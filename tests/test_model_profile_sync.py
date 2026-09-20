@@ -157,7 +157,7 @@ async def test_failures_do_not_report_success(setup, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_oauth_autocreate_restore_and_disconnect_sync_existing_engine(setup, monkeypatch):
-    from excelmanus.auth.router import _auto_add_codex_default_model, _sync_subscription_sessions
+    from excelmanus.auth.router import _auto_add_subscription_models, _sync_subscription_sessions
     from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
 
     s = setup
@@ -166,9 +166,10 @@ async def test_oauth_autocreate_restore_and_disconnect_sync_existing_engine(setu
     credentials = MagicMock()
     credentials.get_active_profile.return_value = SimpleNamespace(access_token="fake-oauth-token")
     s.manager.set_credential_store(credentials)
-    monkeypatch.setattr("excelmanus.auth.providers.registry.list_all", lambda: {"codex": OpenAICodexProvider})
+    s.app.state.credential_store = credentials
+    monkeypatch.setattr("excelmanus.auth.providers.registry.list_all", lambda: {"codex": OpenAICodexProvider()})
     request = Request({"type": "http", "app": s.app})
-    assert _auto_add_codex_default_model(request)
+    assert await _auto_add_subscription_models(request, "openai-codex")
     await _sync_subscription_sessions(request)
     codex = "openai-codex/gpt-6-astra"
     assert codex in engine.model_names()

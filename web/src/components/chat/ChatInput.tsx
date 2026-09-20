@@ -19,7 +19,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
-import { buildApiUrl, apiGet, apiPut, getAuthHeaders, fetchWorkspaceFiles } from "@/lib/api";
+import { apiFetch, buildApiUrl, apiGet, apiPut, getAuthHeaders } from "@/lib/api";
 import { extractTypedFileMentions, findMissingFileMentions, shouldBlockMissingFileMentions } from "@/lib/mention-existence";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { applyVisionFromModel } from "@/lib/vision-capability";
@@ -52,14 +52,18 @@ import {
 } from "./ChatMentionList";
 import { ChatDropzone, ChatUploadButton } from "./ChatUploadButton";
 import { ChatSelectionChip } from "./ChatSelectionChip";
+import { WorkbookContextChip } from "@/components/excel/WorkbookConversation";
+import { prepareWorkbookMessage } from "@/lib/workbook-conversation";
+import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { useChatUpload } from "./use-chat-upload";
+import { registerChatFileUpload } from "./chat-upload-bridge";
 import { shouldCancelComposerNativeDrop } from "./chat-drop";
 import { ComposerRecoveryBar } from "./ComposerRecoveryBar";
 import { useExcelStore } from "@/stores/excel-store";
 import { findLastRetryableFailure } from "@/lib/failure-recovery";
 
 interface ChatInputProps {
-  onSend: (text: string, files?: AttachedFile[]) => void;
+  onSend: (text: string, files?: AttachedFile[], sessionId?: string | null) => void | boolean | Promise<void | boolean>;
   onCommandResult?: (command: string, result: string, format: "markdown" | "text") => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -68,7 +72,10 @@ interface ChatInputProps {
 }
 
 export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onStop, composerDraft }: ChatInputProps) {
+  const sendPendingRef = useRef(false);
   const [text, setText] = useState("");
+  const latestTextRef = useRef(text);
+  latestTextRef.current = text;
   const [isAnswerSubmitting, setIsAnswerSubmitting] = useState(false);
   const [answerSubmitError, setAnswerSubmitError] = useState<string | null>(null);
   const [inputHint, setInputHint] = useState<string | null>(null);
@@ -181,6 +188,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     tokenMapRef,
     setConfirmedTokens,
   });
+
+  // 桌面菜单等输入框外部入口经桥接注册表复用同一上传管线
+  useEffect(() => registerChatFileUpload(insertFileMentions), [insertFileMentions]);
 
   const showInputHint = useCallback((message: string) => {
     setInputHint(message);
@@ -550,7 +560,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       const sessionId = useSessionStore.getState().activeSessionId;
       useChatStore.getState().clearMessages();
       if (sessionId) {
-        fetch(buildApiUrl(`/sessions/${sessionId}/clear`), { method: "POST", headers: { ...getAuthHeaders() } }).catch(() => {});
+        apiFetch(buildApiUrl(`/sessions/${sessionId}/clear`), { method: "POST", headers: { ...getAuthHeaders() } }).catch(() => {});
       }
       if (onCommandResult) onCommandResult("/clear", "对话历史已清除", "text");
       return;
@@ -558,7 +568,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     if (onCommandResult && trimmed.startsWith("/") && !isStreamedSlashCommand(trimmed)) {
       const sessionId = useSessionStore.getState().activeSessionId;
       try {
-        const res = await fetch(buildApiUrl("/command"), {
+        const res = await apiFetch(buildApiUrl("/command"), {
           method: "POST",
           headers: { "Content-Type": "application/json", ...getAuthHeaders() },
           body: JSON.stringify({ command: trimmed, session_id: sessionId || "" }),
@@ -585,6 +595,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   }, [configError, configReady]);
 
   const handleSend = async () => {
+    if (sendPendingRef.current) return;
     if (configBlocked) {
       nudgeInput(getConfigBlockedHint());
       return;
@@ -626,7 +637,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         setText("");
         requestAnimationFrame(autoResize);
         if (sessionId) {
-          fetch(buildApiUrl(`/sessions/${sessionId}/clear`), { method: "POST", headers: { ...getAuthHeaders() } }).catch(() => {});
+          apiFetch(buildApiUrl(`/sessions/${sessionId}/clear`), { method: "POST", headers: { ...getAuthHeaders() } }).catch(() => {});
         }
         if (onCommandResult) {
           onCommandResult("/clear", "对话历史已清除", "text");
@@ -663,7 +674,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       if (onCommandResult && !isStreamedSlashCommand(trimmed)) {
         const sessionId = useSessionStore.getState().activeSessionId;
         try {
-          const res = await fetch(buildApiUrl("/command"), {
+          const res = await apiFetch(buildApiUrl("/command"), {
             method: "POST",
             headers: { "Content-Type": "application/json", ...getAuthHeaders() },
             body: JSON.stringify({ command: trimmed, session_id: sessionId || "" }),
@@ -726,11 +737,22 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       }
       return;
     }
-    const finalText = applyDisplayReplacements(trimmed, tokenMapRef.current);
+    const sessionId = useSessionStore.getState().activeSessionId;
+    const draftText = text;
+    let finalText = applyDisplayReplacements(trimmed, tokenMapRef.current);
+    sendPendingRef.current = true;
     try {
+      if (files.some((file) => file.workspaceKey && file.workspaceKey !== workspaceKeyForSessionId(sessionId))) {
+        throw new Error("附件属于另一个工作区，请移除后在当前工作区重新选择");
+      }
+      finalText = await prepareWorkbookMessage(finalText, sessionId);
       if (extractTypedFileMentions(finalText).length > 0) {
-        const sessionId = useSessionStore.getState().activeSessionId;
-        const { files: workspaceFiles, truncated } = await fetchWorkspaceFiles(sessionId);
+        // 复用侧栏的同一份工作区扫描（30s 缓存 + inflight 合并），失败时按截断处理放行。
+        await useExcelStore.getState().refreshWorkspaceFiles(sessionId, { cached: true }).catch(() => {});
+        const store = useExcelStore.getState();
+        const usable = store.workspaceFilesSessionId === sessionId && !store.workspaceFilesError;
+        const workspaceFiles = usable ? store.workspaceFiles : [];
+        const truncated = !usable || store.workspaceFilesTruncated;
         const knownPaths = workspaceFiles.map((f) => f.path);
         const missing = findMissingFileMentions(finalText, knownPaths);
         // truncated 时清单不完整，存在性校验不可靠，放行由后端兜底
@@ -739,16 +761,22 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           return;
         }
       }
-    } catch {
-      /* fail-open：工作区列表不可用时跳过校验放行 */
+      if (useSessionStore.getState().activeSessionId !== sessionId) throw new Error("已切换对话，草稿已保留，请确认后重新发送");
+      const validFiles = files.filter((af) => af.status === "success");
+      const sent = await onSend(finalText, validFiles.length > 0 ? validFiles : undefined, sessionId);
+      if (sent === false) return;
+      setText((current) => current === draftText ? "" : current);
+      setFiles((current) => current.filter((af) => !validFiles.some((sentFile) => sentFile.id === af.id)));
+      if (latestTextRef.current === draftText) {
+        setConfirmedTokens(new Set());
+        tokenMapRef.current.clear();
+      }
+      requestAnimationFrame(autoResize);
+    } catch (err) {
+      nudgeInput(err instanceof Error ? err.message : "暂时无法发送，请重试");
+    } finally {
+      sendPendingRef.current = false;
     }
-    const validFiles = files.filter((af) => af.status === "success");
-    onSend(finalText, validFiles.length > 0 ? validFiles : undefined);
-    setText("");
-    setFiles([]);
-    setConfirmedTokens(new Set());
-    tokenMapRef.current.clear();
-    requestAnimationFrame(autoResize);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -842,6 +870,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       highlighted={draftHighlight}
     >
       <ChatSelectionChip insertMentionTokens={insertMentionTokens} />
+      <WorkbookContextChip />
       <ChatMentionList
         popover={popover}
         popoverItems={popoverItems}
@@ -888,8 +917,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                 ? "border-red-200 bg-red-50/80 dark:border-red-900/50 dark:bg-red-950/30"
                 : "border-amber-200 bg-amber-50/80 dark:border-amber-900/50 dark:bg-amber-950/30"
             }`}>
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-2.5">
-                <div className="flex items-center gap-2 sm:gap-2.5 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 sm:gap-2.5">
+                <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1 basis-52">
                   <div className={`flex h-6 w-6 sm:h-7 sm:w-7 shrink-0 items-center justify-center rounded-full ${
                     configError
                       ? "bg-red-100 dark:bg-red-900/40"

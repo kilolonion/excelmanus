@@ -4,10 +4,12 @@ import {
   fileNameOf,
   type WorkspaceFileKind,
 } from "@/lib/file-kind";
+import { displayFileName } from "@/lib/file-identity";
 import { useExcelStore } from "@/stores/excel-store";
 import { useFilePreviewStore } from "@/stores/file-preview-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
+import type { WorkbookViewLayout } from "@/lib/workspace-surface";
 
 export type OpenWorkspaceFileIntent = "preview" | "full";
 
@@ -16,6 +18,7 @@ export interface OpenWorkspaceFileOptions {
   sheet?: string;
   sessionId?: string | null;
   workspaceId?: string | null;
+  workbookLayout?: WorkbookViewLayout;
 }
 
 function currentFileScope(opts?: OpenWorkspaceFileOptions): {
@@ -33,7 +36,7 @@ function currentFileScope(opts?: OpenWorkspaceFileOptions): {
 }
 
 export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions): WorkspaceFileKind {
-  const filename = fileNameOf(path);
+  const filename = displayFileName(path) || fileNameOf(path);
   const kind = classifyWorkspaceFile(filename);
   const intent = opts?.intent ?? "preview";
   const scope = currentFileScope(opts);
@@ -48,7 +51,7 @@ export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions)
     word.closeFullView();
     excel.addRecentFile({ path, filename });
     if (intent === "full") {
-      excel.openFullView(path, opts?.sheet);
+      excel.openFullView(path, opts?.sheet, opts?.workbookLayout);
     } else {
       excel.openPanel(path, opts?.sheet);
     }

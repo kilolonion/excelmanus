@@ -18,7 +18,11 @@
 | `EXCELMANUS_DEPLOY_MODE` | `auto`/`standalone`/`server`；`auto` 与未知值均为 standalone；`server` 必须显式指定 | `auto` |
 | `EXCELMANUS_API_HOST` / `EXCELMANUS_API_PORT` / `EXCELMANUS_BACKEND_PORT` / `EXCELMANUS_FRONTEND_PORT` | 监听地址与端口 | 见启动脚本 |
 | `EXCELMANUS_WEB_WORKERS` | uvicorn worker 数；`>1` 时 API 会提示会话与缓存可能分散到多个进程。单机保持 `1` | 由 `deploy/start.*` 设置，默认 `1` |
-| `EXCELMANUS_MANAGE_TOKEN` | 绑定非 loopback 时必填（至少 16 字符）；配置有效令牌后，除健康检查和 CORS 预检外，API 请求需 `Authorization: Bearer` | 空（仅 loopback 可空） |
+| `EXCELMANUS_MANAGE_TOKEN` | 可选的自动化/桌面访问令牌，至少 16 字符；兼容 `Authorization: Bearer` 或 `X-ExcelManus-Token`，不支持 URL 查询参数 | 空 |
+| `EXCELMANUS_LOGIN_USERNAME` | 首次部署的单管理员账号；设置 → 安全保存的账号优先 | `admin` |
+| `EXCELMANUS_LOGIN_PASSWORD` | 首次部署的管理员密码，至少 12 字符；设置 → 安全保存的密码优先 | 空（本机默认不启用） |
+| `EXCELMANUS_LOGIN_SESSION_HOURS` | 浏览器登录有效期，整数 1–168 小时 | `12` |
+| `EXCELMANUS_LOGIN_COOKIE_SECURE` | `auto` 根据请求 HTTPS 状态设置 Secure Cookie；HTTPS 反代部署可显式设 `true` | `auto` |
 | `EXCELMANUS_SECRET_KEY` | Fernet 密钥种子（测试或自定义数据卷） | 空则生成 `{EXCELMANUS_HOME}/.secret_key` |
 | `EXCELMANUS_DESKTOP` | 桌面运行标记，由桌面启动器设置 | 源码启动不设置 |
 | `EXCELMANUS_RUN_PYTHON` | `run_code` 使用的 Python 路径；桌面版自动指定随包运行时 | 随运行环境确定 |
@@ -99,8 +103,9 @@
 
 会话 API 提供 `GET /api/v1/sessions/{session_id}/subagents`，以及
 `POST /api/v1/sessions/{session_id}/subagents/{run_id}`（body 包含 `action`、可选 `message` / `wait_seconds`）。
-网页会话顶栏的「任务」入口可查看后台任务、执行结果和已修改文件，支持补充指令、
-回答问题、暂停、取消与继续。主对话结束或停止后，当前会话的活动后台任务仍每两秒
+`GET /api/v1/sessions/{session_id}/task-list` 返回会话当前任务清单快照（无清单时为 `null`）。
+网页会话顶栏的「任务」入口可查看助手的任务清单进度，以及后台任务、执行结果和已修改文件，
+支持补充指令、回答问题、暂停、取消与继续。主对话结束或停止后，当前会话的活动后台任务仍每两秒
 更新状态；切换回来或刷新页面会重新查询。继续会创建新执行记录，旧记录保留。
 后台任务结束时会刷新其修改过的文件视图。面板仅展示当前会话，任务仍由对话中的
 `delegate` 启动，不在页面加载时自动恢复执行。
@@ -360,7 +365,7 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_JEV_ENABLED` | 全局模式：`off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_EXPOSURE` | 工具披露策略：`off` / `shadow` / `enforce` | `off` |
+| `EXCELMANUS_JEV_EXPOSURE` | 工具披露与工作区/表格上下文建议：`off` / `shadow` / `enforce` | `off` |
 | `EXCELMANUS_JEV_OBSERVATION` | 观察结果策略：`off` / `shadow` / `enforce` | `off` |
 | `EXCELMANUS_JEV_VERIFICATION` | 修改后检查建议：`off` / `shadow` / `enforce` | `off` |
 | `EXCELMANUS_JEV_RECOVERY` | 错误恢复建议：`off` / `shadow` / `enforce` | `off` |
@@ -374,7 +379,7 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe 直连密钥（与提供商列表同步） | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway 密钥（与提供商列表同步） | — |
 
-这是可选的实验性功能，需要 `system-one` extra。`off` 不启用；`shadow` 记录建议而不应用；`enforce` 还要求有效标定与对应题包或策略族的签字。目前仓库签字集合为空，仅打开开关或把 `EXCELMANUS_JEV_CALIBRATED` 设为 `true` 不足以启用执行侧影响。标定器 `bench/jev_live_calibrate.py` 从主库读取密钥，真实标定会访问外部服务，且不会自动签字。
+这是可选的实验性功能，需要 `system-one` extra。`off` 不启用；`shadow` 记录建议而不应用。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。详见[上下文建议说明](design/jev-context-advice-20260920.md)。其他执行侧影响仍要求有效标定与对应题包或策略族的签字。目前仓库签字集合为空，仅打开开关或把 `EXCELMANUS_JEV_CALIBRATED` 设为 `true` 不足以启用执行侧影响。标定器 `bench/jev_live_calibrate.py` 从主库读取密钥，真实标定会访问外部服务，且不会自动签字。
 
 ## 加密配置
 
@@ -405,7 +410,11 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 
 `EXCELMANUS_AUTH_ENABLED` / `NEXT_PUBLIC_AUTH_ENABLED` / `EXCELMANUS_SESSION_ISOLATION` 已移除。Codex 订阅 OAuth 仍可用（进程级，不绑定登录用户）。
 
-后端默认监听 `127.0.0.1`。若绑定非 loopback 地址（LAN 或公网），必须设置 `EXCELMANUS_MANAGE_TOKEN`（至少 16 字符）；配置有效令牌后，除健康检查和 CORS 预检外，API 请求要求 `Authorization: Bearer`。服务器模式请让 Nginx 反代到 `127.0.0.1:8000`，不要把应用端口直接暴露到 `0.0.0.0`。
+后端默认监听 `127.0.0.1`。单管理员登录用于保护整个实例，不创建用户表、注册入口或用户工作区隔离，模型订阅 OAuth 仍独立工作。在 **设置 → 安全 → 登录保护** 中启用/关闭，设置账号和密码；密码留空保留原值。保存立即生效并撤销所有浏览器会话，重启后保留。明确关闭后，该地址允许直接访问，包括原管理令牌保护的接口。
+
+首次启动 `server` 模式（包括 loopback 反代）或非 loopback 监听时，须先配置管理员密码或管理令牌，或者先在本地设置页保存登录配置。无凭据、短密码或短令牌会拒绝启动；已在设置页明确关闭保护的选择会被保留。服务器应使用 HTTPS，并由 Nginx 同源转发前端和 API。详细配置、反代和恢复方法见 [服务器登录保护](server-login.md)。
+
+登录配置和会话单独保存在 `{EXCELMANUS_HOME}/access.db`，不参与产品配置导入/导出。密码使用带随机盐的 scrypt 哈希，浏览器只持有 HttpOnly、SameSite=Strict 会话 Cookie。登录、状态及最小健康检查可公开访问，其余 API（含文件、SSE、订阅接口和 API 文档）需要认证。健康检查在未登录时不返回模型、引导进度或会话信息。登录限制为每实例每分钟 10 次，多个 worker 共享会话、撤销状态和限速。
 
 ### 旧版 `users/` 手动搬迁
 

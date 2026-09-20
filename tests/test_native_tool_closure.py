@@ -88,6 +88,40 @@ def test_analyze_schema_fields_bind_and_execute(tmp_path: Path) -> None:
     assert result.success, result.model_text
 
 
+def test_profile_quality_accept_sample_rows_as_scan_budget(tmp_path: Path) -> None:
+    """profile/quality 接受 sample_rows/limit 作采样上限别名；其它 mode 仍拒绝。"""
+    (tmp_path / "sales.csv").write_text(
+        "month,amount\n" + "\n".join(f"2024-{i:02d},{i}" for i in range(1, 21)),
+        encoding="utf-8",
+    )
+    with use_workspace(tmp_path):
+        for mode in ("quality", "profile"):
+            sampled = analyze_spreadsheet(file_path="sales.csv", mode=mode, sample_rows=5)
+            assert sampled.success, sampled.model_text
+            sheet = sampled.value["sheets"][0]
+            assert sheet["sampled"] is True
+            assert sheet["sample_size"] == 5
+            limited = analyze_spreadsheet(file_path="sales.csv", mode=mode, limit=5)
+            assert limited.success, limited.model_text
+        rejected = analyze_spreadsheet(file_path="sales.csv", mode="files", sample_rows=5)
+        assert not rejected.success
+
+
+def test_mode_union_schema_fields_are_mode_accepted() -> None:
+    """mode-union 工具平铺在 schema 的每个字段必须至少被一个 mode 接受（或被默认值豁免）。"""
+    tools = {t.name: t for t in intent_tools.get_tools()}
+    cases = {
+        "inspect_spreadsheet": (intent_tools._INSPECT_MODE_FIELDS, intent_tools._INSPECT_DEFAULTS),
+        "analyze_spreadsheet": (intent_tools._ANALYZE_MODE_FIELDS, intent_tools._ANALYZE_DEFAULTS),
+        "trace_spreadsheet_formulas": (intent_tools._TRACE_MODE_FIELDS, intent_tools._TRACE_DEFAULTS),
+    }
+    for name, (mode_fields, defaults) in cases.items():
+        props = set(tools[name].input_schema.get("properties") or {})
+        accepted = set().union(*mode_fields.values()) | set(defaults)
+        dead = sorted(props - accepted)
+        assert not dead, f"{name} schema 字段未被任何 mode 接受: {dead}"
+
+
 def test_split_tsv_and_distinct_keys(tmp_path: Path) -> None:
     (tmp_path / "book.tsv").write_text("group\tv\nA/B\t1\nA:B\t2\n", encoding="utf-8")
     with use_workspace(tmp_path):

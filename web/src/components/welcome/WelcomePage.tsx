@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import { duration } from "@/lib/sidebar-motion";
 import { isImageFile } from "@/lib/file-kind";
+import styles from "./WelcomePage.module.css";
+import { WorkbookStart } from "./WorkbookStart";
 
 const smoothEase: [number, number, number, number] = [0.4, 0, 0.2, 1];
 
@@ -23,6 +25,7 @@ interface SampleFileRef {
 
 interface Suggestion {
   label: string;
+  summary: string;
   text: string;
   icon: LucideIcon;
   samples?: SampleFileRef[];
@@ -31,24 +34,28 @@ interface Suggestion {
 const SUGGESTIONS: Suggestion[] = [
   {
     label: "经营分析",
+    summary: "按区域汇总销售、计算同比，生成趋势图与经营结论。",
     text: "把月度销售数据做成经营看板：按区域汇总、计算同比、生成趋势图，并写出关键结论",
     icon: TrendingUp,
     samples: [{ path: "/samples/月度销售报表.csv", name: "月度销售报表.csv" }],
   },
   {
     label: "跨表自动化",
+    summary: "匹配产品信息、补齐订单金额，保留公式并标记异常。",
     text: "补齐订单工作表：从产品目录匹配产品名称和单价，计算金额，保留公式并标记未匹配项",
     icon: TableProperties,
     samples: [{ path: "/samples/订单与产品.xlsx", name: "订单与产品.xlsx" }],
   },
   {
     label: "图片转 Excel",
+    summary: "提取收据明细、核对合计，还原为可编辑的 Excel。",
     text: "把这张收款收据还原成可编辑 Excel：提取客户、明细、数量和金额，核对合计并保留原有布局",
     icon: ScanLine,
     samples: [{ path: "/samples/收款收据.jpg", name: "收款收据.jpg" }],
   },
   {
     label: "高级分析",
+    summary: "分析广告与销售的关系，生成回归图表和预测公式。",
     text: "评估广告投入是否带来销售增长：用 Python 做回归分析，生成散点图和预测公式，把结果写回 Excel",
     icon: Code2,
     samples: [{ path: "/samples/广告与销售数据.csv", name: "广告与销售数据.csv" }],
@@ -166,110 +173,97 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
   );
 
   return (
-    <motion.div
-      className="em-welcome relative flex-1 min-h-0 overflow-hidden"
-      variants={containerVariants}
-      initial="hidden"
-      animate="show"
-    >
-      <motion.section className="em-welcome-hero" variants={fadeUp}>
-        <div className="em-welcome-hero-content relative z-10 max-w-2xl">
-          <div className="em-welcome-kicker">Spreadsheet intelligence</div>
-          <motion.h1 className="mt-4 text-[clamp(1.65rem,4vw,2.65rem)] font-semibold tracking-[-0.04em] text-[var(--em-ink)]" variants={fadeUp}>
-            把琐碎的表格工作，交给你的智能工作区。
-          </motion.h1>
-          <motion.p className="mt-3 max-w-xl text-sm leading-6 text-[var(--em-muted)] sm:text-[15px]" variants={fadeUp}>
-            上传文件、描述目标，ExcelManus 会在同一个工作区里完成分析、编辑和复核。
-          </motion.p>
-          <motion.div className="em-welcome-proof mt-6 flex flex-wrap items-center gap-2 text-[11px] text-[var(--em-muted)]" variants={fadeUp}>
-            <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">支持 Excel、CSV、图片</span>
-            <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">结果可追溯</span>
-            <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">移动端友好</span>
-          </motion.div>
-        </div>
-      </motion.section>
-
+    <div className={styles.viewport}>
       <motion.div
-        className="em-task-grid grid grid-cols-1 gap-3 sm:grid-cols-2"
-        variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06, delayChildren: 0.1 } } }}
+        className={styles.layout}
+        variants={containerVariants}
+        initial="hidden"
+        animate="show"
       >
-        <div className="em-task-heading col-span-full mb-1 flex items-center justify-between px-1">
-          <div>
-            <h2 className="text-sm font-semibold text-[var(--em-ink)]">从一个具体任务开始</h2>
-            <p className="mt-1 text-xs text-[var(--em-muted)]">选择示例，或直接在下方输入你的目标</p>
+        <motion.section className={styles.hero} variants={fadeUp} aria-labelledby="welcome-title">
+          <div className={styles.heroContent}>
+            <div className={styles.kicker}>Spreadsheet intelligence</div>
+            <h1 id="welcome-title" className={styles.title}>
+              从一张表开始。
+            </h1>
+            <p className={styles.description}>
+              打开已有 Excel，边看表，边提问，也可以直接编辑。
+            </p>
+            <WorkbookStart />
           </div>
-          <span className="hidden text-[11px] text-[var(--em-muted)] sm:block">常用工作流</span>
+        </motion.section>
+
+        <div className={styles.heading}>
+          <h2 id="welcome-tasks-title">从一个具体任务开始</h2>
+          <p>选择示例，或在下方输入你的目标</p>
         </div>
-        {SUGGESTIONS.map((suggestion) => {
-          const { label, text, icon: Icon, samples } = suggestion;
-          const hasImageSample = !!samples?.some((sample) => isImageFile(sample.name));
-          const isThis = loadingKey === text;
-          const isBusy = !!loadingKey;
-          const hasError = errorKey === text;
-          return (
-            <motion.button
-              key={text}
-              type="button"
-              variants={cardVariants}
-              whileHover={isBusy ? {} : { y: -2, transition: { duration: 0.15 } }}
-              whileTap={isBusy ? {} : { scale: 0.97 }}
-              onPointerEnter={() => prefetchSample(suggestion)}
-              onPointerDown={() => prefetchSample(suggestion)}
-              onClick={() => handleClick(suggestion)}
-              disabled={isBusy}
-              aria-label={`试用示例：${text}`}
-              className={`em-task-card ${hasImageSample ? "em-task-card-image" : ""} group flex flex-col gap-2 p-4 text-left text-sm
-                transition-[border-color,background-color,box-shadow,color,opacity] duration-200 min-h-[44px]
-                ${isThis ? "opacity-60 cursor-wait" : isBusy ? "opacity-80 cursor-default" : "hover:bg-[var(--em-primary-alpha-06)] active:bg-[var(--em-primary-alpha-10)] cursor-pointer"}
-                ${hasError ? "border-[color:var(--destructive)]/40" : ""}`}
-            >
-              <span className="flex items-center gap-3">
-                <span className="em-task-icon flex-shrink-0 h-9 w-9 rounded-xl bg-[var(--em-primary-alpha-08)] flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-15)] transition-colors">
-                  {isThis ? (
-                    <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
-                  ) : (
-                    <Icon className="h-4 w-4 text-muted-foreground group-hover:text-[var(--em-primary)] transition-colors" />
-                  )}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="em-task-label mb-1 block text-[10px] font-semibold tracking-[0.08em] text-[var(--em-primary)]">{label}</span>
-                  <span className="em-task-copy block group-hover:text-foreground transition-colors line-clamp-3">{text}</span>
-                </span>
-              </span>
-              {!!samples?.length && (
-                <span className="em-task-files flex flex-wrap items-center gap-1.5 pl-11">
-                  {samples.map((s) =>
-                    isImageFile(s.name) ? (
-                      <span
-                        key={s.name}
-                        className="inline-flex items-center gap-1.5 rounded-md bg-muted/50 px-1 py-0.5 pr-1.5 text-[10px] text-muted-foreground group-hover:bg-muted transition-colors"
-                      >
-                        <img
-                          src={s.path}
-                          alt=""
-                          className="h-7 w-9 rounded object-cover border border-black/5 dark:border-white/10"
-                        />
-                        <span className="max-w-[9rem] truncate">{s.name}</span>
-                      </span>
+
+        <motion.div
+          className={styles.tasks}
+          role="group"
+          aria-labelledby="welcome-tasks-title"
+          variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06, delayChildren: 0.1 } } }}
+        >
+          {SUGGESTIONS.map((suggestion) => {
+            const { label, summary, text, icon: Icon, samples } = suggestion;
+            const isThis = loadingKey === text;
+            const isBusy = !!loadingKey;
+            const hasError = errorKey === text;
+            return (
+              <motion.button
+                key={text}
+                type="button"
+                variants={cardVariants}
+                whileTap={isBusy ? {} : { scale: 0.99 }}
+                onPointerEnter={() => prefetchSample(suggestion)}
+                onPointerDown={() => prefetchSample(suggestion)}
+                onFocus={() => prefetchSample(suggestion)}
+                onClick={() => handleClick(suggestion)}
+                disabled={isBusy}
+                aria-label={`试用示例：${label}。 ${text}${hasError ? "。示例文件加载失败，请再试一次" : ""}`}
+                aria-busy={isThis}
+                title={hasError ? "示例文件加载失败，请再试一次" : text}
+                data-loading={isThis || undefined}
+                data-error={hasError || undefined}
+                className={styles.card}
+              >
+                <span className={styles.cardContent}>
+                  <span className={styles.cardHeader}>
+                    <span className={styles.icon} aria-hidden="true">
+                      {isThis ? (
+                        <Loader2 className={styles.spinner} />
+                      ) : (
+                        <Icon />
+                      )}
+                    </span>
+                    <span className={styles.label}>{label}</span>
+                  </span>
+                  <span className={styles.copy}>{summary}</span>
+                  <span className={styles.footer}>
+                    {hasError ? (
+                      <span className={styles.error} role="status">加载失败，点击重试</span>
                     ) : (
-                      <span
-                        key={s.name}
-                        className="inline-flex items-center gap-1 rounded-md bg-muted/50 px-1.5 py-0.5 text-[10px] text-muted-foreground group-hover:bg-muted transition-colors"
-                      >
-                        <Paperclip className="h-2.5 w-2.5" />
-                        {s.name}
-                      </span>
-                    ),
+                      samples?.map((sample) => (
+                        <span key={sample.name} className={styles.file}>
+                          {isImageFile(sample.name) ? (
+                            <img src={sample.path} alt="" width={32} height={24} />
+                          ) : (
+                            <Paperclip aria-hidden="true" />
+                          )}
+                          <span className={styles.filename}>{sample.name}</span>
+                        </span>
+                      ))
+                    )}
+                  </span>
+                  {hasError && (
+                    <span className={styles.compactError} role="status">加载失败，点击重试</span>
                   )}
                 </span>
-              )}
-              {hasError && (
-                <span className="pl-11 text-[11px] text-destructive">示例文件加载失败，请再试一次</span>
-              )}
-            </motion.button>
-          );
-        })}
+              </motion.button>
+            );
+          })}
+        </motion.div>
       </motion.div>
-    </motion.div>
+    </div>
   );
 }

@@ -115,6 +115,8 @@ def _canonical_endpoint(base_url: str) -> str:
 def _infer_protocol(endpoint: str, model: str) -> str:
     host = endpoint
     lower_model = (model or "").strip().lower()
+    if "cloudcode-pa.googleapis.com" in host:
+        return "antigravity"
     if "generativelanguage.googleapis.com" in host or "generatecontent" in host:
         return "gemini"
     if "anthropic" in host or "api.anthropic.com" in host:

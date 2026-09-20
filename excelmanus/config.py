@@ -7,8 +7,10 @@ import os
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from excelmanus.data_home import get_data_home
+from excelmanus.model_identity import longest_prefix_match, normalize_lookup_table
 class ConfigError(Exception):
     """配置缺失或校验失败时抛出的异常。"""
 
@@ -38,8 +40,9 @@ _ALLOWED_PROTOCOLS = {"auto", "openai", "openai_responses", "anthropic", "gemini
 logger = logging.getLogger(__name__)
 
 # ── 模型 → 上下文窗口大小映射（token 数） ──────────────────────────
-# 键为模型标识符的前缀或完整名称，匹配时优先取最长前缀。
-# 未匹配到的模型回退到 _DEFAULT_CONTEXT_TOKENS。
+# 键为模型标识符的前缀或完整名称；匹配时先归一化（点/横线/下划线等价、
+# 字母→数字边界分段），再按 "-" 边界做最长前缀匹配，支持 provider/
+# 前缀与 Bedrock 命名空间（us.anthropic. 等）。未匹配回退默认值。
 _DEFAULT_CONTEXT_TOKENS = 256_000
 
 _MODEL_CONTEXT_WINDOW: dict[str, int] = {
@@ -50,6 +53,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gpt-5.6-terra": 1_050_000,
     "gpt-5.6-luna": 1_050_000,
     "gpt-5.6": 1_050_000,
+    "gpt-5.6-cyber": 400_000,
     "gpt-5.5": 1_050_000,
     "gpt-5.4": 1_050_000,
     "gpt-5": 400_000,
@@ -60,18 +64,16 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gpt-5.3": 400_000,
     "gpt-5-codex": 400_000,
     "gpt-5-codex-mini": 400_000,
-    "gpt-5-codex-latest": 400_000,
     "gpt-5.2-codex": 400_000,
     "gpt-5.3-codex": 400_000,
-    "gpt-5.3-codex-latest": 400_000,
     "gpt-5.1-codex-mini": 400_000,
     "gpt-5.1-codex-max": 400_000,
     "gpt-5.3-codex-spark": 128_000,
-    "gpt-5.3-codex-spark-latest": 128_000,
     "gpt-5.1": 400_000,
     "gpt-5.1-codex": 400_000,
     "gpt-5-chat-latest": 128_000,
     "gpt-5.1-chat-latest": 128_000,
+    "gpt-5.3-chat-latest": 128_000,
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
     "gpt-4.1": 1_047_576,
@@ -91,34 +93,22 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "claude-4-opus": 200_000,
     "claude-sonnet-4": 200_000,
     "claude-opus-4": 200_000,
-    "claude-sonnet-4-5-20250929": 200_000,
-    "claude-opus-4-5-20251101": 200_000,
+    "claude-sonnet-4.5": 200_000,
+    "claude-opus-4.5": 200_000,
     "claude-opus-4.1": 200_000,
     "claude-opus-4.6": 200_000,
-    "claude-opus-4-6": 200_000,
     "claude-opus-4.7": 1_000_000,
-    "claude-opus-4-7": 1_000_000,
     "claude-opus-4.8": 1_000_000,
-    "claude-opus-4-8": 1_000_000,
     "claude-sonnet-4.6": 200_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-fable-5-1": 1_000_000,
     "claude-fable-5": 1_000_000,
-    "claude-mythos-5-1": 1_000_000,
     "claude-mythos-5": 1_000_000,
     "claude-opus-5": 1_000_000,
     "claude-sonnet-5": 1_000_000,
     "claude-haiku-4.5": 200_000,
-    "claude-haiku-4-5": 200_000,
-    "claude-haiku-4-5-20251001": 200_000,
     # Google Gemini 提供商
     "gemini-2.5-pro": 1_048_576,
-    "gemini-2.5-pro-preview": 1_048_576,
     "gemini-2.5-flash": 1_048_576,
-    "gemini-2.5-flash-preview": 1_048_576,
-    "gemini-2.5-flash-image-preview": 1_048_576,
     "gemini-2.5-flash-lite": 1_048_576,
-    "gemini-2.5-flash-lite-preview": 1_048_576,
     "gemini-live-2.5-flash-preview": 1_048_576,
     "gemini-2.5-flash-live-preview": 1_048_576,
     "gemini-2.5-flash-native-audio-preview": 1_048_576,
@@ -128,9 +118,10 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gemini-3.5-flash-lite": 1_048_576,
     "gemini-3.5-flash": 1_048_576,
     "gemini-3.1-pro": 1_048_576,
-    "gemini-3.1-pro-preview": 1_048_576,
     "gemini-3.1-flash-lite": 1_048_576,
     "gemini-3.1-flash": 1_048_576,
+    "gemini-3.1-flash-image": 128_000,
+    "gemini-3-pro-image": 65_536,
     "gemini-3-flash": 1_048_576,
     "gemini-3.0-pro-preview-02-2026": 1_048_576,
     "gemini-3.0-flash-preview-02-2026": 1_048_576,
@@ -139,6 +130,12 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     # 通义千问（Qwen）提供商
     "qwen-max": 262_144,
     "qwen-max-latest": 262_144,
+    "qwen3-max": 262_144,
+    "qwen3-vl-plus": 262_144,
+    "qwen3-vl-flash": 262_144,
+    "qwen-vl-max": 131_072,
+    "qwen-vl-plus": 131_072,
+    "qwq-32b": 131_072,
     "qwen-plus": 1_000_000,
     "qwen-plus-us": 1_000_000,
     "qwen-plus-latest": 1_000_000,
@@ -214,29 +211,12 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "jamba-large": 256_000,
     "jamba-mini": 256_000,
     "jamba-3b": 256_000,
-    # Amazon Nova 提供商
-    "amazon.nova-premier": 1_000_000,
-    "amazon.nova-pro": 300_000,
-    "amazon.nova-lite": 300_000,
-    "amazon.nova-micro": 128_000,
-    "amazon.nova-sonic": 300_000,
-    "us.amazon.nova-premier": 1_000_000,
-    "us.amazon.nova-pro": 300_000,
-    "us.amazon.nova-lite": 300_000,
-    "us.amazon.nova-micro": 128_000,
-    "us.amazon.nova-sonic": 300_000,
-    "eu.amazon.nova-premier": 1_000_000,
-    "eu.amazon.nova-pro": 300_000,
-    "eu.amazon.nova-lite": 300_000,
-    "eu.amazon.nova-micro": 128_000,
-    "eu.amazon.nova-sonic": 300_000,
-    "apac.amazon.nova-premier": 1_000_000,
-    "apac.amazon.nova-pro": 300_000,
-    "apac.amazon.nova-lite": 300_000,
-    "apac.amazon.nova-micro": 128_000,
-    "apac.amazon.nova-sonic": 300_000,
-    "amazon.nova-2-lite": 1_000_000,
-    "amazon.nova-2-sonic": 1_000_000,
+    # Amazon Nova（含 Bedrock 区域前缀，靠命名空间剥离匹配）
+    "nova-premier": 1_000_000,
+    "nova-pro": 300_000,
+    "nova-lite": 300_000,
+    "nova-micro": 128_000,
+    "nova-sonic": 300_000,
     "nova-2-lite": 1_000_000,
     "nova-2-sonic": 1_000_000,
     # MiniMax 提供商
@@ -262,9 +242,9 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "moonshot-kimi-k2.5": 262_144,
     "moonshot-kimi-k2.5-thinking": 262_144,
     "moonshot-kimi-k2-instruct": 131_072,
-    "moonshotai/kimi-k2": 262_144,
-    "moonshotai/kimi-k2-thinking": 262_144,
-    "moonshotai/kimi-k2.5": 262_144,
+    "moonshot-v1-128k": 128_000,
+    "moonshot-v1-32k": 32_000,
+    "moonshot-v1-8k": 8_000,
     # Cohere 提供商
     "command-a": 256_000,
     "command-a-03-2025": 256_000,
@@ -280,10 +260,14 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "glm-5.3": 1_000_000,
     "glm-5.3-flash": 1_000_000,
     "glm-5.2": 1_000_000,
-    "glm-5.1": 1_000_000,
-    "glm-5-turbo": 1_000_000,
-    "glm-5": 1_000_000,
-    "glm-4.7": 128_000,
+    "glm-5.1": 200_000,
+    "glm-5-turbo": 200_000,
+    "glm-5v-turbo": 200_000,
+    "glm-5": 200_000,
+    "glm-4.7": 200_000,
+    "glm-4.6": 200_000,
+    "glm-4.5": 128_000,
+    "glm-4.5-air": 128_000,
     "glm-4-plus": 128_000,
     "glm-4-long": 1_000_000,
     "glm-4": 128_000,
@@ -291,47 +275,32 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "doubao-seed-evolving": 256_000,
     "doubao-seed-2.1-pro": 256_000,
     "doubao-seed-2.1-turbo": 256_000,
-    "doubao-seed-2-1-pro": 256_000,
-    "doubao-seed-2-1-turbo": 256_000,
     "doubao-seed-2.0-pro": 256_000,
     "doubao-seed-2.0-code": 256_000,
     "doubao-seed-2.0-lite": 256_000,
     "doubao-seed-2.0-mini": 256_000,
-    "doubao-seed-2-0": 256_000,
+    "doubao-seed-2.0": 256_000,
     "doubao-seed-1.6": 256_000,
-    "doubao-seed-1-6": 256_000,
     # xAI Grok 提供商
     "grok-4.6": 500_000,
-    "grok-4-6": 500_000,
     "grok-4.5": 500_000,
     "grok-4.3": 1_000_000,
     "grok-4-fast-reasoning": 2_000_000,
     "grok-4-fast-non-reasoning": 2_000_000,
-    "grok-4-1-fast-reasoning": 2_000_000,
-    "grok-4-1-fast-non-reasoning": 2_000_000,
+    "grok-4.1-fast-reasoning": 2_000_000,
+    "grok-4.1-fast-non-reasoning": 2_000_000,
     "grok-code-fast-1": 256_000,
     "grok-4": 256_000,
-    "xai.grok-4-fast-reasoning": 2_000_000,
-    "xai.grok-4-fast-non-reasoning": 2_000_000,
-    "xai.grok-4-1-fast-reasoning": 2_000_000,
-    "xai.grok-4-1-fast-non-reasoning": 2_000_000,
-    "xai.grok-code-fast-1": 256_000,
-    "xai.grok-4": 256_000,
     # Meta Llama 提供商
     "llama-4-scout": 10_000_000,
     "llama-4-maverick": 1_000_000,
     "llama-3.3": 131_072,
     "llama-3.2": 131_072,
     "llama-3.1": 131_072,
-    "meta-llama/llama-4-scout": 10_000_000,
-    "meta-llama/llama-4-maverick": 1_000_000,
-    "meta-llama/llama-3.3": 131_072,
-    "meta-llama/llama-3.2": 131_072,
-    "meta-llama/llama-3.1": 131_072,
-    "moonshot-v1-128k": 128_000,
-    "moonshot-v1-32k": 32_000,
-    "moonshot-v1-8k": 8_000,
 }
+
+
+_CONTEXT_WINDOW_LOOKUP = normalize_lookup_table(_MODEL_CONTEXT_WINDOW)
 
 
 _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
@@ -347,11 +316,8 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     "claude-3-sonnet": "claude-sonnet-5",
     "claude-3-haiku": "claude-haiku-4-5",
     "claude-3-5-sonnet": "claude-sonnet-5",
-    "claude-3.5-sonnet": "claude-sonnet-5",
     "claude-3-5-haiku": "claude-haiku-4-5",
-    "claude-3.5-haiku": "claude-haiku-4-5",
     "claude-3-7-sonnet": "claude-sonnet-5",
-    "claude-3.7-sonnet": "claude-sonnet-5",
     # Gemini 1.5 / 2.0 generations（2.0 已关停）
     "gemini-1.5-pro": "gemini-3.8-flash",
     "gemini-1.5-flash": "gemini-3.8-flash",
@@ -360,7 +326,9 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     "gemini-2.0-flash-live": "gemini-live-2.5-flash-preview",
     "gemini-2.0-flash-thinking-exp": "gemini-3.8-flash",
     "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
-    "gemini-2.0-flash-lite-001": "gemini-3.5-flash-lite",
+    # Gemini 3 预览别名（官方已关停/更名）
+    "gemini-3-pro-preview": "gemini-3.1-pro-preview",
+    "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
     # 2026 年 9 月前的模型别名，统一迁移到当前旗舰默认值
     "qwen3.7-plus": "qwen3.8-max",
     "qwen3.7-flash": "qwen3.8-flash",
@@ -372,6 +340,8 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     # DeepSeek 旧别名（2026-07-24 下线）
     "deepseek-chat": "deepseek-flash",
     "deepseek-reasoner": "deepseek-flash",
+    # 已下线，暂时路由到 V4.1-Flash
+    "deepseek-v4-flash": "deepseek-flash",
     # Moonshot 已下线系列
     "moonshot-v1": "kimi-k3",
     "kimi-k2.5": "kimi-k3",
@@ -383,31 +353,16 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
 }
 
 
-def _normalize_model_identifier(model: str) -> str:
-    """归一化模型标识，兼容空格/下划线命名。"""
-    normalized = model.strip().lower().replace("_", "-")
-    normalized = re.sub(r"\s+", "-", normalized)
-    normalized = re.sub(r"-+", "-", normalized)
-    return normalized
+_DEPRECATED_LOOKUP = normalize_lookup_table(_DEPRECATED_MODEL_REPLACEMENTS)
 
 
 def get_deprecated_model_replacement(model: str) -> tuple[str, str] | None:
-    """返回弃用模型及推荐替代模型；未命中时返回 None。"""
-    model_normalized = _normalize_model_identifier(model)
-    candidates = [model_normalized]
-    if "/" in model_normalized:
-        tail = model_normalized.rsplit("/", 1)[-1]
-        if tail and tail not in candidates:
-            candidates.append(tail)
+    """返回弃用模型及推荐替代模型；未命中时返回 None。
 
-    for candidate in candidates:
-        replacement = _DEPRECATED_MODEL_REPLACEMENTS.get(candidate)
-        if replacement:
-            return candidate, replacement
-        for deprecated, suggested in _DEPRECATED_MODEL_REPLACEMENTS.items():
-            if candidate.startswith(f"{deprecated}-"):
-                return deprecated, suggested
-    return None
+    归一化后最长前缀匹配；前缀命中后紧跟 1~2 位纯数字段（版本号）
+    不算命中（如 ``kimi-k2.6`` 不命中 ``kimi-k2``）。
+    """
+    return longest_prefix_match(model, _DEPRECATED_LOOKUP, version_guard=True)
 
 
 def format_deprecated_model_message(model: str) -> str | None:
@@ -429,50 +384,22 @@ def _log_deprecated_model_warning(scope: str, model: str) -> None:
         logger.warning("[%s] %s", scope, msg)
 
 
+@lru_cache(maxsize=1024)
 def _infer_context_tokens_for_model(model: str) -> int:
-    """根据模型名推断上下文窗口大小，最长前缀匹配优先。"""
-    model_normalized = _normalize_model_identifier(model)
-    candidates = [model_normalized]
-    if "/" in model_normalized:
-        tail = model_normalized.rsplit("/", 1)[-1]
-        if tail and tail not in candidates:
-            candidates.append(tail)
-
-    best_key = ""
-    best_val = _DEFAULT_CONTEXT_TOKENS
-    best_candidate = ""
-    for candidate in candidates:
-        for key, val in _MODEL_CONTEXT_WINDOW.items():
-            if candidate.startswith(key.lower()) and len(key) > len(best_key):
-                best_key = key
-                best_val = val
-                best_candidate = candidate
-
-    if not best_key:
-        for candidate in candidates:
-            # 兜底：未来 gpt-5.x / gpt-6.x Codex 变体，默认继承 400k / 1.05M。
-            if candidate.startswith("gpt-6"):
-                best_key = "gpt-6*(fallback)"
-                best_val = 1_050_000
-                best_candidate = candidate
-                break
-            if candidate.startswith("gpt-5") and "codex" in candidate:
-                best_key = "gpt-5*-codex(fallback)"
-                best_val = 400_000
-                best_candidate = candidate
-                break
-
-    if best_key:
+    """根据模型名推断上下文窗口大小，归一化最长前缀匹配优先。"""
+    matched = longest_prefix_match(model, _CONTEXT_WINDOW_LOOKUP)
+    if matched is not None:
+        best_key, best_val = matched
         logger.debug(
-            "模型 %r 匹配上下文窗口映射 %r（候选=%r）→ %d tokens",
-            model, best_key, best_candidate or model_normalized, best_val,
+            "模型 %r 匹配上下文窗口映射 %r → %d tokens",
+            model, best_key, best_val,
         )
-    else:
-        logger.debug(
-            "模型 %r 未匹配到已知映射，使用默认 %d tokens",
-            model, _DEFAULT_CONTEXT_TOKENS,
-        )
-    return best_val
+        return best_val
+    logger.debug(
+        "模型 %r 未匹配到已知映射，使用默认 %d tokens",
+        model, _DEFAULT_CONTEXT_TOKENS,
+    )
+    return _DEFAULT_CONTEXT_TOKENS
 
 
 def is_context_window_user_pinned(max_context_tokens: int, model: str) -> bool:
@@ -865,31 +792,33 @@ def _normalize_base_url(
     if not is_openai_compat:
         return normalized
 
-    # 对 OpenAI 兼容协议，检查路径是否以 /v1 结尾
+    # 对 OpenAI 兼容协议，检查路径是否以版本段结尾
     from urllib.parse import urlparse
     parsed = urlparse(normalized)
     path = parsed.path.rstrip("/")
 
-    # 已经以 /v1 结尾 — 正常
-    if path.endswith("/v1") or path == "/v1":
+    # 已经以版本段结尾（/v1、/v2、/api/v3、/v1beta 等）— 正常。
+    # 例如 WorkBuddy 上游使用 /v2，不应再补 /v1。
+    if re.search(r"/v[\w.]+$", path):
         return normalized
 
-    # 已带其它版本前缀（火山方舟 /api/v3、Anthropic 兼容 /anthropic）— 不要再补 /v1
-    if re.search(r"/api/v\d+$", path) or path.endswith("/anthropic"):
+    # 已带其它版本前缀（Anthropic 兼容 /anthropic）— 不要再补 /v1
+    if path.endswith("/anthropic"):
         return normalized
 
-    # 路径以 /v1/ 开头后面还有子路径（如 /v1/chat）→ 过度指定，警告
-    if "/v1/" in path:
+    # 版本段后还有子路径（如 /v1/chat）→ 过度指定，警告
+    _ver_in_path = re.search(r"/v[\w.]+/", path)
+    if _ver_in_path:
         logger.warning(
-            "%s 的路径 %r 包含 /v1/ 后的额外子路径，"
+            "%s 的路径 %r 在版本段后包含额外子路径，"
             "OpenAI SDK 会自动拼接 /chat/completions，请确认路径是否正确。"
-            "建议将路径截断到 /v1，例如: %s",
+            "建议将路径截断到版本段，例如: %s",
             env_name, path,
-            normalized[:normalized.index("/v1/") + 3],
+            normalized[:normalized.index(_ver_in_path.group()) + len(_ver_in_path.group()) - 1],
         )
         return normalized
 
-    # 路径不包含 /v1 — 很可能缺失，自动补全
+    # 路径不包含版本段 — 很可能缺失，自动补全 /v1
     corrected = normalized + _OPENAI_COMPAT_V1_SUFFIX
     logger.warning(
         "%s=%r 未以 /v1 结尾。OpenAI 兼容 API 通常需要 /v1 路径前缀，"

@@ -3,6 +3,29 @@ import type { GuideViewport } from "./useTargetRect";
 type Rect = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 type Placement = "top" | "bottom" | "left" | "right";
 
+/** Mobile uses a compact teaching card until the user explicitly opens a practice. */
+export function getTourCardMaxHeight(viewportHeight: number, isMobile: boolean, practiceExpanded: boolean) {
+  const available = Math.max(1, viewportHeight - 20);
+  if (!isMobile) return available;
+  const desired = practiceExpanded
+    ? Math.max(260, viewportHeight * 0.7)
+    : Math.max(220, Math.min(320, viewportHeight * 0.48));
+  return Math.min(available, desired);
+}
+
+/** Expand a target for the spotlight without drawing outside the safe visual viewport. */
+export function getSpotlightRect(target: Rect | null, viewport: GuideViewport, padding: number) {
+  if (!target) return null;
+  const viewportRight = viewport.left + viewport.width;
+  const viewportBottom = viewport.top + viewport.height;
+  const left = Math.max(viewport.left, target.left - padding);
+  const top = Math.max(viewport.top, target.top - padding);
+  const right = Math.min(viewportRight, target.right + padding);
+  const bottom = Math.min(viewportBottom, target.bottom + padding);
+  if (right - left < 1 || bottom - top < 1) return null;
+  return { left, top, width: right - left, height: bottom - top };
+}
+
 /** Prefer the requested side, then the side with the least target overlap.
  * The card is always inside the visual viewport, including landscape keyboards. */
 export function placeTourCard(target: Rect | null, viewport: GuideViewport, width: number, height: number, placement: Placement) {

@@ -189,4 +189,14 @@ describe("ChatWorkspaceTabs", () => {
     expect(html).toMatch(/aria-selected="false"[^>]*><span[^>]*>表格/);
     expect(html).not.toMatch(/disabled=""[^>]*><span[^>]*>表格/);
   });
+
+  it("keeps the sheet tab and open-file entry available before any workbook exists", () => {
+    excelState.activeFilePath = null;
+    excelState.recentFiles = [];
+    excelState.workspaceFiles = [];
+    const html = renderToStaticMarkup(React.createElement(ChatWorkspaceTabs));
+    expect(html).not.toContain('aria-disabled="true"');
+    expect(html).toContain('aria-label="打开表格"');
+    expect(html).not.toMatch(/disabled=""[^>]*><span[^>]*>表格/);
+  });
 });

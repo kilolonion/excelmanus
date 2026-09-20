@@ -138,8 +138,14 @@ export const SPLASH_CRITICAL_CSS = `
 .em-splash-arc{
   position:absolute;
   inset:0;
-  animation:em-splash-arc-spin 10s linear infinite;
+  animation:em-splash-arc-spin 3s linear infinite;
   transform-origin:50% 50%;
+  will-change:transform;
+}
+.em-splash-arc svg{
+  display:block;
+  width:100%;
+  height:100%;
 }
 .em-splash-logo{
   position:relative;
@@ -181,11 +187,14 @@ export const SPLASH_CRITICAL_CSS = `
   flex-wrap:nowrap;
   align-items:center;
   gap:8px;
-  white-space:nowrap;
+  justify-content:center;
+  max-width:100%;
   font-size:13px;
   color:#66756c;
 }
 .em-splash-spinner{
+  display:inline-block;
+  box-sizing:border-box;
   flex-shrink:0;
   width:14px;
   height:14px;
@@ -193,6 +202,7 @@ export const SPLASH_CRITICAL_CSS = `
   border:2px solid rgba(11,107,79,.15);
   border-top-color:#0b6b4f;
   animation:em-splash-status-spin .8s linear infinite;
+  will-change:transform;
 }
 .em-splash-progress{
   margin:14px 0 0;
@@ -203,9 +213,53 @@ export const SPLASH_CRITICAL_CSS = `
   background:#dce7e0;
 }
 .em-splash-progress-fill{
+  width:40%;
   height:100%;
   border-radius:999px;
   background:#0b6b4f;
+  animation:em-splash-progress-slide 1.6s cubic-bezier(.4,0,.2,1) infinite;
+  will-change:transform;
+}
+.em-splash-elapsed{
+  margin:14px 0 0;
+  color:#66756c;
+  font-size:12px;
+  line-height:1.5;
+  font-variant-numeric:tabular-nums;
+}
+.em-splash-hint{
+  margin:6px 0 0;
+  max-width:32em;
+  min-height:3em;
+  color:#66756c;
+  font-size:12px;
+  line-height:1.5;
+}
+.em-splash-recovery{
+  margin-top:8px;
+  visibility:hidden;
+  /* Offer a working link even if the application never hydrates. */
+  animation:em-splash-reveal 0s 30s forwards;
+}
+.em-splash-recovery a{
+  display:inline-block;
+  border:1px solid #dce7e0;
+  border-radius:8px;
+  padding:8px 16px;
+  color:#0b6b4f;
+  background:#fff;
+  font-size:13px;
+  line-height:1.5;
+  text-decoration:none;
+}
+.em-splash-recovery a:hover{background:#f0f7f3}
+.em-splash-recovery a:focus-visible{outline:2px solid #0b6b4f;outline-offset:3px}
+.em-splash[data-error="true"] .em-splash-recovery{
+  visibility:visible;
+  animation:none;
+}
+.em-splash[data-error="true"] .em-splash-arc{
+  animation:none;
 }
 .em-splash-footer{
   position:relative;
@@ -240,6 +294,13 @@ export const SPLASH_CRITICAL_CSS = `
 @keyframes em-splash-status-spin{
   from{transform:rotate(0deg)}
   to{transform:rotate(360deg)}
+}
+@keyframes em-splash-progress-slide{
+  from{transform:translateX(-100%)}
+  to{transform:translateX(250%)}
+}
+@keyframes em-splash-reveal{
+  to{visibility:visible}
 }
 @media (min-width:768px){
   .em-splash-glow::before{
@@ -295,6 +356,16 @@ export const SPLASH_CRITICAL_CSS = `
   }
 }
 @media (prefers-reduced-motion:reduce){
-  .em-splash-arc,.em-splash-spinner{animation:none}
+  /* Decorative rotation stops; essential liveness feedback keeps moving slowly. */
+  .em-splash-arc{animation:none;will-change:auto}
+  .em-splash-spinner{animation-duration:1.6s}
+  .em-splash-progress-fill{animation-duration:3.2s}
+}
+@media (max-height:700px){
+  .em-splash{overflow:auto}
+  .em-splash-main{padding-top:20px;padding-bottom:20px}
+  .em-splash-mark{height:162px;flex-shrink:0}
+  .em-splash-title{margin-top:16px}
+  .em-splash-status{margin-top:24px}
 }
 `.trim();

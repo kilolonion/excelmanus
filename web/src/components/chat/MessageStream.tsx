@@ -5,6 +5,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowDown } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
 import { RollbackConfirmDialog } from "./RollbackConfirmDialog";
@@ -462,14 +463,19 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
                   initial={isNew ? "initial" : false}
                   animate="animate"
                 >
-                  <MessageRowItem
-                    messageId={messageId}
-                    isStreaming={isStreaming}
-                    isLast={false}
-                    onEditAndResend={onEditAndResend ? handleEditAndResend : undefined}
-                    onRetry={onRetry ? handleRetry : undefined}
-                    onRetryWithModel={onRetryWithModel ? handleRetryWithModel : undefined}
-                  />
+                  <ErrorBoundary
+                    resetKey={messageId}
+                    fallback={(error, reset) => <MessageRenderFallback error={error} onReset={reset} />}
+                  >
+                    <MessageRowItem
+                      messageId={messageId}
+                      isStreaming={isStreaming}
+                      isLast={false}
+                      onEditAndResend={onEditAndResend ? handleEditAndResend : undefined}
+                      onRetry={onRetry ? handleRetry : undefined}
+                      onRetryWithModel={onRetryWithModel ? handleRetryWithModel : undefined}
+                    />
+                  </ErrorBoundary>
                 </motion.div>
               </div>
             );
@@ -487,14 +493,19 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
               initial={pinnedIsNew ? "initial" : false}
               animate="animate"
             >
-              <MessageRowItem
-                messageId={pinnedId}
-                isStreaming={isStreaming}
-                isLast
-                onEditAndResend={onEditAndResend ? handleEditAndResend : undefined}
-                onRetry={onRetry ? handleRetry : undefined}
-                onRetryWithModel={onRetryWithModel ? handleRetryWithModel : undefined}
-              />
+              <ErrorBoundary
+                resetKey={pinnedId}
+                fallback={(error, reset) => <MessageRenderFallback error={error} onReset={reset} />}
+              >
+                <MessageRowItem
+                  messageId={pinnedId}
+                  isStreaming={isStreaming}
+                  isLast
+                  onEditAndResend={onEditAndResend ? handleEditAndResend : undefined}
+                  onRetry={onRetry ? handleRetry : undefined}
+                  onRetryWithModel={onRetryWithModel ? handleRetryWithModel : undefined}
+                />
+              </ErrorBoundary>
             </motion.div>
             </div>
           </div>
@@ -547,6 +558,21 @@ function TimestampSeparator({ ts, isNew }: { ts: number; isNew: boolean }) {
         {formatTimestamp(ts)}
       </span>
     </motion.div>
+  );
+}
+
+function MessageRenderFallback({ error, onReset }: { error: Error; onReset: () => void }) {
+  return (
+    <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-muted-foreground">
+      该消息渲染失败：{error.message}
+      <button
+        type="button"
+        onClick={onReset}
+        className="ml-2 underline underline-offset-2 hover:text-foreground"
+      >
+        重试
+      </button>
+    </div>
   );
 }
 

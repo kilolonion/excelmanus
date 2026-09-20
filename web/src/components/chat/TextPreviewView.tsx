@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { FileText, ChevronDown, ChevronUp } from "lucide-react";
 import type { TextPreviewEntry } from "@/stores/excel-store";
 import { ScrollablePreview } from "./ScrollablePreview";
+import { displayFileName, displayFilePath } from "@/lib/file-identity";
 
 interface TextPreviewViewProps {
   data: TextPreviewEntry;
@@ -44,7 +45,7 @@ const MAX_DISPLAY_LINES = 60;
 
 export function TextPreviewView({ data }: TextPreviewViewProps) {
   const lines = useMemo(() => data.content.split("\n"), [data.content]);
-  const filename = data.filePath.split("/").pop() || data.filePath;
+  const filename = displayFileName(data.filePath) || data.filePath;
   const language = useMemo(() => inferLanguage(data.filePath), [data.filePath]);
   const [expanded, setExpanded] = useState(false);
 
@@ -57,7 +58,7 @@ export function TextPreviewView({ data }: TextPreviewViewProps) {
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/50 border-b border-border/40">
         <FileText className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="font-medium text-foreground/80 truncate" title={data.filePath}>
+        <span className="font-medium text-foreground/80 truncate" title={displayFilePath(data.filePath)}>
           {filename}
         </span>
         <span className="text-[10px] text-muted-foreground/60 px-1.5 py-px rounded bg-muted/60 font-mono">

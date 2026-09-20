@@ -41,6 +41,7 @@ import type { DeployStatusInfo, DeployResult, VersionManifest } from "@/lib/api"
 import { fetchVersionManifest } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { RollbackPanel } from "@/components/settings/RollbackPanel";
+import { ProjectLinks } from "@/components/settings/ProjectLinks";
 
 interface VersionInfo {
   current: string;
@@ -89,7 +90,8 @@ export function VersionTab() {
   const deployMode = useAuthConfigStore((s) => s.deployMode);
 
   const [version, setVersion] = useState<VersionInfo | null>(null);
-  const isStandalone = deployMode === "standalone" && version?.check_method !== "desktop_installer";
+  const isDesktopApp = (typeof window !== "undefined" && !!window.excelManusDesktop) || version?.check_method === "desktop_installer";
+  const isStandalone = deployMode === "standalone" && !isDesktopApp;
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [installations, setInstallations] = useState<InstallationEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -118,22 +120,26 @@ export function VersionTab() {
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
+    setActionMsg(null);
     try {
-      const [v, b, i, ds, manifest] = await Promise.all([
-        apiGet<VersionInfo>("/version/check"),
+      const v = await apiGet<VersionInfo>("/version/check");
+      setVersion(v);
+      // A packaged app has no source checkout, deployment tools or source
+      // installation registry. Do not invoke those endpoints from Desktop.
+      if (window.excelManusDesktop || v.check_method === "desktop_installer") return;
+      const [b, i, ds, manifest] = await Promise.all([
         apiGet<{ backups: BackupEntry[] }>("/version/backups"),
         apiGet<{ installations: InstallationEntry[] }>("/version/installations"),
         fetchDeployStatus().catch(() => null),
         fetchVersionManifest().catch(() => null),
       ]);
-      setVersion(v);
       setBackups(b.backups ?? []);
       setInstallations(i.installations ?? []);
       if (ds) setDeployStatus(ds);
       if (manifest?.git_commit) setCurrentGitCommit(manifest.git_commit);
       setLastUpgrade(manifest?.last_upgrade ?? null);
     } catch {
-      // 忽略
+      setActionMsg({ type: "err", text: "版本信息加载失败，请重试。" });
     } finally {
       setLoading(false);
     }
@@ -296,11 +302,35 @@ export function VersionTab() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12 text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin mr-2" />
-        加载版本信息…
+      <div className="space-y-4">
+        <div className="flex items-center justify-center py-12 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin mr-2" />
+          加载版本信息…
+        </div>
+        <ProjectLinks />
       </div>
     );
+  }
+
+  if (isDesktopApp) {
+    return <div className="space-y-4">
+      <div className="rounded-lg border border-border p-4 space-y-3">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <Sparkles className="h-5 w-5 text-[var(--em-primary)]" />
+          ExcelManus Desktop
+          <Badge variant="secondary">v{version?.current || process.env.NEXT_PUBLIC_APP_VERSION || "unknown"}</Badge>
+        </div>
+        <p className="text-sm text-muted-foreground">下载适用于 Windows 或 macOS 的新版安装包，退出应用后安装。已有对话、模型配置和工作区数据会保留。</p>
+        <a href="https://github.com/kilolonion/excelmanus/releases" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm text-[var(--em-primary)] underline underline-offset-4">
+          <Download className="h-4 w-4" />打开下载页面
+        </a>
+      </div>
+      <p className="text-xs leading-relaxed text-muted-foreground">备份应用数据时，可从应用菜单「文件 → 打开数据目录」找到数据位置，退出应用后复制该目录。添加在其他位置的工作区文件夹需要单独备份。日志位于「帮助 → 打开日志目录」。</p>
+      <ProjectLinks />
+      {actionMsg?.type === "err" && <div role="status" className="text-sm text-destructive">
+        {actionMsg.text} <button type="button" className="underline" onClick={() => void fetchAll()}>重试</button>
+      </div>}
+    </div>;
   }
 
   const totalBackupMB = backups.reduce((s, b) => s + b.size_mb, 0);
@@ -415,6 +445,10 @@ export function VersionTab() {
           </div>
         )}
       </div>
+
+      <Separator />
+
+      <ProjectLinks />
 
       <Separator />
 

@@ -49,7 +49,8 @@ def _make_provider_mock(*, new_access: str = "new_token") -> MagicMock:
     """创建 mock provider，模拟 refresh + get_api_credential。"""
     fresh_exp = (datetime.now(tz=timezone.utc) + timedelta(hours=1)).isoformat()
     provider = MagicMock()
-    provider.refresh_token = AsyncMock(
+    provider.MODEL_NAME_PREFIX = ""
+    provider.refresh_profile = AsyncMock(
         return_value=RefreshedCredential(
             access_token=new_access,
             refresh_token="rt_new",
@@ -59,6 +60,7 @@ def _make_provider_mock(*, new_access: str = "new_token") -> MagicMock:
     provider.get_api_credential = MagicMock(
         return_value=(new_access, "https://api.openai.com/v1")
     )
+    provider.get_request_headers = MagicMock(return_value={})
     provider.matches_model = MagicMock(return_value=True)
     return provider
 
@@ -124,7 +126,7 @@ async def test_resolve_returns_credential_for_fresh_token():
     assert result is not None
     assert result.api_key == "fresh_token"
     assert result.source == "oauth"
-    provider_mock.refresh_token.assert_not_called()
+    provider_mock.refresh_profile.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -143,7 +145,7 @@ async def test_resolve_refreshes_expired_token():
 
     assert result is not None
     assert result.api_key == "refreshed_token"
-    provider_mock.refresh_token.assert_called_once_with("rt_xxx")
+    provider_mock.refresh_profile.assert_called_once_with(expired_profile)
     store.update_tokens.assert_called_once()
 
 
@@ -156,8 +158,9 @@ async def test_resolve_deactivates_on_refresh_failure():
     store.deactivate_profile = MagicMock()
 
     provider_mock = MagicMock()
+    provider_mock.MODEL_NAME_PREFIX = ""
     provider_mock.matches_model = MagicMock(return_value=True)
-    provider_mock.refresh_token = AsyncMock(side_effect=RuntimeError("refresh failed"))
+    provider_mock.refresh_profile = AsyncMock(side_effect=RuntimeError("refresh failed"))
 
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
@@ -202,7 +205,7 @@ async def test_concurrent_refresh_serialized_by_lock():
     assert all(r is not None for r in results)
     assert all(r.api_key == "new_token" for r in results)
     # refresh 最多被调用一次
-    assert provider_mock.refresh_token.call_count <= 1
+    assert provider_mock.refresh_profile.call_count <= 1
 
 
 @pytest.mark.asyncio
@@ -233,7 +236,7 @@ async def test_process_level_refresh_is_shared():
         )
 
     assert all(r is not None for r in results)
-    assert provider_mock.refresh_token.call_count <= 1
+    assert provider_mock.refresh_profile.call_count <= 1
     assert list(resolver._refresh_locks.keys()) == ["openai-codex"]
 
 

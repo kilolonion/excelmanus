@@ -545,10 +545,12 @@ _INSPECT_DEFAULTS = {
 _ANALYZE_MODE_FIELDS: dict[str, frozenset[str]] = {
     "profile": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name", "max_rows",
+        "sample_rows", "limit",
         "expected_version", "content_version", "header_row",
     }),
     "quality": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name", "max_rows",
+        "sample_rows", "limit",
         "expected_version", "content_version", "header_row",
     }),
     "filter": frozenset({
@@ -602,6 +604,14 @@ _TRACE_DEFAULTS = {
     "depth": 2,
     "detail": "summary",
     "scope": "all",
+}
+
+# mode-union 工具的字段合同：schema 平铺全部字段，每个 mode 只接受自己的子集。
+# introspect_capability(tool_detail) 用它向模型披露逐 mode 可用字段。
+MODE_FIELDS_BY_TOOL: dict[str, dict[str, frozenset[str]]] = {
+    "inspect_spreadsheet": _INSPECT_MODE_FIELDS,
+    "analyze_spreadsheet": _ANALYZE_MODE_FIELDS,
+    "trace_spreadsheet_formulas": _TRACE_MODE_FIELDS,
 }
 
 _EDIT_KIND_FIELDS = {
@@ -3027,7 +3037,11 @@ def analyze_spreadsheet(
             return _invalid(f"{chosen} 需要 file_path / path")
         return scan_excel_snapshot(
             file_path=target,
-            max_sample_rows=int(args.get("max_rows") or args.get("maxRows") or 500),
+            max_sample_rows=int(
+                args.get("max_rows") or args.get("maxRows")
+                or args.get("sample_rows") or args.get("sampleRows")
+                or args.get("limit") or 500
+            ),
             include_relationships=True,
             sheet_name=args.get("sheet_name"),
             expected_version=args.get("expected_version"),
@@ -3837,6 +3851,7 @@ def get_tools() -> list[ToolDef]:
                     "match_mode": {
                         "type": "string",
                         "enum": ["contains", "exact", "regex", "startswith"],
+                        "description": "search 模式的匹配方式",
                     },
                     "directory": {
                         "type": "string",
@@ -3848,7 +3863,7 @@ def get_tools() -> list[ToolDef]:
                     },
                     "sample_rows": {
                         "type": "integer",
-                        "description": "表格采样行数（规范名）。精确 range 时忽略并警告。",
+                        "description": "range 模式无精确地址时的等距采样行数（规范名）；精确 range 时忽略并警告；仅 mode=range 接受。",
                     },
                     "max_results": {
                         "type": "integer",
@@ -3889,9 +3904,9 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "列头所在行号（Excel 行号，1-based，第 1 行 = 1），默认自动检测；表单类文档传 -1",
                     },
-                    "column": {"type": "string", "description": "filter/distinct 的目标列；aggregate 单条件筛选用 column+operator+value"},
+                    "column": {"type": "string", "description": "filter/distinct 的目标列；aggregate/pivot 单条件筛选用 column+operator+value"},
                     "group_by": {
-                        "description": "aggregate 的分组列名或列名数组；也支持日期派生键对象 {column, transform}，transform=year|quarter|month|year_month|date|week|hour（按月份聚合传 {\"column\":\"日期\",\"transform\":\"year_month\"}）；不传则整体汇总；传列名或对象，不要传 JSON 字符串",
+                        "description": "aggregate 的分组列名或列名数组（pivot 中作 index 别名）；也支持日期派生键对象 {column, transform}，transform=year|quarter|month|year_month|date|week|hour（按月份聚合传 {\"column\":\"日期\",\"transform\":\"year_month\"}）；不传则整体汇总；传列名或对象，不要传 JSON 字符串",
                     },
                     "aggregations": {
                         "type": "object",
@@ -3905,7 +3920,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "eq/ne/gt/ge/lt/le/contains/not_contains/regex/not_regex/in/not_in/between/isnull/notnull/startswith/endswith；也接受 =、==、!=、not（→ne）",
                     },
-                    "value": {},
+                    "value": {"description": "filter/aggregate/pivot 单条件的比较值（配合 column+operator）"},
                     "conditions": {
                         "type": "array",
                         "items": {"type": "object"},
@@ -3917,18 +3932,18 @@ def get_tools() -> list[ToolDef]:
                         "description": "条件组合：and（默认）/ or / not（对单个条件整体取反，仅接受恰好一个条件）",
                     },
                     "columns": {
-                        "description": "pivot 的列维度：列名或列名数组，也支持日期派生键对象 {column, transform}（如按月份分列传 {\"column\":\"日期\",\"transform\":\"year_month\"}）；其它模式下为选中列名数组；传列名、数组或对象，不要传 JSON 字符串",
+                        "description": "pivot 的列维度：列名或列名数组，也支持日期派生键对象 {column, transform}（如按月份分列传 {\"column\":\"日期\",\"transform\":\"year_month\"}）；filter 下为选中列名数组；传列名、数组或对象，不要传 JSON 字符串",
                     },
                     "max_rows": {
                         "type": "integer",
-                        "description": "结果行数/组数/条目数上限（规范名）；filter/aggregate/distinct/pivot 通用。",
+                        "description": "行数上限（规范名）：profile/quality 为采样行数上限，filter/aggregate/distinct/pivot 为结果行数/组数/条目数上限。",
                     },
                     "sort_by": {
                         "type": "string",
-                        "description": "结果排序列：分组键或聚合输出列名（如 金额_sum）；传源列名会自动映射到其唯一聚合输出列",
+                        "description": "filter/aggregate 的结果排序列：数据列名、分组键或聚合输出列名（如 金额_sum）；传源列名会自动映射到其唯一聚合输出列",
                     },
                     "ascending": {"type": "boolean", "default": True, "description": "filter/aggregate 默认升序；最大 TopN 显式传 false（降序）并设置 max_rows。"},
-                    "limit": {"type": "integer", "description": "deprecated 别名，等同 max_rows"},
+                    "limit": {"type": "integer", "description": "deprecated 别名，等同 max_rows；registry 层会折叠为 max_rows"},
                     "join": {
                         "type": "object",
                         "description": "aggregate/pivot 跨表连接（VLOOKUP 语义，左连接右表按键去重）：{sheet: 右表名（同簿）或 file_path: 另一文件, on: 同名键 或 left_on+right_on: 异名键, columns: [带来的列]（缺省=右表全部非键列）}；连接列可参与 group_by/aggregations/conditions",
@@ -3947,19 +3962,19 @@ def get_tools() -> list[ToolDef]:
                         "type": "boolean",
                         "description": "pivot 追加合计行与合计列（Excel 总计）；合计标签用 margins_name，默认「合计」。",
                     },
-                    "margins_name": {"type": "string"},
+                    "margins_name": {"type": "string", "description": "pivot 合计行/列标签，默认「合计」"},
                     "totals": {"type": "boolean", "description": "pivot 的 margins 别名"},
                     "totals_name": {"type": "string", "description": "pivot 的 margins_name 别名"},
                     "grand_total": {"type": "boolean", "description": "pivot 的 margins 别名"},
-                    "directory": {"type": "string"},
-                    "file_paths": {"type": "array", "items": {"type": "string"}},
-                    "paths": {"type": "array", "items": {"type": "string"}},
+                    "directory": {"type": "string", "description": "files/relationships 的扫描目录，默认工作区根"},
+                    "file_paths": {"type": "array", "items": {"type": "string"}, "description": "relationships 的目标文件列表；单文件直接用 file_path"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "file_paths 的别名"},
                     "max_files": {"type": "integer", "description": "files/relationships 的文件数上限"},
                     "query": {"type": "string", "description": "files 模式按文件名或路径搜索"},
                     "include": {"type": "array", "items": {"type": "string"}, "description": "files 模式附加维度"},
                     "sample_rows": {
                         "type": "integer",
-                        "description": "表格采样行数（规范名）。",
+                        "description": "relationships 的每文件采样行数；profile/quality 下作 max_rows 别名（采样行数上限）",
                     },
                     "expected_version": {
                         "type": "string",
@@ -4450,15 +4465,16 @@ def get_tools() -> list[ToolDef]:
                     "target": {
                         "type": "string",
                         "description": _brief_range_description(
-                            extra="规范名是 target，如 产品表!B2。",
+                            extra="规范名是 target，如 产品表!B2；trace/impact 必填，map 不接受。",
                         ),
                     },
                     "direction": {
                         "type": "string",
                         "enum": ["precedents", "dependents", "both"],
+                        "description": "仅 mode=trace：追踪方向",
                     },
-                    "depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 5},
-                    "detail": {"type": "string", "enum": ["summary", "full"]},
+                    "depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 5, "description": "仅 mode=trace：追踪深度 1-5"},
+                    "detail": {"type": "string", "enum": ["summary", "full"], "description": "仅 mode=map：输出详略"},
                     "scope": {"type": "string", "enum": ["all", "sheet"], "description": "impact 范围：all=所有工作表，sheet=目标工作表"},
                 },
             },

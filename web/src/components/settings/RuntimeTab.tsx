@@ -119,6 +119,7 @@ interface ToggleItem {
   label: string;
   desc: string;
   icon: React.ReactNode;
+  coachId?: string;
   type: "bool" | "int" | "float" | "select" | "string";
   options?: SelectOption[];
   min?: number;
@@ -150,6 +151,7 @@ const BASIC_GROUPS: ItemGroup[] = [
         label: "上下文压缩",
         desc: "占用超过窗口乘以阈值时，自动摘要旧消息并保留最近几轮。保存后立即同步到已打开的对话。",
         icon: <Shrink className="h-4 w-4" />,
+        coachId: "coach-settings-runtime-compaction",
         type: "bool",
       },
       {
@@ -878,7 +880,7 @@ export function RuntimeTab() {
           {group.items.map((item) => {
             const value = merged[item.key];
             return (
-              <div key={item.key}>
+              <div key={item.key} data-coach-id={item.coachId}>
                 {item.type === "bool" ? (
                   /* Boolean toggle: always horizontal */
                   <div className="flex items-center justify-between gap-3">

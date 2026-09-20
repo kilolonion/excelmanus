@@ -15,6 +15,8 @@ export interface AttachedFile {
   cachedBase64?: string;
   /** 侧边栏拖入的已有工作区文件：展示附件芯片，但不走“新上传”通知 */
   fromWorkspace?: boolean;
+  /** Scope captured when the file was imported or attached. */
+  workspaceKey?: string;
 }
 
 export interface Session {
@@ -106,6 +108,20 @@ export interface SubagentRun {
     structured_changes: { path: string; tool_name: string; change_type: string; sheets_affected: string[] }[];
     observed_files: string[];
   } | null;
+}
+
+/** 会话任务清单快照（GET /sessions/{id}/task-list），结构对应后端 TaskList.to_dict()。 */
+export interface SessionTaskList {
+  title: string;
+  items: {
+    title: string;
+    status: string;
+    result?: string | null;
+    verification?: string | Record<string, unknown> | null;
+  }[];
+  created_at?: string;
+  progress?: Record<string, number>;
+  plan_file_path?: string;
 }
 
 export type AssistantBlock =

@@ -141,7 +141,11 @@ async def upload_file(raw_request: Request) -> JSONResponse:
     }
     if converted:
         resp["converted_from"] = original_filename
-        resp["converted_to"] = filename
+        # dest_path 落盘名带 uploads/{8hex}_ 前缀，响应只给展示名
+        from excelmanus.workspace.identity import display_name_for
+        resp["converted_to"] = display_name_for(
+            str(dest_path.relative_to(ws.root_dir)).replace("\\", "/")
+        )
     return JSONResponse(content=resp)
 
 
@@ -260,7 +264,10 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
     }
     if converted:
         resp["converted_from"] = original_filename
-        resp["converted_to"] = raw_filename
+        from excelmanus.workspace.identity import display_name_for
+        resp["converted_to"] = display_name_for(
+            str(dest_path.relative_to(ws.root_dir)).replace("\\", "/")
+        )
     return JSONResponse(content=resp)
 
 
@@ -531,6 +538,17 @@ async def put_onboarding(body: OnboardingPut) -> JSONResponse:
 @router.get("/api/v1/health")
 async def health(request: Request) -> dict:
     """健康检查：返回版本号和已加载的工具/技能包计数。"""
+    from excelmanus.auth.access import access_enabled, authenticated
+    # An unauthenticated probe must not enumerate models, workspaces, tools,
+    # onboarding state or active sessions, even with ?details=1.
+    if await run_in_threadpool(access_enabled) and not await run_in_threadpool(authenticated, request):
+        config = get_config()
+        return {
+            "status": "draining" if get_draining() else "ok",
+            "auth_required": True,
+            "authenticated": False,
+            "deploy_mode": config.deploy_mode if config else "standalone",
+        }
     if get_draining():
         return {
             "status": "draining",
@@ -563,7 +581,6 @@ async def health(request: Request) -> dict:
         active_sessions = await _session_manager.get_active_count()
 
     # 发布清单摘要（供前端版本轮询使用）。不得开库：fingerprint 只读文件 / git。
-    from excelmanus.auth.manage_token import manage_token_configured
     from excelmanus.api_routes_version import get_manifest_data, _API_SCHEMA_VERSION
     from excelmanus.onboarding_state import load_onboarding_state
     _manifest = get_manifest_data()
@@ -586,5 +603,6 @@ async def health(request: Request) -> dict:
         "api_schema_version": _API_SCHEMA_VERSION,
         "git_commit": _manifest.get("git_commit"),
         "deploy_mode": _config.deploy_mode if _config is not None else "standalone",
-        "auth_required": manage_token_configured(),
+        "auth_required": access_enabled(),
+        "authenticated": True,
     }

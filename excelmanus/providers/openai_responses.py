@@ -824,6 +824,8 @@ class OpenAIResponsesClient:
             current_tools: dict[int, dict] = {}
             emitted_tool_indexes: set[int] = set()
             _inline_sm = InlineThinkingStateMachine()
+            _reasoning_text_emitted = False  # 是否已输出过 reasoning 摘要文本
+            _reasoning_pending_sep = False   # 下一段摘要文本前需补换行分隔
 
             def _merge_function_item(output_index: int, item: dict[str, Any]) -> dict[str, Any]:
                 raw_arguments = item.get("arguments", "")
@@ -859,8 +861,22 @@ class OpenAIResponsesClient:
                         continue
 
                     event_type = event_data.get("type", "")
+
+                    # 新的 reasoning summary part 开始（GPT/Codex 摘要通常是 **标题** 行）。
+                    # part 边界在 delta 事件流中不可见，这里补换行分隔，
+                    # 避免相邻段落粘连成 "**A****B**" 形式。
+                    if (
+                        event_type == "response.reasoning_summary_part.added"
+                        and _reasoning_text_emitted
+                    ):
+                        _reasoning_pending_sep = True
+
                     reasoning_delta = _extract_reasoning_delta_from_event(event_type, event_data)
                     if reasoning_delta:
+                        if _reasoning_pending_sep:
+                            reasoning_delta = "\n" + reasoning_delta
+                            _reasoning_pending_sep = False
+                        _reasoning_text_emitted = True
                         yield StreamDelta(thinking_delta=reasoning_delta)
 
                     if event_type == "response.output_text.delta":

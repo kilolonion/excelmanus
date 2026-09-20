@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskCard } from "@/components/chat/BackgroundTasks";
 import { SubagentBlock } from "@/components/chat/SubagentBlock";
-import { controlSubagentRun, fetchSubagentRuns } from "@/lib/api";
+import { controlSubagentRun, fetchSessionTaskList, fetchSubagentRuns } from "@/lib/api";
+import { normalizeTaskItems } from "@/lib/sse-event-handler";
 import { completedSubagentFiles } from "@/lib/subagent-runs";
 import { stopGeneration } from "@/lib/chat-actions";
 import { useChatStore } from "@/stores/chat-store";
@@ -100,6 +101,49 @@ describe("background task API", () => {
     vi.stubGlobal("fetch", fetchMock);
     await expect(controlSubagentRun("s", "r", "send", "改为华东")).rejects.toThrow("子任务已结束");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads the session task list snapshot", async () => {
+    const taskList = {
+      title: "补齐订单",
+      items: [
+        { title: "读取订单", status: "completed" },
+        { title: "写入结果", status: "in_progress" },
+      ],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ task_list: taskList })));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await fetchSessionTaskList("session/a")).toEqual(taskList);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/sessions/session%2Fa/task-list");
+  });
+
+  it("returns null when the session has no task list", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ task_list: null })));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await fetchSessionTaskList("s")).toBeNull();
+  });
+});
+
+describe("session task list normalization", () => {
+  it("maps backend task items to display items", () => {
+    const items = normalizeTaskItems({
+      title: "补齐订单",
+      items: [
+        { title: "读取订单", status: "completed" },
+        { title: "校验行数", status: "in_progress", verification: { check_type: "custom", expected: "行数 > 0" } },
+        { title: "写入结果", status: "pending", verification: "非空" },
+      ],
+    });
+    expect(items).toEqual([
+      { content: "读取订单", status: "completed", index: 0, verification: undefined },
+      { content: "校验行数", status: "in_progress", index: 1, verification: "行数 > 0" },
+      { content: "写入结果", status: "pending", index: 2, verification: "非空" },
+    ]);
+  });
+
+  it("returns an empty list for empty payloads", () => {
+    expect(normalizeTaskItems(null)).toEqual([]);
+    expect(normalizeTaskItems({ items: [] })).toEqual([]);
   });
 });
 

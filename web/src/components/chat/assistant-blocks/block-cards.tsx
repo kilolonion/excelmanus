@@ -16,10 +16,12 @@ import type { AssistantBlock } from "@/lib/types";
 import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import { displayFileName } from "@/lib/file-identity";
 
 export function SaveResultCard({ path }: { path: string }) {
-  const filename = path.split("/").pop() || path;
-  const dir = path.substring(0, path.length - filename.length);
+  const rawLeaf = path.split("/").pop() || path;
+  const filename = displayFileName(path) || rawLeaf;
+  const dir = path.substring(0, path.length - rawLeaf.length);
   const deployMode = useAuthConfigStore((s) => s.deployMode);
   const canReveal = deployMode === "standalone";
   const activeSessionId = useSessionStore((s) => s.activeSessionId);

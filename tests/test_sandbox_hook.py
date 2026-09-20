@@ -44,6 +44,20 @@ def _parse_save_versions(stderr: str) -> dict[str, str]:
     return versions
 
 
+def _require_symlink_privilege(tmp_dir: Path) -> None:
+    """Windows 上创建符号链接需要特权；无权限时跳过用例。"""
+    target = tmp_dir / ".symlink_probe_target"
+    link = tmp_dir / ".symlink_probe_link"
+    target.touch()
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("当前环境无创建符号链接权限")
+    finally:
+        link.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+
+
 def _run_in_sandbox(
     workspace: Path,
     script_content: str,
@@ -220,6 +234,7 @@ class TestGreenSandbox:
 
     def test_symlink_escaping_workspace_denied(self, workspace: Path) -> None:
         """工作区内指向外部的符号链接按真实解析路径拒绝。"""
+        _require_symlink_privilege(workspace)
         import tempfile
         outside = Path(tempfile.mkdtemp())
         outside_file = outside / "secret.txt"
@@ -250,6 +265,7 @@ class TestGreenSandbox:
 
     def test_symlink_into_excelmanus_denied(self, workspace: Path) -> None:
         """符号链接解析进 .excelmanus 同样拒绝。"""
+        _require_symlink_privilege(workspace)
         internal = workspace / ".excelmanus" / "sessions"
         internal.mkdir(parents=True, exist_ok=True)
         target_file = internal / "state.json"

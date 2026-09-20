@@ -14,7 +14,7 @@ describe("Jev timeline layout", () => {
 
   it("keeps stage chips from shrinking and wrapping mid-word", () => {
     const rail = src.slice(src.indexOf("function StageRail"), src.indexOf("function VerticalTimeline"));
-    expect(rail).toContain('className="shrink-0"');
+    expect(rail).toContain("shrink-0");
     expect(rail).toContain("whitespace-nowrap");
     expect(rail).toContain("overflow-x-auto");
     expect(rail).not.toContain("min-w-[4.5rem]");
@@ -26,7 +26,8 @@ describe("Jev timeline layout", () => {
     expect(src).toContain('data-testid="jev-desktop-sidebar"');
     expect(src).toContain("flex-shrink-0");
     expect(src).toContain("border-l");
-    expect(src).toContain("headerExtra");
+    expect(src).toContain("<JevPinButton />");
+    expect(src).toContain("<DialogContent");
   });
 
   it("sits next to the chat column in the app shell", () => {

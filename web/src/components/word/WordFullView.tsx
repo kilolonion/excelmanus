@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { ArrowLeft, Download, History, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { buildWordFileUrl, downloadFile } from "@/lib/api";
+import { displayFileName } from "@/lib/file-identity";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
 
@@ -39,7 +40,7 @@ export function WordFullView() {
 
   const fileName = useMemo(() => {
     if (!fullViewPath) return "";
-    return fullViewPath.split("/").pop() || fullViewPath;
+    return displayFileName(fullViewPath) || fullViewPath;
   }, [fullViewPath]);
 
   const viewScope = `${activeWorkspaceId ?? activeSessionId ?? ""}:${fullViewPath ?? ""}`;

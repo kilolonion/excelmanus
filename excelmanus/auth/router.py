@@ -1,4 +1,4 @@
-"""进程级 Codex 订阅 OAuth。不含身份登录 / 租户隔离。"""
+"""进程级订阅 OAuth（Codex、WorkBuddy 等）。不含身份登录 / 租户隔离。"""
 
 from __future__ import annotations
 
@@ -27,16 +27,17 @@ def _get_credential_store(request: Request):
     return store
 
 
-_CODEX_DEFAULT_MODEL = "openai-codex/gpt-6-astra"
-_CODEX_DEFAULT_PROFILE_NAME = "openai-codex/gpt-6-astra"
-_CODEX_DEFAULT_BASE_URL = "https://api.openai.com/v1"
-# 旧版自动创建的名称/模型，用于兼容去重（防止与旧数据重复）
-_CODEX_LEGACY_NAMES = {"Codex 5.3", "codex-5.3", "codex-oauth", "Codex Spark", "codex-spark", "Codex 5.2", "codex-5.2"}
-_CODEX_LEGACY_MODELS = {"gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2-codex", "openai-codex/gpt-5.2-codex"}
+def _get_subscription_provider(provider: str):
+    """按名称取注册的订阅 provider；未注册返回 404。"""
+    from excelmanus.auth.providers.registry import get_provider
+    prov = get_provider(provider)
+    if prov is None:
+        raise HTTPException(404, f"未知订阅提供商: {provider}")
+    return prov
 
 
-def _auto_add_codex_default_model(request: Request) -> bool:
-    """Codex 连接成功后，若模型列表中还没有任何默认 Codex 条目，则自动新增一个。
+async def _auto_add_subscription_models(request: Request, provider_name: str) -> bool:
+    """连接成功后按 provider 钩子自动建档订阅模型。
 
     写入全局 model_profiles，随后由 _sync_subscription_sessions 同步已有会话。
     """
@@ -44,27 +45,28 @@ def _auto_add_codex_default_model(request: Request) -> bool:
     config_store = get_config_store()
     if config_store is None:
         return False
+    provider = _get_subscription_provider(provider_name)
     try:
+        store = _get_credential_store(request)
+        record = store.get_active_profile(provider_name)
+        if record is None:
+            return False
         existing = config_store.list_profiles()
-        # 检查是否已有同名 profile 或同 model 的 codex 条目（兼容新旧命名）
-        _all_names = {_CODEX_DEFAULT_PROFILE_NAME} | _CODEX_LEGACY_NAMES
-        _all_models = {_CODEX_DEFAULT_MODEL} | _CODEX_LEGACY_MODELS
-        for p in existing:
-            if p.get("name", "") in _all_names:
-                return False
-            if p.get("model", "") in _all_models:
-                return False
-        created = config_store.add_profile(
-            name=_CODEX_DEFAULT_PROFILE_NAME,
-            model=_CODEX_DEFAULT_MODEL,
-            api_key="",
-            base_url=_CODEX_DEFAULT_BASE_URL,
-            description="GPT-6 Astra - OAuth 登录（无需 API Key）",
-            protocol="openai_responses",
-            thinking_mode="openai_reasoning",
-            model_family="gpt",
-        )
-        if not created:
+        entries = await provider.subscription_profiles_on_connect(record, existing)
+        created_any = False
+        first_created_name = ""
+        for entry in entries:
+            name = entry.get("name", "")
+            model = entry.get("model", "")
+            if not name or not model:
+                continue
+            if any(p.get("name") == name or p.get("model") == model for p in existing):
+                continue
+            if config_store.add_profile(**entry):
+                created_any = True
+                first_created_name = first_created_name or name
+                existing.append({"name": name, "model": model})
+        if not created_any:
             return False
         # 同步到内存 config
         from excelmanus.api_app_state import _sync_config_profiles_from_db, _user_config_store
@@ -72,15 +74,15 @@ def _auto_add_codex_default_model(request: Request) -> bool:
             _sync_config_profiles_from_db()
             user_cfg = _user_config_store()
             if user_cfg is not None and not user_cfg.get_active_model():
-                user_cfg.set_active_model(_CODEX_DEFAULT_PROFILE_NAME)
+                user_cfg.set_active_model(first_created_name)
                 from excelmanus.api_app_state import apply_profile_to_config
-                apply_profile_to_config(_CODEX_DEFAULT_PROFILE_NAME)
+                apply_profile_to_config(first_created_name)
         except Exception:
             pass
-        logger.info("已自动添加 Codex 默认模型: %s (%s)", _CODEX_DEFAULT_PROFILE_NAME, _CODEX_DEFAULT_MODEL)
+        logger.info("已自动添加 %s 订阅模型: %s", provider_name, first_created_name)
         return True
     except Exception:
-        logger.debug("自动添加 Codex 默认模型失败", exc_info=True)
+        logger.debug("自动添加订阅模型失败", exc_info=True)
         return False
 
 
@@ -138,28 +140,6 @@ def _mask_token(token: str | None) -> str:
     if not token or len(token) <= 12:
         return "****" if token else ""
     return f"{token[:4]}{'*' * (len(token) - 8)}{token[-4:]}"
-
-
-def _codex_profile_email(profile: Any) -> str:
-    """从已存凭证中取出可展示邮箱，不回传完整 claims。"""
-    raw = getattr(profile, "extra_data", None)
-    data: Any = None
-    if isinstance(raw, str) and raw:
-        try:
-            data = _json.loads(raw)
-        except Exception:
-            data = None
-    elif isinstance(raw, dict):
-        data = raw
-    if isinstance(data, dict):
-        email = data.get("email")
-        if isinstance(email, str) and email.strip():
-            return email.strip()
-    access = getattr(profile, "access_token", None)
-    if access:
-        from excelmanus.auth.providers.openai_codex import _extract_email, _parse_jwt_claims
-        return _extract_email(_parse_jwt_claims(access))
-    return ""
 
 
 @router.get("/providers")
@@ -317,7 +297,7 @@ async def codex_device_code_poll(
         profile_name="default",
         credential=credential,
     )
-    _auto_add_codex_default_model(request)
+    await _auto_add_subscription_models(request, "openai-codex")
     await _sync_subscription_sessions(request)
 
     logger.info(
@@ -359,7 +339,7 @@ async def connect_openai_codex(
         profile_name="default",
         credential=credential,
     )
-    _auto_add_codex_default_model(request)
+    await _auto_add_subscription_models(request, "openai-codex")
     await _sync_subscription_sessions(request)
 
     logger.info(
@@ -411,7 +391,9 @@ async def openai_codex_status(
         except (ValueError, TypeError):
             pass
 
-    email = _codex_profile_email(profile)
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    display = OpenAICodexProvider().profile_display_info(profile)
+    email = str(display.get("email") or "")
     return {
         "status": "expired" if is_expired else "connected",
         "provider": "openai-codex",
@@ -472,15 +454,18 @@ async def refresh_openai_codex(
 
 _CODEX_OAUTH_TTL = 900  # state token 有效期 15 分钟
 _CODEX_OAUTH_FALLBACK_PORT = 1455  # 与 Codex CLI 默认回调端口保持一致
-_codex_callback_server: asyncio.AbstractServer | None = None
-_codex_callback_timeout_task: asyncio.Task[None] | None = None
-_codex_callback_state = ""
+
+# 通用 loopback 回调 listener 注册表：key 为 provider 名。
+# 每个槽位 {server, state, task, port, path, message_type}。
+_loopback_listeners: dict[str, dict[str, Any]] = {}
 
 
-def _codex_callback_page(*, code: str, state: str, error: str) -> str:
+def _loopback_callback_page(
+    *, message_type: str, code: str, state: str, error: str,
+) -> str:
     """生成一次性 loopback 回调页，把结果传回发起登录的前端窗口。"""
     payload = {
-        "type": "codex-oauth-callback",
+        "type": message_type,
         **({"error": error} if error else {"code": code, "state": state}),
     }
     payload_json = _json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
@@ -496,31 +481,37 @@ def _codex_callback_page(*, code: str, state: str, error: str) -> str:
 </body></html>"""
 
 
-async def _close_codex_callback_listener() -> None:
-    global _codex_callback_server, _codex_callback_timeout_task, _codex_callback_state
-    server = _codex_callback_server
-    _codex_callback_server = None
-    _codex_callback_state = ""
+async def _close_loopback_listener(key: str) -> None:
+    slot = _loopback_listeners.pop(key, None)
+    if not slot:
+        return
+    server = slot.get("server")
     if server is not None:
         server.close()
         await server.wait_closed()
-    timeout_task = _codex_callback_timeout_task
-    _codex_callback_timeout_task = None
+    timeout_task = slot.get("task")
     current = asyncio.current_task()
     if timeout_task is not None and timeout_task is not current:
         timeout_task.cancel()
 
 
-async def _expire_codex_callback_listener(expected_state: str) -> None:
-    await asyncio.sleep(_CODEX_OAUTH_TTL)
-    if _codex_callback_state == expected_state:
-        await _close_codex_callback_listener()
+async def _expire_loopback_listener(key: str, expected_state: str, ttl: int) -> None:
+    await asyncio.sleep(ttl)
+    slot = _loopback_listeners.get(key)
+    if slot is not None and slot.get("state") == expected_state:
+        await _close_loopback_listener(key)
 
 
-async def _handle_codex_loopback_callback(
+async def _handle_loopback_callback(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
+    *,
+    listener_key: str,
     expected_state: str,
+    callback_path: str,
+    allowed_hosts: tuple[str, ...],
+    message_type: str,
+    missing_code_error: str,
 ) -> None:
     from urllib.parse import parse_qs, urlsplit
 
@@ -545,9 +536,9 @@ async def _handle_codex_loopback_callback(
         parsed = urlsplit(target)
         params = parse_qs(parsed.query)
         state = (params.get("state") or [""])[0]
-        if host_header not in ("localhost:1455", "127.0.0.1:1455"):
+        if host_header not in allowed_hosts:
             status, error = 400, "OAuth 回调 Host 无效"
-        elif method != "GET" or parsed.path != "/auth/callback":
+        elif method != "GET" or parsed.path != callback_path:
             status, error = 404, "未找到 OAuth 回调地址"
         elif state != expected_state:
             status, error = 400, "OAuth state 不匹配，请重新发起登录"
@@ -558,13 +549,15 @@ async def _handle_codex_loopback_callback(
             if oauth_error:
                 status, error = 400, oauth_error
             elif not code:
-                status, error = 400, "OpenAI 回调缺少授权码"
+                status, error = 400, missing_code_error
             else:
                 status, error = 200, ""
     except Exception:
-        logger.debug("Codex loopback 回调解析失败", exc_info=True)
+        logger.debug("loopback 回调解析失败 (%s)", listener_key, exc_info=True)
 
-    body = _codex_callback_page(code=code, state=state, error=error).encode("utf-8")
+    body = _loopback_callback_page(
+        message_type=message_type, code=code, state=state, error=error,
+    ).encode("utf-8")
     reason = "OK" if status == 200 else "Bad Request" if status == 400 else "Not Found"
     headers = (
         f"HTTP/1.1 {status} {reason}\r\n"
@@ -585,24 +578,73 @@ async def _handle_codex_loopback_callback(
         except (ConnectionError, OSError):
             pass
     if matched_attempt:
-        await _close_codex_callback_listener()
+        await _close_loopback_listener(listener_key)
+
+
+async def _start_loopback_listener(
+    key: str,
+    *,
+    state: str,
+    port: int,
+    callback_path: str,
+    message_type: str,
+    missing_code_error: str,
+    ttl: int,
+    allow_ephemeral: bool = False,
+) -> int:
+    """在回环地址启动与 state 绑定的一次性 listener，返回实际监听端口。"""
+    await _close_loopback_listener(key)
+
+    async def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        slot = _loopback_listeners.get(key) or {}
+        actual_port = int(slot.get("port") or port)
+        await _handle_loopback_callback(
+            reader,
+            writer,
+            listener_key=key,
+            expected_state=state,
+            callback_path=callback_path,
+            allowed_hosts=(
+                f"localhost:{actual_port}",
+                f"127.0.0.1:{actual_port}",
+            ),
+            message_type=message_type,
+            missing_code_error=missing_code_error,
+        )
+
+    try:
+        server = await asyncio.start_server(
+            _on_conn, host="127.0.0.1", port=port,
+        )
+    except OSError:
+        if not allow_ephemeral:
+            raise
+        server = await asyncio.start_server(
+            _on_conn, host="127.0.0.1", port=0,
+        )
+    sockets = server.sockets or []
+    actual_port = sockets[0].getsockname()[1] if sockets else port
+    _loopback_listeners[key] = {
+        "server": server,
+        "state": state,
+        "port": actual_port,
+        "task": asyncio.create_task(
+            _expire_loopback_listener(key, state, ttl)
+        ),
+    }
+    return actual_port
 
 
 async def _start_codex_callback_listener(state: str) -> None:
     """在官方固定回调端口启动一个与 state 绑定的一次性 listener。"""
-    global _codex_callback_server, _codex_callback_timeout_task, _codex_callback_state
-    await _close_codex_callback_listener()
-    server = await asyncio.start_server(
-        lambda reader, writer: _handle_codex_loopback_callback(
-            reader, writer, state,
-        ),
-        host="127.0.0.1",
+    await _start_loopback_listener(
+        "openai-codex",
+        state=state,
         port=_CODEX_OAUTH_FALLBACK_PORT,
-    )
-    _codex_callback_server = server
-    _codex_callback_state = state
-    _codex_callback_timeout_task = asyncio.create_task(
-        _expire_codex_callback_listener(state)
+        callback_path="/auth/callback",
+        message_type="codex-oauth-callback",
+        missing_code_error="OpenAI 回调缺少授权码",
+        ttl=_CODEX_OAUTH_TTL,
     )
 
 def _generate_oauth_state() -> str:
@@ -745,7 +787,7 @@ async def codex_oauth_exchange(
         profile_name="default",
         credential=credential,
     )
-    _auto_add_codex_default_model(request)
+    await _auto_add_subscription_models(request, "openai-codex")
     await _sync_subscription_sessions(request)
 
     logger.info(
@@ -756,6 +798,365 @@ async def codex_oauth_exchange(
     return {
         "status": "connected",
         "provider": "openai-codex",
+        "account_id": credential.account_id,
+        "plan_type": credential.plan_type,
+        "expires_at": credential.expires_at,
+    }
+
+
+# ── 通用订阅 Provider 路由 ────────────────────────────────────
+# 声明在 Codex 专属路由之后：openai-codex 仍命中上方专属端点，
+# 本组路由承接其余已注册 provider（如 workbuddy）的
+# 浏览器轮询登录、粘贴导入、断开、状态、刷新与动态模型目录。
+
+
+@router.post("/providers/{provider}/browser-login/start")
+async def provider_browser_login_start(
+    provider: str,
+    request: Request,
+) -> Any:
+    """发起「浏览器授权 + 轮询」登录，返回 auth_url 与加密 state。"""
+    from excelmanus.auth.providers.base import BrowserPollCapable
+
+    prov = _get_subscription_provider(provider)
+    if not isinstance(prov, BrowserPollCapable):
+        raise HTTPException(400, f"{provider} 不支持浏览器登录流程")
+
+    try:
+        info = await prov.start_browser_login()
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+    # 上游 login state 加密后下发，轮询时回传，防止客户端伪造 state。
+    sealed = _seal_oauth_state({
+        "login_state": info["state"],
+        "ts": _time.time(),
+    })
+    payload: dict[str, Any] = {
+        "auth_url": info["auth_url"],
+        "state": sealed,
+    }
+    if info.get("expires_in"):
+        payload["expires_in"] = info["expires_in"]
+    return payload
+
+
+@router.post("/providers/{provider}/browser-login/poll")
+async def provider_browser_login_poll(
+    provider: str,
+    request: Request,
+) -> Any:
+    """轮询浏览器登录状态。
+
+    Body: {"state": "..."}（start 端点返回的加密 state）
+    返回 {"status": "pending"} 或 {"status": "connected", ...}。
+    """
+    from excelmanus.auth.providers.base import BrowserPollCapable
+
+    prov = _get_subscription_provider(provider)
+    if not isinstance(prov, BrowserPollCapable):
+        raise HTTPException(400, f"{provider} 不支持浏览器登录流程")
+
+    body = await request.json()
+    state = body.get("state", "")
+    if not state:
+        raise HTTPException(400, "缺少 state 参数")
+
+    pending = _unseal_oauth_state(state)
+    if not pending or "login_state" not in pending:
+        raise HTTPException(400, "state 无效或已过期，请重新发起登录")
+
+    try:
+        credential = await prov.poll_browser_login(pending["login_state"])
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+    if credential is None:
+        return {"status": "pending"}
+
+    store = _get_credential_store(request)
+    store.upsert_profile(
+        user_id=PROCESS_USER_ID,
+        provider=provider,
+        profile_name="default",
+        credential=credential,
+    )
+    await _auto_add_subscription_models(request, provider)
+    await _sync_subscription_sessions(request)
+
+    logger.info(
+        "通过浏览器登录连接 %s (account=%s)",
+        provider, credential.account_id,
+    )
+    return {
+        "status": "connected",
+        "provider": provider,
+        "account_id": credential.account_id,
+        "plan_type": credential.plan_type,
+        "expires_at": credential.expires_at,
+    }
+
+
+@router.post("/providers/{provider}")
+async def connect_subscription_provider(
+    provider: str,
+    request: Request,
+) -> Any:
+    """粘贴 token 接入订阅提供商。"""
+    prov = _get_subscription_provider(provider)
+
+    body = await request.json()
+    token_data = body.get("token_data")
+    if not token_data or not isinstance(token_data, dict):
+        raise HTTPException(400, "请提供 token_data 字段（JSON 对象）")
+
+    try:
+        credential = prov.validate_token_data(token_data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    store = _get_credential_store(request)
+    summary = store.upsert_profile(
+        user_id=PROCESS_USER_ID,
+        provider=provider,
+        profile_name="default",
+        credential=credential,
+    )
+    await _auto_add_subscription_models(request, provider)
+    await _sync_subscription_sessions(request)
+
+    logger.info(
+        "已连接 %s (account=%s, plan=%s)",
+        provider, credential.account_id, credential.plan_type,
+    )
+    return {
+        "status": "connected",
+        "provider": provider,
+        "account_id": credential.account_id,
+        "plan_type": credential.plan_type,
+        "expires_at": credential.expires_at,
+        "created_at": summary.created_at,
+    }
+
+
+@router.delete("/providers/{provider}")
+async def disconnect_subscription_provider(
+    provider: str,
+    request: Request,
+) -> Any:
+    """断开订阅提供商连接。"""
+    _get_subscription_provider(provider)
+    store = _get_credential_store(request)
+    deleted = store.delete_profile(PROCESS_USER_ID, provider, "default")
+    if not deleted:
+        raise HTTPException(404, f"未找到 {provider} 连接")
+    await _sync_subscription_sessions(request)
+    logger.info("已断开 %s", provider)
+    return {"status": "disconnected", "provider": provider}
+
+
+@router.get("/providers/{provider}/status")
+async def subscription_provider_status(
+    provider: str,
+    request: Request,
+) -> Any:
+    """查询订阅提供商连接状态。"""
+    prov = _get_subscription_provider(provider)
+    store = _get_credential_store(request)
+    profile = store.get_active_profile(provider)
+    if not profile:
+        return {"status": "disconnected", "provider": provider}
+
+    from datetime import datetime as _dt, timezone as _tz
+    is_expired = False
+    if profile.expires_at:
+        try:
+            exp = _dt.fromisoformat(profile.expires_at)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=_tz.utc)
+            is_expired = exp < _dt.now(tz=_tz.utc)
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "status": "expired" if is_expired else "connected",
+        "provider": provider,
+        "account_id": profile.account_id,
+        "plan_type": profile.plan_type,
+        "expires_at": profile.expires_at,
+        "is_active": profile.is_active,
+        "access_token_preview": _mask_token(profile.access_token),
+        "has_refresh_token": bool(profile.refresh_token),
+        **prov.profile_display_info(profile),
+    }
+
+
+@router.post("/providers/{provider}/refresh")
+async def refresh_subscription_provider(
+    provider: str,
+    request: Request,
+) -> Any:
+    """手动刷新订阅提供商 token。"""
+    prov = _get_subscription_provider(provider)
+    store = _get_credential_store(request)
+    profile = store.get_active_profile(provider)
+    if not profile:
+        raise HTTPException(404, f"未找到 {provider} 连接")
+    if not profile.refresh_token:
+        raise HTTPException(400, "无 refresh token，请重新登录")
+
+    try:
+        refreshed = await prov.refresh_profile(profile)
+    except RuntimeError as e:
+        store.deactivate_profile(profile.id)
+        raise HTTPException(502, str(e))
+
+    store.update_tokens(
+        profile.id,
+        refreshed.access_token,
+        refreshed.refresh_token,
+        refreshed.expires_at,
+    )
+    await _sync_subscription_sessions(request)
+    logger.info("%s token 已刷新", provider)
+    return {
+        "status": "refreshed",
+        "provider": provider,
+        "expires_at": refreshed.expires_at,
+    }
+
+
+@router.get("/providers/{provider}/models")
+async def subscription_provider_models(
+    provider: str,
+    request: Request,
+) -> Any:
+    """返回订阅提供商可用于建档的模型目录。"""
+    prov = _get_subscription_provider(provider)
+    store = _get_credential_store(request)
+    record = store.get_active_profile(provider)
+    try:
+        entries = await prov.list_model_entries(record)
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    return {"provider": provider, "models": entries}
+
+
+# ── 通用回环 OAuth（LoopbackOAuthCapable）─────────────────────
+# 标准授权码 + localhost 回调（如 Google Antigravity）。
+# 声明在 Codex 专属 /oauth/* 之后：openai-codex 仍命中上方 PKCE 实现。
+
+
+@router.post("/providers/{provider}/oauth/start")
+async def provider_oauth_start(
+    provider: str,
+    request: Request,
+) -> Any:
+    """发起回环 OAuth 登录：启动本机回调监听并返回授权 URL。"""
+    from excelmanus.auth.providers.base import LoopbackOAuthCapable
+
+    prov = _get_subscription_provider(provider)
+    if not isinstance(prov, LoopbackOAuthCapable):
+        raise HTTPException(400, f"{provider} 不支持回环 OAuth 登录")
+
+    state = _generate_oauth_state()
+    ttl = int(getattr(prov, "oauth_ttl_seconds", _CODEX_OAUTH_TTL) or 900)
+    message_type = f"{provider}-oauth-callback"
+
+    cred_store = _get_credential_store(request)
+    try:
+        port = await _start_loopback_listener(
+            provider,
+            state=state,
+            port=int(getattr(prov, "callback_port", 0) or 0),
+            callback_path=prov.callback_path,
+            message_type=message_type,
+            missing_code_error=f"{provider} 回调缺少授权码",
+            ttl=ttl,
+            allow_ephemeral=True,
+        )
+    except OSError as exc:
+        raise HTTPException(
+            503, f"无法在本机启动 OAuth 回调监听: {exc}",
+        ) from exc
+
+    redirect_uri = f"http://localhost:{port}{prov.callback_path}"
+    cred_store.save_oauth_state(state, {
+        "redirect_uri": redirect_uri,
+        "provider": provider,
+    }, ttl=ttl)
+
+    try:
+        authorize_url = prov.build_authorize_url(state, redirect_uri)
+    except RuntimeError as e:
+        await _close_loopback_listener(provider)
+        cred_store.pop_oauth_state(state, ttl=ttl)
+        raise HTTPException(502, str(e))
+
+    return {
+        "authorize_url": authorize_url,
+        "state": state,
+        "redirect_uri": redirect_uri,
+        "mode": "popup",
+        "message_type": message_type,
+    }
+
+
+@router.post("/providers/{provider}/oauth/exchange")
+async def provider_oauth_exchange(
+    provider: str,
+    request: Request,
+) -> Any:
+    """用授权码交换 token 并落库。
+
+    Body: {"code": "...", "state": "..."}（code 由回调页 postMessage
+    带回，或用户粘贴的 localhost 回调 URL 中解析得到）。
+    """
+    from excelmanus.auth.providers.base import LoopbackOAuthCapable
+
+    prov = _get_subscription_provider(provider)
+    if not isinstance(prov, LoopbackOAuthCapable):
+        raise HTTPException(400, f"{provider} 不支持回环 OAuth 登录")
+
+    body = await request.json()
+    code = (body.get("code") or "").strip()
+    state = (body.get("state") or "").strip()
+    if not code:
+        raise HTTPException(400, "缺少 code 参数")
+    if not state:
+        raise HTTPException(400, "缺少 state 参数")
+
+    cred_store = _get_credential_store(request)
+    ttl = int(getattr(prov, "oauth_ttl_seconds", _CODEX_OAUTH_TTL) or 900)
+    pending = cred_store.pop_oauth_state(state, ttl=ttl)
+    if not pending or pending.get("provider") != provider:
+        raise HTTPException(400, "state 无效或已过期，请重新发起授权")
+    redirect_uri = str(pending.get("redirect_uri") or "")
+    if not redirect_uri:
+        raise HTTPException(400, "state 数据不完整")
+
+    try:
+        credential = await prov.exchange_code(code=code, redirect_uri=redirect_uri)
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+    store = _get_credential_store(request)
+    store.upsert_profile(
+        user_id=PROCESS_USER_ID,
+        provider=provider,
+        profile_name="default",
+        credential=credential,
+    )
+    await _auto_add_subscription_models(request, provider)
+    await _sync_subscription_sessions(request)
+
+    logger.info(
+        "通过 OAuth 回环流程连接 %s (account=%s)",
+        provider, credential.account_id,
+    )
+    return {
+        "status": "connected",
+        "provider": provider,
         "account_id": credential.account_id,
         "plan_type": credential.plan_type,
         "expires_at": credential.expires_at,

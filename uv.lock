@@ -703,6 +703,30 @@ web = [
 ]
 
 [package.dev-dependencies]
+desktop-runtime = [
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "oletools" },
+    { name = "openpyxl" },
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pillow" },
+    { name = "plotly" },
+    { name = "python-docx" },
+    { name = "pyxlsb" },
+    { name = "pyyaml" },
+    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "seaborn" },
+    { name = "xlrd" },
+    { name = "xlsxwriter" },
+]
 dev = [
     { name = "httpx" },
     { name = "hypothesis" },
@@ -754,6 +778,23 @@ requires-dist = [
 provides-extras = ["web", "dev", "vba", "analysis", "all", "system-one"]
 
 [package.metadata.requires-dev]
+desktop-runtime = [
+    { name = "matplotlib", specifier = ">=3.7.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "oletools", specifier = ">=0.60.0" },
+    { name = "openpyxl", specifier = ">=3.1.0" },
+    { name = "pandas", specifier = ">=2.0.0" },
+    { name = "pillow", specifier = ">=10.0.0" },
+    { name = "plotly", specifier = ">=5.18.0" },
+    { name = "python-docx", specifier = ">=1.1.0" },
+    { name = "pyxlsb", specifier = ">=1.0.10" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "scikit-learn", specifier = ">=1.3.0" },
+    { name = "scipy", specifier = ">=1.11.0" },
+    { name = "seaborn", specifier = ">=0.13.0" },
+    { name = "xlrd", specifier = ">=2.0.0" },
+    { name = "xlsxwriter", specifier = ">=3.1.0" },
+]
 dev = [
     { name = "httpx", specifier = ">=0.24.0" },
     { name = "hypothesis", specifier = ">=6.0.0" },

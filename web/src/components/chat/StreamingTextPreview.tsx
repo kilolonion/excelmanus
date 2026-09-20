@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { Settings, Loader2 } from "lucide-react";
 import { ScrollablePreview } from "./ScrollablePreview";
+import { displayFileName, displayFilePath } from "@/lib/file-identity";
 
 interface StreamingTextPreviewProps {
   toolName: string;
@@ -93,7 +94,7 @@ function StreamingDiffBody({
   const newLines = newString ? newString.split("\n") : [];
   const deletions = oldLines.length;
   const additions = newLines.length;
-  const filename = filePath ? filePath.split("/").pop() || filePath : null;
+  const filename = filePath ? displayFileName(filePath) || filePath : null;
   const isNewStringStreaming = newString !== null;
   const isWaiting = !oldString && !newString;
 
@@ -112,7 +113,7 @@ function StreamingDiffBody({
       <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/40 select-none">
         <Settings className="h-3.5 w-3.5 text-muted-foreground/50 flex-shrink-0" />
         {filename && (
-          <span className="font-medium text-foreground/80 truncate text-[12px]" title={filePath ?? ""}>
+          <span className="font-medium text-foreground/80 truncate text-[12px]" title={filePath ? displayFilePath(filePath) : ""}>
             {filename}
           </span>
         )}
@@ -191,7 +192,7 @@ function StreamingWriteBody({
   content: string;
 }) {
   const lines = content.split("\n");
-  const filename = filePath ? filePath.split("/").pop() || filePath : null;
+  const filename = filePath ? displayFileName(filePath) || filePath : null;
 
   return (
     <div className="mt-2 rounded-lg border border-border/60 overflow-hidden text-xs">
@@ -199,7 +200,7 @@ function StreamingWriteBody({
       <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/40 select-none">
         <Settings className="h-3.5 w-3.5 text-muted-foreground/50 flex-shrink-0" />
         {filename && (
-          <span className="font-medium text-foreground/80 truncate text-[12px]" title={filePath ?? ""}>
+          <span className="font-medium text-foreground/80 truncate text-[12px]" title={filePath ? displayFilePath(filePath) : ""}>
             {filename}
           </span>
         )}

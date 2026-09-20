@@ -114,6 +114,8 @@ def _make_session_manager(engine: MagicMock, session_id: str = "e2e-session") ->
     sm.release_for_chat = AsyncMock()
     sm.flush_messages_sync = MagicMock()
     sm.get_engine = MagicMock(return_value=engine)
+    sm.workspace_path_for_session = MagicMock(return_value="")
+    sm.workspace_id_for_session = MagicMock(return_value=None)
     return sm
 
 

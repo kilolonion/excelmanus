@@ -204,3 +204,9 @@ backups/
 # 安装标记与打包产物
 .install_complete
 *.tar.gz
+
+# Independent project homepage: maintained and published separately.
+/homepage/
+
+# pnpm 本地缓存（含打包产物副本）
+.pnpm-store/

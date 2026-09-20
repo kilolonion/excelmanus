@@ -264,4 +264,4 @@ class TestConnectionCodexOAuth:
             import json
             body = json.loads(response.body)
             assert body["ok"] is True
-            assert "Codex OAuth" in (body.get("note") or "")
+            assert "订阅" in (body.get("note") or "")

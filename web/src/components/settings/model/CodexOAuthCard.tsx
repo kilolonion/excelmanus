@@ -45,6 +45,8 @@ export function CodexOAuthCard({
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [androidClient, setAndroidClient] = useState(false);
+  useEffect(() => { setAndroidClient(window.excelManusAndroid?.version === 1); }, []);
 
   // OAuth PKCE
   const [oauthBusy, setOauthBusy] = useState(false);
@@ -447,11 +449,18 @@ export function CodexOAuthCard({
               size="sm"
               className="w-full h-8 text-xs text-white font-medium gap-1.5"
               style={{ backgroundColor: "var(--em-primary)" }}
-              onClick={handleOAuthLogin}
+              onClick={() => {
+                if (androidClient) {
+                  setShowFallback(true);
+                  void handleDeviceCode();
+                } else {
+                  void handleOAuthLogin();
+                }
+              }}
               disabled={authorizing}
             >
               <ExternalLink className="h-3 w-3" />
-              使用 ChatGPT 账号登录
+              {androidClient ? "使用设备码连接 ChatGPT" : "使用 ChatGPT 账号登录"}
             </Button>
           ) : (
             <div className="space-y-2 rounded-md border border-border bg-muted/30 p-2.5">

@@ -15,6 +15,7 @@ from excelmanus.system_one.types import ChoiceAnswer, Decision, NoulAnswer, Scor
 logger = get_logger("system_one.trace")
 
 _PACK_ACTIONS: dict[str, tuple[str, ...]] = {
+    "context.resolve": ("next",),
     "exposure.turn": ("profile",),
     "skill.pin": ("pin",),
     "observation.shape": ("shape",),
@@ -26,6 +27,7 @@ _PACK_ACTIONS: dict[str, tuple[str, ...]] = {
 }
 
 _ANSWER_KEYS = (
+    "workspace", "target", "edit_intent",
     "domain",
     "needs_write",
     "mode_hint",
@@ -107,6 +109,24 @@ def curated_answers(pack_id: str, decision: Decision) -> dict[str, str | float |
     """只抽对执行面有意义的题面答案。禁止完整 state / 密钥 / 结果正文。"""
     out: dict[str, str | float | bool] = {}
     extras = dict(decision.extras or {})
+    if pack_id == "context.resolve" and decision.reason == "context_advice":
+        for key in ("workspace", "target", "edit_intent", "column", "read", "next"):
+            out[key] = str(extras.get(key) or "")
+        confidence = extras.get("confidence") or {}
+        if isinstance(confidence, Mapping) and confidence:
+            out["confidence"] = min(float(v) for v in confidence.values())
+        candidate = extras.get("target_candidate")
+        if isinstance(candidate, Mapping):
+            out["target_source"] = str(candidate.get("source") or "")
+        column = extras.get("column_candidate")
+        if isinstance(column, Mapping):
+            letter = str(column.get("column") or "")
+            header = str(column.get("header") or "")[:60]
+            out["column_header"] = f"{letter}:{header}".strip(":")
+        routed = str(extras.get("routed_workspace") or "")
+        if routed:
+            out["routed_workspace"] = routed[:80]
+        return out
     evaluation = decision.evaluation
     if evaluation is not None:
         for qid, answer in (evaluation.answers or {}).items():
@@ -163,6 +183,11 @@ def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
     if not decision.applied or gate != "enforce":
         return "仅观察，未改 wire/审批/UI"
     extras = decision.extras or {}
+    if pack_id == "context.resolve":
+        routed = str(extras.get("routed_workspace") or "")
+        if routed:
+            return f"已将会话绑定到工作区「{routed[:40]}」，可在会话列表中纠正归属"
+        return "已向主模型提供工作区、表格位置和澄清建议；未切换工作区或修改文件"
     if pack_id == "exposure.turn":
         profile = extras.get("profile") or "full"
         if extras.get("wire_narrow"):

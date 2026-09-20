@@ -130,6 +130,36 @@ class Driver:
         self._persist_runtime_state()
         return item
 
+    def inject_workbook_change(self, event: dict[str, Any]) -> None:
+        """Coalesce edit bursts without waking an idle agent or losing its task."""
+        from excelmanus.workbook.user_edits import MAX_EVENTS, PROMPT_KIND, render_changes
+
+        item = next((item for item in self.inbox.next_step
+                     if item.extra.get("prompt_kind") == PROMPT_KIND), None)
+        events = list(item.extra.get("workbook_events", [])) if item else []
+        if any(e["event_id"] == event["event_id"] for e in events):
+            return
+        events.append({"event_id": event["event_id"], "path": event["path"],
+                       "content_version": event.get("after_version"),
+                       "changes": event["context"]["summary"]})
+        # Limit both event count and characters so continuous typing cannot flood context.
+        events = events[-MAX_EVENTS:]
+        while len(events) > 1 and sum(len(str(e)) for e in events) > 10000:
+            events.pop(0)
+        count = (item.extra.get("workbook_event_count", 0) if item else 0) + 1
+        paths = list(item.extra.get("workbook_paths", [])) if item else []
+        paths = [path for path in paths if path != event["path"]] + [event["path"]]
+        paths = paths[-32:]
+        extra = {"prompt_kind": PROMPT_KIND, "workbook_events": events,
+                 "workbook_event_count": count, "workbook_paths": paths}
+        content = render_changes(events, count, paths)
+        if item is None:
+            self.inject(content, extra=extra)
+        else:
+            item.content = content
+            item.extra.update(extra)
+            self._persist_runtime_state()
+
     def runtime_state(self) -> dict[str, Any]:
         from excelmanus.trace import trace_of
 

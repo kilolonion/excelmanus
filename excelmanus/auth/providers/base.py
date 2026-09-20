@@ -40,6 +40,8 @@ class ResolvedCredential:
     protocol: str = "openai"
     pool_account_id: str | None = None
     pool_profile_name: str | None = None
+    # 订阅上游要求的额外请求头（如 WorkBuddy 的 X-User-Id/X-Enterprise-Id）。
+    extra_headers: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -119,10 +121,65 @@ class DeviceCodeCapable(ABC):
         """用设备授权码交换 token。"""
 
 
+class BrowserPollCapable(ABC):
+    """支持「浏览器授权 + 服务端轮询」登录的 Provider 混入。
+
+    适用于无标准 OAuth 授权码/设备码、而是上游签发 login state +
+    authUrl，由用户浏览器完成登录、客户端轮询取 token 的流程
+    （如 Tencent CodeBuddy / WorkBuddy）。
+    """
+
+    @abstractmethod
+    async def start_browser_login(self) -> dict[str, Any]:
+        """发起登录，返回 {state, auth_url, expires_in?}。
+
+        auth_url 由前端在系统浏览器中打开；state 用于后续轮询。
+        """
+
+    @abstractmethod
+    async def poll_browser_login(
+        self, state: str,
+    ) -> ValidatedCredential | None:
+        """轮询登录状态。返回 None 表示仍在等待用户完成授权。
+
+        Raises:
+            RuntimeError: state 无效/过期或上游错误。
+        """
+
+
+class LoopbackOAuthCapable(ABC):
+    """支持「浏览器授权 + 本机回环回调」登录的 Provider 混入。
+
+    适用于标准 OAuth 授权码流程、redirect_uri 指向 localhost 的场景
+    （如 Google Antigravity：http://localhost:<port>/oauth-callback）。
+    与 PKCECapable 的区别：不要求 PKCE，且回调端口/路径由 provider 决定。
+    """
+
+    #: 回环回调路径（如 "/oauth-callback"）。
+    callback_path: str = "/oauth-callback"
+    #: 首选回环端口；占用时可回退到随机端口（Google loopback 允许任意端口）。
+    callback_port: int = 0
+    #: state/登录会话有效期（秒）。
+    oauth_ttl_seconds: int = 900
+
+    @abstractmethod
+    def build_authorize_url(self, state: str, redirect_uri: str) -> str:
+        """构建浏览器授权 URL。"""
+
+    @abstractmethod
+    async def exchange_code(
+        self, code: str, redirect_uri: str,
+    ) -> ValidatedCredential:
+        """用授权码交换 token 并返回验证后的凭证。"""
+
+
 class AuthProvider(ABC):
     """认证提供商抽象基类。"""
 
     provider_name: str = ""
+    # 用户私有模型档案使用 ``<MODEL_NAME_PREFIX><model_id>`` 命名，
+    # 运行时据此识别「订阅管理档案」并剥离前缀得到上游模型 ID。
+    MODEL_NAME_PREFIX: str = ""
 
     @abstractmethod
     def validate_token_data(self, raw_data: dict[str, Any]) -> ValidatedCredential:
@@ -140,10 +197,68 @@ class AuthProvider(ABC):
             RuntimeError: 刷新失败（网络错误、refresh token 过期等）。
         """
 
+    async def refresh_profile(
+        self, profile: AuthProfileRecord,
+    ) -> RefreshedCredential:
+        """用完整凭证记录刷新 token。
+
+        默认只使用 refresh_token；需要账号上下文（如 enterpriseId）的
+        provider 可重写本方法。
+        """
+        return await self.refresh_token(profile.refresh_token or "")
+
     @abstractmethod
     def get_api_credential(self, access_token: str) -> tuple[str, str]:
         """从 access token 获取 (api_key, base_url) 用于 LLM 调用。"""
 
+    def get_request_headers(
+        self, profile: AuthProfileRecord,
+    ) -> dict[str, str]:
+        """LLM 调用需要附带的 provider 专属请求头。默认无。"""
+        return {}
+
     def matches_model(self, model: str) -> bool:
         """检查模型是否属于本 provider 管辖。默认返回 False。"""
         return False
+
+    # ── 订阅管理档案（MODEL_NAME_PREFIX 前缀命名） ─────────────
+
+    def is_managed_profile_name(self, name: str) -> bool:
+        """判断名称是否为本 provider 的订阅管理档案/模型。"""
+        return bool(self.MODEL_NAME_PREFIX) and name.startswith(
+            self.MODEL_NAME_PREFIX
+        )
+
+    def model_from_profile_name(self, name: str) -> str | None:
+        """从前缀化名称反解真实 model ID。默认剥离前缀，子类可加白名单校验。"""
+        if not self.is_managed_profile_name(name):
+            return None
+        model_id = name[len(self.MODEL_NAME_PREFIX):]
+        return model_id or None
+
+    async def list_model_entries(
+        self, record: AuthProfileRecord | None,
+    ) -> list[dict[str, Any]]:
+        """返回可用于建档的模型目录（{model, display_name, profile_name, ...}）。
+
+        静态目录 provider 重写 ``list_supported_model_entries`` 即可；
+        动态目录 provider 重写本方法做网络发现。
+        """
+        fn = getattr(self, "list_supported_model_entries", None)
+        if callable(fn):
+            return list(fn())
+        return []
+
+    async def subscription_profiles_on_connect(
+        self,
+        record: AuthProfileRecord,
+        existing_profiles: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """连接成功后建议自动创建的模型档案列表（默认空，即不自动建档）。"""
+        return []
+
+    def profile_display_info(
+        self, profile: AuthProfileRecord,
+    ) -> dict[str, Any]:
+        """status 端点返回的 provider 专属展示字段（如 email/nickname）。"""
+        return {}

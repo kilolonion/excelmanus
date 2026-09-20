@@ -87,6 +87,11 @@ def build_chat_runtime(config: ExcelManusConfig) -> ChatRuntime:
             from excelmanus.auth.providers.resolver import CredentialResolver
 
             cred_store = CredentialStore(database.conn)
+            try:
+                from excelmanus.auth.providers.workbuddy import migrate_legacy_workbuddy
+                migrate_legacy_workbuddy(cred_store, config_store)
+            except Exception:
+                logger.debug("旧版 workbuddy 数据迁移失败", exc_info=True)
             manager.set_credential_store(cred_store)
             manager.set_credential_resolver(CredentialResolver(credential_store=cred_store))
         except Exception:

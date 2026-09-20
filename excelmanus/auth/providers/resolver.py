@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from excelmanus.auth.providers.base import AuthProfileRecord, ResolvedCredential
 from excelmanus.auth.providers.credential_store import PROCESS_USER_ID
-from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+from excelmanus.auth.providers import registry as _provider_registry
 
 if TYPE_CHECKING:
     from excelmanus.auth.providers.credential_store import CredentialStore
@@ -17,9 +17,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_PROVIDERS = {
-    "openai-codex": OpenAICodexProvider(),
-}
+# 快照 registry 中已注册的 provider；测试可整体替换本字典做隔离。
+_PROVIDERS = _provider_registry.list_all()
 
 
 def _is_expiring_soon(expires_at: str | None, margin_seconds: int = 300) -> bool:
@@ -102,6 +101,7 @@ class CredentialResolver:
             source="oauth",
             provider=provider_name,
             protocol=_protocol,
+            extra_headers=provider.get_request_headers(profile) or None,
         )
 
     async def _try_oauth_profile(self, provider_name: str) -> ResolvedCredential | None:
@@ -123,6 +123,7 @@ class CredentialResolver:
             return ResolvedCredential(
                 api_key=api_key, base_url=base_url, source="oauth",
                 provider=provider_name, protocol=_protocol,
+                extra_headers=provider.get_request_headers(profile) or None,
             )
 
         lock = self._get_refresh_lock(provider_name)
@@ -135,6 +136,7 @@ class CredentialResolver:
                 return ResolvedCredential(
                     api_key=api_key, base_url=base_url, source="oauth",
                     provider=provider_name, protocol=_protocol,
+                    extra_headers=provider.get_request_headers(profile) or None,
                 )
             refreshed = await self._refresh_profile(profile, provider)
             if not refreshed:
@@ -145,6 +147,7 @@ class CredentialResolver:
         return ResolvedCredential(
             api_key=api_key, base_url=base_url, source="oauth",
             provider=provider_name, protocol=_protocol,
+            extra_headers=provider.get_request_headers(profile) or None,
         )
 
     async def _refresh_profile(
@@ -162,7 +165,7 @@ class CredentialResolver:
             return None
 
         try:
-            refreshed = await provider.refresh_token(profile.refresh_token)
+            refreshed = await provider.refresh_profile(profile)
         except RuntimeError as e:
             logger.warning("Provider %s token 刷新失败: %s", profile.provider, e)
             if self._store:
@@ -230,6 +233,7 @@ class CredentialResolver:
                 protocol=_protocol,
                 pool_account_id=account.id,
                 pool_profile_name=profile_name,
+                extra_headers=provider.get_request_headers(profile) or None,
             )
         except Exception:
             logger.debug("池账号凭证解析失败", exc_info=True)
@@ -237,6 +241,11 @@ class CredentialResolver:
 
     @staticmethod
     def _match_provider(model: str) -> str | None:
+        # 前缀匹配优先（workbuddy/gpt-* 不应被 codex 的模型名正则接管）
+        for name, provider in _PROVIDERS.items():
+            prefix = getattr(provider, "MODEL_NAME_PREFIX", "")
+            if prefix and model.startswith(prefix):
+                return name
         for name, provider in _PROVIDERS.items():
             if provider.matches_model(model):
                 return name

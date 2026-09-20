@@ -1,0 +1,40 @@
+plugins { id 'com.android.application' }
+
+def projectVersion = new File(rootDir, '../pyproject.toml').text.find(/(?m)^version\s*=\s*"([^"]+)"/) { full, version -> version }
+
+android {
+    namespace 'com.excelmanus.android'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.excelmanus.android'
+        minSdk 26
+        targetSdk 35
+        versionCode 3
+        versionName projectVersion ?: '1.8.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+    buildTypes {
+        debug { applicationIdSuffix '.debug'; versionNameSuffix '-preview' }
+        release {
+            minifyEnabled false
+            // Signing is supplied by the publisher; never embed release keys here.
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    testOptions { unitTests.returnDefaultValues = true }
+    lint { abortOnError true; checkReleaseBuilds true }
+}
+
+dependencies {
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
+    implementation 'androidx.activity:activity:1.10.1'
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.core:core:1.15.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}

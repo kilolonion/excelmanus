@@ -101,7 +101,7 @@ class TestBatchQuery:
             {"query_type": "can_i_do", "query": "读取数据"},
         ]
         result = introspect_capability(queries=queries)
-        
+
         # 应包含两个查询的结果
         assert "[1]" in result
         assert "[2]" in result
@@ -214,6 +214,19 @@ class TestToolDetail:
         assert "inspect_spreadsheet" in result
         assert "file_path" in result
         assert "🟢" in result
+
+    def test_mode_union_tool_detail_lists_per_mode_fields(self, registry: ToolRegistry) -> None:
+        """mode-union 工具的 tool_detail 应披露逐 mode 可用字段，避免模型按平铺 schema 误传。"""
+        from excelmanus.tools import intent_tools
+
+        real = {t.name: t for t in intent_tools.get_tools()}
+        registry._tools["analyze_spreadsheet"] = real["analyze_spreadsheet"]
+        registry._tools["trace_spreadsheet_formulas"] = real["trace_spreadsheet_formulas"]
+        detail = introspect_capability("tool_detail", "analyze_spreadsheet")
+        assert "mode=quality 字段:" in detail
+        assert "sample_rows" in detail
+        trace_detail = introspect_capability("tool_detail", "trace_spreadsheet_formulas")
+        assert "mode=map 字段:" in trace_detail
 
     def test_schema_consistency(self, registry: ToolRegistry) -> None:
         """返回的 schema 应与 ToolDef.input_schema 一致。"""

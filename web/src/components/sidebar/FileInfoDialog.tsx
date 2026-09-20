@@ -26,6 +26,7 @@ import {
   type FileRegistryEvent,
 } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
+import { displayFilePath } from "@/lib/file-identity";
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -135,7 +136,7 @@ export function FileInfoDialog({ open, onOpenChange, filePath }: FileInfoDialogP
       <OverlayCardHeader
         icon={<Info className="h-5 w-5" />}
         title="文件信息"
-        description={<span className="font-mono text-xs break-all line-clamp-2 sm:truncate sm:line-clamp-none" title={filePath}>{filePath}</span>}
+        description={<span className="font-mono text-xs break-all line-clamp-2 sm:truncate sm:line-clamp-none" title={displayFilePath(filePath)}>{displayFilePath(filePath)}</span>}
         onClose={() => onOpenChange(false)}
       />
       <OverlayCardBody className="pb-5">

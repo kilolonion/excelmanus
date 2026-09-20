@@ -220,9 +220,13 @@ if %NODE_MAJOR% LSS 20 (
     goto :exit_with_pause
 )
 
-REM Check web/node_modules
-if not exist "%PROJECT_ROOT%\web\node_modules" (
-    echo [--] 首次启动，安装前端依赖...
+REM Check critical files too: node_modules can remain after an interrupted install
+set "FRONTEND_DEPS_READY=1"
+if not exist "%PROJECT_ROOT%\web\node_modules\next\package.json" set "FRONTEND_DEPS_READY=0"
+if not exist "%PROJECT_ROOT%\web\node_modules\next\dist\build\webpack\loaders\next-flight-client-entry-loader.js" set "FRONTEND_DEPS_READY=0"
+if not exist "%PROJECT_ROOT%\web\node_modules\typescript\package.json" set "FRONTEND_DEPS_READY=0"
+if "%FRONTEND_DEPS_READY%"=="0" (
+    echo [--] 前端依赖缺失或不完整，正在修复...
     pushd "%PROJECT_ROOT%\web"
     call npm install
     if errorlevel 1 (

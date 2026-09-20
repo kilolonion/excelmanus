@@ -31,7 +31,34 @@ export function formatThinkingDuration(seconds: number): string {
 }
 
 export function thinkingPreview(content: string, max = 48): string {
-  const oneLine = content.replace(/\s+/g, " ").trim();
+  const oneLine = content
+    .replace(/\*\*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!oneLine) return "";
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+export interface ThinkingSegment {
+  text: string;
+  bold: boolean;
+}
+
+/**
+ * 将 thinking 原始文本解析为「行 → 片段」结构，供思考卡片渲染加粗。
+ *
+ * GPT / OAuth（Codex）等模型的推理摘要由多个 `**标题**` 段落组成，
+ * 流式拼接后可能粘连为 `**A****B**`：这里把相邻加粗段规范为独立行。
+ * 行内以 `**` 作为加粗开关切分片段；流式输出中途出现的未闭合 `**`
+ * 视为加粗到行尾，避免渲染出裸 `**`。
+ */
+export function parseThinkingLines(content: string): ThinkingSegment[][] {
+  const normalized = content.replace(/\*\*\*\*/g, "**\n**");
+  return normalized.split("\n").map((line) => {
+    const segments: ThinkingSegment[] = [];
+    line.split("**").forEach((part, index) => {
+      if (part) segments.push({ text: part, bold: index % 2 === 1 });
+    });
+    return segments;
+  });
 }

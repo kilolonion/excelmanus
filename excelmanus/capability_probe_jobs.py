@@ -88,6 +88,8 @@ class ProbeTargetSpec:
     api_key: str
     protocol: str
     thinking_mode: str = "auto"
+    # 订阅上游要求的额外请求头（如 WorkBuddy X-User-Id 等）
+    extra_headers: dict[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -413,6 +415,7 @@ class CapabilityProbeJobManager:
                         api_key=spec.api_key,
                         base_url=spec.base_url,
                         protocol=spec.protocol,
+                        default_headers=spec.extra_headers,
                     )
 
                     async def _stage_callback(stage: str, state: str, payload: dict[str, Any] | None = None) -> None:

@@ -2,6 +2,7 @@
 
 import { ArrowLeftRight, FileSpreadsheet, ArrowRight, Check, X } from "lucide-react";
 import { useExcelStore } from "@/stores/excel-store";
+import { displayFileName } from "@/lib/file-identity";
 
 interface MergeResultCardProps {
   sourceFiles: string[];
@@ -30,9 +31,9 @@ export function MergeResultCard({
   const addedPct = totalRows > 0 ? (rowsAdded / totalRows) * 100 : 0;
   const unmatchedPct = totalRows > 0 ? (rowsUnmatched / totalRows) * 100 : 0;
 
-  const fileNameA = sourceFiles[0]?.split("/").pop() || "";
-  const fileNameB = sourceFiles[1]?.split("/").pop() || "";
-  const outputName = outputFile.split("/").pop() || outputFile;
+  const fileNameA = displayFileName(sourceFiles[0] ?? "");
+  const fileNameB = displayFileName(sourceFiles[1] ?? "");
+  const outputName = displayFileName(outputFile) || outputFile;
 
   const joinLabel: Record<string, string> = {
     left: "左连接",

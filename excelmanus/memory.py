@@ -150,6 +150,20 @@ def _load_system_prompt() -> str:
 _DEFAULT_SYSTEM_PROMPT = _load_system_prompt()
 
 
+_encoding_cache: Any = None
+
+
+def _get_encoding() -> Any:
+    """首次计数时才加载 BPE 词表，避免阻塞模块导入。"""
+    global _encoding_cache
+    if _encoding_cache is None:
+        try:
+            _encoding_cache = tiktoken.get_encoding("o200k_base")
+        except Exception:
+            _encoding_cache = tiktoken.get_encoding("cl100k_base")
+    return _encoding_cache
+
+
 class TokenCounter:
     """基于 tiktoken 的 token 计数器。
 
@@ -157,17 +171,12 @@ class TokenCounter:
     比字符估算更准确的近似值，用于 memory 截断判断。
     """
 
-    try:
-        _encoding = tiktoken.get_encoding("o200k_base")
-    except Exception:
-        _encoding = tiktoken.get_encoding("cl100k_base")
-
     @staticmethod
     def count(text: str) -> int:
         """计算文本的 token 数量。"""
         if not text:
             return 0
-        return len(TokenCounter._encoding.encode(text))
+        return len(_get_encoding().encode(text))
 
     @staticmethod
     def count_message(

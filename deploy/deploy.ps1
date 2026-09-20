@@ -555,6 +555,7 @@ function Invoke-RemoteFrontend {
 # ═══════════════════════════════════════════════════════════════
 
 $Script:RSYNC_EXCLUDES = @(
+    "/homepage/",
     ".git", "node_modules", "web/node_modules", "web/.next",
     "__pycache__", "*.pyc", ".env", ".env.local",
     "data/", "workspace/", "users/", "*.pem",

@@ -8,6 +8,7 @@ import { cellStyleToCSS, hasWrapText } from "./cell-style-utils";
 import { buildMergeMaps, getMergeInfo, type MergeSpan } from "./merge-utils";
 import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { displayFileName } from "@/lib/file-identity";
 
 // ── 阈值 ────────────────────────────────────────────────
 const INLINE_THRESHOLD = 5;
@@ -615,8 +616,8 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
     : profile === "all-deleted" ? Minus
     : RefreshCw;
 
-  const fileNameA = data.filePath.split("/").pop() || data.filePath;
-  const fileNameB = data.filePathB?.split("/").pop() || data.filePathB || "";
+  const fileNameA = displayFileName(data.filePath) || data.filePath;
+  const fileNameB = displayFileName(data.filePathB ?? "") || data.filePathB || "";
 
   return (
     <div ref={containerRef} className="my-2 rounded-xl border border-[var(--em-hairline)] overflow-hidden text-xs bg-background">

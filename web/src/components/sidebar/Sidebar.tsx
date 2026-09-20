@@ -14,7 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useUIStore } from "@/stores/ui-store";
 import { useSessionStore } from "@/stores/session-store";
-import { sidebarTransition, sidebarContentVariants, useMotionSafe } from "@/lib/sidebar-motion";
+import { sidebarContentVariants, useMotionSafe } from "@/lib/sidebar-motion";
 import { SessionList } from "./SessionList";
 import { StatusFooter } from "./StatusFooter";
 
@@ -55,11 +55,11 @@ function useSwipeToClose(enabled: boolean, onClose: () => void) {
 
 export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
+  const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
   const isMobile = useIsMobile();
   
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const { safeTransition } = useMotionSafe();
+  const { shouldReduce } = useMotionSafe();
   const activeTab = useUIStore((s) => s.sidebarTab);
   const setActiveTab = useUIStore((s) => s.setSidebarTab);
   const [contentMounted, setContentMounted] = useState(sidebarOpen);
@@ -69,23 +69,33 @@ export function Sidebar() {
   useEffect(() => { isFirstRender.current = false; }, []);
 
   // 移动端左滑关闭侧栏
-  const swipe = useSwipeToClose(isMobile && sidebarOpen, toggleSidebar);
+  const closeSidebar = useCallback(() => setSidebarOpen(false), [setSidebarOpen]);
+  const swipe = useSwipeToClose(isMobile && sidebarOpen, closeSidebar);
 
-  // 移动端抽屉保持固定宽度，只动画 transform。动画 width 会在每一帧重排
-  // ScrollArea 里的整份会话历史，低端移动设备上尤其明显。
+  // 侧栏的最终几何状态直接由 sidebarOpen 决定。不要把 width 只交给
+  // Framer Motion 的动画状态，否则关闭动画完成后快速重新打开时，store 已经
+  // 是 true，但 aside 仍可能停留在动画留下的 0px，导致打开按钮消失而侧栏不见。
+  // 移动端保持固定宽度，只动画 transform，避免每一帧重排会话列表。
   const mobileSidebarWidth = "min(88vw, 360px)";
-  const sidebarAnimate = isMobile
-    // Keep width out of the mobile animation entirely; only x changes.
-    ? { x: sidebarOpen ? 0 : "-100%" }
-    : { width: sidebarOpen ? 320 : 0, x: 0 };
-  const sidebarOpenTransition = isFirstRender.current
-    ? { duration: 0 }
-    : (safeTransition ?? (isMobile ? { duration: 0.22, ease: "easeOut" as const } : sidebarTransition));
+  const desktopSidebarWidth = sidebarOpen ? "320px" : "0px";
+  const sidebarTransition = shouldReduce || isFirstRender.current
+    ? "none"
+    : isMobile
+      ? "transform 220ms ease-out"
+      : "width 250ms cubic-bezier(0.4, 0, 0.2, 1), min-width 250ms cubic-bezier(0.4, 0, 0.2, 1)";
+
+  useEffect(() => {
+    if (sidebarOpen) {
+      setContentMounted(true);
+    } else if (shouldReduce) {
+      setContentMounted(false);
+    }
+  }, [sidebarOpen, shouldReduce]);
 
   // 移动端自动收起侧栏（首次挂载及会话变化时）
   useEffect(() => {
     if (isMobile && sidebarOpen) {
-      toggleSidebar();
+      setSidebarOpen(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId, isMobile]);
@@ -101,31 +111,33 @@ export function Sidebar() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
             className="fixed inset-0 z-40 bg-black/50"
-            onClick={toggleSidebar}
+            onClick={closeSidebar}
           />
         )}
       </AnimatePresence>
-      <motion.aside
+      <aside
         data-coach-id="coach-sidebar"
         aria-label="侧栏"
         aria-hidden={!sidebarOpen}
         inert={!sidebarOpen ? true : undefined}
-        animate={sidebarAnimate}
-        transition={sidebarOpenTransition}
-        onAnimationStart={() => {
-          if (useUIStore.getState().sidebarOpen) setContentMounted(true);
-        }}
-        onAnimationComplete={() => setContentMounted(useUIStore.getState().sidebarOpen)}
         className={`em-sidebar flex flex-col ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}
         style={{ 
-          width: isMobile ? mobileSidebarWidth : undefined,
-          minWidth: isMobile ? mobileSidebarWidth : undefined,
+          width: isMobile ? mobileSidebarWidth : desktopSidebarWidth,
+          minWidth: isMobile ? mobileSidebarWidth : desktopSidebarWidth,
+          transform: isMobile ? `translateX(${sidebarOpen ? "0" : "-100%"})` : undefined,
+          transition: sidebarTransition,
           overflow: "hidden",
           pointerEvents: sidebarOpen ? "auto" : "none",
-          willChange: isMobile && (sidebarOpen || contentMounted) ? "transform" : undefined,
+          willChange: sidebarOpen || contentMounted ? (isMobile ? "transform" : "width, min-width") : undefined,
           boxShadow: sidebarOpen ? undefined : "none",
+        }}
+        onTransitionEnd={(event) => {
+          if (event.target !== event.currentTarget) return;
+          const finishedProperty = isMobile ? "transform" : "width";
+          if (event.propertyName !== finishedProperty) return;
+          setContentMounted(useUIStore.getState().sidebarOpen);
         }}
         onTouchStart={swipe.onTouchStart}
         onTouchEnd={swipe.onTouchEnd}
@@ -157,7 +169,7 @@ export function Sidebar() {
             <Button
               variant="ghost"
               size="icon"
-              onClick={toggleSidebar}
+              onClick={closeSidebar}
               aria-label="收起侧栏"
               className="h-7 w-7 min-h-8 min-w-8 flex-shrink-0"
             >
@@ -213,14 +225,14 @@ export function Sidebar() {
             <StatusFooter />
           </div>
         </motion.div>
-      </motion.aside>
+      </aside>
     </>
   );
 }
 
 export function SidebarToggle() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar);
+  const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
 
   if (sidebarOpen) return null;
 
@@ -228,7 +240,7 @@ export function SidebarToggle() {
     <Button
       variant="ghost"
       size="icon"
-      onClick={toggleSidebar}
+      onClick={() => setSidebarOpen(true)}
       aria-label="展开侧栏"
       className="h-8 w-8 mr-1"
     >

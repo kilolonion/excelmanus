@@ -1,10 +1,14 @@
 "use client";
 
-import { useState, useRef, useEffect, useLayoutEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, Fragment } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Brain, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { formatThinkingDuration, thinkingPreview } from "@/lib/thinking";
+import {
+  formatThinkingDuration,
+  parseThinkingLines,
+  thinkingPreview,
+} from "@/lib/thinking";
 
 interface ThinkingBlockProps {
   content: string;
@@ -170,7 +174,23 @@ export function ThinkingBlock({
                   : undefined
               }
             >
-              {content}
+              {parseThinkingLines(content).map((segments, lineIndex) => (
+                <Fragment key={lineIndex}>
+                  {lineIndex > 0 && "\n"}
+                  {segments.map((seg, segIndex) =>
+                    seg.bold ? (
+                      <strong
+                        key={segIndex}
+                        className="font-semibold text-foreground"
+                      >
+                        {seg.text}
+                      </strong>
+                    ) : (
+                      seg.text
+                    ),
+                  )}
+                </Fragment>
+              ))}
             </div>
           </motion.div>
         )}

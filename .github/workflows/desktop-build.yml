@@ -73,6 +73,9 @@ jobs:
         working-directory: source-中文/desktop
         run: |
           npm ci
+          npm test
+          npm run check
+          npm run smoke:renderer
           npm run dist:mac
 
       - name: Windows source regressions
@@ -96,6 +99,10 @@ jobs:
           npm ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run smoke:renderer
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($env:REQUIRE_SIGNING -eq 'true') {
             if (!$env:WIN_CSC_LINK) { throw 'Signed release requires WINDOWS_CSC_LINK' }

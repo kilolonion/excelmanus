@@ -99,6 +99,20 @@ async def list_subagent_runs(session_id: str, request: Request) -> dict:
     return {"runs": runtime.list_runs()}
 
 
+@router.get("/api/v1/sessions/{session_id}/task-list")
+async def get_session_task_list(session_id: str, request: Request) -> dict:
+    """返回会话当前任务清单快照；无任务清单时 task_list 为 None。"""
+    engine = await _engine_for_session(session_id, request)
+    store = getattr(engine, "_task_store", None)
+    current = store.current if store is not None else None
+    payload = sanitize_external_data(current.to_dict()) if current is not None else None
+    if payload is not None and store.plan_file_path:
+        payload["plan_file_path"] = sanitize_external_text(
+            store.plan_file_path, max_len=500
+        )
+    return {"task_list": payload}
+
+
 @router.post("/api/v1/sessions/{session_id}/subagents/{run_id}")
 async def control_subagent_run(
     session_id: str, run_id: str, body: SubagentControlRequest, request: Request,

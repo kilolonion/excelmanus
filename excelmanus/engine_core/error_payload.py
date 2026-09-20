@@ -123,6 +123,7 @@ WORKBOOK_PROTECTED = "WORKBOOK_PROTECTED"
 OUT_OF_RANGE = "OUT_OF_RANGE"
 NAMED_RANGE_NOT_FOUND = "NAMED_RANGE_NOT_FOUND"
 TABLE_NOT_FOUND = "TABLE_NOT_FOUND"
+USER_EDIT_PENDING = "USER_EDIT_PENDING"
 
 ERROR_CODES: frozenset[str] = frozenset({
     INVALID_ARGS,
@@ -183,6 +184,7 @@ ERROR_CODES: frozenset[str] = frozenset({
     OUT_OF_RANGE,
     NAMED_RANGE_NOT_FOUND,
     TABLE_NOT_FOUND,
+    USER_EDIT_PENDING,
 })
 
 # error_code → failure_class。未列出的码（含未知）回落 internal。
@@ -226,6 +228,7 @@ ERROR_CODE_TO_FAILURE_CLASS: dict[str, str] = {
     COORD_CONTRACT: FAILURE_INVALID_ARGS,
     FILE_EXISTS: FAILURE_CONFLICT,
     AMBIGUOUS_MATCH: FAILURE_CONFLICT,
+    USER_EDIT_PENDING: FAILURE_CONFLICT,
     PLAN_INACTIVE: FAILURE_UNSUPPORTED,
     CONVERSION_UNAVAILABLE: FAILURE_UNSUPPORTED,
     NOOP: FAILURE_UNSUPPORTED,
@@ -285,6 +288,7 @@ _REMEDIATION_BY_CODE: dict[str, str] = {
     NAMED_RANGE_NOT_FOUND: "先列出工作簿命名区域，再用存在的名称重试。",
     TABLE_NOT_FOUND: "先列出工作表 Table 名称，再用存在的表名重试。",
     VERSION_CONFLICT: "这次写入没有落盘。重读受影响范围，按新数据重新计算或确认后再写；不要只替换 expected_version 重放基于旧数据的操作。更早已经成功的写入不要当成失败。",
+    USER_EDIT_PENDING: "用户在工具执行前修改了工作簿，本次调用未执行；先阅读改动简报并重新读取目标区域，再决定是否重发该调用，不要原样重放。",
     STALE_READ: "重新读取文件后再继续，不要用过期快照写入。",
     STALE_SNAPSHOT: "重新打开快照后再继续；不要用期望版本与当前字节不一致的文件。",
     SELECTION_STALE: "选择集已过期；重新筛选或读取后再写，不要套用旧行号。",

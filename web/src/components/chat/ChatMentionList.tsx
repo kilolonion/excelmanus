@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
 import { FileSpreadsheet, FolderOpen, Sparkles } from "lucide-react";
-import { buildApiUrl, getAuthHeaders } from "@/lib/api";
+import { apiFetch, buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { AT_TOP_LEVEL, type MentionData, type PopoverMode } from "./chat-input-constants";
@@ -14,6 +14,7 @@ import {
   trackRecentExcelFile,
   truncateMention,
 } from "./chat-input-insert";
+import { displayFilePath } from "@/lib/file-identity";
 
 export function useChatMentions() {
   const [mentionData, setMentionData] = useState<MentionData | null>(null);
@@ -44,7 +45,7 @@ export function useChatMentions() {
       if (subpath) params.set("path", subpath);
       if (sessionId) params.set("session_id", sessionId);
       const qs = params.toString();
-      const res = await fetch(`${buildApiUrl("/mentions")}${qs ? `?${qs}` : ""}`, {
+      const res = await apiFetch(`${buildApiUrl("/mentions")}${qs ? `?${qs}` : ""}`, {
         headers: { ...getAuthHeaders() },
         signal: request.controller.signal,
       });
@@ -91,7 +92,7 @@ export function buildMentionPopoverItems(
     if (filter && mentionData) {
       for (const f of mentionData.files) {
         if (f.toLowerCase().includes(filter)) {
-          items.push({ command: formatFileMention({ path: f }), description: "文件", icon: <FileSpreadsheet className="h-3.5 w-3.5" /> });
+          items.push({ command: formatFileMention({ path: f }), label: displayFilePath(f), description: "文件", icon: <FileSpreadsheet className="h-3.5 w-3.5" /> });
         }
       }
       for (const s of mentionData.skills) {
@@ -113,7 +114,7 @@ export function buildMentionPopoverItems(
           const icon = f.endsWith("/")
             ? <FolderOpen className="h-3.5 w-3.5" />
             : <FileSpreadsheet className="h-3.5 w-3.5" />;
-          items.push({ command: formatFileMention({ path: f }), description: f.endsWith("/") ? "目录" : "文件", icon });
+          items.push({ command: formatFileMention({ path: f }), label: f.endsWith("/") ? f : displayFilePath(f), description: f.endsWith("/") ? "目录" : "文件", icon });
         }
       }
       if (items.length === 0) {

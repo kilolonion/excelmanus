@@ -90,7 +90,8 @@ class TestUploadFromUrl:
                 response = client.post("/api/v1/upload", files={"file": ("report.xls", b"legacy workbook")}, data={"folder": "quarter"})
         assert response.status_code == 200, response.text
         assert response.json()["converted_from"] == "report.xls"
-        expected_alias = response.json()["path"].removesuffix(".xlsx") + ".xls"
+        # add_alias 统一存 POSIX 分隔符；响应 path 在 Windows 上带反斜杠。
+        expected_alias = response.json()["path"].replace("\\", "/").removesuffix(".xlsx") + ".xls"
         registry.add_alias.assert_called_once_with("uploaded-file", "original_path", expected_alias)
         assert (tmp_path / response.json()["path"]).is_file()
         assert not (tmp_path / expected_alias).exists()

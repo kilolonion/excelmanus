@@ -23,8 +23,12 @@ import {
   workspaceKeyForSessionId,
 } from "@/lib/workspace-file-ref";
 import { isSpreadsheetFile } from "@/lib/file-kind";
+import { displayFileName, toPublicFileIdentity } from "@/lib/file-identity";
+import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
+import { fileRefFromSession } from "@/lib/workspace-file-ref";
+import type { WorkbookViewLayout } from "@/lib/workspace-surface";
 
-let workspaceFilesRequest: { sessionId: string | null; version: number; promise: Promise<void> } | null = null;
+let workspaceFilesRequest: { sessionId: string | null; workspaceId: string | null; version: number; promise: Promise<void> } | null = null;
 
 function activeSessionId(): string | null {
   return useSessionStore.getState().activeSessionId;
@@ -200,10 +204,11 @@ interface ExcelState {
   // 全屏表格模式
   fullViewPath: string | null;
   fullViewSheet: string | null;
+  fullViewLayout: WorkbookViewLayout;
 
   // 选区引用模式
   selectionMode: boolean;
-  pendingSelection: { filePath: string; sheet: string; range: string } | null;
+  pendingSelection: { filePath: string; sheet: string; range: string; contentVersion?: string } | null;
   draftRange: { range: string; sheet: string; path?: string; contentVersion?: string } | null;
 
   // 快速添加文件提及到聊天输入（由侧栏设置，ChatInput 消费）
@@ -231,9 +236,13 @@ interface ExcelState {
   workspaceFiles: { path: string; filename: string; is_dir?: boolean }[];
   wsFilesLoaded: boolean;
   workspaceFilesSessionId: string | null | undefined;
+  /** 与 workspaceFilesSessionId 一起标记已加载列表的工作区作用域 */
+  workspaceFilesWorkspaceId: string | null;
   workspaceFilesLoadedVersion: number;
   workspaceFilesLoadedAt: number;
   workspaceFilesError: string | null;
+  /** 后端按上限截断时为 true：workspaceFiles 不是完整清单，不可用于存在性校验 */
+  workspaceFilesTruncated: boolean;
 
   // 引导演示文件（不真实存储，引导结束后自动消失）
   demoFile: { path: string; filename: string } | null;
@@ -294,11 +303,11 @@ interface ExcelState {
   mergeRecentFiles: (files: { path: string; filename: string; modifiedAt?: number }[], workspaceKey?: string) => void;
   /** Evict a cached entry the backend reported missing. 不写 dismissedPaths，文件重建后仍可重新出现。 */
   evictRecentFile: (path: string, workspaceKey?: string | null) => void;
-  openFullView: (path: string, sheet?: string) => void;
+  openFullView: (path: string, sheet?: string, layout?: WorkbookViewLayout) => void;
   closeFullView: () => void;
   enterSelectionMode: () => void;
   exitSelectionMode: () => void;
-  confirmSelection: (sel: { filePath: string; sheet: string; range: string }) => void;
+  confirmSelection: (sel: { filePath: string; sheet: string; range: string; contentVersion?: string }) => void;
   setDraftRange: (range: { range: string; sheet: string; path?: string; contentVersion?: string } | null) => void;
   clearPendingSelection: () => void;
   /** Insert @file:filename into chat input from sidebar click. */
@@ -312,7 +321,7 @@ interface ExcelState {
   clearPendingTemplateMessage: () => void;
   toggleShowSystemFiles: () => void;
   bumpWorkspaceFilesVersion: () => void;
-  refreshWorkspaceFiles: (sessionId?: string | null, options?: { cached?: boolean }) => Promise<void>;
+  refreshWorkspaceFiles: (sessionId?: string | null, options?: { cached?: boolean; workspaceId?: string | null }) => Promise<void>;
   fetchOperationHistory: (sessionId: string) => Promise<void>;
   undoOperationById: (sessionId: string, approvalId: string) => Promise<boolean>;
   appendOperation: (op: OperationRecord) => void;
@@ -352,6 +361,7 @@ export const useExcelStore = create<ExcelState>()(
   recentFiles: [],
   fullViewPath: null,
   fullViewSheet: null,
+  fullViewLayout: "embedded",
   selectionMode: false,
   pendingSelection: null,
   draftRange: null,
@@ -365,9 +375,11 @@ export const useExcelStore = create<ExcelState>()(
   workspaceFiles: [],
   wsFilesLoaded: false,
   workspaceFilesSessionId: undefined,
+  workspaceFilesWorkspaceId: null,
   workspaceFilesLoadedVersion: -1,
   workspaceFilesLoadedAt: 0,
   workspaceFilesError: null,
+  workspaceFilesTruncated: false,
   demoFile: null,
   streamingToolContent: {},
   operations: [],
@@ -472,9 +484,11 @@ export const useExcelStore = create<ExcelState>()(
         workspaceFiles: [],
         wsFilesLoaded: false,
         workspaceFilesSessionId: undefined,
+        workspaceFilesWorkspaceId: null,
         workspaceFilesLoadedVersion: -1,
         workspaceFilesLoadedAt: 0,
         workspaceFilesError: null,
+        workspaceFilesTruncated: false,
         fileGroups: [],
         fileGroupsLoaded: false,
         workbookChanges: {},
@@ -553,14 +567,14 @@ export const useExcelStore = create<ExcelState>()(
   addRecentFile: (file, explicitWorkspaceKey) =>
     set((state) => {
       const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
-      if (!isScopedWorkspaceKey(workspaceKey)) return {};
+      if (!isScopedWorkspaceKey(workspaceKey) || !toPublicFileIdentity(file.path)) return {};
       const normPath = normalizeExcelPath(file.path);
       const filtered = sanitizeRecentFiles(state.recentFiles).filter(
         (f) => !(normalizeExcelPath(f.path) === normPath && f.workspaceKey === workspaceKey),
       );
       const entry: ExcelFileRef = {
         path: file.path,
-        filename: file.filename,
+        filename: displayFileName(file.path) || file.filename,
         lastUsedAt: Date.now(),
         workspaceKey,
       };
@@ -577,14 +591,14 @@ export const useExcelStore = create<ExcelState>()(
     set((state) => {
       if (state.dismissedPaths.has(file.path)) return {};
       const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
-      if (!isScopedWorkspaceKey(workspaceKey)) return {};
+      if (!isScopedWorkspaceKey(workspaceKey) || !toPublicFileIdentity(file.path)) return {};
       const normPath = normalizeExcelPath(file.path);
       const filtered = sanitizeRecentFiles(state.recentFiles).filter(
         (f) => !(normalizeExcelPath(f.path) === normPath && f.workspaceKey === workspaceKey),
       );
       const entry: ExcelFileRef = {
         path: file.path,
-        filename: file.filename,
+        filename: displayFileName(file.path) || file.filename,
         lastUsedAt: Date.now(),
         workspaceKey,
       };
@@ -645,11 +659,12 @@ export const useExcelStore = create<ExcelState>()(
       }
       if (isScopedWorkspaceKey(workspaceKey)) {
         for (const f of files) {
+          if (!toPublicFileIdentity(f.path)) continue;
           const key = `${workspaceKey}|${normalizeExcelPath(f.path)}`;
           if (!map.has(key) && !state.dismissedPaths.has(f.path)) {
             map.set(key, {
               path: f.path,
-              filename: f.filename,
+              filename: displayFileName(f.path) || f.filename,
               lastUsedAt: f.modifiedAt ?? 0,
               workspaceKey,
             });
@@ -662,19 +677,29 @@ export const useExcelStore = create<ExcelState>()(
       return { recentFiles: merged };
     }),
 
-  openFullView: (path, sheet) =>
+  openFullView: (path, sheet, layout = "embedded") => {
+    const session = activeSession();
+    if (session) useWorkbookConversationStore.getState().bind(session.id, fileRefFromSession(path, session), sheet, layout);
     set({
       panelOpen: false,
+      panelTab: "sheet",
       fullViewPath: path,
       fullViewSheet: sheet ?? null,
-      activeWorkspaceKey: workspaceKeyFromSession(activeSession()),
-    }),
+      fullViewLayout: layout,
+      activeFilePath: path,
+      activeSheet: sheet ?? null,
+      activeWorkspaceKey: workspaceKeyFromSession(session),
+    });
+  },
 
-  closeFullView: () =>
+  closeFullView: () => {
+    const sessionId = activeSessionId();
+    if (sessionId) useWorkbookConversationStore.getState().setShowSheet(sessionId, false);
     set({
       fullViewPath: null,
       fullViewSheet: null,
-    }),
+    });
+  },
 
   enterSelectionMode: () =>
     set({ selectionMode: true, pendingSelection: null, draftRange: null }),
@@ -722,24 +747,28 @@ export const useExcelStore = create<ExcelState>()(
 
   refreshWorkspaceFiles: (sessionId, options) => {
     const sid = sessionId === undefined ? activeSessionId() : sessionId;
+    const wid = options?.workspaceId ?? null;
     const state = get();
     const version = state.workspaceFilesVersion;
     if (options?.cached && state.wsFilesLoaded && !state.workspaceFilesError && state.workspaceFilesSessionId === sid
+      && state.workspaceFilesWorkspaceId === wid
       && state.workspaceFilesLoadedVersion === version && Date.now() - state.workspaceFilesLoadedAt < 30_000) {
       return Promise.resolve();
     }
-    if (workspaceFilesRequest?.sessionId === sid && workspaceFilesRequest.version === version) {
+    if (workspaceFilesRequest?.sessionId === sid && workspaceFilesRequest.workspaceId === wid
+      && workspaceFilesRequest.version === version) {
       return workspaceFilesRequest.promise;
     }
     if (state.workspaceFilesError) set({ workspaceFilesError: null });
     if (state.workspaceFilesSessionId !== sid) {
-      set({ workspaceFiles: [], wsFilesLoaded: false, workspaceFilesSessionId: sid, fileGroups: [], fileGroupsLoaded: false });
+      set({ workspaceFiles: [], wsFilesLoaded: false, workspaceFilesSessionId: sid, workspaceFilesWorkspaceId: wid,
+        fileGroups: [], fileGroupsLoaded: false, workspaceFilesTruncated: false });
     }
-    const request = { sessionId: sid, version, promise: Promise.resolve() };
+    const request = { sessionId: sid, workspaceId: wid, version, promise: Promise.resolve() };
     workspaceFilesRequest = request;
     request.promise = (async () => {
       try {
-        const { files } = await fetchWorkspaceFiles(sid);
+        const { files, truncated } = await fetchWorkspaceFiles(sid, options?.workspaceId);
         // An older scan must not replace a newer scan or another session's files.
         if (workspaceFilesRequest !== request || activeSessionId() !== sid) return;
         const next = files.map((f) => ({ path: f.path, filename: f.filename, is_dir: f.is_dir }));
@@ -747,7 +776,8 @@ export const useExcelStore = create<ExcelState>()(
         const unchanged = previous.length === next.length && previous.every((file, index) =>
           file.path === next[index].path && file.filename === next[index].filename && file.is_dir === next[index].is_dir);
         set({ workspaceFiles: unchanged ? previous : next, wsFilesLoaded: true, workspaceFilesSessionId: sid,
-          workspaceFilesLoadedVersion: version, workspaceFilesLoadedAt: Date.now() });
+          workspaceFilesWorkspaceId: wid,
+          workspaceFilesLoadedVersion: version, workspaceFilesLoadedAt: Date.now(), workspaceFilesTruncated: truncated });
         // Reuse the same scan for recent workbooks instead of walking the workspace twice.
         get().mergeRecentFiles(files.filter((file) => !file.is_dir && isSpreadsheetFile(file.filename)).map((file) => ({
           path: file.path, filename: file.filename, modifiedAt: (file.modified_at || 0) * 1000,
@@ -914,9 +944,11 @@ export const useExcelStore = create<ExcelState>()(
       workspaceFiles: [],
       wsFilesLoaded: false,
       workspaceFilesSessionId: undefined,
+      workspaceFilesWorkspaceId: null,
       workspaceFilesLoadedVersion: -1,
       workspaceFilesLoadedAt: 0,
       workspaceFilesError: null,
+      workspaceFilesTruncated: false,
       diffs: [],
       textDiffs: [],
       previews: {},

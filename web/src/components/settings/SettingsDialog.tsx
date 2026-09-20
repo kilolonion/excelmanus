@@ -2,7 +2,7 @@
 
 import { useCallback, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Settings, Server, Package, SlidersHorizontal, X, ArrowUpCircle } from "lucide-react";
+import { Settings, Server, Package, SlidersHorizontal, X, ArrowUpCircle, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -16,6 +16,7 @@ const ModelTab = lazy(() => import("./ModelTab").then(m => ({ default: m.ModelTa
 const PluginsTab = lazy(() => import("./PluginsTab").then(m => ({ default: m.PluginsTab })));
 const RuntimeTab = lazy(() => import("./RuntimeTab").then(m => ({ default: m.RuntimeTab })));
 const VersionTab = lazy(() => import("./VersionTab").then(m => ({ default: m.VersionTab })));
+const AccessTab = lazy(() => import("./AccessTab").then(m => ({ default: m.AccessTab })));
 
 function TabSpinner() {
   return (
@@ -32,10 +33,11 @@ import { useOnboardingStore } from "@/stores/onboarding-store";
 import { checkModelPlaceholder } from "@/lib/api";
 
 const TAB_META = [
-  { value: "model", label: "模型", icon: <Server className="size-4" /> },
-  { value: "plugins", label: "插件", icon: <Package className="size-4" /> },
-  { value: "runtime", label: "系统", icon: <SlidersHorizontal className="size-4" /> },
-  { value: "version", label: "版本", icon: <ArrowUpCircle className="size-4" /> },
+  { value: "model", label: "模型", coachId: "coach-settings-tab-model", icon: <Server className="size-4" /> },
+  { value: "plugins", label: "插件", coachId: "coach-settings-tab-plugins", icon: <Package className="size-4" /> },
+  { value: "runtime", label: "系统", coachId: "coach-settings-tab-runtime", icon: <SlidersHorizontal className="size-4" /> },
+  { value: "access", label: "安全", coachId: "coach-settings-tab-access", icon: <ShieldCheck className="size-4" /> },
+  { value: "version", label: "版本", coachId: "coach-settings-tab-version", icon: <ArrowUpCircle className="size-4" /> },
 ];
 
 const PLUGIN_TAB_VALUES = ["rules", "skills", "mcp", "memory"] as const;
@@ -124,7 +126,7 @@ export function SettingsDialog() {
                       type="button"
                       role="tab"
                       aria-selected={isActive}
-                      data-coach-id={`coach-settings-tab-${tab.value}`}
+                      data-coach-id={tab.coachId}
                       onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)}
                       className={`
                         relative flex-1 min-w-[44px] flex items-center justify-center
@@ -171,7 +173,7 @@ export function SettingsDialog() {
                         type="button"
                         role="tab"
                         aria-selected={isActive}
-                        data-coach-id={`coach-settings-tab-${tab.value}`}
+                        data-coach-id={tab.coachId}
                         onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)}
                         className={`
                           flex items-center justify-center gap-1.5 px-3 py-1.5
@@ -224,6 +226,9 @@ export function SettingsDialog() {
                 </TabsContent>
                 <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
                   {settingsTab === "runtime" && <RuntimeTab />}
+                </TabsContent>
+                <TabsContent value="access" className="mt-0 grow shrink-0 flex flex-col">
+                  {settingsTab === "access" && <AccessTab />}
                 </TabsContent>
                 <TabsContent value="version" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "version" ? true : undefined} data-coach-id="coach-settings-content-version">
                   {settingsTab === "version" && <VersionTab />}

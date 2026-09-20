@@ -1,5 +1,12 @@
 import { resolveWorkbookPanelPath } from "@/components/excel/WorkbookPanelButton";
 import { isSpreadsheetFile } from "@/lib/file-kind";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import { useExcelStore } from "@/stores/excel-store";
+import { useWordStore } from "@/stores/word-store";
+import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
+import { normalizeRelativePath, workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
+import { currentWorkbookTarget } from "@/lib/workbook-conversation";
+import { useSessionStore } from "@/stores/session-store";
 
 export type ChatWorkspaceTab = "chat" | "sheet";
 
@@ -40,4 +47,35 @@ export function resolveSheetFullViewTarget(input: {
     path: targetPath,
     sheet: targetPath === input.activeFilePath ? input.activeSheet ?? undefined : undefined,
   };
+}
+
+/** 空表格视图也可进入文件选择，不以 Agent 生成工作簿为前置条件。 */
+export function activateChatWorkspaceTab(key: ChatWorkspaceTab): void {
+  const excel = useExcelStore.getState();
+  if (key === "chat") {
+    if (excel.compareMode) excel.closeCompare();
+    if (excel.fullViewPath) excel.closeFullView();
+    if (useWordStore.getState().fullViewPath) {
+      useWordStore.getState().closeFullView();
+    }
+    return;
+  }
+  if (excel.activeWorkspaceKey !== workspaceKeyForSessionId(useSessionStore.getState().activeSessionId)) {
+    useWorkbookConversationStore.getState().openPicker();
+    return;
+  }
+  const target = resolveSheetFullViewTarget({
+    activeFilePath: excel.activeFilePath,
+    activeSheet: excel.activeSheet,
+    recentFiles: excel.recentFiles,
+    workspaceFiles: excel.workspaceFiles,
+    workspaceKey: excel.activeWorkspaceKey,
+    fullViewPath: excel.fullViewPath,
+    fullViewSheet: excel.fullViewSheet,
+  });
+  if (!target) { useWorkbookConversationStore.getState().openPicker(); return; }
+  if (excel.compareMode) excel.closeCompare();
+  const discussion = currentWorkbookTarget(useSessionStore.getState().activeSessionId);
+  const sheet = discussion?.file.relative === normalizeRelativePath(target.path) ? discussion.sheet ?? target.sheet : target.sheet;
+  openWorkspaceFile(target.path, { intent: "full", sheet, workbookLayout: "embedded" });
 }

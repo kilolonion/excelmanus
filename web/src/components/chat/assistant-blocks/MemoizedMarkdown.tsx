@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import { MentionHighlighter } from "../MentionHighlighter";
 import { baseMarkdownComponents } from "../MarkdownComponents";
 import { isWorkspaceFileHref } from "@/lib/file-kind";
+import { displayFileName } from "@/lib/file-identity";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import React, { useEffect, useRef, useState } from "react";
 
@@ -33,7 +34,7 @@ function isWorkspaceFileLink(href: string): boolean {
 }
 
 function WorkspaceFileLink({ href, children }: { href: string; children: React.ReactNode }) {
-  const filename = href.split("/").pop() || href;
+  const filename = displayFileName(href) || href;
   return (
     <button
       type="button"

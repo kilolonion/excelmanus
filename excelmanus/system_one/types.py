@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping
 
 PackId = Literal[
+    "context.resolve",
     "exposure.turn",
     "observation.shape",
     "observation.prune",

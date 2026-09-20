@@ -43,6 +43,11 @@ export const PROVIDER_LOGO_SLUG: Record<string, string> = {
   mistralai: "mistral",
   tencent: "qq",
   hunyuan: "qq",
+  workbuddy: "qq",
+  "workbuddy-cn": "qq",
+  "workbuddy-global": "qq",
+  codebuddy: "qq",
+  antigravity: "gemini",
   qq: "qq",
   bytedance: "bytedance",
   doubao: "bytedance",
@@ -207,6 +212,45 @@ export const CODEX_OAUTH_PRESET: ProviderPreset = {
   model_family: "gpt",
   description: "订阅 OAuth 登录，无需 API Key",
   purchaseUrl: "https://chatgpt.com",
+};
+
+export const WORKBUDDY_CN_OAUTH_PRESET: ProviderPreset = {
+  id: "workbuddy-cn",
+  label: "WorkBuddy 国内版",
+  icon: "🐧",
+  model: "workbuddy-cn/auto",
+  base_url: "https://copilot.tencent.com/v2",
+  protocol: "openai",
+  thinking_mode: "auto",
+  model_family: "",
+  description: "WorkBuddy/CodeBuddy 国内版订阅登录，无需 API Key",
+  purchaseUrl: "https://www.codebuddy.cn",
+};
+
+export const WORKBUDDY_GLOBAL_OAUTH_PRESET: ProviderPreset = {
+  id: "workbuddy-global",
+  label: "WorkBuddy Global",
+  icon: "🐧",
+  model: "workbuddy-global/auto",
+  base_url: "https://www.workbuddy.ai/v2",
+  protocol: "openai",
+  thinking_mode: "auto",
+  model_family: "",
+  description: "WorkBuddy 国际版订阅登录，无需 API Key",
+  purchaseUrl: "https://www.workbuddy.ai",
+};
+
+export const ANTIGRAVITY_OAUTH_PRESET: ProviderPreset = {
+  id: "antigravity",
+  label: "Google Antigravity",
+  icon: "🌐",
+  model: "antigravity/claude-sonnet-4-6",
+  base_url: "https://daily-cloudcode-pa.googleapis.com",
+  protocol: "antigravity",
+  thinking_mode: "gemini_level",
+  model_family: "claude",
+  description: "Google Antigravity / Cloud Code Assist 订阅登录，无需 API Key",
+  purchaseUrl: "https://antigravity.google",
 };
 
 export const CODEX_MODELS: CodexModelEntry[] = [

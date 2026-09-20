@@ -14,6 +14,7 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.database import Database
 from excelmanus.events import EventType
 from excelmanus.subagent.models import SubagentStartRequest
+from excelmanus.task_list import TaskStatus
 from excelmanus.tools.registry import ToolRegistry
 
 
@@ -322,6 +323,33 @@ async def test_session_control_api_waits_and_cancels(monkeypatch, tmp_path):
         assert cancelled.json()["run"]["status"] == "aborted"
         missing = await client.post("/api/v1/sessions/s/subagents/nope", json={"action": "status"})
         assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_session_task_list_api_returns_current_snapshot(monkeypatch, tmp_path):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    import excelmanus.api_routes_sessions as routes
+
+    parent = engine(tmp_path)
+    monkeypatch.setattr(routes, "_has_session_access", AsyncMock(return_value=True))
+    manager = SimpleNamespace(get_or_restore_engine=AsyncMock(return_value=parent))
+    monkeypatch.setattr(routes, "get_session_manager", lambda: manager)
+    app = FastAPI()
+    app.include_router(routes.router)
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        empty = await client.get("/api/v1/sessions/s/task-list")
+        assert empty.status_code == 200
+        assert empty.json()["task_list"] is None
+
+        parent._task_store.create("补齐订单", ["读取订单", "写入结果"])
+        parent._task_store.update_item(0, TaskStatus.IN_PROGRESS)
+        listed = await client.get("/api/v1/sessions/s/task-list")
+        assert listed.status_code == 200
+        payload = listed.json()["task_list"]
+        assert payload["title"] == "补齐订单"
+        assert [item["title"] for item in payload["items"]] == ["读取订单", "写入结果"]
+        assert [item["status"] for item in payload["items"]] == ["in_progress", "pending"]
 
 
 @pytest.mark.asyncio

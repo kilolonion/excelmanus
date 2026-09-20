@@ -21,7 +21,8 @@ describe("workspace file scans", () => {
       { id: "b", title: "B", messageCount: 0, inFlight: false, workspaceId: "ws-b" },
     ] });
     useExcelStore.setState({ workspaceFiles: [], wsFilesLoaded: false, workspaceFilesSessionId: undefined,
-      workspaceFilesVersion: 0, workspaceFilesLoadedVersion: -1, workspaceFilesLoadedAt: 0, workspaceFilesError: null, recentFiles: [] });
+      workspaceFilesWorkspaceId: null, workspaceFilesVersion: 0, workspaceFilesLoadedVersion: -1,
+      workspaceFilesLoadedAt: 0, workspaceFilesError: null, workspaceFilesTruncated: false, recentFiles: [] });
   });
 
   it("shares in-flight scans and reuses a fresh snapshot across panel remounts", async () => {
@@ -85,5 +86,26 @@ describe("workspace file scans", () => {
     useExcelStore.setState({ workspaceFilesLoadedAt: Date.now() - 31_000 });
     await refresh()("a", { cached: true });
     expect(scan).toHaveBeenCalledTimes(2);
+  });
+
+  it("records the backend truncation flag and resets it on scope change", async () => {
+    scan.mockResolvedValue({ files: [{ path: "one.xlsx", filename: "one.xlsx", modified_at: 1 }], truncated: true });
+    await refresh()("a");
+    expect(useExcelStore.getState().workspaceFilesTruncated).toBe(true);
+    scan.mockResolvedValue(result("b.xlsx"));
+    await refresh()("b");
+    expect(useExcelStore.getState().workspaceFilesTruncated).toBe(false);
+  });
+
+  it("does not merge in-flight scans across different workspace ids", async () => {
+    let resolveA!: (value: WorkspaceFileList) => void;
+    scan.mockImplementationOnce(() => new Promise((done) => { resolveA = done; }));
+    const first = refresh()("a", { workspaceId: "ws-a" });
+    scan.mockResolvedValueOnce(result("other.xlsx"));
+    const second = refresh()("a", { workspaceId: "ws-other" });
+    expect(scan).toHaveBeenCalledTimes(2);
+    resolveA(result("one.xlsx"));
+    await Promise.all([first, second]);
+    expect(useExcelStore.getState().workspaceFilesWorkspaceId).toBe("ws-other");
   });
 });

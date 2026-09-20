@@ -85,6 +85,18 @@ export const EMPTY_JEV_PROVIDER_DRAFT: JevProviderDraft = {
   api_key: "",
 };
 
+export function validateJevProvider(draft: JevProviderDraft): string | null {
+  if (!draft.name.trim()) return "请填写供应商名称";
+  if (!draft.model.trim()) return "请填写模型 ID";
+  try {
+    const url = new URL(draft.base_url.trim());
+    if (!["https:", "http:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.search || url.hash) return "请填写有效的 HTTP 或 HTTPS 服务地址，不包含密钥、查询参数或片段";
+  } catch {
+    return "请填写完整的服务地址，例如 https://api.typesafe.ai";
+  }
+  return null;
+}
+
 export function jevPresetById(id: string): JevProviderPreset | undefined {
   return JEV_PROVIDER_PRESETS.find((item) => item.id === id);
 }
@@ -223,7 +235,7 @@ export function jevEntryStatus(input: {
   }
   if (input.enabled === "enforce") {
     if (input.enforceReady === false) {
-      return { tone: "ready", chip: "待标定" };
+      return { tone: "ready", chip: "部分功能可用" };
     }
     return { tone: "enforce", chip: "生效" };
   }

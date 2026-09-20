@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import signal
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from excelmanus.mcp.processes import (
     ProcessInfo,
@@ -31,6 +34,7 @@ def test_workspace_marker_respects_settings_state_dir(
     assert marker == f"{custom_dir.resolve(strict=False).as_posix()}/"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows 上进程由 job 管理，不走 ps 列举")
 def test_list_workspace_mcp_processes_filters_by_marker(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     marker = (workspace / ".excelmanus" / "mcp").resolve(strict=False).as_posix()
@@ -43,6 +47,7 @@ def test_list_workspace_mcp_processes_filters_by_marker(tmp_path: Path) -> None:
     assert [item.pid for item in rows] == [100]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows 上进程由 job 管理，不走 ps 列举")
 def test_snapshot_supports_custom_state_dir(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     custom_state = (tmp_path / "runtime/mcp").resolve(strict=False).as_posix()

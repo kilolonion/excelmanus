@@ -55,6 +55,37 @@ export async function createOrReuseSession(opts?: {
   return created;
 }
 
+/**
+ * 菜单栏「新建对话」入口：优先沿用当前会话所属工作区，
+ * 没有可用会话时回退到首选工作区。
+ */
+export async function newChatInPreferredWorkspace(): Promise<Session> {
+  const store = useSessionStore.getState();
+  const active = store.activeSessionId
+    ? store.sessions.find((s) => s.id === store.activeSessionId)
+    : undefined;
+  if (active && (active.workspaceId || active.workspacePath)) {
+    return createOrReuseSession({
+      workspaceId: active.workspaceId,
+      workspacePath: active.workspacePath,
+    });
+  }
+  let workspaces: WorkspaceFolder[] = [];
+  try {
+    workspaces = await fetchWorkspaces();
+  } catch {
+    workspaces = [];
+  }
+  const preferred = resolvePreferredWorkspace({
+    sessions: store.sessions,
+    workspaces,
+    lastWorkspaceId: store.lastWorkspaceId,
+    lastWorkspacePath: store.lastWorkspacePath,
+    lastOpenedSessionId: store.activeSessionId,
+  });
+  return createOrReuseSession(preferred);
+}
+
 let landingInFlight: Promise<Session | null> | null = null;
 
 /** 进入应用或当前没有会话时，保证首选工作区有一条可复用的空白「新对话」。 */

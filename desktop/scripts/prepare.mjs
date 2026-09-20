@@ -1,8 +1,9 @@
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, renameSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
+import { frontendRuntimeFilter } from './runtime-files.mjs';
 
 const desktopRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const projectRoot = resolve(desktopRoot, "..");
@@ -27,12 +28,16 @@ function stageFrontend() {
 
   const destination = join(buildRoot, "frontend");
   resetDir(destination);
-  cpSync(standalone, destination, { recursive: true });
   // electron-builder intentionally filters directories named node_modules from
   // extraResources. Keep the standalone dependency tree under a different
-  // name and expose it through NODE_PATH at runtime.
-  const dependencyDir = join(destination, "node_modules");
-  if (existsSync(dependencyDir)) renameSync(dependencyDir, join(destination, "next_modules"));
+  // name and expose it through NODE_PATH at runtime. Copy directly to that
+  // name: renaming a just-copied dependency tree can fail with EPERM on Windows
+  // while the indexer or antivirus still has one of its descendants open.
+  for (const entry of readdirSync(standalone)) {
+    cpSync(join(standalone, entry), join(destination, entry === "node_modules" ? "next_modules" : entry), {
+      recursive: true, filter: file => frontendRuntimeFilter(standalone, file),
+    });
+  }
   mkdirSync(join(destination, ".next"), { recursive: true });
   cpSync(staticDir, join(destination, ".next", "static"), { recursive: true });
   cpSync(publicDir, join(destination, "public"), { recursive: true });

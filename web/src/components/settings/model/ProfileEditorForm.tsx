@@ -2,7 +2,7 @@
 
 import { useMemo, type ReactNode } from "react";
 import {
-  Check, ChevronDown, ChevronRight, Eye, EyeOff, KeyRound, Loader2, Pencil,
+  Check, ChevronDown, ChevronRight, Eye, EyeOff, KeyRound, Loader2, Lock, Pencil,
   Plus, Save, Search, ShieldAlert, Wifi, Wrench, X, CheckCircle2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,7 @@ import {
 import { glassMenuItemClass, glassMenuPanelClass } from "@/components/ui/menu-panel";
 import { cn } from "@/lib/utils";
 import { useAdminModel } from "./admin-model-context";
-import { uniqueSiblingProfileName, filterModelPickerList } from "./helpers";
+import { isSubscriptionProfile, uniqueSiblingProfileName, filterModelPickerList } from "./helpers";
 
 const FIELD = "h-9 text-xs rounded-lg";
 
@@ -94,11 +94,13 @@ function GlassSelect({
   options,
   onChange,
   ariaLabel,
+  disabled,
 }: {
   value: string;
   options: { value: string; label: string }[];
   onChange: (value: string) => void;
   ariaLabel: string;
+  disabled?: boolean;
 }) {
   const current = options.find((option) => option.value === value)?.label ?? value;
   return (
@@ -107,7 +109,8 @@ function GlassSelect({
         <button
           type="button"
           aria-label={ariaLabel}
-          className="inline-flex items-center gap-1.5 w-full h-9 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40"
+          disabled={disabled}
+          className="inline-flex items-center gap-1.5 w-full h-9 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40 disabled:opacity-60 disabled:hover:bg-transparent disabled:cursor-not-allowed"
         >
           <span className="flex-1 truncate">{current}</span>
           <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -228,6 +231,12 @@ export function ProfileEditorForm() {
   );
   const credentialName = editingProfile || siblingSourceName || undefined;
   const addingSibling = Boolean(siblingSourceName && !editingProfile);
+  const siblingSource = useMemo(
+    () => (config?.profiles || []).find((p) => p.name === siblingSourceName),
+    [config?.profiles, siblingSourceName],
+  );
+  // 订阅（OAuth）sibling：沿用订阅凭证，无需 API Key，连接参数固定不可改。
+  const codexSibling = Boolean(addingSibling && siblingSource && isSubscriptionProfile(siblingSource));
   const existingNames = useMemo(
     () => (config?.profiles || []).map((profile) => profile.name),
     [config?.profiles],
@@ -252,9 +261,11 @@ export function ProfileEditorForm() {
   const formTitle = editingProfile ? "编辑提供商" : addingSibling ? "添加模型" : "添加提供商";
   const formHint = editingProfile
     ? "修改连接信息。API Key 留空则继续使用已保存的凭证。"
-    : addingSibling
-      ? "沿用此提供商的地址和凭证，从已检测列表中选择要加入的模型。"
-      : "填写服务地址和凭证，然后检测可用模型。";
+    : codexSibling
+      ? "沿用 ChatGPT 订阅 OAuth 凭证，从可用列表选择要加入的模型。"
+      : addingSibling
+        ? "沿用此提供商的地址和凭证，从已检测列表中选择要加入的模型。"
+        : "填写服务地址和凭证，然后检测可用模型。";
   const canSubmit = Boolean(profileDraft.model) && (Boolean(profileDraft.name.trim()) || addingSibling) && !addingProfile;
 
   return (
@@ -304,6 +315,12 @@ export function ProfileEditorForm() {
           </Field>
         </div>
 
+        {codexSibling ? (
+          <div className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+            <Lock className="h-3 w-3 shrink-0" style={{ color: "var(--em-primary)" }} />
+            使用 ChatGPT 订阅 OAuth 凭证，无需 API Key
+          </div>
+        ) : (
         <Field
           label="API Key"
           extra={keySaved ? (
@@ -339,6 +356,7 @@ export function ProfileEditorForm() {
             </button>
           </div>
         </Field>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_12rem] gap-3">
           <Field label="API 请求地址">
@@ -348,6 +366,7 @@ export function ProfileEditorForm() {
               className={`${FIELD} font-mono`}
               placeholder="https://your-api-endpoint.com/v1/"
               spellCheck={false}
+              disabled={codexSibling}
             />
           </Field>
           <Field label="协议">
@@ -356,12 +375,15 @@ export function ProfileEditorForm() {
               value={protocol}
               options={PROTOCOL_OPTIONS}
               onChange={(next) => setProfileDraft((d) => ({ ...d, protocol: next }))}
+              disabled={codexSibling}
             />
           </Field>
         </div>
+        {!codexSibling && (
         <p className="text-[11px] text-muted-foreground -mt-1.5 leading-relaxed">
           {PROTOCOL_HINTS[protocol] || PROTOCOL_HINTS.auto}
         </p>
+        )}
 
         <div className="relative" ref={modelDropdownRef}>
           <Field
@@ -473,7 +495,13 @@ export function ProfileEditorForm() {
                         setProfileDraft((d) => ({
                           ...d,
                           model: m.id,
-                          name: d.name.trim() || uniqueSiblingProfileName(m.id, existingNames),
+                          name: d.name.trim()
+                            || (codexSibling && !existingNames.includes(m.id)
+                              ? m.id
+                              : uniqueSiblingProfileName(m.id, existingNames)),
+                          description: codexSibling && !d.description.trim() && m.owned_by
+                            ? `${m.owned_by} — OAuth 登录（无需 API Key）`
+                            : d.description,
                         }));
                       }}
                     >

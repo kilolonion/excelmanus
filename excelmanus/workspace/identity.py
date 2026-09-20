@@ -32,6 +32,10 @@ SENSITIVE_BASENAMES: frozenset[str] = frozenset({
     ".env",
     "config.env",
     "excelmanus.db",
+    "access.db",
+    "access.db-journal",
+    "access.db-wal",
+    "access.db-shm",
     "installations.json",
 })
 
@@ -57,9 +61,6 @@ _TS_BACKUP_NAME_RE = re.compile(
     r"^(?P<stem>.+)_(?P<ts>\d{8}T\d{6})_(?P<hex>[0-9a-fA-F]{4})(?P<ext>\.[^.]+)$"
 )
 
-_UPLOAD_REL_PREFIX_RE = re.compile(
-    r"^uploads/(?P<hex>[0-9a-fA-F]{8})_(?P<rest>.+)$"
-)
 _UPLOAD_FILE_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8}_")
 
 
@@ -83,12 +84,21 @@ class CanonicalPath:
 
 
 def display_name_for(relative: str) -> str:
-    """Strip ``uploads/{8hex}_`` for display only; identity is unchanged."""
+    """Strip internal encodings for display only; identity is unchanged.
+
+    Removes the ``uploads/**/{8hex}_`` upload prefix (any depth) and the FVM
+    ``_{YYYYMMDDTHHMMSS}_{4hex}`` backup suffix, so a stored name like
+    ``outputs/backups/8hex_report_20260911T091344_f525.xlsx`` renders as
+    ``report.xlsx``.
+    """
     rel = _normalize_slashes(relative).removeprefix("./")
-    match = _UPLOAD_REL_PREFIX_RE.match(rel)
-    if match:
-        return Path(match.group("rest")).name
-    return Path(rel).name
+    name = Path(rel).name
+    ts_match = _TS_BACKUP_NAME_RE.match(name)
+    if ts_match:
+        name = f"{ts_match.group('stem')}{ts_match.group('ext')}"
+    if (rel.startswith("uploads/") or ts_match) and _UPLOAD_FILE_PREFIX_RE.match(name):
+        name = name[9:]
+    return name
 
 
 def is_hidden_name(name: str) -> bool:

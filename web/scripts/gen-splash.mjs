@@ -28,34 +28,23 @@ try {
     logLevel: "warning",
   });
   const bundled = await import(pathToFileURL(bundleFile).href);
-  const { markup, css, progress } = bundled.default ?? bundled;
+  const { markup, css } = bundled.default ?? bundled;
 
   const icon = readFileSync(join(webRoot, "public", "icon.png")).toString("base64");
   const body = markup.replaceAll('"/icon.png"', `"data:image/png;base64,${icon}"`);
   if (body.includes('"/icon.png"')) throw new Error("icon.png 内联失败，splash.html 不能引用本地路径");
 
-  // 与 LoadingProgressBar 相同的 ease-out cubic 曲线，并暴露状态文案钩子给主进程。
-  const script = `(function(){
-var fill=document.querySelector('.em-splash-progress-fill');
-window.__emSplashSetStatus=function(text){
-var s=document.querySelector('.em-splash-status span:not(.em-splash-spinner)');
-if(s)s.textContent=text;
-};
-if(!fill)return;
-if(window.matchMedia('(prefers-reduced-motion: reduce)').matches){
-fill.style.width='${progress.to}%';return;
-}
-var origin=performance.now();
-var tick=function(now){
-var t=Math.min(1,(now-origin)/${progress.ms});
-var eased=1-Math.pow(1-t,3);
-var next=${progress.from}+(${progress.to}-${progress.from})*eased;
-var current=parseFloat(fill.style.width)||0;
-fill.style.width=Math.max(current,next)+'%';
-if(t<1)requestAnimationFrame(tick);
-};
-requestAnimationFrame(tick);
-})();`;
+  const runtime = await build({
+    entryPoints: [join(webRoot, "scripts", "splash-runtime.ts")],
+    bundle: true,
+    write: false,
+    platform: "browser",
+    format: "iife",
+    minify: true,
+    tsconfig: join(webRoot, "tsconfig.json"),
+    logLevel: "warning",
+  });
+  const script = runtime.outputFiles[0].text;
 
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>ExcelManus</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body style="margin:0;background:#fff">${body}<script>${script}</script></body></html>`;
   writeFileSync(outFile, html);

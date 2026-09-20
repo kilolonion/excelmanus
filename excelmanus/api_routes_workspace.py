@@ -146,6 +146,9 @@ async def restore_revision(request: RevisionRestoreRequest) -> JSONResponse:
             request.revision_id,
             expected_version=expected or None,
             restore_missing=not live,
+            event_context={"source": "user", "session_id": request.session_id,
+                           "summary": f"用户恢复了整个文件到历史版本 {request.revision_id}，请重新读取。"}
+            if dest.suffix.lower() in {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv"} else None,
         )
         svc.raise_if_failed(receipt)
     except RevisionIntegrityError:
@@ -160,6 +163,10 @@ async def restore_revision(request: RevisionRestoreRequest) -> JSONResponse:
             "message": str(exc),
             "fields": exc.fields,
         })
+    try:
+        session_manager.drain_workspace_events()
+    except Exception:
+        logger.warning("历史版本已恢复，改动通知等待重试", exc_info=True)
     return JSONResponse(content={
         "status": "ok",
         "path": receipt.primary_path(),
@@ -203,10 +210,11 @@ async def read_revision_content(
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     elif suffix == ".docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    from excelmanus.workspace.identity import display_name_for
     return StreamingResponse(
         iter((data,)),
         media_type=media_type,
-        headers={"Content-Disposition": f'inline; filename="{Path(ident.relative).name}"', "X-Revision-Id": rec.id},
+        headers={"Content-Disposition": f'inline; filename="{display_name_for(ident.relative)}"', "X-Revision-Id": rec.id},
     )
 
 

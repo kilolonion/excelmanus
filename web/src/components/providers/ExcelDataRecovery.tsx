@@ -6,6 +6,9 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
 import { useFilePreviewStore } from "@/stores/file-preview-store";
+import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
+import { fetchWorkbookView } from "@/lib/api";
+import { fileBaseName } from "@/lib/revision-display";
 import {
   workspaceKeyForSessionId,
   workspaceKeyFromSession,
@@ -13,7 +16,7 @@ import {
 
 /**
  * ExcelDataRecovery 组件
- * 
+ *
  * 解决页面刷新后 Excel diff 数据丢失的问题。
  * 在页面加载时主动从后端恢复 Excel 相关数据。
  */
@@ -22,19 +25,43 @@ export function ExcelDataRecovery() {
   const prevSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!loadedSessionId) return;
+    if (!loadedSessionId || useSessionStore.getState().activeSessionId !== loadedSessionId) return;
 
-    // 会话切换时先清理旧会话的瞬态数据，防止跨会话 diff 泄漏
-    if (prevSessionRef.current && prevSessionRef.current !== loadedSessionId) {
+    // Bind the first loaded session too: on a fresh Desktop profile no workbook
+    // panel has opened yet, so activeWorkspaceKey would otherwise remain null.
+    if (prevSessionRef.current !== loadedSessionId) {
       const sessions = useSessionStore.getState().sessions;
-      const prev = sessions.find((item) => item.id === prevSessionRef.current);
       const next = sessions.find((item) => item.id === loadedSessionId);
-      const prevWorkspaceKey = workspaceKeyFromSession(prev);
       const nextWorkspaceKey = workspaceKeyFromSession(next);
-      useExcelStore.getState().rebindSession(
-        prevWorkspaceKey,
+      const excel = useExcelStore.getState();
+      const target = useWorkbookConversationStore.getState().targets[loadedSessionId];
+      excel.rebindSession(
+        excel.activeWorkspaceKey,
         nextWorkspaceKey,
       );
+      if (target?.file.workspaceKey === nextWorkspaceKey) {
+        if (target.showSheet) {
+          excel.openFullView(target.file.relative, target.sheet, target.layout);
+        } else {
+          excel.closeFullView();
+          useWorkbookConversationStore.getState().observe(loadedSessionId, target.file, { status: "loading" });
+          void fetchWorkbookView({ path: target.file.relative, workspaceKey: nextWorkspaceKey,
+            workspaceId: target.file.workspaceId, sessionId: loadedSessionId, sheet: target.sheet, withStyles: false,
+          }).then((view) => {
+            if (useSessionStore.getState().activeSessionId !== loadedSessionId) return;
+            useWorkbookConversationStore.getState().observe(loadedSessionId, target.file, {
+              status: "ready", sheet: view.active_sheet || view.windows[0]?.sheet, version: view.content_version,
+            });
+          }).catch((err) => {
+            if (useSessionStore.getState().activeSessionId !== loadedSessionId) return;
+            useWorkbookConversationStore.getState().observe(loadedSessionId, target.file, {
+              status: "error", error: err instanceof Error ? err.message : "表格读取失败",
+            });
+          });
+        }
+      } else if (prevSessionRef.current) {
+        excel.closeFullView();
+      }
       useWordStore.getState().rebindWorkspace(nextWorkspaceKey);
       useFilePreviewStore.getState().clearForSessionChange();
     }
@@ -44,7 +71,7 @@ export function ExcelDataRecovery() {
       try {
         // 动态导入以避免循环依赖
         const { fetchSessionExcelEvents } = await import("@/lib/api");
-        const { diffs: recoveredDiffs, previews: recoveredPreviews, affected_files } = 
+        const { diffs: recoveredDiffs, previews: recoveredPreviews, affected_files } =
           await fetchSessionExcelEvents(loadedSessionId);
 
         if (recoveredDiffs.length === 0 && recoveredPreviews.length === 0 && affected_files.length === 0) {
@@ -60,7 +87,7 @@ export function ExcelDataRecovery() {
         const sourceWorkspaceKey = workspaceKeyForSessionId(loadedSessionId);
         for (const fp of affected_files) {
           if (!fp) continue;
-          const filename = fp.split("/").pop() || fp;
+          const filename = fileBaseName(fp) || fp;
           excelStore.addRecentFileIfNotDismissed({ path: fp, filename }, sourceWorkspaceKey);
         }
 
@@ -86,14 +113,14 @@ export function ExcelDataRecovery() {
               existing.map((d) => `${d.toolCallId}::${d.filePath}::${d.sheet}::${d.affectedRange}`)
             );
             const merged = [...existing];
-            
+
             for (const diff of convertedDiffs) {
               const key = `${diff.toolCallId}::${diff.filePath}::${diff.sheet}::${diff.affectedRange}`;
               if (seen.has(key)) continue;
               seen.add(key);
               merged.push(diff);
             }
-            
+
             if (merged.length === existing.length) return {};
             return { diffs: merged.slice(-500) };
           });

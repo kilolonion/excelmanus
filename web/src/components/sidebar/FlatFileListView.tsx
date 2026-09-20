@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import { isSpreadsheetFile, workspaceFileOpenHint } from "@/lib/file-kind";
+import { displayFilePath } from "@/lib/file-identity";
 import { useOpenWorkspacePathSet } from "@/lib/open-workspace-file";
 import { useExcelStore } from "@/stores/excel-store";
 import { downloadFile, normalizeExcelPath, fetchFileRegistry, updateFileGroupMembers } from "@/lib/api";
@@ -119,7 +120,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
             title={
               selectMode
                 ? "点击选择"
-                : `${workspaceFileOpenHint(file.filename)}\n${file.path}`
+                : `${workspaceFileOpenHint(file.filename)}\n${displayFilePath(file.path)}`
             }
           >
             {selectMode ? (

@@ -14,7 +14,7 @@ const RESERVED_PREFIXES = [
   ".versions",
 ] as const;
 
-const TS_BACKUP_NAME_RE = /^.+_\d{8}T\d{6}_[0-9a-fA-F]{4}\.[^.]+$/;
+const TS_BACKUP_NAME_RE = /^(.+)_\d{8}T\d{6}_[0-9a-fA-F]{4}(\.[^.]+)$/;
 const UPLOAD_HEX_PREFIX_RE = /^[0-9a-fA-F]{8}_/;
 
 function normalizeSlashes(raw: string): string {
@@ -73,18 +73,39 @@ export function toPublicFileIdentity(raw: string): string | null {
   const parts = rel.split("/").filter(Boolean);
   if (parts.some((part) => part.startsWith(".") || part.startsWith("~$"))) return null;
 
+  const leaf = parts[parts.length - 1] ?? "";
+  if (leaf.startsWith("_rc_") || leaf.startsWith("_sw_")) return null;
+  if (rel === "scripts/temp" || rel.startsWith("scripts/temp/")) return null;
+
   return `./${rel.replace(/^\.\//, "")}`;
 }
 
-/** Display filename: strip uploads/{8hex}_ ; never show timestamped backup names. */
+/**
+ * Display filename: never leak internal encodings. Strips the
+ * ``uploads/{8hex}_`` prefix (any depth) and the FVM
+ * ``_{YYYYMMDDTHHMMSS}_{4hex}`` backup suffix — mirrors
+ * ``excelmanus/workspace/identity.py::display_name_for``.
+ */
 export function displayFileName(identity: string): string {
   const rel = normalizeSlashes(identity).replace(/^\.\//, "");
-  const base = rel.split("/").pop() || rel;
-  if (looksLikeTimestampedBackupName(base)) return "";
-  if (rel.startsWith("uploads/") && UPLOAD_HEX_PREFIX_RE.test(base)) {
-    return base.slice(9);
+  let base = rel.split("/").pop() || rel;
+  const stamp = TS_BACKUP_NAME_RE.exec(base);
+  if (stamp) base = `${stamp[1]}${stamp[2]}`;
+  if ((rel.startsWith("uploads/") || stamp) && UPLOAD_HEX_PREFIX_RE.test(base)) {
+    base = base.slice(9);
   }
   return base;
+}
+
+/** Display path: keep the directory portion, clean the leaf name. */
+export function displayFilePath(identity: string): string {
+  const norm = normalizeSlashes(identity);
+  if (norm.replace(/^\.\//, "").endsWith("/")) return norm;
+  const name = displayFileName(norm);
+  const stripped = norm.replace(/^\.\//, "");
+  const idx = stripped.lastIndexOf("/");
+  const rel = name ? (idx >= 0 ? `${stripped.slice(0, idx + 1)}${name}` : name) : stripped;
+  return norm.startsWith("./") ? `./${rel}` : rel;
 }
 
 export function identityKey(identity: string): string {

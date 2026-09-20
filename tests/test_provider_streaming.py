@@ -160,6 +160,65 @@ async def test_openai_responses_stream_emits_reasoning_delta() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openai_responses_stream_separates_reasoning_summary_parts() -> None:
+    """相邻 reasoning summary part 之间应补换行，避免 **标题** 段落粘连。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}',
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"**Planning product name and price insertion**"}',
+            'data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":""}}',
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"**Implementing formulas and formatting after insertion**"}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        thinking = ""
+        async for chunk in stream:
+            thinking += chunk.thinking_delta or ""
+        assert thinking == (
+            "**Planning product name and price insertion**\n"
+            "**Implementing formulas and formatting after insertion**"
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_no_separator_before_first_summary_part() -> None:
+    """首个 summary part 前不应产生前置换行。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}',
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"**Only heading**"}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        thinking = ""
+        async for chunk in stream:
+            thinking += chunk.thinking_delta or ""
+        assert thinking == "**Only heading**"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_openai_responses_stream_forwards_reasoning_effort() -> None:
     client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
     captured_body: dict[str, Any] = {}

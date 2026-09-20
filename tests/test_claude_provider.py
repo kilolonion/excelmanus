@@ -466,3 +466,9 @@ def test_apply_thinking_to_body_keeps_budget_for_haiku():
         thinking_effort="high",
     )
     assert body["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+
+def test_uses_adaptive_thinking_with_provider_prefix():
+    from excelmanus.providers.claude import uses_adaptive_thinking
+
+    assert uses_adaptive_thinking("anthropic/claude-opus-5")

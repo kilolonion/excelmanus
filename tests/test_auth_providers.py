@@ -441,19 +441,25 @@ class TestCredentialResolver:
         assert CredentialResolver._match_provider("gemini-2.5-pro") is None
 
 
-class TestCodexOnlyRegistry:
-    def test_registry_only_registers_openai_codex(self):
+class TestProviderRegistry:
+    def test_registry_registers_builtin_providers(self):
         from excelmanus.auth.providers.registry import list_all
         names = set(list_all())
-        assert names == {"openai-codex"}
+        assert names == {
+            "openai-codex",
+            "workbuddy-cn",
+            "workbuddy-global",
+            "antigravity",
+        }
 
     def test_codex_profile_email_from_extra_data(self):
-        from excelmanus.auth.router import _codex_profile_email
+        from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
         profile = SimpleNamespace(
             extra_data=json.dumps({"email": "plus@example.com"}),
             access_token=None,
         )
-        assert _codex_profile_email(profile) == "plus@example.com"
+        info = OpenAICodexProvider().profile_display_info(profile)
+        assert info.get("email") == "plus@example.com"
 
 
 # ── OAuth State Token 加密测试 ────────────────────────────────
@@ -515,14 +521,29 @@ class TestOAuthStateToken:
         assert result["user_code"] == "WXYZ-9876"
 
     def test_loopback_callback_page_forwards_state_bound_code(self):
-        from excelmanus.auth.router import _codex_callback_page
+        from excelmanus.auth.router import _loopback_callback_page
 
-        page = _codex_callback_page(code="code-123", state="state-456", error="")
+        page = _loopback_callback_page(
+            message_type="codex-oauth-callback",
+            code="code-123", state="state-456", error="",
+        )
 
         assert '"type": "codex-oauth-callback"' in page
         assert '"code": "code-123"' in page
         assert '"state": "state-456"' in page
         assert "window.opener.postMessage" in page
+
+    def test_loopback_callback_page_forwards_error(self):
+        from excelmanus.auth.router import _loopback_callback_page
+
+        page = _loopback_callback_page(
+            message_type="antigravity-oauth-callback",
+            code="", state="", error="access_denied",
+        )
+
+        assert '"type": "antigravity-oauth-callback"' in page
+        assert '"error": "access_denied"' in page
+        assert '"code"' not in page
 
 
 # ── DB 迁移测试 ───────────────────────────────────────────────

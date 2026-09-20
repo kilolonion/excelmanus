@@ -81,6 +81,28 @@ npm run dist:win   # On Windows
 
 Run only the command for the current platform. Both commands rebuild the Web UI, stage the frontend and runtimes, package the backend, and invoke electron-builder. Artifacts are written to `desktop/dist/`. Staging synchronizes the desktop package and lockfile version with `pyproject.toml`.
 
+The Windows installation page uses a separate animated activity bar while work
+is in progress, then restores NSIS's completion/error display. The default bar
+mixes script progress with archive progress and can move backwards or stall
+around 70%; those values are not an overall installation percentage. The activity
+bar covers extraction, placing the bundled runtimes, removal of the previous
+version, and caching the new installer. These operations still need disk time;
+the animation does not estimate a percentage or time remaining.
+
+Extraction stages files in a unique directory **inside the destination**, then
+renames its top-level entries into place. This avoids electron-builder's second
+full Shell copy of thousands of small files, keeps moves on one volume, and
+inherits the destination's permissions. Brief move failures are retried; an
+existing target or persistent lock falls back to the original copy operation.
+Registry, shortcuts, upgrades and signed-uninstaller generation remain handled
+by the pinned electron-builder templates. A compile-time guard and native tests
+check that the extraction override is actually selected.
+
+Keep the default 7z payload. The pinned ZIP extraction plugin does not preserve
+UTF-8 archive filenames, including bundled Chinese filenames. The Windows
+installer regression test exercises the actual extraction plugin with Chinese
+filenames and installation paths, plus success, abort, and silent UI paths.
+
 For troubleshooting, the individual stages are available:
 
 ```bash
@@ -90,7 +112,26 @@ npm run prepare:backend
 
 `prepare:assets` includes the Web build and Python runtime preparation. Calling `prepare:frontend` and `prepare:runtime` alone does not produce a complete package.
 
-The staging script currently selects the official Node.js v22.23.2 distribution and checks it against the upstream SHA-256 manifest. The Python runtime is copied from uv's managed distribution and populated from `uv.lock`, including web, analysis, and VBA dependencies. The frozen backend executable must not be used as a Python interpreter for `run_code`.
+The staging script currently selects the official Node.js v22.23.2 distribution and checks it against the upstream SHA-256 manifest. The Python runtime is copied from uv's managed distribution and populated from the locked `desktop-runtime` dependency group: spreadsheet, document, analysis, plotting and VBA libraries. API/model/MCP dependencies remain in the frozen backend and are not duplicated in this interpreter. The managed interpreter's pip, IDLE, ensurepip and standard-library tests are excluded. Known dependency test suites and bytecode caches are removed; datasets, fonts, native libraries, runtime testing helpers and license metadata remain. Preparation runs offline feature checks before accepting the runtime. The frozen backend executable must not be used as a Python interpreter for `run_code`.
+
+Next.js `output: "standalone"` supplies the traced JS runtime dependencies.
+Staging additionally excludes its build cache and dependency test suites, type
+declarations and source maps. Application routes, public files, native modules
+and package metadata are retained. Do not replace tracing with a hand-picked
+list of top-level JS packages.
+
+To profile the real Windows extraction operations without registering an app:
+
+```powershell
+node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe'
+node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe' --fast
+```
+
+The first measures the upstream copy path; `--fast` measures the destination-local
+move path against the same payload. Results go to unique `.build/install-profile`
+directories. Run them sequentially without other builds for comparable timings.
+They measure file operations, not upgrade removal, registry writes or shortcuts.
+See [Windows installation measurements](../docs/windows-install-performance-20260920.md).
 
 ## Validate the packaged runtime
 
@@ -99,6 +140,22 @@ From `desktop/`:
 ```bash
 npm run smoke
 ```
+
+`npm run smoke:renderer` also runs offline checks in a real, hidden Electron
+window on Windows or macOS. It verifies the isolated menu bridge, native file
+payloads, Chinese download filenames, external links, and an OAuth popup's
+loopback callback without exposing the workspace bridge to that popup.
+It also verifies that unsaved changes can cancel closing and that a renderer
+closes after its unload guard is removed. Port 1455 must be available for the
+local callback fixture. No account or model
+credentials are needed. Both desktop CI targets run this before packaging.
+
+Desktop REST, multipart uploads, previews, exports and model-probe events use
+the launch-time backend origin. Regular Web REST requests retain their same-origin
+proxy when no runtime origin is configured. Selected native files retain their
+MIME type; the native menu limits each selection to 256 MB total and reports
+skipped files in the application. The initial window fits the display's usable
+area, including system scaling and the taskbar or Dock.
 
 This checks `.build` with developer tools removed from PATH. It covers frozen imports, workbook creation, pandas reading through bundled Python, frontend runtime origin, CORS, and model-profile persistence. It makes no language-model calls. Backend startup may connect to the default Exa MCP server; remote MCP availability is not a smoke-test acceptance condition.
 

@@ -51,7 +51,12 @@ async function installApi(context, initial = originalState) {
 
 async function practice(page, step) {
   const panel = page.locator('.em-tour-practice');
-  if (!await panel.count()) return;
+  if (!await panel.count()) {
+    const expand = page.getByRole('button',{name:'展开互动练习',exact:true});
+    if (!await expand.count()) return;
+    await expand.click();
+    await panel.waitFor();
+  }
   const prompt = panel.locator('input');
   const select = panel.locator('select');
   if (await prompt.count()) {
@@ -163,6 +168,7 @@ for (const engine of engines) {
     await page.locator('.em-tour-transition').waitFor(); await inside(page,'.em-tour-transition');
     await page.getByRole('button',{name:'跳过本节，前往设置引导',exact:true}).click();
     await page.getByRole('heading',{name:'管理模型供应商',exact:true}).waitFor();
+    await page.getByRole('button',{name:'展开互动练习',exact:true}).click();
     await page.locator('.em-tour-practice select').focus();
     assert.equal(await page.locator('.em-tour-practice select').evaluate(el=>document.activeElement===el),true);
     const ended = page.waitForResponse(res=>res.url().endsWith('/onboarding') && res.request().postDataJSON()?.coach_phase==='done');

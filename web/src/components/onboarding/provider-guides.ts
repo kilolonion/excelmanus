@@ -1,6 +1,9 @@
 import {
+  ANTIGRAVITY_OAUTH_PRESET,
   CODEX_OAUTH_PRESET,
   PROVIDER_PRESETS,
+  WORKBUDDY_CN_OAUTH_PRESET,
+  WORKBUDDY_GLOBAL_OAUTH_PRESET,
 } from "../settings/model/constants";
 
 export interface GuideStep {
@@ -136,13 +139,45 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     pricing: "使用 ChatGPT Plus/Pro 订阅，无需单独 API 充值",
     steps: [
       { title: "1. 登录 ChatGPT", description: "确保账号已开通 ChatGPT Plus/Pro 的 Codex 订阅能力。" },
-      { title: "2. 完成 Codex 授权", description: "进入「设置 → 模型配置」，使用 OpenAI Codex 区域的浏览器授权或 auth.json 完成连接。" },
-      { title: "3. 保存模型", description: "使用 openai-codex/gpt-6-astra 作为 Model ID，即可在模型选择器中使用 Codex。" },
+      { title: "2. 完成 Codex 授权", description: "进入「设置 → 模型 → 订阅与 OAuth」，使用 OpenAI Codex 区域的浏览器授权或 auth.json 完成连接。" },
+      { title: "3. 保存模型", description: "连接成功后自动创建模型档案，即可在模型选择器中使用 Codex。" },
+    ],
+  },
+  "workbuddy-cn": {
+    description: "腾讯 WorkBuddy/CodeBuddy 国内版订阅模型（GLM、Kimi、Hunyuan 等）",
+    pricing: "使用 WorkBuddy 订阅积分，无需单独 API 充值",
+    steps: [
+      { title: "1. 准备 WorkBuddy 账号", description: "确保账号已开通腾讯 WorkBuddy/CodeBuddy 国内版订阅。" },
+      { title: "2. 完成浏览器授权", description: "进入「设置 → 模型 → 订阅与 OAuth」，在「WorkBuddy 国内版」区域点击登录并完成浏览器授权。" },
+      { title: "3. 选择模型", description: "连接成功后从动态模型目录中选择模型保存，即可在模型选择器中使用。" },
+    ],
+  },
+  "workbuddy-global": {
+    description: "WorkBuddy 国际版订阅模型（GLM、Kimi、Hunyuan 等）",
+    pricing: "使用 WorkBuddy Global 订阅积分，无需单独 API 充值",
+    steps: [
+      { title: "1. 准备 WorkBuddy 账号", description: "确保账号已开通 WorkBuddy Global（workbuddy.ai）订阅。" },
+      { title: "2. 完成浏览器授权", description: "进入「设置 → 模型 → 订阅与 OAuth」，在「WorkBuddy Global」区域点击登录并完成浏览器授权。" },
+      { title: "3. 选择模型", description: "连接成功后从动态模型目录中选择模型保存，即可在模型选择器中使用。" },
+    ],
+  },
+  antigravity: {
+    description: "Google Antigravity 订阅模型（Claude、Gemini、GPT-OSS 统一网关）",
+    pricing: "使用 Google Antigravity / Cloud Code Assist 订阅额度，无需单独 API 充值",
+    steps: [
+      { title: "1. 准备 Google 账号", description: "确保 Google 账号具备 Antigravity / Cloud Code Assist 使用资格（Google One AI Premium 等）。" },
+      { title: "2. 完成 Google 授权", description: "进入「设置 → 模型 → 订阅与 OAuth」，在「Google Antigravity」区域点击登录，完成浏览器授权（本机回环回调）。" },
+      { title: "3. 选择模型", description: "连接成功后从模型目录中选择 Claude / Gemini 模型保存，即可在模型选择器中使用。" },
     ],
   },
 };
 
-const CANONICAL_PRESETS = [...PROVIDER_PRESETS, CODEX_OAUTH_PRESET];
+const OAUTH_PRESETS = [CODEX_OAUTH_PRESET, WORKBUDDY_CN_OAUTH_PRESET, WORKBUDDY_GLOBAL_OAUTH_PRESET, ANTIGRAVITY_OAUTH_PRESET];
+
+/** 订阅 OAuth 类供应商 id —— onboarding 中走授权引导而非 API Key 表单。 */
+export const OAUTH_PROVIDER_IDS: ReadonlySet<string> = new Set(OAUTH_PRESETS.map((p) => p.id));
+
+const CANONICAL_PRESETS = [...PROVIDER_PRESETS, ...OAUTH_PRESETS];
 
 export const PROVIDER_GUIDES: ProviderGuide[] = CANONICAL_PRESETS.map((preset) => ({
   id: preset.id,

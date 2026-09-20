@@ -14,9 +14,11 @@ import os
 import re
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.providers.antigravity import AntigravityClient
 from excelmanus.providers.claude import ClaudeClient
 from excelmanus.providers.gemini import GeminiClient
 from excelmanus.providers.openai_responses import OpenAIResponsesClient
+from excelmanus.providers.workbuddy import WorkBuddyClient, is_workbuddy_base_url
 
 if TYPE_CHECKING:
     import openai
@@ -66,26 +68,31 @@ def is_responses_api_enabled() -> bool:
 
 
 def normalize_openai_base_url(base_url: str) -> str:
-    """规范化 OpenAI 兼容 API 的 base_url：去尾斜杠、检测缺失 /v1。
+    """规范化 OpenAI 兼容 API 的 base_url：去尾斜杠、检测缺失版本段。
 
     仅对 OpenAI 兼容协议使用（非 Gemini/Anthropic 原生 API）。
+    已带版本段的路径（/v1、/v2、/api/v3 等）原样保留 —— 例如
+    WorkBuddy 的 /v2 不应被补成 /v2/v1。
     此函数为轻量级运行时规范化，与 config._normalize_base_url 互补。
     """
+    from urllib.parse import urlparse
+
     url = base_url.rstrip("/")
-    # 已经以 /v1 结尾 — 正常
-    if url.endswith("/v1"):
+    path = urlparse(url).path
+    # 已经以版本段结尾（/v1、/v2、/v1beta、/api/v3…）— 正常
+    if re.search(r"/v[\w.]+$", path):
         return url
-    # 路径中已有 /v1/（如 /v1/chat）→ 不自动修正，但记录日志
-    if "/v1/" in url:
+    # 路径中已有 /v1/、/v2/ 等（如 /v1/chat）→ 不自动修正，但记录日志
+    if re.search(r"/v[\w.]+/", path):
         logging.getLogger(__name__).warning(
-            "base_url %r 包含 /v1/ 后的额外子路径，"
+            "base_url %r 在版本段后包含额外子路径，"
             "OpenAI SDK 会自动拼接 /chat/completions，最终 URL 可能不正确。",
             base_url,
         )
         return url
-    # 缺失 /v1 — 自动补全
+    # 缺失版本段 — 自动补全 /v1
     logging.getLogger(__name__).info(
-        "base_url %r 未以 /v1 结尾，已自动补全为 %s/v1",
+        "base_url %r 未以版本段结尾，已自动补全为 %s/v1",
         base_url, url,
     )
     return url + "/v1"
@@ -116,6 +123,7 @@ def create_client(
     base_url: str,
     protocol: str = "auto",
     model: str = "",
+    default_headers: dict[str, str] | None = None,
 ) -> Any:
     """根据 protocol（或 base_url 自动检测）创建合适的 LLM 客户端。
 
@@ -135,6 +143,12 @@ def create_client(
     """
     normalized = (protocol or "auto").strip().lower()
 
+    if normalized == "antigravity":
+        # Cloud Code v1internal 端点不含版本段，跳过 /v1 规范化。
+        return AntigravityClient(
+            api_key=api_key, base_url=base_url,
+            default_headers=default_headers,
+        )
     if normalized == "gemini":
         return GeminiClient(api_key=api_key, base_url=base_url)
     if normalized == "anthropic":
@@ -146,10 +160,18 @@ def create_client(
             base_url = normalize_openai_base_url(base_url)
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
     if normalized == "openai":
+        base_url = normalize_openai_base_url(base_url)
+        if is_workbuddy_base_url(base_url):
+            return WorkBuddyClient(
+                api_key=api_key, base_url=base_url,
+                default_headers=default_headers,
+            )
         import openai
 
-        base_url = normalize_openai_base_url(base_url)
-        return openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+        return openai.AsyncOpenAI(
+            api_key=api_key, base_url=base_url,
+            default_headers=default_headers,
+        )
 
     # auto: 按 URL 模式自动检测（旧行为）
     if is_gemini_provider(base_url):
@@ -174,9 +196,17 @@ def create_client(
     base_url = normalize_openai_base_url(base_url)
     if is_responses_api_enabled():
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
+    if is_workbuddy_base_url(base_url):
+        return WorkBuddyClient(
+            api_key=api_key, base_url=base_url,
+            default_headers=default_headers,
+        )
     import openai
 
-    return openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+    return openai.AsyncOpenAI(
+        api_key=api_key, base_url=base_url,
+        default_headers=default_headers,
+    )
 
 
 __all__ = [
@@ -184,8 +214,11 @@ __all__ = [
     "normalize_openai_base_url",
     "is_gemini_provider",
     "is_claude_provider",
+    "is_workbuddy_base_url",
     "is_responses_api_enabled",
     "GeminiClient",
     "ClaudeClient",
     "OpenAIResponsesClient",
+    "WorkBuddyClient",
+    "AntigravityClient",
 ]

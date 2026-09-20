@@ -26,26 +26,45 @@ def list_all() -> dict[str, "AuthProvider"]:
 
 
 def match_provider(model: str) -> str | None:
-    """从规范化模型标识中提取 provider，并检查是否有对应的注册提供商。
+    """识别模型/档案名归属的订阅 provider。
 
-    优先从 ``provider/raw_model`` 格式提取；回退到 regex 匹配。
+    优先按 ``MODEL_NAME_PREFIX`` 前缀匹配；回退到 provider 自定义匹配。
     """
-    from excelmanus.config import parse_canonical_model
-
-    provider, _ = parse_canonical_model(model)
-    if provider != "unknown" and provider in _PROVIDERS:
-        return provider
-    for name, prov in _PROVIDERS.items():
-        if prov.matches_model(model):
+    prov = managed_provider_for(model)
+    if prov is not None:
+        return prov.provider_name
+    for name, p in _PROVIDERS.items():
+        if p.matches_model(model):
             return name
     return None
+
+
+def managed_provider_for(value: str) -> "AuthProvider | None":
+    """value 以某 provider 的 ``MODEL_NAME_PREFIX`` 开头时返回该 provider。"""
+    for p in _PROVIDERS.values():
+        if p.MODEL_NAME_PREFIX and value.startswith(p.MODEL_NAME_PREFIX):
+            return p
+    return None
+
+
+def strip_managed_prefix(value: str) -> str:
+    """剥离订阅档案前缀得到真实模型 ID；非订阅档案原样返回。"""
+    p = managed_provider_for(value)
+    if p is None:
+        return value
+    return p.model_from_profile_name(value) or value[len(p.MODEL_NAME_PREFIX):]
 
 
 # ── 自动注册所有内置 provider ──────────────────────────────────
 
 def _register_builtins() -> None:
+    from excelmanus.auth.providers.antigravity import AntigravityProvider
     from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    from excelmanus.auth.providers.workbuddy import WorkBuddyProvider
     register(OpenAICodexProvider())
+    register(AntigravityProvider())
+    for realm in WorkBuddyProvider.REALMS:
+        register(WorkBuddyProvider(realm))
 
 
 _register_builtins()

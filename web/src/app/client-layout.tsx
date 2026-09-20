@@ -9,6 +9,7 @@ import { BackgroundTasks } from "@/components/chat/BackgroundTasks";
 import { WorkbookPanelButton } from "@/components/excel/WorkbookPanelButton";
 import { JevTimelineButton, JevTimelineDrawer } from "@/components/chat/JevTimeline";
 import { SessionSync } from "@/components/providers/SessionSync";
+import { DesktopMenuBridge } from "@/components/providers/DesktopMenuBridge";
 import { ExcelDataRecovery } from "@/components/providers/ExcelDataRecovery";
 import { PlaceholderAlert } from "@/components/modals/PlaceholderAlert";
 import { useOnboardingStore } from "@/stores/onboarding-store";
@@ -101,6 +102,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
         <WorkspaceOverlays />
         <FilePreviewHost />
         <SessionSync />
+        <DesktopMenuBridge />
         <ExcelDataRecovery />
         <PlaceholderAlert />
       </div>

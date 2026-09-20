@@ -152,6 +152,7 @@ export function ChatUploadButton({ onPick }: ChatUploadButtonProps) {
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
+              data-coach-id="coach-upload-button"
               variant="ghost"
               size="icon"
               className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"

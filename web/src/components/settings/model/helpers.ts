@@ -35,6 +35,10 @@ export function inferProfileProvider(profile: Pick<ProfileEntry, "model" | "base
   const modelPrefix = model.split("/")[0];
 
   if (model.startsWith("openai-codex/")) return "openai-codex";
+  if (model.startsWith("workbuddy-global/") || baseUrl.includes("workbuddy.ai")) return "workbuddy-global";
+  if (model.startsWith("workbuddy-cn/") || model.startsWith("workbuddy/") || baseUrl.includes("copilot.tencent.com") || baseUrl.includes("codebuddy.cn")) return "workbuddy-cn";
+  // antigravity 模型 ID 内含 claude-/gemini-/gpt-oss，必须先于品牌推断命中
+  if (model.startsWith("antigravity/") || protocol === "antigravity" || baseUrl.includes("cloudcode-pa.googleapis.com")) return "antigravity";
   if (baseUrl.includes("openrouter.ai") || protocol === "openrouter") return "openrouter";
   if (model.includes("grok") || baseUrl.includes("x.ai") || baseUrl.includes("xai") || family === "xai") return "xai";
   if (model.includes("moonshot") || model.includes("kimi") || baseUrl.includes("moonshot") || family === "moonshot") return "moonshot";
@@ -107,13 +111,49 @@ export function isCodexProfile(profile: Pick<ProfileEntry, "model">): boolean {
   return (profile.model || "").startsWith("openai-codex/");
 }
 
+export function isAntigravityProfile(profile: Pick<ProfileEntry, "model">): boolean {
+  return (profile.model || "").startsWith("antigravity/");
+}
+
+/** WorkBuddy 订阅模型前缀（按 realm 拆分；末尾 "workbuddy/" 为旧版兼容）。 */
+export const WORKBUDDY_MODEL_PREFIXES = ["workbuddy-cn/", "workbuddy-global/", "workbuddy/"] as const;
+
+/** 返回该档案归属的 WorkBuddy realm 前缀，非 WorkBuddy 档案返回 null。 */
+export function workbuddyProfilePrefix(profile: Pick<ProfileEntry, "model">): string | null {
+  const model = profile.model || "";
+  return WORKBUDDY_MODEL_PREFIXES.find((p) => model.startsWith(p)) ?? null;
+}
+
+export function isWorkBuddyProfile(profile: Pick<ProfileEntry, "model">): boolean {
+  return workbuddyProfilePrefix(profile) !== null;
+}
+
+/** 订阅 OAuth 管理档案（openai-codex/、workbuddy-*、antigravity/ 等前缀模型）。 */
+export function isSubscriptionProfile(profile: Pick<ProfileEntry, "model">): boolean {
+  return isCodexProfile(profile) || isWorkBuddyProfile(profile) || isAntigravityProfile(profile);
+}
+
+/** 返回该档案归属的订阅 provider 模型前缀，非订阅档案返回 null。 */
+export function subscriptionModelPrefix(profile: Pick<ProfileEntry, "model">): string | null {
+  if (isCodexProfile(profile)) return "openai-codex/";
+  if (isAntigravityProfile(profile)) return "antigravity/";
+  return workbuddyProfilePrefix(profile);
+}
+
 export function isProfileConnected(profile: ProfileEntry): boolean {
-  return isCodexProfile(profile) || Boolean(profile.api_key);
+  return isSubscriptionProfile(profile) || Boolean(profile.api_key);
 }
 
 const OFFICIAL_HOST_MARKERS: Record<string, string[]> = {
   openai: ["api.openai.com"],
   "openai-codex": ["api.openai.com"],
+  "workbuddy-cn": ["copilot.tencent.com", "codebuddy.cn", "www.codebuddy.cn"],
+  "workbuddy-global": ["workbuddy.ai", "www.workbuddy.ai"],
+  antigravity: [
+    "cloudcode-pa.googleapis.com",
+    "daily-cloudcode-pa.googleapis.com",
+    "daily-cloudcode-pa.sandbox.googleapis.com",
+  ],
   anthropic: ["api.anthropic.com"],
   gemini: ["generativelanguage.googleapis.com"],
   deepseek: ["api.deepseek.com"],
@@ -154,6 +194,9 @@ export function isOfficialProviderEndpoint(baseUrl: string, providerId: string):
 
 export function getProfileProviderId(profile: ProfileEntry): string {
   if (isCodexProfile(profile)) return "openai-codex";
+  if (isAntigravityProfile(profile)) return "antigravity";
+  const wbPrefix = workbuddyProfilePrefix(profile);
+  if (wbPrefix) return wbPrefix === "workbuddy-global/" ? "workbuddy-global" : "workbuddy-cn";
   const inferred = inferProfileProvider(profile);
   if (inferred && (!profile.base_url.trim() || isOfficialProviderEndpoint(profile.base_url, inferred))) {
     return inferred;

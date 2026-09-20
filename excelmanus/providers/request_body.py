@@ -117,7 +117,8 @@ def compile_provider_body(protocol: str, chat: dict) -> dict:
         return claude_body(model, messages, args.get("tools"), tool_choice=args.get("tool_choice"),
             thinking_enabled=args.get("_thinking_enabled", False), thinking_budget=args.get("_thinking_budget", 0),
             thinking_effort=args.get("_thinking_effort") or "", extra_body=args.get("extra_body"), max_tokens=args.get("max_tokens"))
-    if protocol == "gemini":
+    if protocol in ("gemini", "antigravity"):
+        # Antigravity 复用 Gemini 载荷编译；v1internal 信封由客户端包装。
         return gemini_body(model, messages, args.get("tools"), tool_choice=args.get("tool_choice"),
             thinking_budget=args.get("_thinking_budget", 0), thinking_level=args.get("_thinking_level") or "",
             extra_body=args.get("extra_body"))

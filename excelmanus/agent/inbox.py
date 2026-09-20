@@ -19,8 +19,10 @@ _KIND_TARGET: dict[str, InboxTarget] = {
     "inject": "next-step",
 }
 _SNAPSHOT_EXTRA_KEYS = (
+    "context_input",
     "chat_mode", "slash_command", "raw_args", "images", "prompt_kind",
     "resumed_from", "resume_task", "resume_interaction",
+    "workbook_events", "workbook_event_count", "workbook_paths",
 )
 
 

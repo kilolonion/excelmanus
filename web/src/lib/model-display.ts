@@ -1,4 +1,4 @@
-const CODEX_OAUTH_MODEL_PREFIX = "openai-codex/";
+const SUBSCRIPTION_MODEL_PREFIXES = ["openai-codex/", "workbuddy-cn/", "workbuddy-global/", "workbuddy/", "antigravity/"];
 const PLACEHOLDER_MODEL_IDS = new Set(["test-model", "dummy-model", "placeholder-model"]);
 
 export function isPlaceholderModelId(id: string | null | undefined): boolean {
@@ -7,13 +7,12 @@ export function isPlaceholderModelId(id: string | null | undefined): boolean {
 }
 
 /**
- * Keep raw model ids for storage/API, but hide Codex OAuth provider prefix in UI.
+ * Keep raw model ids for storage/API, but hide subscription OAuth provider prefix in UI.
  */
 export function formatModelIdForDisplay(modelId: string | null | undefined): string {
   if (!modelId) return "";
-  return modelId.startsWith(CODEX_OAUTH_MODEL_PREFIX)
-    ? modelId.slice(CODEX_OAUTH_MODEL_PREFIX.length)
-    : modelId;
+  const prefix = SUBSCRIPTION_MODEL_PREFIXES.find((p) => modelId.startsWith(p));
+  return prefix ? modelId.slice(prefix.length) : modelId;
 }
 
 export function displayModelLabel(m: {

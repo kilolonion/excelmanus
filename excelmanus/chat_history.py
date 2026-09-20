@@ -166,6 +166,30 @@ class ChatHistoryStore:
         )
         self._conn.commit()
 
+    def rebind_session_workspace(
+        self,
+        session_id: str,
+        workspace_path: str,
+        workspace_id: str | None,
+    ) -> bool:
+        """Move a still-blank session to another workspace.
+
+        The WHERE clause re-checks blank/message_count so a session that
+        committed work between the eligibility check and this write is never
+        re-pointed. Returns True when the row was updated.
+        """
+        if not session_id or not workspace_path:
+            return False
+        now = self._next_updated_at()
+        cur = self._conn.execute(
+            "UPDATE sessions SET workspace_path = ?, workspace_id = ?, "
+            "updated_at = ? WHERE id = ? AND blank = 1 "
+            "AND COALESCE(message_count, 0) = 0",
+            (workspace_path, workspace_id, now, session_id),
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0) > 0
+
     def backfill_workspace_paths(
         self, workspace_path: str, workspace_id: str | None = None
     ) -> int:

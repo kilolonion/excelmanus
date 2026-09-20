@@ -1,4 +1,15 @@
 export type WorkspaceSurface = "chat" | "excel" | "word" | "compare";
+export type WorkbookViewLayout = "embedded" | "split";
+
+export function workspaceLayout(surface: WorkspaceSurface, layout: WorkbookViewLayout, isMobile: boolean) {
+  const split = surface === "excel" && layout === "split" && !isMobile;
+  return {
+    split,
+    chatVisible: surface === "chat" || split,
+    composerVisible: surface !== "compare" && (surface !== "excel" || !isMobile),
+    fullHeightSheet: surface === "compare" || (surface === "excel" && (split || isMobile)),
+  };
+}
 
 export function resolveWorkspaceSurface(input: {
   wordFullViewPath: string | null;

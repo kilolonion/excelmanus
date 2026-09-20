@@ -862,26 +862,28 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
 
     # 保留 profile 级坐标用于缓存键（与 GET 端点一致），
-    # 同时剥离 Codex 前缀得到 API 实际使用的模型 ID。
+    # 同时剥离订阅前缀（openai-codex/、workbuddy/）得到 API 实际使用的模型 ID。
     cache_model, cache_base_url = model, base_url
     api_model = model
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-    if OpenAICodexProvider.is_codex_profile_name(model):
-        _real = OpenAICodexProvider.model_from_profile_name(model)
-        api_model = _real if _real else model[len(OpenAICodexProvider.MODEL_NAME_PREFIX):]
+    from excelmanus.auth.providers.registry import managed_provider_for, strip_managed_prefix
+    if managed_provider_for(model) is not None:
+        api_model = strip_managed_prefix(model)
 
-    # 优先尝试当前用户的运行时凭据（如 Codex OAuth access token），
-    # 以便能通过 backend-api 执行真实探测并写入缓存。
+    # 优先尝试当前用户的运行时凭据（如订阅 OAuth access token），
+    # 以便能通过上游端点执行真实探测并写入缓存。
+    # 注意用带前缀的原始 model 解析：前缀匹配优先于裸模型名匹配。
     _resolver = getattr(getattr(request, "app", None).state, "credential_resolver", None)
+    _extra_headers: dict[str, str] | None = None
     if _resolver is not None:
         try:
-            _resolved_cred = _resolver.resolve_sync(api_model)
+            _resolved_cred = _resolver.resolve_sync(model)
             if _resolved_cred:
                 api_key = _resolved_cred.api_key or api_key
                 if _resolved_cred.base_url:
                     base_url = _resolved_cred.base_url
                 if _resolved_cred.protocol:
                     resolved_protocol = _resolved_cred.protocol
+                _extra_headers = _resolved_cred.extra_headers
         except Exception:
             logger.debug("能力探测解析运行时凭证失败", exc_info=True)
 
@@ -909,7 +911,10 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
             )
 
     req_protocol = body.get("protocol") or resolved_protocol
-    client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
+    client = create_client(
+        api_key=api_key, base_url=base_url, protocol=req_protocol,
+        default_headers=_extra_headers,
+    )
 
     try:
         caps = await run_full_probe(
@@ -951,9 +956,10 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
     targets: list[tuple[str, str, str, str, str]] = []
 
     profiles = get_config_store().list_profiles() if get_config_store() else []
+    from excelmanus.auth.providers.registry import managed_provider_for as _managed_prov
     for p in profiles:
-        # Codex OAuth 档案使用用户订阅凭据，不走通用 API Key 探测
-        if p.get("model", "").startswith("openai-codex/"):
+        # 订阅 OAuth 档案使用用户订阅凭据，不走通用 API Key 探测
+        if _managed_prov(p.get("model", "")) is not None:
             continue
         p_model, p_base_url, p_api_key, p_protocol = _profile_connection(
             p, default_protocol=get_config().protocol or "auto",
@@ -1001,7 +1007,7 @@ def _build_probe_targets(
 ) -> list["ProbeTargetSpec"]:
     """将 profile 名列表或 all=True 解析为 ProbeTargetSpec 列表。"""
     from excelmanus.capability_probe_jobs import ProbeTargetSpec
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    from excelmanus.auth.providers.registry import managed_provider_for, strip_managed_prefix
 
     assert get_config() is not None
     default_protocol = get_config().protocol or "auto"
@@ -1035,14 +1041,11 @@ def _build_probe_targets(
         else:
             continue
 
-        if model.startswith("openai-codex/"):
+        if managed_provider_for(model) is not None:
             continue
 
         cache_model = model
-        api_model = model
-        if OpenAICodexProvider.is_codex_profile_name(model):
-            real = OpenAICodexProvider.model_from_profile_name(model)
-            api_model = real if real else model[len(OpenAICodexProvider.MODEL_NAME_PREFIX):]
+        api_model = strip_managed_prefix(model)
 
         dedup_key = f"{cache_model}|{base_url}"
         if dedup_key in seen_keys:
@@ -1071,7 +1074,7 @@ async def create_probe_job(request: Request) -> JSONResponse:
     mgr = _get_probe_job_mgr()
 
     from excelmanus.capability_probe_jobs import ProbeTargetSpec
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    from excelmanus.auth.providers.registry import strip_managed_prefix
 
     body: dict = {}
     try:
@@ -1091,21 +1094,21 @@ async def create_probe_job(request: Request) -> JSONResponse:
     elif req_model:
         model, base_url, api_key, protocol = _resolve_model_info(None, req_model, body.get("base_url"))
         cache_model = model
-        api_model = model
-        if OpenAICodexProvider.is_codex_profile_name(model):
-            real = OpenAICodexProvider.model_from_profile_name(model)
-            api_model = real if real else model[len(OpenAICodexProvider.MODEL_NAME_PREFIX):]
+        api_model = strip_managed_prefix(model)
 
         _resolver = getattr(getattr(request, "app", None).state, "credential_resolver", None)
+        _extra_headers: dict[str, str] | None = None
         if _resolver is not None:
             try:
-                _resolved_cred = _resolver.resolve_sync(api_model)
+                # 用带前缀的原始 model 解析：前缀匹配优先于裸模型名匹配
+                _resolved_cred = _resolver.resolve_sync(model)
                 if _resolved_cred:
                     api_key = _resolved_cred.api_key or api_key
                     if _resolved_cred.base_url:
                         base_url = _resolved_cred.base_url
                     if _resolved_cred.protocol:
                         protocol = _resolved_cred.protocol
+                    _extra_headers = _resolved_cred.extra_headers
             except Exception:
                 logger.debug("probe job 解析运行时凭证失败", exc_info=True)
 
@@ -1117,6 +1120,7 @@ async def create_probe_job(request: Request) -> JSONResponse:
             api_key=api_key,
             protocol=protocol,
             thinking_mode=body.get("thinking_mode", "auto"),
+            extra_headers=_extra_headers,
         )]
     else:
         targets = _build_probe_targets(None, probe_all=False)
@@ -1278,17 +1282,19 @@ async def test_model_connection(request: Request) -> JSONResponse:
     req_model = body.get("model")
     req_base_url = body.get("base_url")
 
-    # Codex OAuth 档案使用用户订阅凭据，无法用通用 API Key 测试
+    # 订阅 OAuth 档案使用用户订阅凭据，无法用通用 API Key 测试
     _test_model_id = req_model or ""
     if not _test_model_id and req_name and get_config_store():
         _tp = get_config_store().get_profile(req_name)
         if _tp:
             _test_model_id = _tp.get("model", "")
-    if _test_model_id.startswith("openai-codex/"):
+    from excelmanus.auth.providers.registry import managed_provider_for as _managed_for
+    _sub_prov = _managed_for(_test_model_id)
+    if _sub_prov is not None:
         return JSONResponse(content={
             "ok": True,
             "model": _test_model_id,
-            "note": "Codex OAuth 模型使用用户订阅凭据，无需通用 API Key 测试",
+            "note": "订阅 OAuth 模型使用用户订阅凭据，无需通用 API Key 测试",
         })
 
     model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
@@ -1559,6 +1565,34 @@ async def list_remote_models(request: Request) -> JSONResponse:
         stored_protocol = str(profile.get("protocol") or "").strip().lower()
         if stored_protocol:
             protocol = stored_protocol
+
+    # 订阅（OAuth）档案没有 API Key，/models 探测不可用；
+    # 直接返回 provider 的模型目录，供「添加模型」下拉使用。
+    if profile is not None:
+        from excelmanus.auth.providers.registry import managed_provider_for as _managed_for
+        _sub_prov = _managed_for(str(profile.get("name") or "")) or _managed_for(
+            str(profile.get("model") or "")
+        )
+        if _sub_prov is not None:
+            _cred_store = getattr(request.app.state, "credential_store", None)
+            _record = (
+                _cred_store.get_active_profile(_sub_prov.provider_name)
+                if _cred_store is not None else None
+            )
+            try:
+                _entries = await _sub_prov.list_model_entries(_record)
+            except Exception:
+                _entries = []
+            return JSONResponse(content={
+                "models": [
+                    {
+                        "id": e.get("public_model_id") or e.get("profile_name") or e["model"],
+                        "owned_by": e.get("display_name") or e["model"],
+                    }
+                    for e in _entries
+                ],
+            })
+
     api_key = _resolve_list_remote_api_key(
         request_key=_usable_api_key(body.get("api_key")),
         profile=profile,
@@ -1652,12 +1686,13 @@ async def check_model_placeholder(request: Request) -> JSONResponse:
 
     results: list[dict] = []
 
+    from excelmanus.auth.providers.registry import managed_provider_for as _managed_for
     profiles = get_config_store().list_profiles() if get_config_store() else []
     if not profiles:
         results.append({"name": "active", "field": "model", "model": ""})
     for p in profiles:
         p_api_key = p.get("api_key") or ""
-        if not p.get("model", "").startswith("openai-codex/") and _is_placeholder(p_api_key):
+        if _managed_for(p.get("model", "")) is None and _is_placeholder(p_api_key):
             results.append({"name": p["name"], "field": "api_key", "model": p["model"]})
         if not p.get("model") or not str(p.get("model")).strip():
             results.append({"name": p["name"], "field": "model", "model": ""})

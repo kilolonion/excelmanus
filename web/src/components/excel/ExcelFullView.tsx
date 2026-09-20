@@ -2,7 +2,8 @@
 
 import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import { Check, XCircle } from "lucide-react";
+import { Check, XCircle, FolderOpen, FileSpreadsheet } from "lucide-react";
+import { useWorkbookConversationStore, type WorkbookViewState } from "@/stores/workbook-conversation-store";
 import { useShallow } from "zustand/react/shallow";
 import { FileHistoryWorkspace } from "@/components/history/FileHistoryWorkspace";
 import { ExcelRibbonChrome } from "@/components/excel/ExcelRibbonChrome";
@@ -51,6 +52,8 @@ export function ExcelFullView() {
   const {
     fullViewPath,
     fullViewSheet,
+    fullViewLayout,
+    openFullView,
     closeFullView,
     openPanel,
     selectionMode,
@@ -69,6 +72,8 @@ export function ExcelFullView() {
     useShallow((s) => ({
       fullViewPath: s.fullViewPath,
       fullViewSheet: s.fullViewSheet,
+      fullViewLayout: s.fullViewLayout,
+      openFullView: s.openFullView,
       closeFullView: s.closeFullView,
       openPanel: s.openPanel,
       selectionMode: s.selectionMode,
@@ -89,9 +94,14 @@ export function ExcelFullView() {
   const session = useSessionStore((s) => s.sessions.find((item) => item.id === s.activeSessionId));
   const viewGeneration = useExcelStore((s) => s.viewGeneration);
   const workspaceKey = workspaceKeyFromSession(session);
+  const boundWorkspaceKey = useExcelStore((s) => s.activeWorkspaceKey);
+  const reportView = useCallback((view: WorkbookViewState) => {
+    if (!fullViewPath || !session || useSessionStore.getState().activeSessionId !== session.id) return;
+    useWorkbookConversationStore.getState().observe(session.id, fileRefFromSession(fullViewPath, session), view);
+  }, [fullViewPath, session]);
   const [lastTarget, setLastTarget] = useState<ReturnType<typeof rememberFullViewTarget>>(null);
   const target = rememberFullViewTarget(
-    { path: fullViewPath, sheet: fullViewSheet, workspaceKey },
+    { path: boundWorkspaceKey === workspaceKey ? fullViewPath : null, sheet: fullViewSheet, workspaceKey },
     lastTarget,
   );
   if (
@@ -111,11 +121,8 @@ export function ExcelFullView() {
   const [withStyles, setWithStyles] = useState(true);
   const [draftCellValue, setDraftCellValue] = useState<string | undefined>(undefined);
 
-  const handleRangeSelected = useCallback((range: string, sheet: string, cellValue?: string) => {
+  const handleRangeSelected = useCallback((range: string, sheet: string, cellValue?: string, contentVersion?: string) => {
     const path = displayPath || undefined;
-    const contentVersion = path
-      ? useExcelStore.getState().getContentVersion(path) ?? undefined
-      : undefined;
     setDraftRange({ range, sheet, path, contentVersion });
     setDraftCellValue(cellValue);
   }, [setDraftRange, displayPath]);
@@ -126,10 +133,12 @@ export function ExcelFullView() {
         filePath: displayPath,
         sheet: draftRange.sheet,
         range: draftRange.range,
+        contentVersion: draftRange.contentVersion,
       });
+      if (isMobile) closeFullView();
     }
     setDraftCellValue(undefined);
-  }, [draftRange, displayPath, confirmSelection]);
+  }, [draftRange, displayPath, confirmSelection, isMobile, closeFullView]);
 
   const handleCancelRange = useCallback(() => {
     setDraftCellValue(undefined);
@@ -152,9 +161,14 @@ export function ExcelFullView() {
 
   const handleSwitchToPanel = useCallback(() => {
     if (!fullViewPath) return;
+    if (!isMobile) {
+      const current = activeSessionId ? useWorkbookConversationStore.getState().targets[activeSessionId] : undefined;
+      openFullView(fullViewPath, current?.sheet ?? fullViewSheet ?? undefined, fullViewLayout === "split" ? "embedded" : "split");
+      return;
+    }
     openPanel(fullViewPath, fullViewSheet ?? undefined);
     closeFullView();
-  }, [fullViewPath, fullViewSheet, openPanel, closeFullView]);
+  }, [fullViewPath, fullViewSheet, fullViewLayout, openFullView, activeSessionId, isMobile, openPanel, closeFullView]);
 
   const fileUrl = useMemo(
     () => (displayPath ? buildExcelFileUrl(displayPath, activeSessionId, session?.workspaceId) : ""),
@@ -174,7 +188,15 @@ export function ExcelFullView() {
     : "";
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-w-0">
+      <div className="flex items-center gap-2 border-b px-3 py-2 shrink-0 text-sm">
+        <FileSpreadsheet className="h-4 w-4 shrink-0 text-[var(--em-primary)]" />
+        <span className="truncate flex-1" title={fileName}>{fileName}</span>
+        <button type="button" onClick={() => useWorkbookConversationStore.getState().openPicker(fullViewLayout)}
+          className="flex items-center gap-1.5 rounded-md px-2 py-1.5 hover:bg-muted shrink-0 text-xs">
+          <FolderOpen className="h-4 w-4" />打开表格
+        </button>
+      </div>
       <div className="relative flex-1 min-h-0 overflow-hidden">
         <UniverSheet
           active={Boolean(fullViewPath) && panelTab === "sheet"}
@@ -187,6 +209,7 @@ export function ExcelFullView() {
           onRangeSelected={handleRangeSelected}
           withStyles={withStyles}
           onCellEdit={handleCellEdit}
+          onViewState={reportView}
           historyActive={panelTab === "history"}
           onNativeRibbonTab={() => setPanelTab("sheet")}
           ribbonSlot={
@@ -202,7 +225,7 @@ export function ExcelFullView() {
               onRefresh={handleRefresh}
               onDownload={() => downloadFile(displayPath, fileName, activeSessionId, session?.workspaceId).catch(() => {})}
               onExpand={handleSwitchToPanel}
-              expandTitle="切换到侧边面板"
+              expandTitle={isMobile ? "切换到侧边面板" : fullViewLayout === "split" ? "切换到内嵌表格" : "切换到并排对话"}
               onClose={closeFullView}
             />
           }

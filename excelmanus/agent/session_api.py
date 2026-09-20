@@ -74,6 +74,7 @@ async def followup(
     approval_resolver: ApprovalResolver | None = None,
     question_resolver: QuestionResolver | None = None,
     chat_mode: str = "write",
+    context_input: dict[str, Any] | None = None,
 ) -> ChatResult:
     """用户后续：控制面处理完毕后入 inbox next-turn 并 wakeup。
 
@@ -184,6 +185,7 @@ async def followup(
             "approval_resolver": approval_resolver,
             "question_resolver": question_resolver,
             "chat_mode": chat_mode,
+            "context_input": context_input or {},
         },
     )
     result = await engine._driver.wait_for_item(item)
@@ -343,6 +345,9 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     from excelmanus.system_one.host import maybe_record_turn_exposure
 
     await maybe_record_turn_exposure(engine, user_message, on_event=on_event)
+    from excelmanus.system_one.intent_context import suggest_context
+
+    context_advice = await suggest_context(engine, user_message, extra.get("context_input"), on_event=on_event)
 
     from excelmanus.prompt.skill_catalog import prepare_skill_followup
     route_result, skill_invocation = prepare_skill_followup(
@@ -365,6 +370,8 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     )
     engine._last_route_result = route_result
     _add_user_turn_to_memory(user_message)
+    if context_advice:
+        engine._memory.add_user_message(context_advice, hidden=True, prompt_kind="jev_context_advice")
     if skill_invocation:
         engine._memory.add_user_message(
             skill_invocation, hidden=True, prompt_kind="skill_invocation",

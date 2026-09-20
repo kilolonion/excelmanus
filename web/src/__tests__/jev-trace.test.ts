@@ -4,6 +4,13 @@ import {
   jevEmptyCopy,
   parseJevTrace,
   packTitle,
+  traceStatus,
+  traceActionLabel,
+  traceNeedsAttention,
+  summarizeTraces,
+  formatConfidence,
+  formatLatency,
+  formatContextAnswer,
 } from "@/lib/jev-trace";
 import { useJevStore } from "@/stores/jev-store";
 import { dispatchSSEEvent } from "@/lib/sse-event-handler";
@@ -80,10 +87,62 @@ describe("jev-trace", () => {
   });
 
   it("marks deny and unavailable tones", () => {
-    expect(cardTone(makeTrace({ kind: "deny", action: "deny" })!)).toBe("deny");
-    expect(cardTone(makeTrace({ kind: "ask", action: "ask" })!)).toBe("ask");
+    expect(cardTone(makeTrace({ kind: "deny", action: "deny", gate: "enforce", applied: true })!)).toBe("deny");
+    expect(cardTone(makeTrace({ kind: "ask", action: "ask", gate: "enforce", applied: true })!)).toBe("ask");
     expect(cardTone(makeTrace({ transport: "unavailable" })!)).toBe("unavailable");
     expect(cardTone(makeTrace({ applied: true, gate: "enforce" })!)).toBe("applied");
+  });
+
+  it("does not present an observed denial as an actual intervention", () => {
+    const trace = makeTrace({ kind: "deny", action: "deny" })!;
+    expect(cardTone(trace)).toBe("shadow");
+    expect(traceStatus(trace).label).toBe("仅观察");
+    expect(traceActionLabel(trace)).toBe("建议拒绝");
+    expect(traceNeedsAttention(trace)).toBe(false);
+  });
+
+  it("distinguishes skipped, failed, unapplied, and advisory outcomes", () => {
+    expect(traceStatus(makeTrace({ gate: "off", transport: "unavailable" })!).label).toBe("已跳过");
+    expect(traceStatus(makeTrace({ gate: "enforce", applied: false })!).label).toBe("未采纳");
+    expect(traceStatus(makeTrace({ pack: "context.resolve", gate: "enforce", applied: true })!).label).toBe("已提供建议");
+    const routed = makeTrace({
+      pack: "context.resolve", gate: "enforce", applied: true,
+      answers: { routed_workspace: "销售" },
+    })!;
+    expect(traceStatus(routed).label).toBe("已路由工作区");
+    expect(traceStatus(routed).description).toContain("销售");
+    for (const reason of ["error:timeout", "unavailable", "budget_exhausted", "provider_cooldown"]) {
+      const trace = makeTrace({ reason })!;
+      expect(traceStatus(trace).label).toBe("已回退");
+      expect(cardTone(trace)).toBe("unavailable");
+      expect(traceNeedsAttention(trace)).toBe(true);
+    }
+  });
+
+  it("keeps valid context advice visible even when tool exposure is off", () => {
+    const skipped = makeTrace({ gate: "off", reason: "disabled" })!;
+    const advice = makeTrace({ pack: "context.resolve", gate: "enforce", applied: true })!;
+    expect(jevEmptyCopy({ streaming: false, traces: [advice, skipped] })).toBe("");
+  });
+
+  it("counts actual evaluations and excludes missing latency from the mean", () => {
+    const traces = [
+      makeTrace({ latency_ms: 200, gate: "enforce", applied: true })!,
+      makeTrace({ latency_ms: 400 })!,
+      makeTrace({ latency_ms: 0, reason: "disabled", gate: "off" })!,
+      makeTrace({ latency_ms: 0, reason: "budget_exhausted" })!,
+    ];
+    expect(summarizeTraces(traces)).toEqual({ evaluated: 2, applied: 1, attention: 1, meanMs: 300 });
+  });
+
+  it("formats readable answers and rejects invalid measurements", () => {
+    expect(formatContextAnswer("domain", "spreadsheet_write")).toBe("表格编辑");
+    expect(formatContextAnswer("needs_write", 0.91)).toBe("91%");
+    expect(formatContextAnswer("needs_user", false)).toBe("否");
+    for (const value of [NaN, Infinity, -0.1, 1.1]) expect(formatConfidence(value)).toBeNull();
+    expect(formatLatency(Infinity)).toBe("—");
+    expect(formatLatency(1250)).toBe("1.25 s");
+    expect(makeTrace({ latency_ms: Infinity })!.latencyMs).toBe(0);
   });
 
   it("handler accumulates live jev_trace and skips replay", () => {

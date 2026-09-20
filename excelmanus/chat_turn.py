@@ -94,6 +94,7 @@ async def run_engine_followup(
     chat_mode: str = "write",
     display_text: str | None = None,
     mention_contexts: list[ResolvedMention] | None = None,
+    context_input: dict[str, Any] | None = None,
 ) -> ChatTurnOutcome:
     """按网页直聊参数调用 ``engine.followup``。
 
@@ -101,12 +102,14 @@ async def run_engine_followup(
     """
     if display_text is None:
         display_text, mention_contexts = await resolve_mentions(message, engine)
+    context_kwargs = {"context_input": context_input} if context_input else {}
     result = await engine.followup(
         display_text,
         on_event=on_event,
         mention_contexts=mention_contexts,
         images=images or [],
         chat_mode=chat_mode,
+        **context_kwargs,
     )
     return ChatTurnOutcome(
         result=result,

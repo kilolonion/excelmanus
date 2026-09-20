@@ -265,3 +265,31 @@ class TestEngineThinkingInjection:
         )
         assert new_tc.effort == "high"
         assert new_tc.budget_tokens == 6000
+
+
+class TestNormalizedThinkingStrategies:
+    def test_deepseek_first_strategy_is_thinking_type_enabled(self):
+        from excelmanus.model_probe import _get_thinking_strategies
+        strategies = _get_thinking_strategies("deepseek", "deepseek-flash")
+        assert strategies[0][0] == "ds_thinking"
+        assert strategies[0][2] == "glm_thinking"
+        names = [s[0] for s in strategies]
+        assert "plain" in names
+
+    def test_claude_model_via_generic_proxy_gets_claude_compat(self):
+        from excelmanus.model_probe import _get_thinking_strategies
+        strategies = _get_thinking_strategies("generic", "anthropic/claude-sonnet-5")
+        names = [s[0] for s in strategies]
+        assert "claude_compat_thinking" in names
+
+    def test_openai_prefixed_model_gets_openai_reasoning(self):
+        from excelmanus.model_probe import _get_thinking_strategies
+        strategies = _get_thinking_strategies("openai", "openai/gpt-5.6-terra")
+        names = [s[0] for s in strategies]
+        assert "openai_reasoning" in names
+
+    def test_gpt4o_still_excluded_from_openai_reasoning(self):
+        from excelmanus.model_probe import _get_thinking_strategies
+        strategies = _get_thinking_strategies("openai", "gpt-4o")
+        names = [s[0] for s in strategies]
+        assert "openai_reasoning" not in names

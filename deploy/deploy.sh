@@ -921,6 +921,7 @@ _rollback_frontend_from_last_backup() {
 
 # ── rsync 排除列表 ──
 _rsync_excludes=(
+  --exclude='/homepage/'
   --exclude='.git'
   --exclude='node_modules'
   --exclude='web/node_modules'

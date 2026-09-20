@@ -13,13 +13,14 @@
     "dist": "npm run prepare:assets && npm run prepare:backend && electron-builder",
     "dist:win": "npm run prepare:assets && npm run prepare:backend && electron-builder --win nsis",
     "dist:mac": "npm run prepare:assets && npm run prepare:backend && electron-builder --mac dmg",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/process-lifecycle.js && node --check src/frontend-runner.cjs && node --check scripts/prepare.mjs && node --check scripts/build-backend.mjs && node --check scripts/prepare-python.mjs && node --check scripts/smoke.mjs && node --check scripts/smoke-app.mjs && node --check ../web/scripts/gen-splash.mjs",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/process-lifecycle.js && node --check src/frontend-runner.cjs && node --check scripts/prepare.mjs && node --check scripts/build-backend.mjs && node --check scripts/prepare-python.mjs && node --check scripts/smoke.mjs && node --check scripts/smoke-app.mjs && node --check ../web/scripts/gen-splash.mjs && node --check src/window-compat.js && node --check src/window-lifecycle.js && node --check src/picked-files.js && node --check src/oauth-preload.js && node --check scripts/smoke-renderer.cjs",
     "build:web": "npm --prefix ../web run build",
     "prepare:python": "node scripts/prepare-python.mjs",
     "smoke": "node scripts/smoke.mjs",
     "dist:mac:local": "npm run prepare:assets && npm run prepare:backend && electron-builder --mac dmg --config.mac.identity=-",
     "smoke:app": "node scripts/smoke-app.mjs",
-    "test": "node --test tests/*.test.cjs"
+    "test": "node --test tests/*.test.cjs",
+    "smoke:renderer": "node scripts/smoke-renderer.cjs"
   },
   "devDependencies": {
     "electron": "44.4.3",
@@ -39,6 +40,11 @@
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "../web/server",
+        "to": "mobile-server",
+        "filter": ["*.cjs"]
+      },
       {
         "from": ".build/frontend",
         "to": "frontend",
@@ -91,6 +97,7 @@
       ]
     },
     "nsis": {
+      "include": "installer/progress.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,

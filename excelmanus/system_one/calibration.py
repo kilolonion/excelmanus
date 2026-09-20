@@ -60,6 +60,7 @@ def calibration_fingerprint(pack_id: str) -> str:
         "pack_id": spec.pack_id,
         "family": spec.family,
         "gate": spec.gate,
+        "advisory_only": spec.advisory_only,
         "questions": [
             {
                 "qid": item.qid,

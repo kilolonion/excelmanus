@@ -651,6 +651,7 @@ def test_profile_names_avoid_code_clash() -> None:
     assert "code" not in PROFILE_NAMES
     assert "file_code" in PROFILE_NAMES
     assert set(PACKS) == {
+        "context.resolve",
         "exposure.turn",
         "observation.shape",
         "observation.prune",

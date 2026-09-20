@@ -15,6 +15,8 @@ export interface PopoverItem {
   command: string;
   description: string;
   icon: React.ReactNode;
+  /** 展示标签：缺省回退到 command。用于隐藏 @file: 内的编码路径。 */
+  label?: string;
   isActive?: boolean;
   hasChildren?: boolean;
 }
@@ -143,7 +145,7 @@ export function CommandPopover({
                 className={`font-mono text-xs flex-1 truncate ${isActive ? "font-semibold" : ""}`}
                 style={{ color: item.command ? "var(--em-primary)" : undefined }}
               >
-                {item.command || item.description}
+                {item.label || item.command || item.description}
               </span>
               {item.command && (
                 <span className="text-xs text-muted-foreground truncate">

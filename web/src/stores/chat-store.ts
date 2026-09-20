@@ -18,6 +18,7 @@ import {
 } from "@/lib/injected-user-prompt";
 import {
   collectHistoryAffectedFiles,
+  displayFileName,
   mergeAffectedFiles,
   toPublicFileIdentity,
 } from "@/lib/file-identity";
@@ -127,7 +128,7 @@ const _MAX_DIFFS_IN_STORE = 500;
 // 仅由 SSE 事件产生的块类型，不持久化到后端消息存储。
 // 从后端刷新时，必须从已有缓存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 时 thinking 块消失）。
 const _SSE_ONLY_BLOCK_TYPES = new Set([
-  "thinking", "iteration", "approval_action", "subagent",
+  "thinking", "iteration", "approval_action", "subagent", "task_list",
   // verification_report 仅出现在历史缓存中，保留以便刷新时不丢旧卡片
   "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
   "llm_retry", "failure_guidance",
@@ -532,7 +533,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
                   const filename =
                     (typeof magic?.filename === "string" && magic.filename) ||
                     (typeof dlParsed?.filename === "string" ? dlParsed.filename : "") ||
-                    filePath.split("/").pop() ||
+                    displayFileName(filePath) ||
                     "download";
                   const description =
                     (typeof magic?.description === "string" && magic.description) ||

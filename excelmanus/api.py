@@ -49,6 +49,7 @@ import asyncio
 import json
 import os
 import re
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -148,6 +149,7 @@ def _build_bootstrap_config() -> tuple[ExcelManusConfig, ConfigError | None]:
             api_key="",
             base_url="https://example.invalid/v1",
             model="",
+            deploy_mode="server" if os.environ.get("EXCELMANUS_DEPLOY_MODE", "").strip().lower() == "server" else "standalone",
             cors_allow_origins=tuple(load_cors_allow_origins()),
             # Fresh profiles lack model credentials but still need packaged skills.
             skills_system_dir=str(Path(__file__).resolve().parent / "skillpacks" / "system"),
@@ -227,6 +229,35 @@ def _make_content_disposition(filename: str) -> str:
         )
 
 
+def _terminal_display_width(text: str) -> int:
+    """计算文本在终端中的显示列宽。
+
+    CJK/全角字符占 2 列；组合符、变体选择符（如 U+FE0F）、
+    控制符等零宽字符占 0 列；紧随 U+FE0F 的字符按 emoji 呈现计 2 列。
+    """
+    width = 0
+    for idx, ch in enumerate(text):
+        if unicodedata.category(ch) in ("Mn", "Me", "Cf", "Cc"):
+            continue
+        if unicodedata.east_asian_width(ch) in ("W", "F") or (
+            idx + 1 < len(text) and text[idx + 1] == "\ufe0f"
+        ):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def _render_banner_box(lines: list[str]) -> str:
+    """将多行文本渲染为终端等宽边框框（按显示宽度对齐）。"""
+    inner = max((_terminal_display_width(line) for line in lines), default=0)
+    border = "═" * (inner + 4)
+    body = [
+        "║  " + line + " " * (inner - _terminal_display_width(line)) + "  ║"
+        for line in lines
+    ]
+    return "\n".join([f"╔{border}╗", *body, f"╚{border}╝"])
+
 
 # ── Lifespan ──────────────────────────────────────────────
 
@@ -243,19 +274,20 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
         set_config_incomplete(True)
         get_runtime().config_incomplete = True
         logger.warning(
-            "\n"
-            "╔══════════════════════════════════════════════════════════════╗\n"
-            "║  ⚠️  模型配置缺失，服务以降级模式启动                      ║\n"
-            "║                                                            ║\n"
-            "║  %s\n"
-            "║                                                            ║\n"
-            "║  你可以通过以下任一方式完成配置：                          ║\n"
-            "║    1. 打开浏览器访问前端页面，按引导填写 API Key           ║\n"
-            "║    2. 在设置页添加模型档案（保存在主数据库）               ║\n"
-            "║                                                            ║\n"
-            "║  配置完成后，通过前端设置页保存即可生效（无需重启）。      ║\n"
-            "╚══════════════════════════════════════════════════════════════╝",
-            str(bootstrap_error).ljust(58)[:58] + "║",
+            "\n%s",
+            _render_banner_box(
+                [
+                    "⚠️  模型配置缺失，服务以降级模式启动",
+                    "",
+                    str(bootstrap_error),
+                    "",
+                    "你可以通过以下任一方式完成配置：",
+                    "  1. 打开浏览器访问前端页面，按引导填写 API Key",
+                    "  2. 在设置页添加模型档案（保存在主数据库）",
+                    "",
+                    "配置完成后，通过前端设置页保存即可生效（无需重启）。",
+                ]
+            ),
         )
 
     get_runtime().config = app.state.bootstrap_config
@@ -403,6 +435,12 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
         try:
             from excelmanus.auth.providers.credential_store import CredentialStore as _CredStore
             _cred_store = _CredStore(get_runtime().database.conn)
+            try:
+                from excelmanus.auth.providers.workbuddy import migrate_legacy_workbuddy
+                from excelmanus.api_app_state import get_config_store as _get_cs
+                migrate_legacy_workbuddy(_cred_store, _get_cs())
+            except Exception:
+                logger.debug("旧版 workbuddy 数据迁移失败", exc_info=True)
             app.state.credential_store = _cred_store
             if get_runtime().session_manager is not None:
                 get_runtime().session_manager.set_credential_store(_cred_store)
@@ -857,6 +895,9 @@ def create_app(
         bootstrap_config, bootstrap_error = _build_bootstrap_config()
     assert bootstrap_config is not None
 
+    from excelmanus.auth.access import validate_access_config
+    validate_access_config(server=bootstrap_config.deploy_mode == "server")
+
     application = FastAPI(
         title="ExcelManus API",
         version=excelmanus.__version__,
@@ -891,7 +932,7 @@ def create_app(
             "Cache-Control",
             "X-ExcelManus-Token",
         ],
-        expose_headers=["X-Request-Id", "Content-Disposition"],
+        expose_headers=["X-Request-Id", "Content-Disposition", "X-ExcelManus-Auth", "Retry-After"],
     )
 
     _register_exception_handlers(application)
@@ -899,6 +940,8 @@ def create_app(
     # 注册认证路由
     from excelmanus.auth.router import router as auth_router
     application.include_router(auth_router)
+    from excelmanus.auth.access import router as access_router
+    application.include_router(access_router)
 
     # 注册子路由模块
     from excelmanus.api_routes_mcp import router as mcp_router

@@ -3,6 +3,7 @@ import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { pythonBaseFilter, prunePythonRuntime } from './runtime-files.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const project = resolve(root, '..');
@@ -20,16 +21,22 @@ const pythonArch = run(sourcePython, ['-I', '-B', '-X', 'utf8', '-c', 'import pl
 const normalizeArch = value => ({amd64:'x64',x86_64:'x64',aarch64:'arm64'}[value] || value);
 if (normalizeArch(pythonArch) !== process.arch) throw new Error(`Python architecture ${pythonArch} does not match Node ${process.arch}`);
 const prefix = run(sourcePython, ['-I', '-B', '-X', 'utf8', '-c', 'import sys; print(sys.base_prefix)'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
-const target = join(root, '.build', 'runtime', 'python');
+// An optional output under .build lets validation run without replacing a
+// runtime that another packaging job is using.
+const buildRoot = join(root, '.build');
+const target = resolve(process.argv[2] || join(buildRoot, 'runtime', 'python'));
+const targetRelative = relative(buildRoot, target);
+if (!targetRelative || targetRelative === '..' || targetRelative.startsWith(`..${sep}`) || isAbsolute(targetRelative)) throw new Error('Python output must be inside desktop/.build');
 rmSync(target, { recursive: true, force: true });
 mkdirSync(target, { recursive: true });
-cpSync(prefix, target, { recursive: true, verbatimSymlinks: true });
+cpSync(prefix, target, { recursive: true, verbatimSymlinks: true, filter: file => pythonBaseFilter(prefix, file) });
 const python = join(target, process.platform === 'win32' ? 'python.exe' : 'bin/python3');
 if (!existsSync(python)) throw new Error(`Managed Python layout not supported: ${prefix}`);
 const site = run(python, ['-I', '-B', '-X', 'utf8', '-c', 'import sysconfig; print(sysconfig.get_path("purelib"))'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
 const siteRelative = relative(target, site);
 if (siteRelative === '..' || siteRelative.startsWith(`..${sep}`) || isAbsolute(siteRelative)) throw new Error('Python is not relocatable');
-const requirements = join(root, '.build', 'python-requirements.txt');
-run('uv', ['export', '--frozen', '--no-dev', '--no-emit-project', '--extra', 'analysis', '--extra', 'vba', '--extra', 'web', '-o', requirements]);
+const requirements = `${target}-requirements.txt`;
+run('uv', ['export', '--frozen', '--only-group', 'desktop-runtime', '-o', requirements], { stdio: ['ignore', 'ignore', 'inherit'] });
 run('uv', ['pip', 'install', '--python', python, '--target', site, '--requirements', requirements]);
-run(python, ['-I', '-B', '-X', 'utf8', '-c', 'import pandas, openpyxl, xlrd, pyxlsb, xlsxwriter, matplotlib, scipy, sklearn, seaborn, plotly; print("Bundled Python imports OK")']);
+console.log('Removed Python test/cache files:', prunePythonRuntime(target));
+run(python, ['-I', '-B', '-X', 'utf8', join(root, 'scripts', 'check-python-runtime.py')]);

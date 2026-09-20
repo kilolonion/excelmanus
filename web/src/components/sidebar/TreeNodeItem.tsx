@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import { workspaceFileOpenHint } from "@/lib/file-kind";
+import { displayFilePath } from "@/lib/file-identity";
 import { useWorkspaceFileActive } from "@/lib/open-workspace-file";
 import { useExcelStore } from "@/stores/excel-store";
 import { formatFileMention } from "@/components/chat/chat-input-insert";
@@ -368,7 +369,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
       title={
         selectMode
           ? "点击选择"
-          : `${workspaceFileOpenHint(file.filename)}\n${file.path}`
+          : `${workspaceFileOpenHint(file.filename)}\n${displayFilePath(file.path)}`
       }
     >
       {selectMode ? (

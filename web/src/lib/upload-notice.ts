@@ -1,4 +1,5 @@
 import type { FileAttachment } from "@/lib/types";
+import { displayFileName } from "@/lib/file-identity";
 
 export const UPLOADED_FILE_LABEL = "已上传文件";
 export const UPLOADED_IMAGE_LABEL = "已上传图片";
@@ -34,7 +35,7 @@ export function extractFileAttachmentsFromContent(
   while ((match = UPLOAD_NOTICE_RE.exec(rawContent)) !== null) {
     const filePath = (match[1] || match[2] || "").trim();
     if (!filePath) continue;
-    const filename = filePath.split("/").pop() || filePath;
+    const filename = displayFileName(filePath) || filePath;
     files.push({ filename, path: filePath, size: 0 });
   }
   UPLOAD_NOTICE_RE.lastIndex = 0;

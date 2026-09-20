@@ -222,6 +222,7 @@ class TargetSpec:
     read_dependency: ReadDependency | None = None
     builder: Callable[[bytes | None], bytes] | None = None
     intent: dict[str, Any] | None = None
+    event_context: dict[str, Any] | None = None
 
 
 @dataclass
@@ -464,6 +465,7 @@ class WorkspaceFileService:
         create: bool = False,
         operation_id: str | None = None,
         intent: dict[str, Any] | None = None,
+        event_context: dict[str, Any] | None = None,
     ) -> MutationReceipt:
         rel = self._canonical(file_path)
         dest = self.root / rel
@@ -476,6 +478,7 @@ class WorkspaceFileService:
                         expected_version=expected_version,
                         builder=builder,
                         intent=intent,
+                        event_context=event_context,
                     )
                 ],
                 operation_id=operation_id,
@@ -483,7 +486,7 @@ class WorkspaceFileService:
         if not create:
             raise CommitError("NOT_FOUND", f"文件不存在：{rel}", fields={"path": rel})
         return self.apply_batch(
-            [TargetSpec(op="create", path=file_path, builder=builder, intent=intent)],
+            [TargetSpec(op="create", path=file_path, builder=builder, intent=intent, event_context=event_context)],
             operation_id=operation_id,
         )
 
@@ -620,6 +623,7 @@ class WorkspaceFileService:
         expected_version: str | None,
         restore_missing: bool = False,
         operation_id: str | None = None,
+        event_context: dict[str, Any] | None = None,
     ) -> MutationReceipt:
         return self.apply_batch(
             [
@@ -629,6 +633,7 @@ class WorkspaceFileService:
                     restore_revision_id=revision_id,
                     expected_version=expected_version,
                     restore_missing=restore_missing,
+                    event_context=event_context,
                 )
             ],
             operation_id=operation_id,
@@ -1131,6 +1136,7 @@ class WorkspaceFileService:
             "publish_status": item.publish_status,
             "is_dir": item.is_dir,
             "restore_revision_id": item.spec.restore_revision_id,
+            "event_context": item.spec.event_context,
         }
 
     def _publish(self, tx_id: str, prepared: list[_PreparedTarget], intent: dict[str, Any]) -> None:
@@ -1366,6 +1372,7 @@ class WorkspaceFileService:
                     "before_version": item.before_version,
                     "after_version": item.after_version,
                     "from_path": item.from_rel,
+                    "context": item.spec.event_context,
                 }
             )
         return events
@@ -1468,7 +1475,8 @@ class WorkspaceFileService:
             after = self._read_tx_blob(intent["tx_id"], raw.get("after_sha256")) if load_blobs else None
             from_rel = raw.get("from_path")
             prepared.append(_PreparedTarget(
-                spec=TargetSpec(op=raw["op"], path=rel, restore_revision_id=raw.get("restore_revision_id")),
+                spec=TargetSpec(op=raw["op"], path=rel, restore_revision_id=raw.get("restore_revision_id"),
+                                event_context=raw.get("event_context")),
                 rel=rel, dest=self.root / rel, lineage_id=raw.get("lineage_id") or "",
                 exists_before=bool(raw.get("exists_before")), exists_after=bool(raw.get("exists_after")),
                 before_bytes=before, after_bytes=after if after is not None else before,

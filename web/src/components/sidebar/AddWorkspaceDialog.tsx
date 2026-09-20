@@ -13,14 +13,6 @@ import { createWorkspaceFolder, updateWorkspaceFolder } from "@/lib/api";
 import type { WorkspaceFolder } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-declare global {
-  interface Window {
-    excelManusDesktop?: {
-      selectFolder: () => Promise<string | null>;
-    };
-  }
-}
-
 function folderNameFromPath(path: string): string {
   const parts = path.trim().split(/[/\\]/).filter(Boolean);
   return parts[parts.length - 1] || "";

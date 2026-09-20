@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
+from excelmanus.model_identity import has_token_prefix
 from excelmanus.providers import (
     ClaudeClient,
     GeminiClient,
@@ -722,13 +723,11 @@ def _get_thinking_strategies(
     thinking_type 会存入 ModelCapabilities，engine 据此注入请求参数。
     """
     strategies: list[tuple[str, dict[str, Any], str]] = []
-    model_lower = model.lower()
 
     # ── Claude 模型经 OpenAI 兼容代理（按模型名检测） ────────
     # 当 Claude 模型通过第三方 OpenAI 兼容代理访问时，客户端是 AsyncOpenAI 而非 ClaudeClient，
     # 但仍需要 Anthropic 风格的 thinking 参数。大多数代理会透传 extra_body 到上游。
-    _is_claude_model = any(model_lower.startswith(p) for p in ("claude-", "claude_"))
-    if _is_claude_model:
+    if has_token_prefix(model, "claude"):
         strategies.append((
             "claude_compat_thinking",
             {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 2048}}},
@@ -758,7 +757,13 @@ def _get_thinking_strategies(
             "enable_thinking",
         ))
     elif provider == "deepseek":
-        # DeepSeek: reasoner 自动输出；V3/V4 可用 extra_body.enable_thinking
+        # DeepSeek 官方现用 thinking.type=enabled + reasoning_effort（与 GLM 同形态），
+        # compiler 的 glm_thinking 分支会注入这两个参数；保留 plain 与 enable_thinking 兜底。
+        strategies.append((
+            "ds_thinking",
+            {"extra_body": {"thinking": {"type": "enabled"}}},
+            "glm_thinking",
+        ))
         strategies.append(("plain", {}, "deepseek"))
         strategies.append((
             "ds_enable",
@@ -775,7 +780,7 @@ def _get_thinking_strategies(
         strategies.append(("plain", {}, "deepseek"))
     elif provider == "openai":
         # OpenAI o1/o3/GPT-5 系列: reasoning_effort 等级制
-        if any(model_lower.startswith(p) for p in ("o1", "o3", "o4", "gpt-5", "gpt-6")):
+        if has_token_prefix(model, ("o1", "o3", "o4", "gpt-5", "gpt-6")):
             strategies.append((
                 "openai_reasoning",
                 {"reasoning_effort": "low"},

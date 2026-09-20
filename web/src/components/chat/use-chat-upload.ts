@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
-import { fetchFileBlob, uploadFile, uploadFileFromUrl } from "@/lib/api";
+import { fetchFileBlob, uploadFileFromUrl } from "@/lib/api";
+import { ensureWorkbookSession, importWorkspaceFile } from "@/lib/open-workbook";
 import { identityKey, toPublicFileIdentity } from "@/lib/file-identity";
 import type { AttachedFile } from "@/lib/types";
 import { useSessionStore } from "@/stores/session-store";
+import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { isVisionImageFile } from "@/lib/file-kind";
 import { detectFileUrl, friendlyUploadError } from "./chat-input-constants";
 import {
@@ -128,15 +130,19 @@ export function useChatUpload({
 
   const triggerUpload = useCallback(async (id: string, file: File) => {
     try {
-      const scope = activeUploadScope();
-      const result = await uploadFile(file, scope.sessionId, scope.workspaceId);
+      const session = await ensureWorkbookSession();
+      const workspaceKey = workspaceKeyForSessionId(session.id);
+      const result = await importWorkspaceFile(file, session);
       setFiles((prev) =>
         prev.map((f) =>
-          f.id === id ? { ...f, status: "success" as const, uploadResult: result } : f
+          f.id === id ? { ...f, status: "success" as const, uploadResult: result, workspaceKey } : f
         )
       );
       if (result.path) {
         backfillPendingUploadFull(tokenMapRef.current, file.name, result.path);
+        // Make a newly uploaded workbook available to both the Web tabs and
+        // the native Sheet menu, even before the file sidebar has been opened.
+        trackRecentExcelFile(result.path, result.filename, workspaceKey);
       }
     } catch (err) {
       const error = friendlyUploadError(err);
@@ -230,6 +236,7 @@ export function useChatUpload({
         status: image ? "uploading" as const : "success" as const,
         uploadResult: { filename: file.filename, path: file.path, size: 0 },
         fromWorkspace: true,
+        workspaceKey: workspaceKeyForSessionId(useSessionStore.getState().activeSessionId),
       };
     });
     setFiles((prev) => [...prev, ...attached]);
@@ -285,11 +292,13 @@ export function useChatUpload({
     setFiles((prev) => [...prev, placeholder]);
 
     try {
-      const scope = activeUploadScope();
-      const result = await uploadFileFromUrl(url, scope.sessionId, scope.workspaceId);
+      const session = await ensureWorkbookSession();
+      const workspaceKey = workspaceKeyForSessionId(session.id);
+      const result = await uploadFileFromUrl(url, session.id, session.workspaceId);
+      trackRecentExcelFile(result.path, result.filename, workspaceKey);
       setFiles((prev) =>
         prev.map((f) =>
-          f.id === id ? { ...f, status: "success" as const, uploadResult: result } : f
+          f.id === id ? { ...f, status: "success" as const, uploadResult: result, workspaceKey } : f
         )
       );
       if (!isVisionImageFile(result.filename)) {

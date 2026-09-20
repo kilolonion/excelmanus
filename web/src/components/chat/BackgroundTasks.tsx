@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { CheckCircle2, CircleHelp, Clock3, ListTodo, Loader2, Pause, Play, RefreshCw, Send, Square, XCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -10,11 +10,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import type { SubagentControlAction } from "@/lib/api";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import { normalizeTaskItems } from "@/lib/sse-event-handler";
 import { isSubagentActive, subagentChangedFiles, SUBAGENT_STATUS_LABELS } from "@/lib/subagent-runs";
 import { basenameOf, toolActionTitle } from "@/lib/tool-labels";
+import { displayFilePath } from "@/lib/file-identity";
 import type { SubagentRun } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useSessionStore } from "@/stores/session-store";
+import { TaskList } from "./TaskList";
 import { useBackgroundTasks } from "./use-background-tasks";
 
 type ControlTask = (runId: string, action: SubagentControlAction, message?: string) => Promise<SubagentRun>;
@@ -96,7 +99,7 @@ export function BackgroundTaskCard({ run, onControl, onOpenFile }: {
         <div className="space-y-1">
           <p className="text-xs text-muted-foreground">已修改的文件</p>
           {files.map((path) => (
-            <button key={path} type="button" onClick={() => onOpenFile(path)} title={path}
+            <button key={path} type="button" onClick={() => onOpenFile(path)} title={displayFilePath(path)}
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs hover:bg-[var(--em-fill)]">
               <FileTypeIcon filename={basenameOf(path)} className="h-4 w-4 shrink-0" />
               <span className="truncate">{basenameOf(path)}</span>
@@ -151,7 +154,8 @@ export function BackgroundTaskCard({ run, onControl, onOpenFile }: {
 
 function SessionBackgroundTasks({ sessionId }: { sessionId: string }) {
   const [open, setOpen] = useState(false);
-  const { runs, loading, error, refresh, control } = useBackgroundTasks(sessionId, open);
+  const { runs, taskList, loading, error, refresh, control } = useBackgroundTasks(sessionId, open);
+  const taskItems = useMemo(() => normalizeTaskItems(taskList), [taskList]);
   const activeCount = runs.filter((run) => isSubagentActive(run.status)).length;
   const waitingCount = runs.filter((run) => run.status === "waiting_input").length;
   const ordered = [...runs].sort((a, b) => {
@@ -173,17 +177,23 @@ function SessionBackgroundTasks({ sessionId }: { sessionId: string }) {
       <DialogContent className="sm:max-w-xl max-h-[85dvh] flex flex-col overflow-hidden p-0 gap-0">
         <DialogHeader className="p-5 pr-14 border-b border-[var(--em-hairline)] text-left">
           <DialogTitle>后台任务</DialogTitle>
-          <DialogDescription>当前会话的后台任务。对话结束后仍会继续，关闭此面板不影响执行。</DialogDescription>
+          <DialogDescription>当前会话的任务清单与后台任务。后台任务在对话结束后仍会继续，关闭此面板不影响执行。</DialogDescription>
         </DialogHeader>
         <div className="overflow-y-auto min-h-0 p-4 space-y-3">
+          {taskItems.length > 0 && (
+            <section className="space-y-1.5" aria-label="任务清单">
+              <p className="text-xs text-muted-foreground">任务清单{taskList?.title ? ` · ${taskList.title}` : ""}</p>
+              <TaskList items={taskItems} />
+            </section>
+          )}
           <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span aria-live="polite">{runs.length} 个任务{activeCount ? ` · ${activeCount} 个未结束` : ""}{waitingCount ? ` · ${waitingCount} 个等待回答` : ""}</span>
+            <span aria-live="polite">{runs.length} 个后台任务{activeCount ? ` · ${activeCount} 个未结束` : ""}{waitingCount ? ` · ${waitingCount} 个等待回答` : ""}</span>
             <Button variant="ghost" size="sm" onClick={refresh} disabled={loading} className="h-7 text-xs">
               <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />刷新
             </Button>
           </div>
           {error && <p role="alert" className="text-sm text-red-600">状态更新失败：{error}。{runs.length ? "当前显示上次获取的状态。" : ""}</p>}
-          {runs.length === 0 && <p className="py-10 text-center text-sm text-muted-foreground">{loading ? "正在读取任务…" : error ? "暂时无法获取任务" : "还没有后台任务。可以在对话中让助手把独立任务放到后台执行。"}</p>}
+          {runs.length === 0 && <p className={cn("text-center text-sm text-muted-foreground", taskItems.length === 0 && "py-10")}>{loading ? "正在读取任务…" : error ? "暂时无法获取任务" : taskItems.length > 0 ? "暂无后台任务。" : "还没有后台任务。可以在对话中让助手把独立任务放到后台执行。"}</p>}
           {ordered.map((run) => (
             <BackgroundTaskCard key={`${run.run_id}:${run.pending_question?.question_id ?? ""}`} run={run} onControl={control}
               onOpenFile={(path) => { setOpen(false); openWorkspaceFile(path); }} />

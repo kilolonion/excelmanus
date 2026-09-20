@@ -43,6 +43,7 @@ import {
   recentFilesForWorkspace,
 } from "@/lib/workspace-file-ref";
 import { WORKSPACE_FILE_INPUT_ACCEPT } from "@/lib/file-kind";
+import { displayFilePath } from "@/lib/file-identity";
 import { formatFileMention } from "@/components/chat/chat-input-insert";
 import {
   buildTree,
@@ -124,7 +125,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     const query = fileQuery.trim().toLocaleLowerCase();
     if (!query) return workspaceVisibleFiles;
     return workspaceVisibleFiles.filter((file) =>
-      `${file.filename} ${file.path}`.toLocaleLowerCase().includes(query),
+      `${file.filename} ${displayFilePath(file.path)}`.toLocaleLowerCase().includes(query),
     );
   }, [fileQuery, workspaceVisibleFiles]);
 
@@ -494,7 +495,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       {/* File controls */}
       {embedded && (
         <TooltipProvider delayDuration={300}>
-          <div className="mb-2 shrink-0 space-y-2 border-b border-border/40 pb-2">
+          <div
+            className="mb-2 shrink-0 space-y-2 border-b border-border/40 pb-2"
+            data-coach-id="coach-sidebar-file-tools"
+          >
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">

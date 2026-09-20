@@ -22,6 +22,7 @@ import {
   FileWarning,
 } from "lucide-react";
 import type { RollbackFileChange, RollbackPreviewResult } from "@/lib/api";
+import { displayFileName } from "@/lib/file-identity";
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null || bytes === undefined) return "-";
@@ -76,7 +77,7 @@ function DiffPreview({ diff }: { diff: string }) {
 function FileChangeItem({ change }: { change: RollbackFileChange }) {
   const [expanded, setExpanded] = useState(false);
   const hasDiff = !!change.diff;
-  const filename = change.path.split("/").pop() || change.path;
+  const filename = displayFileName(change.path) || change.path;
   const dir = change.path.includes("/")
     ? change.path.slice(0, change.path.lastIndexOf("/") + 1)
     : "";

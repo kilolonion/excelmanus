@@ -73,10 +73,12 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
             ):
                 extra["_responses_previous_response_id"] = str(previous["id"])
             extra["_responses_store"] = True
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    try:
+        from excelmanus.auth.providers.registry import strip_managed_prefix
 
-    if OpenAICodexProvider.is_codex_profile_name(api_model):
-        api_model = OpenAICodexProvider.model_from_profile_name(api_model) or api_model
+        api_model = strip_managed_prefix(api_model) or api_model
+    except Exception:
+        pass
     profile_thinking_mode = getattr(profile, "thinking_mode", "auto") if profile else "auto"
     if profile_thinking_mode not in ("auto", ""):
         effective = profile_thinking_mode if profile_thinking_mode != "disabled" else ""
@@ -145,6 +147,12 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
                     extra["extra_headers"] = parsed
             except (ValueError, TypeError):
                 pass
+    # 订阅凭证解析出的 provider 专属请求头（含刷新后的 token）覆盖静态值
+    oauth_headers = getattr(engine, "_oauth_extra_headers", None)
+    if isinstance(oauth_headers, dict) and oauth_headers:
+        merged_headers = dict(extra.get("extra_headers") or {})
+        merged_headers.update(oauth_headers)
+        extra["extra_headers"] = merged_headers
     return extra
 
 

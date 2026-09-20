@@ -125,6 +125,7 @@ _TOOL_COMMON_ERRORS: dict[str, list[str]] = {
     ],
     "analyze_spreadsheet": [
         "mode 枚举：profile|quality|filter|aggregate|distinct|pivot|relationships|files；overview/range/search 属于 inspect_spreadsheet",
+        "各 mode 只接受自己的字段子集，可用字段见上方 mode=… 字段清单；profile/quality 的采样行数上限用 max_rows（sample_rows 也可作别名）",
         "filter 需要 column/operator/value 或 conditions",
         "profile/quality 需要 file_path",
         "多表省略 sheet 时：只有一张可见表，或筛选/分组/聚合列只在唯一一张可见数据表全量出现，会自动绑定并在 resolved_sheet + warnings 显式声明；隐藏表列命中碰撞或其他歧义仍 SHEET_REQUIRED，需按 available_sheets 显式指定。别名、表单表、空表不参与列匹配",
@@ -354,6 +355,13 @@ def _schema_kind_enums(tool: ToolDef) -> dict[str, list[str]]:
     return found
 
 
+def _mode_field_map(tool_name: str) -> dict[str, frozenset[str]] | None:
+    """mode-union 工具的逐 mode 字段合同；非 union 工具返回 None。"""
+    from excelmanus.tools.intent_tools import MODE_FIELDS_BY_TOOL
+
+    return MODE_FIELDS_BY_TOOL.get(tool_name)
+
+
 def _summarize_tool_schema(tool: ToolDef) -> str:
     schema = tool.input_schema if isinstance(getattr(tool, "input_schema", None), dict) else {}
     props = schema.get("properties") or {}
@@ -362,6 +370,12 @@ def _summarize_tool_schema(tool: ToolDef) -> str:
     enums = _schema_kind_enums(tool)
     if "mode" in enums:
         lines.append("mode: " + "|".join(enums["mode"]))
+        mode_fields = _mode_field_map(tool.name)
+        if mode_fields:
+            for mode_name in enums["mode"]:
+                fields = sorted(mode_fields.get(mode_name, frozenset()) - {"request", "mode"})
+                label = ", ".join(fields) if fields else "（无额外字段）"
+                lines.append(f"mode={mode_name} 字段: {label}")
     if "operations.kind" in enums:
         lines.append("operations.kind: " + "|".join(enums["operations.kind"]))
         keys = [k for k in enums.get("operations.keys", []) if k not in {"kind"}]

@@ -2,79 +2,86 @@
 
 图片只交给当前激活模型。probe=False 不覆盖已知视觉模型的关键词推断，
 避免 Codex 等 backend-api 的探测误判把图片拦掉。
+
+关键词按 token 序列匹配（归一化后以 "-" 为边界），
+支持 provider/ 前缀与 Bedrock 命名空间写法。
 """
 
 from __future__ import annotations
 
 from excelmanus.logger import get_logger
+from excelmanus.model_identity import (
+    matches_token_sequence,
+    token_sequence_pattern,
+)
 
 logger = get_logger("vision_capability")
 
+# 命中即判定为非视觉模型（优先级高于视觉关键词）
 _NON_VISION_KEYWORDS = (
-    "o3-mini",
-    "amazon.nova-micro", "amazon.nova-sonic",
+    "o1-mini", "o1-preview", "o3-mini",
+    "nova-micro", "nova-sonic", "nova-2-sonic",
     "gemini-embedding",
     "llama-3.2-1b", "llama-3.2-3b",
     "step-3.5-flash",
     "mistral-small-3.0", "mistral-small-3.1",
+    "gemma-3-1b",
+    "embedding", "embed", "rerank", "tts", "whisper",
+    "transcribe", "realtime", "moderation", "audio",
 )
 
+# 命中即疑似视觉模型
 _VISION_KEYWORDS = (
-    "gpt-4o", "gpt-4.1",
-    "gpt-5",
-    "gpt-6",
+    "gpt-4o", "gpt-4.1", "gpt-4-turbo", "chatgpt-4o",
+    "gpt-5", "gpt-6",
     "gpt-image-1",
     "o1", "o3", "o4",
-    "grok-2-vision", "grok-4",
-    "claude-opus-", "claude-sonnet-", "claude-haiku-",
-    "claude-opus-4", "claude-sonnet-4", "claude-haiku-4",
+    "grok-4",
+    "claude-opus", "claude-sonnet", "claude-haiku",
     "claude-fable", "claude-mythos",
     "gemini",
-    "amazon.nova", "nova-lite", "nova-pro", "nova-premier",
-    "-vl", "-vision", "-multimodal",
-    "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.5-vl",
-    "qwen-omni", "qwen2.5-omni", "qwen3-omni",
+    "nova-lite", "nova-pro", "nova-premier", "nova-2-lite",
+    # 通用 token：覆盖各家的 -vl / -vision / -multimodal / -omni 变体
+    "vl", "vision", "multimodal", "omni",
     "qwen3.8",
     "qwen3.7-plus", "qwen3.7-flash", "qwen3.7-max",
-    "qwen3.6-plus", "qwen3.6-flash",
+    "qwen3.6-plus", "qwen3.6-flash", "qwen3.6-max",
     "qwen3.5-plus", "qwen3.5-flash",
-    "qvq-",
-    "deepseek-flash",
-    "deepseek-v4-flash",
-    "deepseek-v4.1",
-    "deepseek-vl",
+    "qwen3-max",
+    "qvq",
+    "deepseek-flash", "deepseek-v4-flash", "deepseek-v4.1",
     "janus-pro",
-    "llama-3.2-", "llama3.2-vision",
-    "llama-4-", "llama4-",
+    "llama-3.2", "llama-4",
     "pixtral",
     "ministral-3b", "ministral-8b", "ministral-14b",
     "mistral-small-3", "mistral-medium-3", "mistral-large-3",
-    "phi-3-vision", "phi-3.5-vision", "phi-4-multimodal",
-    "glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v", "glm-5",
+    "glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v", "glm-5v", "glm-5",
     "internvl",
-    "minicpm-v",
-    "minicpm-o",
-    "ernie-4.5-vl", "ernie-vl",
-    "command-a-vision",
-    "aya-vision",
-    "moonshot-v1-vision", "kimi-vl", "kimi-k3", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7",
-    "yi-vl",
-    "doubao-1.5-vision", "doubao-1.6-vision", "doubao-vision", "seed1.5-vl", "seed-vl",
-    "doubao-seed-2",
-    "hunyuan-vision",
-    "minimax-vl", "minimax-m3",
-    "step-1v", "step-1.5v", "step-3",
-    "step-r1-v-mini", "step-1o-vision", "step-1o-turbo-vision",
+    "minicpm-v", "minicpm-o",
+    "kimi-k3", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7",
+    "doubao-seed-1.6", "doubao-seed-2",
+    "minimax-m3",
+    "step-1v", "step-1.5v", "step-3", "step-r1-v-mini",
     "llava",
+    "gemma-3", "gemma-3n",
 )
+
+_NON_VISION_PATTERN = token_sequence_pattern(_NON_VISION_KEYWORDS)
+_VISION_PATTERN = token_sequence_pattern(_VISION_KEYWORDS)
+
+
+def _keyword_hint(model: str) -> bool | None:
+    """关键词命中：NON→False，VISION→True，未命中→None。"""
+    if matches_token_sequence(model, _NON_VISION_PATTERN):
+        return False
+    if matches_token_sequence(model, _VISION_PATTERN):
+        return True
+    return None
 
 
 def keyword_implies_vision(model: str) -> bool:
     """仅按模型 ID 关键词判断是否像视觉模型。"""
-    model_lower = (model or "").lower()
-    if any(kw in model_lower for kw in _NON_VISION_KEYWORDS):
-        return False
-    return any(kw in model_lower for kw in _VISION_KEYWORDS)
+    return _keyword_hint(model) is True
 
 
 def infer_vision_capable(
@@ -92,12 +99,11 @@ def infer_vision_capable(
     if override == "false":
         return False
 
-    model_lower = (model or "").lower()
-    if any(kw in model_lower for kw in _NON_VISION_KEYWORDS):
+    hint = _keyword_hint(model)
+    if hint is False:
         logger.info("视觉能力来自关键词推断 (NON_VISION): model=%s → False", model)
         return False
-
-    keyword_vision = any(kw in model_lower for kw in _VISION_KEYWORDS)
+    keyword_vision = hint is True
 
     if probe is True:
         logger.info("视觉能力来自 probe 检测结果: model=%s, vision=True", model)

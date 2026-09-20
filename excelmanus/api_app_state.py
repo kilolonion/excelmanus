@@ -235,8 +235,16 @@ def _user_config_store() -> Any:
     return UserConfigStore(store._conn)
 
 
-def _is_codex_profile(name: str, model: str = "") -> bool:
-    return str(name).startswith("openai-codex/") or str(model).startswith("openai-codex/")
+def _is_subscription_profile(name: str, model: str = "") -> bool:
+    """name/model 命中任一已注册订阅 provider 的 MODEL_NAME_PREFIX。"""
+    try:
+        from excelmanus.auth.providers.registry import managed_provider_for
+        return (
+            managed_provider_for(str(name)) is not None
+            or managed_provider_for(str(model)) is not None
+        )
+    except Exception:
+        return str(name).startswith("openai-codex/") or str(model).startswith("openai-codex/")
 
 
 _PLACEHOLDER_MODEL_IDS = frozenset({"test-model", "dummy-model", "placeholder-model"})
@@ -273,7 +281,7 @@ def apply_profile_to_config(name: str) -> bool:
     object.__setattr__(config, "api_key", api_key)
     object.__setattr__(config, "base_url", base_url)
     object.__setattr__(config, "protocol", protocol)
-    if _is_codex_profile(name, model) or (api_key and base_url and model):
+    if _is_subscription_profile(name, model) or (api_key and base_url and model):
         set_config_incomplete(False)
     else:
         set_config_incomplete(True)

@@ -1,12 +1,17 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, screen } = require("electron");
 const { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const net = require("node:net");
 const { spawn } = require("node:child_process");
 const { stopProcess: stopChild } = require("./process-lifecycle");
+const { configureWindowNavigation, initialWindowBounds, isAppUrl } = require("./window-compat");
+const { readPickedFiles } = require("./picked-files");
+const { closeWindowsBeforeShutdown } = require("./window-lifecycle");
+const { allowPrivateNetwork } = require("./mobile-network");
 
 const LOOPBACK = "127.0.0.1";
 const STARTUP_TIMEOUT_MS = 120_000;
+const REPO_URL = "https://github.com/kilolonion/excelmanus";
 
 let mainWindow = null;
 let backendProcess = null;
@@ -17,7 +22,10 @@ let frontendUrl = null;
 let backendPort = null;
 let frontendPort = null;
 let backendRestarts = 0;
+let rendererRecoveries = 0;
 let stopPromise = null;
+let quitRequested = false;
+let mobilePairing = null;
 const RESTART_EXIT_CODE = 75;
 // A second process must not open the same profile/database concurrently.
 if (process.env.EXCELMANUS_HOME) app.setPath("userData", path.resolve(userDataRoot(), "browser"));
@@ -80,7 +88,7 @@ async function waitForHttp(url, timeoutMs = STARTUP_TIMEOUT_MS, child = null) {
     } catch (error) {
       lastError = error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, 150));
   }
   throw new Error(`等待服务就绪超时: ${url}; ${lastError?.message || "unknown error"}`);
 }
@@ -107,7 +115,11 @@ function spawnLogged(command, args, options, label) {
         backendProcess = startBackend(backendPort, frontendPort);
         await waitForHttp(`http://${LOOPBACK}:${backendPort}/api/v1/health`, undefined, backendProcess);
         backendRestarts = 0;
-      }).catch((error) => { log(`重启失败: ${error.message}`); void dialog.showErrorBox("ExcelManus 重启失败", error.message); });
+      }).catch((error) => {
+        if (shuttingDown) return;
+        log(`重启失败: ${error.message}`);
+        dialog.showErrorBox("ExcelManus 重启失败", error.message);
+      });
       return;
     }
     if (!shuttingDown) {
@@ -164,7 +176,9 @@ function startBackend(port, frontendPort) {
     EXCELMANUS_HOME: userDataRoot(),
     EXCELMANUS_DESKTOP: "1",
     EXCELMANUS_DESKTOP_CONTROL_STDIN: "1",
-    PYTHONDONTWRITEBYTECODE: "1",
+    // Redirect bytecode caches into userData: keeps the install tree read-only
+    // while still letting source-run interpreters skip recompiles on relaunch.
+    PYTHONPYCACHEPREFIX: path.join(userDataRoot(), "pycache"),
     EXCELMANUS_DEPLOY_MODE: "standalone",
     EXCELMANUS_API_HOST: LOOPBACK,
     EXCELMANUS_API_PORT: String(port),
@@ -189,7 +203,7 @@ function startBackend(port, frontendPort) {
   return spawnLogged(pythonCommand(), [path.join(projectRoot(), "desktop", "backend_runner.py"), "--host", LOOPBACK, "--port", String(port)], {
     cwd: projectRoot(),
     env,
-  }, "backend-dev");
+    }, "backend");
 }
 
 function startFrontend(port, backendPort) {
@@ -199,6 +213,9 @@ function startFrontend(port, backendPort) {
     PORT: String(port),
     HOSTNAME: LOOPBACK,
     NODE_PATH: path.join(cwd, "next_modules"),
+    // Persist V8 compile cache across launches (Node >=22.1); trims standalone
+    // server module loading on every start after the first.
+    NODE_COMPILE_CACHE: path.join(userDataRoot(), "node-compile-cache"),
     BACKEND_INTERNAL_URL: `http://${LOOPBACK}:${backendPort}`,
     EXCELMANUS_RUNTIME_BACKEND_ORIGIN: `http://${LOOPBACK}:${backendPort}`,
   };
@@ -206,34 +223,97 @@ function startFrontend(port, backendPort) {
 }
 
 function configureWindowSecurity(window) {
-  const allowedPopup = (url) => {
-    try {
-      const parsed = new URL(url);
-      return !parsed.username && !parsed.password && ["https://auth.openai.com", "http://localhost:1455", "http://127.0.0.1:1455"].includes(parsed.origin);
-    } catch { return false; }
-  };
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    if (allowedPopup(url)) return { action: "allow" };
-    if (url.startsWith("https://")) void shell.openExternal(url);
-    return { action: "deny" };
-  });
-  window.webContents.on("will-navigate", (event, url) => {
-    try { if (new URL(url).origin === new URL(frontendUrl).origin || allowedPopup(url)) return; } catch {}
-    event.preventDefault();
+  configureWindowNavigation(window, {
+    getFrontendUrl: () => frontendUrl,
+    openExternal: (url) => shell.openExternal(url),
+    onError: (error) => log(`打开链接失败: ${error.message}`),
+    oauthPreload: path.join(__dirname, "oauth-preload.js"),
   });
 }
 
+function attachRendererDiagnostics(window) {
+  window.webContents.on("console-message", (event, ...legacy) => {
+    let level = event && event.level;
+    let message = event && event.message;
+    let line = event && event.lineNumber;
+    let sourceId = event && event.sourceId;
+    if (level === undefined) {
+      const [oldLevel, oldMessage, oldLine, oldSourceId] = legacy;
+      level = { 2: "warning", 3: "error" }[oldLevel];
+      message = oldMessage;
+      line = oldLine;
+      sourceId = oldSourceId;
+    }
+    if (level !== "warning" && level !== "error") return;
+    log(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+  });
+  window.webContents.on("render-process-gone", (event, details) => {
+    log(`渲染进程异常退出: reason=${details.reason} exitCode=${details.exitCode}`);
+    if (shuttingDown) return;
+    if (frontendUrl && rendererRecoveries < 3) {
+      rendererRecoveries += 1;
+      loadFrontend(frontendUrl);
+      return;
+    }
+    dialog.showErrorBox("ExcelManus 界面崩溃", `渲染进程异常退出: ${details.reason}\n日志: ${path.join(userDataRoot(), "logs", "desktop.log")}`);
+  });
+  window.webContents.on("did-fail-load", (event, code, description, url, isMainFrame) => {
+    if (!isMainFrame || code === -3) return;
+    log(`页面加载失败: ${code} ${description} ${url}`);
+  });
+  window.webContents.on("preload-error", (event, preloadPath, error) => {
+    log(`preload 加载失败: ${preloadPath} ${error.message}`);
+  });
+  window.on("unresponsive", () => log("渲染进程无响应"));
+  window.on("responsive", () => log("渲染进程恢复响应"));
+}
+
+function isFrontendSender(event) {
+  if (!mainWindow || event.sender !== mainWindow.webContents || !frontendUrl) return false;
+  return event.senderFrame === mainWindow.webContents.mainFrame
+    && isAppUrl(event.senderFrame?.url, frontendUrl);
+}
+
+function getMobilePairing() {
+  if (!frontendUrl || !backendPort) throw new Error("工作区正在启动，请稍后再试");
+  if (!mobilePairing) {
+    const modulePath = app.isPackaged
+      ? path.join(process.resourcesPath, "mobile-server", "mobile-pairing.cjs")
+      : path.join(projectRoot(), "web", "server", "mobile-pairing.cjs");
+    const { MobilePairing } = require(modulePath);
+    mobilePairing = new MobilePairing({
+      frontend: frontendUrl.replace(/\/$/, ""), backend: `http://${LOOPBACK}:${backendPort}`,
+      backendToken: process.env.EXCELMANUS_MANAGE_TOKEN || "",
+      stateFile: path.join(userDataRoot(), "mobile-pairing.json"),
+    });
+  }
+  return mobilePairing;
+}
+
+ipcMain.handle("excelmanus:mobile-pairing", async (event, action, input = {}) => {
+  if (!isFrontendSender(event)) throw new Error("手机连接请求来自无效页面");
+  const pairing = getMobilePairing();
+  if (action === "status") return { ...pairing.status(), platform: process.platform, desktop: true };
+  if (action === "issue") return pairing.issue(typeof input.address === "string" ? input.address : undefined);
+  if (action === "approve") return pairing.approve(String(input.id));
+  if (action === "reject") return pairing.reject(String(input.id));
+  if (action === "revoke") return pairing.revoke(String(input.id));
+  if (action === "stop") return pairing.stop();
+  if (action === "network-settings") {
+    if (process.platform === "win32") await shell.openExternal("ms-settings:network-status");
+    else throw new Error("请打开系统网络设置，让手机和电脑连接同一个路由器");
+    return pairing.status();
+  }
+  if (action === "allow-firewall") {
+    if (!pairing.status().enabled) throw new Error("请先开启手机连接");
+    await allowPrivateNetwork(pairing.port);
+    return pairing.status();
+  }
+  throw new Error("不支持的手机连接操作");
+});
+
 ipcMain.handle("excelmanus:select-folder", async (event) => {
-  if (!mainWindow || event.sender !== mainWindow.webContents || !frontendUrl) {
-    throw new Error("文件夹选择请求来自无效窗口");
-  }
-  let senderOrigin;
-  try {
-    senderOrigin = new URL(event.sender.getURL()).origin;
-  } catch {
-    throw new Error("无法确认文件夹选择请求来源");
-  }
-  if (senderOrigin !== new URL(frontendUrl).origin) {
+  if (!isFrontendSender(event)) {
     throw new Error("文件夹选择请求来自无效页面");
   }
   const result = await dialog.showOpenDialog(mainWindow, {
@@ -244,12 +324,130 @@ ipcMain.handle("excelmanus:select-folder", async (event) => {
   return result.canceled ? null : (result.filePaths[0] || null);
 });
 
+ipcMain.handle("excelmanus:pick-chat-files", async (event) => {
+  if (!isFrontendSender(event)) {
+    throw new Error("文件选择请求来自无效页面");
+  }
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "上传文件",
+    buttonLabel: "上传",
+    properties: ["openFile", "multiSelections"],
+  });
+  return readPickedFiles(result.canceled ? [] : result.filePaths);
+});
+
+function sendMenuAction(action) {
+  mainWindow?.webContents.send("excelmanus:menu-action", action);
+}
+
+function showAboutDialog() {
+  void dialog.showMessageBox({
+    type: "info",
+    title: "关于 ExcelManus",
+    message: "ExcelManus",
+    detail: [
+      `版本 ${app.getVersion()}`,
+      `Electron ${process.versions.electron}`,
+      `Chromium ${process.versions.chrome}`,
+      `Node.js ${process.versions.node}`,
+      `数据目录: ${userDataRoot()}`,
+    ].join("\n"),
+  });
+}
+
+function buildAppMenu() {
+  const isMac = process.platform === "darwin";
+  const template = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { role: "about", label: `关于 ${app.name}` },
+        { type: "separator" },
+        { role: "services", label: "服务" },
+        { type: "separator" },
+        { role: "hide", label: `隐藏 ${app.name}` },
+        { role: "hideOthers", label: "隐藏其他" },
+        { role: "unhide", label: "全部显示" },
+        { type: "separator" },
+        { role: "quit", label: `退出 ${app.name}` },
+      ],
+    }] : []),
+    {
+      label: "文件",
+      submenu: [
+        { label: "新建对话", accelerator: "CmdOrCtrl+N", click: () => sendMenuAction("new-chat") },
+        { label: "上传文件…", accelerator: "CmdOrCtrl+U", click: () => sendMenuAction("upload-file") },
+        { type: "separator" },
+        { label: "设置…", accelerator: "CmdOrCtrl+,", click: () => sendMenuAction("open-settings") },
+        { type: "separator" },
+        { label: "打开数据目录", click: () => void shell.openPath(userDataRoot()) },
+        ...(isMac ? [] : [
+          { type: "separator" },
+          { role: "quit", label: "退出" },
+        ]),
+      ],
+    },
+    {
+      label: "编辑",
+      submenu: [
+        { role: "undo", label: "撤销" },
+        { role: "redo", label: "重做" },
+        { type: "separator" },
+        { role: "cut", label: "剪切" },
+        { role: "copy", label: "复制" },
+        { role: "paste", label: "粘贴" },
+        ...(isMac ? [{ role: "pasteAndMatchStyle", label: "粘贴并匹配样式" }] : []),
+        { role: "selectAll", label: "全选" },
+      ],
+    },
+    {
+      label: "视图",
+      submenu: [
+        { label: "对话", accelerator: "CmdOrCtrl+1", click: () => sendMenuAction("show-chat") },
+        { label: "表格", accelerator: "CmdOrCtrl+2", click: () => sendMenuAction("show-sheet") },
+        { type: "separator" },
+        { label: "侧边栏", accelerator: "CmdOrCtrl+B", click: () => sendMenuAction("toggle-sidebar") },
+        { type: "separator" },
+        { role: "reload", label: "重新加载" },
+        { role: "forceReload", label: "强制重新加载" },
+        { role: "toggleDevTools", label: "开发者工具" },
+        { type: "separator" },
+        { role: "resetZoom", label: "实际大小" },
+        { role: "zoomIn", label: "放大" },
+        { role: "zoomOut", label: "缩小" },
+        { type: "separator" },
+        { role: "togglefullscreen", label: "切换全屏" },
+      ],
+    },
+    {
+      label: "窗口",
+      submenu: [
+        { role: "minimize", label: "最小化" },
+        ...(isMac ? [{ role: "zoom", label: "缩放" }] : []),
+        { role: "close", label: "关闭" },
+        ...(isMac ? [{ type: "separator" }, { role: "front", label: "全部置于顶层" }] : []),
+      ],
+    },
+    {
+      label: "帮助",
+      submenu: [
+        { label: "打开日志目录", click: () => void shell.openPath(path.join(userDataRoot(), "logs")) },
+        { type: "separator" },
+        { label: "项目主页", click: () => void shell.openExternal(REPO_URL) },
+        { label: "反馈问题", click: () => void shell.openExternal(`${REPO_URL}/issues`) },
+        ...(isMac ? [] : [
+          { type: "separator" },
+          { label: "关于 ExcelManus", click: showAboutDialog },
+        ]),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1024,
-    minHeight: 700,
+    ...initialWindowBounds(screen.getPrimaryDisplay().workArea),
     backgroundColor: "#ffffff",
     show: false,
     autoHideMenuBar: true,
@@ -262,6 +460,7 @@ function createMainWindow() {
   });
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   configureWindowSecurity(mainWindow);
+  attachRendererDiagnostics(mainWindow);
   mainWindow.on("closed", () => {
     mainWindow = null;
     // 启动阶段关窗即取消启动（继承原 startupWindow 语义）。
@@ -284,7 +483,8 @@ function stopAll() {
   if (stopPromise) return stopPromise;
   shuttingDown = true;
   stopPromise = (async () => {
-    // Drain backend first while the UI can still observe the shutdown.
+    if (mobilePairing) await mobilePairing.shutdown();
+    // Renderers have closed before normal quit, so polling cannot race teardown.
     await stopProcess(backendProcess, "backend");
     backendProcess = null;
     await stopProcess(frontendProcess, "frontend");
@@ -296,8 +496,11 @@ function stopAll() {
 
 async function boot() {
   openLogStream();
+  buildAppMenu();
   createMainWindow();
-  await mainWindow.loadFile(splashFile());
+  // Paint the splash while ports and child processes spin up underneath it.
+  const splashReady = mainWindow.loadFile(splashFile())
+    .catch((error) => log(`启动页加载失败: ${error.message}`));
   backendPort = await freePort();
   const portFile = path.join(userDataRoot(), "frontend-port");
   let preferred = 0;
@@ -308,17 +511,26 @@ async function boot() {
   // Keep localStorage/IndexedDB origin stable across normal restarts.
   writeFileSync(portFile, String(frontendPort));
   if (shuttingDown) return;
-  setSplashStatus("正在启动后端服务...");
+  // Backend warmup (seconds of Python lifespan) and the standalone Next server
+  // are independent — run both at once. As soon as the frontend can serve, the
+  // app's own health-retry loading screen takes over the remaining wait.
   backendProcess = startBackend(backendPort, frontendPort);
-  await waitForHttp(`http://${LOOPBACK}:${backendPort}/api/v1/health`, undefined, backendProcess);
-  if (shuttingDown) return;
-  setSplashStatus("正在启动界面服务...");
   frontendProcess = startFrontend(frontendPort, backendPort);
-  await waitForHttp(`http://${LOOPBACK}:${frontendPort}/`, undefined, frontendProcess);
-  frontendUrl = `http://${LOOPBACK}:${frontendPort}/`;
-  setSplashStatus("即将进入工作空间...");
-  if (shuttingDown || !mainWindow) return;
-  loadFrontend(frontendUrl);
+  const backendReady = waitForHttp(`http://${LOOPBACK}:${backendPort}/api/v1/health`, undefined, backendProcess);
+  const frontendReady = waitForHttp(`http://${LOOPBACK}:${frontendPort}/`, undefined, frontendProcess)
+    .then(() => {
+      frontendUrl = `http://${LOOPBACK}:${frontendPort}/`;
+      if (shuttingDown || !mainWindow) return;
+      loadFrontend(frontendUrl);
+    });
+  const allReady = Promise.all([backendReady, frontendReady]);
+  await splashReady;
+  setSplashStatus("正在启动本地服务...");
+  await allReady;
+  try {
+    const pairing = getMobilePairing();
+    if (pairing.enabled) await pairing.start();
+  } catch (error) { log(`手机连接未恢复: ${error.message}`); }
 }
 
 app.whenReady().then(() => ownsInstance ? boot() : undefined).catch(async (error) => {
@@ -334,7 +546,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("activate", () => {
-  if (process.platform === "darwin" && !mainWindow && frontendUrl) {
+  if (process.platform === "darwin" && !mainWindow && frontendUrl && !quitRequested && !shuttingDown) {
     createMainWindow();
     loadFrontend(frontendUrl);
   }
@@ -342,8 +554,18 @@ app.on("activate", () => {
 
 app.on("before-quit", (event) => {
   event.preventDefault();
-  if (stopPromise) return;
-  void stopAll().then(() => app.exit(0)).catch(error => {
+  if (stopPromise || quitRequested) return;
+  quitRequested = true;
+  void closeWindowsBeforeShutdown(BrowserWindow.getAllWindows()).then(async (closed) => {
+    if (!closed) {
+      quitRequested = false;
+      await dialog.showMessageBox({ type: "info", title: "尚未退出", message: "窗口尚未关闭。请完成保存或处理未保存的更改后，再次退出。" });
+      return;
+    }
+    await stopAll();
+    app.exit(0);
+  }).catch(error => {
+    quitRequested = false;
     log(`退出失败: ${error.message}`);
     if (!mainWindow && frontendUrl) { createMainWindow(); loadFrontend(frontendUrl); }
     dialog.showErrorBox("ExcelManus 未能完全退出", `${error.message}\n请重试退出；日志保留在用户数据目录。`);

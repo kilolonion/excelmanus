@@ -1,10 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { controlSubagentRun, fetchSubagentRuns, type SubagentControlAction } from "@/lib/api";
+import { controlSubagentRun, fetchSessionTaskList, fetchSubagentRuns, type SubagentControlAction } from "@/lib/api";
 import { completedSubagentFiles, isSubagentActive } from "@/lib/subagent-runs";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
-import type { SubagentRun } from "@/lib/types";
+import type { SessionTaskList, SubagentRun } from "@/lib/types";
 import { useChatStore } from "@/stores/chat-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -13,6 +13,7 @@ import { useWordStore } from "@/stores/word-store";
 /** 由按 sessionId 挂载的任务面板持有；聊天流结束后继续查询活动任务。 */
 export function useBackgroundTasks(sessionId: string, open: boolean) {
   const [runs, setRuns] = useState<SubagentRun[]>([]);
+  const [taskList, setTaskList] = useState<SessionTaskList | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -56,9 +57,15 @@ export function useBackgroundTasks(sessionId: string, open: boolean) {
       const version = ++requestVersion.current;
       setLoading(true);
       try {
-        const rows = await fetchSubagentRuns(sessionId);
+        const [rowsResult, taskListResult] = await Promise.allSettled([
+          fetchSubagentRuns(sessionId),
+          fetchSessionTaskList(sessionId),
+        ]);
         if (stopped || version !== requestVersion.current) return;
-        accept(rows);
+        if (rowsResult.status === "rejected") throw rowsResult.reason;
+        accept(rowsResult.value);
+        // 任务清单失败不阻塞后台任务刷新；保留上次获取的状态。
+        if (taskListResult.status === "fulfilled") setTaskList(taskListResult.value);
         setError("");
       } catch (cause) {
         if (stopped || version !== requestVersion.current) return;
@@ -103,5 +110,5 @@ export function useBackgroundTasks(sessionId: string, open: boolean) {
     return run;
   }, [sessionId, accept, refresh]);
 
-  return { runs: runs.filter((run) => run.background), loading, error, refresh, control };
+  return { runs: runs.filter((run) => run.background), taskList, loading, error, refresh, control };
 }

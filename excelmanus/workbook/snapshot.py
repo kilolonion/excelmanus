@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from excelmanus.workbook.read_cache import ReadCache
 from excelmanus.workbook.refs import RectRef
 from excelmanus.workbook_commit import content_version_of, remember_content_version
 from excelmanus.workspace.refs import FileRef, WorkspaceRef
@@ -26,6 +27,9 @@ SNAPSHOT_BLOB_THRESHOLD = 8 * 1024 * 1024
 _SNAPSHOT_DIRNAME = ".excelmanus"
 _SNAPSHOTS = "snapshots"
 _live_backings: WeakValueDictionary[int, "SnapshotBacking"] = WeakValueDictionary()
+_workbook_views: ReadCache[tuple[Any, Any, threading.Lock]] = ReadCache(
+    max_bytes=256 * 1024 * 1024, max_entries=4
+)
 _materialize_locks: dict[str, threading.Lock] = {}
 _materialize_locks_mu = threading.Lock()
 
@@ -909,12 +913,11 @@ def project_csv_view(
     windows: list[RectRef],
 ) -> dict[str, Any]:
     """CSV/TSV 网格：第 1 行就是 R1，total 是全文行数。"""
-    import csv
-    import io
+    from excelmanus.workbook.csv_index import csv_index
 
-    rows = list(csv.reader(io.StringIO(_decode_text_bytes(snapshot.read_bytes())), delimiter=snapshot.csv_separator()))
-    used_rows = len(rows)
-    used_cols = max((len(row) for row in rows), default=0)
+    index = csv_index(snapshot)
+    used_rows = index.rows
+    used_cols = index.columns
     sheet_name = "Sheet1"
     sheets = [{"name": sheet_name, "sheet_id": sheet_name, "used": {"rows": used_rows, "cols": used_cols}}]
     projected: list[dict[str, Any]] = []
@@ -927,8 +930,7 @@ def project_csv_view(
         r1 = min(rect.max_row, max(used_rows, 1))
         c1 = min(rect.max_col, max(used_cols, 1))
         cells: dict[str, Any] = {}
-        for row in range(r0, r1 + 1):
-            src = rows[row - 1] if row - 1 < len(rows) else []
+        for row, src in enumerate(index.window(r0, r1), r0):
             for col in range(c0, c1 + 1):
                 raw = src[col - 1] if col - 1 < len(src) else ""
                 if raw == "":
@@ -974,6 +976,23 @@ def project_csv_view(
     }
 
 
+def _cached_workbook_pair(
+    snapshot: WorkbookSnapshot, with_styles: bool
+) -> tuple[Any, Any, threading.Lock]:
+    """按不可变快照复用已解析的工作簿对；read_only 共享同一 ZipFile，须持锁遍历。"""
+    from openpyxl import load_workbook
+
+    def build() -> tuple[tuple[Any, Any, threading.Lock], int]:
+        raw = snapshot.read_bytes()
+        # BytesIO 而非文件路径：缓存期间不占用 OS 句柄，Windows 上不会锁死源文件。
+        wb_f = load_workbook(io.BytesIO(raw), data_only=False, read_only=not with_styles)
+        wb_v = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
+        cost = max(len(raw), 1) * (8 if with_styles else 3)
+        return (wb_f, wb_v, threading.Lock()), cost
+
+    return _workbook_views.get_or_create((snapshot.id.key(), with_styles), build)
+
+
 def project_view(
     snapshot: WorkbookSnapshot,
     windows: list[RectRef],
@@ -987,8 +1006,8 @@ def project_view(
         return project_csv_view(snapshot, windows)
     from excelmanus.tools._style_extract import extract_cell_style
 
-    wb_f = snapshot.open_workbook(data_only=False, read_only=not with_styles)
-    wb_v = snapshot.open_workbook(data_only=True, read_only=True)
+    wb_f, wb_v, wb_lock = _cached_workbook_pair(snapshot, with_styles)
+    wb_lock.acquire()
     try:
         if active_sheet_default:
             active = wb_f.active or wb_f.worksheets[0]
@@ -1093,5 +1112,4 @@ def project_view(
             },
         }
     finally:
-        wb_f.close()
-        wb_v.close()
+        wb_lock.release()

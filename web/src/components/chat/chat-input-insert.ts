@@ -1,6 +1,7 @@
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
 import { useCallback } from "react";
 import { isSpreadsheetFile } from "@/lib/file-kind";
+import { displayFileName, displayFilePath } from "@/lib/file-identity";
 import { useExcelStore } from "@/stores/excel-store";
 
 export function formatFileMention(opts: {
@@ -91,6 +92,8 @@ function mentionFileLabel(fileLabel: string, rangeSpec: string | null): string {
 }
 
 function basenameOf(path: string): string {
+  const clean = displayFileName(path);
+  if (clean) return clean;
   const slash = path.lastIndexOf("/");
   return slash >= 0 ? path.slice(slash + 1) : path;
 }
@@ -98,7 +101,7 @@ function basenameOf(path: string): string {
 function withParentDir(path: string): string | null {
   const parts = path.split("/").filter((p) => p && p !== ".");
   if (parts.length < 2) return null;
-  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+  return `${parts[parts.length - 2]}/${basenameOf(path)}`;
 }
 
 /**
@@ -134,7 +137,7 @@ function resolveUniqueDisplay(
     if (available(withDir)) return withDir;
   }
 
-  return mentionFileLabel(parsed.path, parsed.rangeSpec);
+  return mentionFileLabel(displayFilePath(parsed.path) || parsed.path, parsed.rangeSpec);
 }
 
 export function insertTokensIntoText(
@@ -167,9 +170,9 @@ export function scheduleTextareaCursor(
   });
 }
 
-export function trackRecentExcelFile(path: string, filename: string) {
+export function trackRecentExcelFile(path: string, filename: string, workspaceKey?: string) {
   if (isSpreadsheetFile(filename)) {
-    useExcelStore.getState().addRecentFile({ path, filename });
+    useExcelStore.getState().addRecentFile({ path, filename }, workspaceKey);
   }
 }
 

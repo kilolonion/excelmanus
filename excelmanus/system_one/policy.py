@@ -24,6 +24,8 @@ T_DOM = 0.55
 T_NEEDS_WRITE = 0.7
 T_CODE = 0.8
 T_SUGGEST = 0.6
+T_CONTEXT = 0.8
+T_CONTEXT_MARGIN = 0.15
 T_CHAT = 0.85
 T_VERBATIM = 0.7
 T_BIG = 8000
@@ -261,9 +263,13 @@ def gate_for_pack(pack_id: str, settings: JevSettings) -> GateLevel:
 
 
 def decision_is_applied(pack_id: str, settings: JevSettings) -> bool:
-    """enforce 且中文标定已签字才允许 applied。未签字时只 shadow。"""
+    """enforce 可提供纯建议；执行侧题包还必须通过中文标定签字。"""
     if gate_for_pack(pack_id, settings) != "enforce":
         return False
+    # A context suggestion cannot authorize a workspace switch or a mutation.
+    # Actuator packs retain the existing calibration requirement.
+    if get_pack(pack_id).advisory_only:
+        return True
     from excelmanus.system_one.calibration import calibration_allows_enforce
 
     return calibration_allows_enforce(pack_id, settings)
@@ -307,6 +313,8 @@ def stamp_application(pack_id: str, decision: Decision, settings: JevSettings) -
 def synthesize(pack_id: str, evaluation: Evaluation, state: Mapping[str, Any] | None = None) -> Decision:
     spec = get_pack(pack_id)
     state = state or {}
+    if spec.pack_id == "context.resolve":
+        return _synthesize_context(evaluation, state)
     if spec.pack_id == "exposure.turn":
         return _synthesize_exposure(evaluation, state)
     if spec.pack_id == "observation.shape":
@@ -326,6 +334,97 @@ def synthesize(pack_id: str, evaluation: Evaluation, state: Mapping[str, Any] | 
     if spec.pack_id == "recovery.next_step":
         return _synthesize_recovery(evaluation, state)
     return Decision.noop("unknown_pack")
+
+
+def _synthesize_context(evaluation: Evaluation, state: Mapping[str, Any]) -> Decision:
+    def pick(qid: str, fallback: str) -> str:
+        answer = choice_of(evaluation.answers.get(qid))
+        if answer is None or not T_CONTEXT <= answer.confidence <= 1:
+            return fallback
+        if answer.probabilities:
+            # Confidence describes the distribution; it is not P(selected).
+            selected = answer.probabilities.get(answer.choice)
+            if selected is None or any(not 0 <= v <= 1 for v in answer.probabilities.values()):
+                return fallback
+            others = [v for k, v in answer.probabilities.items() if k != answer.choice]
+            if others and selected - max(others) < T_CONTEXT_MARGIN:
+                return fallback
+        return answer.choice
+
+    def candidate(choice: str, prefix: str, field: str) -> dict[str, Any] | None:
+        if choice not in {f"{prefix}{i}" for i in range(10)}:
+            return None
+        rows = state.get(field) or []
+        index = int(choice[1:])
+        if index >= len(rows) or not isinstance(rows[index], Mapping):
+            return None
+        return dict(rows[index])
+
+    workspace = pick("workspace", "ask")
+    workspace_candidate = candidate(workspace, "w", "workspaces")
+    if workspace_candidate:
+        workspace = "existing"
+    elif workspace not in {"current", "new_blank", "ask", "none"}:
+        workspace = "ask"
+    if workspace == "current" and not state.get("current_workspace"):
+        workspace = "ask"
+    target = pick("target", "ask")
+    target_candidate = candidate(target, "t", "targets")
+    if target_candidate:
+        target = "resolved"
+    elif target not in {"ask", "none"}:
+        target = "ask"
+    edit_intent = pick("edit_intent", "unclear")
+    if edit_intent not in {"specified", "from_context", "unclear", "no_edit"}:
+        edit_intent = "unclear"
+    # Creating a blank workspace cannot satisfy a request that needs an existing file.
+    if workspace == "new_blank" and target != "none":
+        workspace = "ask"
+    explicit = [row for row in state.get("targets", []) if row.get("source") == "explicit_mention"]
+    if explicit and target_candidate and target_candidate not in explicit:
+        target, target_candidate = "ask", None
+    current_id = (state.get("current_workspace") or {}).get("id")
+    if workspace_candidate and workspace_candidate.get("id") == current_id:
+        workspace = "current"
+    if workspace == "existing":
+        # The target candidates are scoped to the CURRENT workspace only.
+        target, target_candidate = "ask", None
+    has_columns = bool(state.get("columns"))
+    column = pick("column", "ask" if has_columns else "none")
+    column_candidate = candidate(column, "c", "columns")
+    if column_candidate:
+        column = "matched"
+    elif column not in {"ask", "none"}:
+        column = "ask" if has_columns else "none"
+    if workspace == "existing" or target == "none":
+        # Columns live in the current workspace's files; a different workspace or
+        # a request with no spreadsheet target cannot carry a column suggestion.
+        column, column_candidate = "none", None
+    read = pick("read", "none")
+    if read not in {"overview", "selection", "column_sample", "formulas", "none"}:
+        read = "none"
+    suggestion = None
+    if target_candidate and read != "none":
+        from excelmanus.system_one.sheet_advice import read_suggestion
+
+        suggestion = read_suggestion(target_candidate, column_candidate, read)
+    confidence = {}
+    for qid in ("workspace", "target", "edit_intent", "column", "read"):
+        answer = choice_of(evaluation.answers.get(qid))
+        confidence[qid] = round(answer.confidence, 3) if answer and 0 <= answer.confidence <= 1 else 0.0
+    next_step = "clarify" if "ask" in {workspace, target} or edit_intent == "unclear" else (
+        "inspect_candidate" if suggestion else (
+            "inspect_target" if target == "resolved" else "continue"
+        )
+    )
+    return Decision(
+        kind="noop", reason="context_advice", evaluation=evaluation,
+        extras={"workspace": workspace, "target": target, "edit_intent": edit_intent,
+                "workspace_candidate": workspace_candidate, "target_candidate": target_candidate,
+                "column": column, "column_candidate": column_candidate,
+                "read": read, "read_suggestion": suggestion,
+                "confidence": confidence, "next": next_step},
+    )
 
 
 def _synthesize_exposure(evaluation: Evaluation, state: Mapping[str, Any]) -> Decision:

@@ -14,8 +14,9 @@ import {
   trackRecentExcelFile,
 } from "./chat-input-insert";
 import { MentionHighlighter } from "./MentionHighlighter";
-import { downloadFile, buildApiUrl, getAuthHeaders } from "@/lib/api";
+import { apiFetch, downloadFile, buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { classifyWorkspaceFile } from "@/lib/file-kind";
+import { displayFilePath } from "@/lib/file-identity";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import type { FileAttachment } from "@/lib/types";
 
@@ -218,7 +219,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
       const params = new URLSearchParams();
       if (activeSessionId) params.set("session_id", activeSessionId);
       const qs = params.toString();
-      const res = await fetch(buildApiUrl(`/mentions${qs ? `?${qs}` : ""}`), {
+      const res = await apiFetch(buildApiUrl(`/mentions${qs ? `?${qs}` : ""}`), {
         headers: { ...getAuthHeaders() },
       });
       if (res.ok) {
@@ -435,7 +436,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                     />
                   </div>
                   {wsFiles
-                    .filter((f) => !wsFilter || f.toLowerCase().includes(wsFilter.toLowerCase()))
+                    .filter((f) => !wsFilter || displayFilePath(f).toLowerCase().includes(wsFilter.toLowerCase()))
                     .map((f) => (
                       <button
                         key={f}
@@ -444,7 +445,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                         className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-left hover:bg-accent transition-colors"
                       >
                         <FileSpreadsheet className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
-                        <span className="truncate">{f}</span>
+                        <span className="truncate">{displayFilePath(f)}</span>
                       </button>
                     ))}
                   {wsFiles.length === 0 && (

@@ -11,6 +11,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useTouchGesture } from "@/hooks/use-touch-gesture";
 import { fetchWorkbookView } from "@/lib/api";
+import { fileBaseName } from "@/lib/revision-display";
 import { ExcelRibbonCommands } from "@/components/excel/ExcelRibbonCommands";
 import {
   enqueueWorkbookCommand,
@@ -22,7 +23,9 @@ import {
   subscribeWorkbookEdits,
   isWorkbookEditPaused,
   discardWorkbookEdits,
+  workbookEditDraft,
 } from "@/lib/excel-cell-edit";
+import { saveBlob } from "@/lib/save-blob";
 import { letterToColIndex, windowCellPatch, demoWorkbookView, viewMatchesLease, viewSnapshotToUniver, type WorkbookViewSnapshot } from "@/lib/workbook-view";
 import { pageForCell, pagesForViewport, rangeIsLoaded, mergeViewWindows, firstUnloadedCell } from "@/lib/workbook-window";
 import { versionStoreKey, type WorkspaceFileRef } from "@/lib/workspace-file-ref";
@@ -38,6 +41,7 @@ import {
   type NativeRibbonTab,
 } from "@/lib/excel-ribbon-actions";
 import { getUniverModules } from "@/lib/univer-modules";
+import type { WorkbookViewState } from "@/stores/workbook-conversation-store";
 
 export { prefetchUniverModules, warmUniverModules } from "@/lib/univer-modules";
 
@@ -52,7 +56,7 @@ interface UniverSheetProps {
   onCellEdit?: (cell: string, value: unknown, sheet?: string) => void;
   initialSheet?: string;
   selectionMode?: boolean;
-  onRangeSelected?: (range: string, sheet: string, cellValue?: string) => void;
+  onRangeSelected?: (range: string, sheet: string, cellValue?: string, contentVersion?: string) => void;
   withStyles?: boolean;
   /** 对比视图等只读场景：禁止编辑且不写回 */
   readOnly?: boolean;
@@ -63,6 +67,7 @@ interface UniverSheetProps {
   /** 点到 Univer 自带的 开始 / 公式 / 数据 时回调 */
   onNativeRibbonTab?: () => void;
   active?: boolean;
+  onViewState?: (view: WorkbookViewState) => void;
 }
 
 function createPreviewWorkbookId(): string {
@@ -179,7 +184,9 @@ function applyWorkbookEditable(api: FUniver, readOnly: boolean) {
   }
 }
 
-export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true, readOnly = false, ribbonSlot, historyActive = false, onNativeRibbonTab, active = true }: UniverSheetProps) {
+export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true, readOnly = false, ribbonSlot, historyActive = false, onNativeRibbonTab, active = true, onViewState }: UniverSheetProps) {
+  const onViewStateRef = useRef(onViewState);
+  onViewStateRef.current = onViewState;
   const containerRef = useRef<HTMLDivElement>(null);
   const univerRef = useRef<FUniver | null>(null);
   const workbookIdRef = useRef<string>(createPreviewWorkbookId());
@@ -493,6 +500,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         needsRefreshRef.current = false;
         expected = next.content_version;
         rememberSnapshotVersion(file.relative, next.content_version, file.workspaceKey);
+        onViewStateRef.current?.({ status: "ready", sheet: name, version: next.content_version });
         if (next.with_styles !== false) styledPagesRef.current.add(`${expected}|${name}|${page.address}`);
         setError(null);
         externalRefreshRef.current = false;
@@ -517,6 +525,12 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       }
     } catch (err) {
       if (!valid() || (err instanceof Error && err.name === "AbortError")) return;
+      if ((err as { code?: string }).code === "STALE_VIEW" && version) {
+        // Drop only the stale read token. The next guarded window request reads
+        // the live version and still refuses to replace pending user edits.
+        useExcelStore.getState().notifyWorkbookChanged(file.relative, file.workspaceKey, undefined, "refresh");
+        return;
+      }
       if ((err as { code?: string }).code === "SHEET_NOT_FOUND") {
         await loadDataRef.current(api, null);
         return;
@@ -564,7 +578,8 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     };
     enqueueWorkbookCommand({ path: identity.fileRef.relative, operations: ops, file: identity.fileRef,
       sessionId: identity.sessionId, viewGeneration: identity.viewGeneration ?? useExcelStore.getState().viewGeneration,
-      onConflict: () => reportError("文件版本已变化，请重新加载后编辑"),
+      expectedVersion: viewRef.current?.content_version ?? null,
+      onConflict: () => reportError("文件已被修改，本次编辑尚未保存。可先导出编辑草稿，再重新加载核对。"),
       onError: reportError,
     });
   };
@@ -599,7 +614,9 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       const previousSheet = providedApi?.getActiveWorkbook?.()?.getActiveSheet?.();
       const position = sameFile ? previousSheet?.getVisibleRange?.() : null;
       const selection = sameFile ? previousSheet?.getSelection?.()?.getActiveRange?.()?.getRange?.() : null;
+      const reportView = onViewStateRef.current;
       try {
+        reportView?.({ status: "loading" });
         setLoading(!sameFile);
         setSyncing(sameFile);
         setError(null);
@@ -643,6 +660,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
         if (!view.sheets.length) {
           setError("文件无工作表");
+          reportView?.({ status: "error", error: "文件无工作表" });
           setLoading(false);
           return;
         }
@@ -702,6 +720,10 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
         setLoading(false);
         setSyncing(false);
+        reportView?.({ status: "ready", sheet: nextSheet?.getSheetName?.() || view.active_sheet || view.windows[0]?.sheet, version: view.content_version });
+        if (fileRef && isWorkbookEditPaused(fileRef)) {
+          setError("此文件仍有未保存的编辑草稿，可先导出草稿，再重新加载核对。");
+        }
         endSuppressEdits();
         // Yield a paint with real values before the style pass starts.
         requestAnimationFrame(() => {
@@ -710,6 +732,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       } catch (err) {
         if (controller.signal.aborted || loadVersion !== loadVersionRef.current) return;
         console.error("Error loading Excel data:", err);
+        reportView?.({ status: "error", error: err instanceof Error ? err.message : "加载失败" });
         setError(err instanceof Error ? err.message : "加载失败");
         setLoading(false);
       } finally {
@@ -765,14 +788,32 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         api = univerAPI;
         univerRef.current = univerAPI;
         const subscriptions: IDisposable[] = [];
-        subscriptions.push(univerAPI.addEvent(univerAPI.Event.CommandExecuted, (event) => emitMutationRef.current(event)));
+        subscriptions.push(univerAPI.addEvent(univerAPI.Event.CommandExecuted, (event) => {
+          emitMutationRef.current(event);
+          const view = viewRef.current;
+          const file = identityRef.current.fileRef;
+          if (view && file && viewMatchesLease(view, file) && !requestRef.current && !suppressEditsRef.current) onViewStateRef.current?.({
+            status: "ready", version: view.content_version,
+            sheet: univerAPI.getActiveWorkbook()?.getActiveSheet?.()?.getSheetName?.(),
+          });
+        }));
         let windowTimer: ReturnType<typeof setTimeout> | undefined;
         const requestWindow = (event: { worksheet?: FWorksheet; activeSheet?: FWorksheet }) => {
           if (windowTimer) clearTimeout(windowTimer);
           windowTimer = setTimeout(() => { void loadWindowRef.current(event?.worksheet || event?.activeSheet); }, 100);
         };
         subscriptions.push(univerAPI.addEvent(univerAPI.Event.Scroll, requestWindow));
-        subscriptions.push(univerAPI.addEvent(univerAPI.Event.SelectionChanged, requestWindow));
+        subscriptions.push(univerAPI.addEvent(univerAPI.Event.SelectionChanged, (event) => {
+          requestWindow(event);
+          const view = viewRef.current;
+          if (!view || !identityRef.current.fileRef || !viewMatchesLease(view, identityRef.current.fileRef)
+            || requestRef.current || loadingShellFileRef.current || suppressEditsRef.current) return;
+          const selection = readActiveRange(univerAPI);
+          onViewStateRef.current?.({
+            status: "ready", version: view.content_version,
+            sheet: selection.sheet, range: selection.range,
+          });
+        }));
         subscriptions.push(univerAPI.addEvent(univerAPI.Event.ActiveSheetChanged, requestWindow));
         subscriptions.push(univerAPI.addEvent(univerAPI.Event.SheetEditStarted, () => { editingRef.current = true; }));
         subscriptions.push(univerAPI.addEvent(univerAPI.Event.SheetEditEnded, (event) => {
@@ -802,7 +843,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
                 setError("更改尚未保存，请重新加载后继续编辑");
                 return;
               }
-              if (id.startsWith("sheet.mutation.") && externalRefreshRef.current) {
+              if (id.startsWith("sheet.mutation.") && id !== "sheet.mutation.set-range-values" && externalRefreshRef.current) {
                 evt.cancel = true;
                 setWindowStatus("正在同步最新版本，请稍后编辑");
                 return;
@@ -843,6 +884,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       } catch (err) {
         console.error("Univer initialization error:", err);
         setError("Univer 引擎初始化失败");
+        onViewStateRef.current?.({ status: "error", error: "表格引擎加载失败，请重新打开" });
         setLoading(false);
       }
     };
@@ -881,7 +923,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       loadVersionRef.current += 1;
       if (boundFile) void flushWorkbookEdits(boundFile);
     };
-  }, [filePath, fileRef?.workspaceKey, fileRef?.workspaceId, viewGeneration, engineAttempt, loadData]);
+  }, [filePath, fileRef?.workspaceKey, fileRef?.workspaceId, sessionId, viewGeneration, engineAttempt, loadData]);
 
   useEffect(() => {
     if (!engineReady || loading || !univerRef.current) return;
@@ -939,12 +981,21 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       if (file) void flushWorkbookEdits(file);
     };
     const unsubscribe = subscribeWorkbookEdits(update);
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      const file = identityRef.current.fileRef;
+      if (file && (hasPendingWorkbookEdits(file) || isWorkbookEditPaused(file))) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
     window.addEventListener("blur", flush);
+    window.addEventListener("beforeunload", beforeUnload);
     document.addEventListener("visibilitychange", flush);
     return () => {
       unsubscribe();
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
       window.removeEventListener("blur", flush);
+      window.removeEventListener("beforeunload", beforeUnload);
       document.removeEventListener("visibilitychange", flush);
     };
   }, []);
@@ -1005,7 +1056,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         const cellValue = isSingleCell
           ? readSingleCellValue(range, sheet, startRow, startCol)
           : undefined;
-        onRangeSelected(selection.range, selection.sheet, cellValue);
+        onRangeSelected(selection.range, selection.sheet, cellValue, viewRef.current?.content_version);
       } catch {
         // 忽略选区读取错误
       }
@@ -1118,7 +1169,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           ? "absolute bottom-10 right-3 max-w-[90%] rounded border bg-background/95 px-3 py-2 text-sm text-muted-foreground shadow-sm pointer-events-none z-10"
           : "absolute inset-0 flex items-center justify-center gap-2 bg-background text-sm text-muted-foreground z-10"
         } role="status" aria-live="polite">
-          <span className="truncate">{engineReady ? `正在读取 ${filePath.split("/").pop()}…` : "正在准备表格…"}</span>
+          <span className="truncate">{engineReady ? `正在读取 ${fileBaseName(filePath)}…` : "正在准备表格…"}</span>
         </div>
       )}
       {!loading && (windowStatus || saving || syncing) && !error && (
@@ -1129,10 +1180,17 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       {error && (
         <div role="alert" className={`absolute z-20 bg-background/95 border p-3 ${viewRef.current ? "bottom-8 left-3 right-3 rounded shadow-sm" : "inset-x-3 top-24 rounded"}`}>
           <div className="flex items-center gap-3"><span className="text-sm text-destructive flex-1">{error}</span>
-            <button className="text-sm underline shrink-0" type="button" onClick={() => {
+            {identityRef.current.fileRef && isWorkbookEditPaused(identityRef.current.fileRef) && (
+              <button className="text-sm underline shrink-0" type="button" onClick={() => {
+                const file = identityRef.current.fileRef!;
+                saveBlob(new Blob([workbookEditDraft(file)], { type: "application/json" }), `${file.relative}.edits.json`);
+              }}>导出编辑草稿</button>
+            )}
+            <button className="text-sm underline shrink-0" type="button" onClick={async () => {
               const file = identityRef.current.fileRef;
               if (file && isWorkbookEditPaused(file)) {
                 if (!window.confirm("重新加载会放弃未保存的更改，是否继续？")) return;
+                await flushWorkbookEdits(file);
                 discardWorkbookEdits(file);
               }
               setError(null);

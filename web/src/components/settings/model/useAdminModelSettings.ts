@@ -11,8 +11,10 @@ import {
   normalizeThinkingEffortOptions,
   type ThinkingEffort,
 } from "@/lib/thinking";
-import { SECTION_META } from "./constants";
+import { SECTION_META, CODEX_MODELS } from "./constants";
 import {
+  isCodexProfile,
+  subscriptionModelPrefix,
   isMaskedApiKey,
   normalizeFetchedCapabilities,
   siblingDraftFromProfile,
@@ -27,6 +29,13 @@ type ThinkingSettings = {
   effective_budget: number;
   allowed_efforts?: string[];
 };
+
+// Codex（OAuth）档案没有 API Key，无法走远端 /models 探测；
+// 模型目录是固定的订阅支持列表，直接作为「已检测」结果使用。
+const CODEX_REMOTE_MODEL_ITEMS: RemoteModelItem[] = CODEX_MODELS.map((m) => ({
+  id: m.publicId,
+  owned_by: m.proOnly ? `${m.displayName} · Pro` : m.displayName,
+}));
 
 export function useAdminModelSettings() {
   const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
@@ -221,7 +230,7 @@ export function useAdminModelSettings() {
     const esUrl =
       buildApiUrl(`/config/models/capabilities/jobs/${encodeURIComponent(jobId)}/events`, { direct: true }) +
       (token ? `?manage_token=${encodeURIComponent(token)}` : "");
-    const es = new EventSource(esUrl);
+    const es = new EventSource(esUrl, { withCredentials: true });
     probeEsRef.current = es;
 
     const onMessage = (e: MessageEvent) => {
@@ -304,6 +313,14 @@ export function useAdminModelSettings() {
     setRemoteModelHint(null);
     setRemoteModels([]);
     setModelDropdownTarget(null);
+    const namedProfile = name
+      ? (config?.profiles || []).find((p) => p.name === name)
+      : undefined;
+    if (namedProfile && isCodexProfile(namedProfile)) {
+      setRemoteModels(CODEX_REMOTE_MODEL_ITEMS);
+      setFetchingModels(false);
+      return;
+    }
     try {
       const usableKey = apiKey && !isMaskedApiKey(apiKey) ? apiKey : undefined;
       const result = await listRemoteModels({
@@ -327,7 +344,7 @@ export function useAdminModelSettings() {
     } finally {
       setFetchingModels(false);
     }
-  }, []);
+  }, [config?.profiles]);
 
   const resetProfileFormUi = useCallback(() => {
     setNewProfile(false);
@@ -342,24 +359,30 @@ export function useAdminModelSettings() {
   }, []);
 
   const beginAddSiblingProfile = useCallback((source: ProfileEntry) => {
+    const codex = isCodexProfile(source);
+    const subscription = subscriptionModelPrefix(source) !== null;
     setNewProfile(true);
     setEditingProfile(null);
     setSiblingSourceName(source.name);
-    setProfileDraft(siblingDraftFromProfile(source));
+    // 订阅档案的 description 带有源模型名（如 "GPT-5.6 Sol — OAuth 登录"），
+    // 添加新模型时不能沿用，交由选择模型时按 displayName 重新生成。
+    setProfileDraft(subscription ? { ...siblingDraftFromProfile(source), description: "" } : siblingDraftFromProfile(source));
     setProfileError(null);
     setRemoteModelError(null);
     setRemoteModelHint(null);
     setTestResult((prev) => ({ ...prev, _profile_form: null }));
-    setRemoteModels([]);
+    setRemoteModels(codex ? CODEX_REMOTE_MODEL_ITEMS : []);
     setModelDropdownTarget(null);
     scrollToForm();
-    void handleFetchRemoteModels(
-      "_profile",
-      source.base_url || undefined,
-      undefined,
-      source.protocol || undefined,
-      source.name,
-    );
+    if (!codex) {
+      void handleFetchRemoteModels(
+        "_profile",
+        source.base_url || undefined,
+        undefined,
+        source.protocol || undefined,
+        source.name,
+      );
+    }
   }, [handleFetchRemoteModels, scrollToForm]);
 
   const handleCapToggle = useCallback(async (profileName: string, model: string, base_url: string, field: string, value: boolean) => {
@@ -489,11 +512,26 @@ export function useAdminModelSettings() {
     setProfileError(null);
     setAddingProfile(true);
     const existingNames = (config?.profiles || []).map((profile) => profile.name);
-    const newName = profileDraft.name.trim() || uniqueSiblingProfileName(profileDraft.model, existingNames);
+    const siblingSource = siblingSourceName
+      ? (config?.profiles || []).find((p) => p.name === siblingSourceName)
+      : undefined;
+    const subPrefix = siblingSource ? subscriptionModelPrefix(siblingSource) : null;
+    // 订阅（OAuth）档案的 model 必须带 provider 前缀才会被识别为订阅模型；
+    // 允许用户直接填写裸模型 ID，这里自动补前缀。
+    const modelId = profileDraft.model.trim();
+    const normalizedModel = subPrefix && modelId && !modelId.startsWith(subPrefix)
+      ? `${subPrefix}${modelId}`
+      : modelId;
+    // 订阅档案约定 name = 完整 publicId（provider/xxx），与 OAuth 卡片保持一致。
+    const newName = profileDraft.name.trim()
+      || (subPrefix && normalizedModel && !existingNames.includes(normalizedModel)
+        ? normalizedModel
+        : uniqueSiblingProfileName(normalizedModel, existingNames));
     const draftSnapshot = {
       ...profileDraft,
       name: newName,
-      ...(siblingSourceName && !profileDraft.api_key.trim()
+      model: normalizedModel,
+      ...(siblingSourceName && !profileDraft.api_key.trim() && !subPrefix
         ? { clone_from: siblingSourceName }
         : {}),
     };

@@ -3,6 +3,7 @@
 import { useMemo, useState, useCallback } from "react";
 import { Settings, ChevronDown, ChevronUp } from "lucide-react";
 import type { TextDiffEntry } from "@/stores/excel-store";
+import { displayFileName, displayFilePath } from "@/lib/file-identity";
 
 interface TextDiffViewProps {
   data: TextDiffEntry;
@@ -101,7 +102,7 @@ function buildDisplayItems(diffLines: DiffLine[]): DisplayItem[] {
 export function TextDiffView({ data }: TextDiffViewProps) {
   const diffLines = useMemo(() => parseDiffLines(data.hunks), [data.hunks]);
   const displayItems = useMemo(() => buildDisplayItems(diffLines), [diffLines]);
-  const filename = data.filePath.split("/").pop() || data.filePath;
+  const filename = displayFileName(data.filePath) || data.filePath;
   const [mode, setMode] = useState<DisplayMode>("collapsed");
 
   const previewItems = useMemo(
@@ -195,7 +196,7 @@ export function TextDiffView({ data }: TextDiffViewProps) {
         <Settings className="h-3.5 w-3.5 text-muted-foreground/50 flex-shrink-0" />
         <span
           className="font-medium text-foreground/80 truncate text-[12px]"
-          title={data.filePath}
+          title={displayFilePath(data.filePath)}
         >
           {filename}
         </span>

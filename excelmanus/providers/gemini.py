@@ -521,6 +521,90 @@ def _normalize_gemini_base_url(base_url: str) -> str:
     return url.rstrip("/")
 
 
+async def iter_gemini_sse_deltas(
+    resp: httpx.Response,
+    *,
+    envelope_key: str | None = None,
+):
+    """消费 Gemini SSE 响应流，yield StreamDelta。
+
+    ``envelope_key`` 用于信封包裹的上游（如 Antigravity 的
+    ``{"response": {...}}``）：非空时先解包再按原生 Gemini chunk 解析。
+    """
+    _inline_sm = InlineThinkingStateMachine()
+    replay_parts: list[dict[str, Any]] = []
+    call_index = 0
+
+    async for line in resp.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        raw = line[6:]
+        try:
+            chunk_data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if envelope_key:
+            inner = chunk_data.get(envelope_key)
+            if not isinstance(inner, dict):
+                continue
+            chunk_data = inner
+
+        candidates = chunk_data.get("candidates", [])
+        if not candidates:
+            usage_meta = chunk_data.get("usageMetadata")
+            if usage_meta:
+                u = _Usage(
+                    prompt_tokens=usage_meta.get("promptTokenCount", 0),
+                    completion_tokens=usage_meta.get("candidatesTokenCount", 0),
+                    total_tokens=usage_meta.get("totalTokenCount", 0),
+                )
+                _cached = usage_meta.get("cachedContentTokenCount", 0)
+                if _cached:
+                    u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
+                yield StreamDelta(usage=u)
+            continue
+
+        candidate = candidates[0]
+        parts = candidate.get("content", {}).get("parts", [])
+        finish = candidate.get("finishReason")
+
+        for part in parts:
+            if part.get("thought") or part.get("thoughtSignature"):
+                replay_parts.append(dict(part))
+                yield StreamDelta(replay_state={"thought_parts": list(replay_parts)})
+            if part.get("thought"):
+                yield StreamDelta(thinking_delta=part.get("text") or (part["thought"] if isinstance(part["thought"], str) else ""))
+            elif "text" in part:
+                for d in _inline_sm.feed(part["text"]):
+                    yield d
+            elif "functionCall" in part:
+                fc = part["functionCall"]
+                yield StreamDelta(tool_calls_delta=[{
+                    "index": call_index,
+                    "id": str(uuid.uuid4()),
+                    "name": fc.get("name", ""),
+                    "arguments": json.dumps(fc.get("args", {})),
+                }])
+                call_index += 1
+
+        if finish:
+            mapped_finish = "stop"
+            if finish in ("FUNCTION_CALL", "TOOL_CALLS"):
+                mapped_finish = "tool_calls"
+            usage_meta = chunk_data.get("usageMetadata")
+            u = None
+            if usage_meta:
+                u = _Usage(
+                    prompt_tokens=usage_meta.get("promptTokenCount", 0),
+                    completion_tokens=usage_meta.get("candidatesTokenCount", 0),
+                    total_tokens=usage_meta.get("totalTokenCount", 0),
+                )
+                _cached = usage_meta.get("cachedContentTokenCount", 0)
+                if _cached:
+                    u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
+            yield StreamDelta(finish_reason=mapped_finish, usage=u)
+
+
 # ── Gemini 客户端（鸭子类型兼容 openai.AsyncOpenAI） ─────────────
 
 
@@ -703,80 +787,14 @@ class GeminiClient:
             params = {"key": self._api_key}
 
         async def _stream_generator():
-            _inline_sm = InlineThinkingStateMachine()
-            replay_parts: list[dict[str, Any]] = []
-            call_index = 0
-
             async with self._http.stream("POST", url, json=body, headers=headers, params=params) as resp:
                 if resp.status_code != 200:
                     error_text = await resp.aread()
                     raise RuntimeError(
                         f"Gemini API 错误 (HTTP {resp.status_code}): {error_text[:500]}"
                     )
-
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    raw = line[6:]
-                    try:
-                        chunk_data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-
-                    candidates = chunk_data.get("candidates", [])
-                    if not candidates:
-                        usage_meta = chunk_data.get("usageMetadata")
-                        if usage_meta:
-                            u = _Usage(
-                                prompt_tokens=usage_meta.get("promptTokenCount", 0),
-                                completion_tokens=usage_meta.get("candidatesTokenCount", 0),
-                                total_tokens=usage_meta.get("totalTokenCount", 0),
-                            )
-                            _cached = usage_meta.get("cachedContentTokenCount", 0)
-                            if _cached:
-                                u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
-                            yield StreamDelta(usage=u)
-                        continue
-
-                    candidate = candidates[0]
-                    parts = candidate.get("content", {}).get("parts", [])
-                    finish = candidate.get("finishReason")
-
-                    for part in parts:
-                        if part.get("thought") or part.get("thoughtSignature"):
-                            replay_parts.append(dict(part))
-                            yield StreamDelta(replay_state={"thought_parts": list(replay_parts)})
-                        if part.get("thought"):
-                            yield StreamDelta(thinking_delta=part.get("text") or (part["thought"] if isinstance(part["thought"], str) else ""))
-                        elif "text" in part:
-                            for d in _inline_sm.feed(part["text"]):
-                                yield d
-                        elif "functionCall" in part:
-                            fc = part["functionCall"]
-                            yield StreamDelta(tool_calls_delta=[{
-                                "index": call_index,
-                                "id": str(uuid.uuid4()),
-                                "name": fc.get("name", ""),
-                                "arguments": json.dumps(fc.get("args", {})),
-                            }])
-                            call_index += 1
-
-                    if finish:
-                        mapped_finish = "stop"
-                        if finish in ("FUNCTION_CALL", "TOOL_CALLS"):
-                            mapped_finish = "tool_calls"
-                        usage_meta = chunk_data.get("usageMetadata")
-                        u = None
-                        if usage_meta:
-                            u = _Usage(
-                                prompt_tokens=usage_meta.get("promptTokenCount", 0),
-                                completion_tokens=usage_meta.get("candidatesTokenCount", 0),
-                                total_tokens=usage_meta.get("totalTokenCount", 0),
-                            )
-                            _cached = usage_meta.get("cachedContentTokenCount", 0)
-                            if _cached:
-                                u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
-                        yield StreamDelta(finish_reason=mapped_finish, usage=u)
+                async for delta in iter_gemini_sse_deltas(resp):
+                    yield delta
 
         return _stream_generator()
 

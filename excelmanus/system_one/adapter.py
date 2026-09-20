@@ -1,4 +1,4 @@
-"""有界 state：只送本问需要的字段，不送对话史、文件字节、密钥。"""
+"""有界 state：只送本问需要的字段，不送完整对话史、文件字节、密钥。"""
 
 from __future__ import annotations
 
@@ -24,6 +24,11 @@ _MAX_LIST = 10
 _MAX_TOOL_ARGS = 8
 
 _PACK_FIELDS: dict[str, tuple[str, ...]] = {
+    "context.resolve": (
+        "user_text", "current_workspace", "workspaces", "targets", "recent_context",
+        "workspaces_truncated", "targets_truncated",
+        "columns", "columns_truncated",
+    ),
     "exposure.turn": (
         "user_text",
         "chat_mode",
@@ -188,7 +193,7 @@ def _clip_tool(value: object) -> dict[str, Any]:
 
 
 def bound_state(pack_id: str, state: Mapping[str, Any] | None) -> dict[str, Any]:
-    """裁剪有界 state。缺字段给安全默认值，从不透传对话史/字节/密钥。"""
+    """裁剪有界 state。缺字段给安全默认值，不透传完整对话史/字节/密钥。"""
     src = dict(state or {})
     allowed = _PACK_FIELDS.get(pack_id)
     if allowed is None:
@@ -196,7 +201,7 @@ def bound_state(pack_id: str, state: Mapping[str, Any] | None) -> dict[str, Any]
     out: dict[str, Any] = {}
     for key in allowed:
         if key == "user_text":
-            out[key] = _clip_text(src.get("user_text"), _MAX_USER_TEXT)
+            out[key] = _clip_text(src.get("user_text"), 2000 if pack_id == "context.resolve" else _MAX_USER_TEXT)
         elif key == "result_head":
             out[key] = _clip_text(src.get("result_head"), _MAX_HEAD)
         elif key == "tool":

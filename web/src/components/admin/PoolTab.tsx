@@ -22,7 +22,7 @@ function BudgetBar({label,used,total,remaining}:{label:string;used:number;total:
 function HDot({s}:{s:string}) { const c=H_CFG[s]||H_CFG.ok; return (<span className="relative inline-flex h-2.5 w-2.5">{s==="ok"&&<span className={`absolute inline-flex h-full w-full rounded-full ${c.d} opacity-75 animate-ping`}/>}<span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${c.d}`}/></span>); }
 function CopyBtn({text}:{text:string}) { const [ok,setOk]=useState(false); return (<button className="text-muted-foreground hover:text-foreground transition-colors" onClick={()=>{navigator.clipboard.writeText(text);setOk(true);setTimeout(()=>setOk(false),1500);}}>{ok?<Check className="h-3 w-3 text-green-500"/>:<Copy className="h-3 w-3"/>}</button>); }
 
-const _PROVIDER_LABELS: Record<string, string> = { "openai-codex": "OpenAI Codex" };
+const _PROVIDER_LABELS: Record<string, string> = { "openai-codex": "OpenAI Codex", workbuddy: "WorkBuddy", "workbuddy-cn": "WorkBuddy 国内版", "workbuddy-global": "WorkBuddy Global", antigravity: "Antigravity" };
 
 function ImportDlg({open,onClose,onDone}:{open:boolean;onClose:()=>void;onDone:()=>void}) {
   const [tab,setTab]=useState<"subscription"|"manual">("subscription");

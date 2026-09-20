@@ -18,9 +18,20 @@ import {
   jevProviderDetail,
   jevRoleDetail,
   resolveJevCatalogModel,
+  validateJevProvider,
 } from "@/lib/jev-settings";
 
 describe("jev-settings", () => {
+  it("validates connection fields before submitting a provider", () => {
+    const draft = draftFromJevPreset(JEV_PROVIDER_PRESETS[0]);
+    expect(validateJevProvider(draft)).toBeNull();
+    expect(validateJevProvider({ ...draft, name: " " })).toBeTruthy();
+    expect(validateJevProvider({ ...draft, model: " " })).toBeTruthy();
+    for (const base_url of ["", "api.typesafe.ai", "file:///tmp", "https://user:secret@example.test", "https://example.test?api_key=secret"]) {
+      expect(validateJevProvider({ ...draft, base_url })).toBeTruthy();
+    }
+    expect(validateJevProvider({ ...draft, base_url: "http://localhost:9000/evaluate" })).toBeNull();
+  });
   it("only sends known settings from drafts with extra fields", () => {
     const draft = { ...EMPTY_JEV_DRAFT, unknown_option: true, jev_mode_hint: true };
     expect(buildJevPayload(draft, EMPTY_JEV_DRAFT)).toEqual({ jev_mode_hint: true });
@@ -89,7 +100,7 @@ describe("jev-settings", () => {
     });
     expect(jevEntryStatus({ configured: true, enabled: "enforce", enforceReady: false })).toEqual({
       tone: "ready",
-      chip: "待标定",
+      chip: "部分功能可用",
     });
     expect(jevEntryDetail({ configured: true, last4: "4f2a", model: "jev-1.13.0" })).toBe(
       "jev-1.13.0 · 密钥 ···4f2a",

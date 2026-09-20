@@ -35,7 +35,8 @@ describe("extractFileAttachmentsFromContent", () => {
       "[宸蹭筑浇狗枸浠? ./uploads/ec755659_广告与销售数据.csv]\n\n读取数据 @广告与销售数据.csv";
     const { content, files } = extractFileAttachmentsFromContent(raw);
     expect(content).toBe("读取数据 @广告与销售数据.csv");
-    expect(files[0]?.filename).toBe("ec755659_广告与销售数据.csv");
+    // path 保留磁盘规范名；filename 是剥掉 {8hex}_ 前缀的展示名。
+    expect(files[0]?.filename).toBe("广告与销售数据.csv");
     expect(files[0]?.path).toBe("./uploads/ec755659_广告与销售数据.csv");
   });
 

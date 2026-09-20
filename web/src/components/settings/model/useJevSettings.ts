@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiPut } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useJevStore } from "@/stores/jev-store";
@@ -64,10 +64,13 @@ export function useJevSettings() {
   const [draft, setDraft] = useState<JevDraft>(EMPTY_JEV_DRAFT);
   const [baseline, setBaseline] = useState<JevDraft>(EMPTY_JEV_DRAFT);
   const [providers, setProviders] = useState<JevProviderPublic[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const saveInFlight = useRef(false);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current); }, []);
 
   const applyRuntime = useCallback((data: JevRuntime) => {
     const next = snapshotFromRuntime(data);
@@ -80,9 +83,11 @@ export function useJevSettings() {
   }, []);
 
   const loadRuntime = useCallback(async () => {
+    setError(null);
     const cached = settingsCache.get<JevRuntime>("/config/runtime");
     if (cached?.jev_providers) {
       applyRuntime(cached);
+      setLoading(false);
       return;
     }
     setLoading(true);
@@ -102,8 +107,11 @@ export function useJevSettings() {
   }, [loadRuntime]);
 
   const persist = useCallback(async (payload: Record<string, unknown>) => {
-    if (Object.keys(payload).length === 0) return;
+    if (saveInFlight.current) return false;
+    if (Object.keys(payload).length === 0) return true;
+    saveInFlight.current = true;
     setSaving(true);
+    setSaved(false);
     setError(null);
     try {
       await apiPut("/config/runtime", payload, { direct: true });
@@ -112,16 +120,20 @@ export function useJevSettings() {
       settingsCache.set("/config/runtime", data);
       applyRuntime(data);
       setSaved(true);
-      window.setTimeout(() => setSaved(false), 2000);
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+      savedTimer.current = setTimeout(() => setSaved(false), 2500);
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败");
+      return false;
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
     }
   }, [applyRuntime]);
 
   const save = useCallback(async (keys: readonly (keyof JevDraft)[]) => {
-    await persist(buildJevPayload(draft, baseline, keys));
+    return persist(buildJevPayload(draft, baseline, keys));
   }, [baseline, draft, persist]);
 
   const saveProviders = useCallback(async (
@@ -150,7 +162,7 @@ export function useJevSettings() {
     if (extras?.activeId !== undefined) payload.jev_active_provider = extras.activeId;
     if (extras?.timeout !== undefined) payload.jev_timeout_seconds = extras.timeout;
     if (extras?.model !== undefined) payload.jev_model = extras.model;
-    await persist(payload);
+    return persist(payload);
   }, [persist]);
 
   const providerPayload = useMemo(
@@ -162,8 +174,8 @@ export function useJevSettings() {
     [baseline, draft],
   );
 
-  const activeProvider = providers.find((item) => item.id === draft.jev_active_provider) || providers[0] || null;
-  const configured = runtime ? jevConfiguredFromRuntime(runtime) : false;
+  const activeProvider = providers.find((item) => item.id === draft.jev_active_provider) || providers.find((item) => item.configured) || providers[0] || null;
+  const configured = runtime ? jevConfiguredFromRuntime({ ...runtime, jev_active_provider: draft.jev_active_provider }) : false;
 
   return {
     runtime,
@@ -181,5 +193,7 @@ export function useJevSettings() {
     saveProvider: () => save(JEV_PROVIDER_KEYS),
     saveRole: () => save(JEV_ROLE_KEYS),
     saveProviders,
+    reload: loadRuntime,
+    resetDraft: () => { setDraft(baseline); setError(null); setSaved(false); },
   };
 }

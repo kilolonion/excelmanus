@@ -1,12 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
-
-export const PROGRESS_FROM = 8;
-export const PROGRESS_TO = 66;
-export const PROGRESS_MS = 4200;
-let progressStartedAt: number | null = null;
 
 const SHEET_FILL = "#ffffff";
 const SHEET_STROKE = "#dce7e0";
@@ -81,27 +75,29 @@ export function LoadingBrandMark({ className }: { className?: string }) {
       </div>
 
       <div className="em-splash-logo-wrap">
-        <svg className="em-splash-arc" viewBox="0 0 162 162">
-          <circle
-            cx="81"
-            cy="81"
-            r="73"
-            fill="none"
-            stroke="rgba(11,107,79,0.12)"
-            strokeWidth="3"
-          />
-          <circle
-            cx="81"
-            cy="81"
-            r="73"
-            fill="none"
-            stroke={SHEET_PRIMARY}
-            strokeWidth="3.5"
-            strokeLinecap="round"
-            strokeDasharray="118 340"
-            transform="rotate(-22 81 81)"
-          />
-        </svg>
+        <div className="em-splash-arc">
+          <svg viewBox="0 0 162 162">
+            <circle
+              cx="81"
+              cy="81"
+              r="73"
+              fill="none"
+              stroke="rgba(11,107,79,0.12)"
+              strokeWidth="3"
+            />
+            <circle
+              cx="81"
+              cy="81"
+              r="73"
+              fill="none"
+              stroke={SHEET_PRIMARY}
+              strokeWidth="3.5"
+              strokeLinecap="round"
+              strokeDasharray="118 340"
+              transform="rotate(-22 81 81)"
+            />
+          </svg>
+        </div>
         <div className="em-splash-logo">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
@@ -117,41 +113,10 @@ export function LoadingBrandMark({ className }: { className?: string }) {
 }
 
 export function LoadingProgressBar({ className }: { className?: string }) {
-  const fillRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const el = fillRef.current;
-    if (!el) return;
-
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      el.style.width = `${PROGRESS_TO}%`;
-      return;
-    }
-
-    if (progressStartedAt == null) progressStartedAt = performance.now();
-    const origin = progressStartedAt;
-    let frame = 0;
-
-    const tick = (now: number) => {
-      const t = Math.min(1, (now - origin) / PROGRESS_MS);
-      const eased = 1 - (1 - t) ** 3;
-      const next = PROGRESS_FROM + (PROGRESS_TO - PROGRESS_FROM) * eased;
-      const current = Number.parseFloat(el.style.width) || 0;
-      el.style.width = `${Math.max(current, next)}%`;
-      if (t < 1) frame = requestAnimationFrame(tick);
-    };
-
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, []);
-
   return (
-    <div className={cn("em-splash-progress", className)}>
-      <div
-        ref={fillRef}
-        className="em-splash-progress-fill"
-        style={{ width: `${PROGRESS_FROM}%` }}
-      />
+    <div className={cn("em-splash-progress", className)} role="progressbar" aria-label="正在加载">
+      {/* Indeterminate, compositor-driven motion also works before hydration. */}
+      <div className="em-splash-progress-fill" />
     </div>
   );
 }

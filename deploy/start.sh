@@ -350,8 +350,11 @@ _check_deps() {
       fi
     fi
 
-    # web/node_modules
-    if [[ ! -d "web/node_modules" ]]; then
+    # node_modules can survive an interrupted install. Verify the files needed
+    # by Next.js startup so a partial installation is repaired automatically.
+    if [[ ! -f "web/node_modules/next/package.json" ]] ||
+       [[ ! -f "web/node_modules/next/dist/build/webpack/loaders/next-flight-client-entry-loader.js" ]] ||
+       [[ ! -f "web/node_modules/typescript/package.json" ]]; then
       NEED_NPM=true
     fi
   fi

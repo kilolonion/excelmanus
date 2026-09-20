@@ -7274,13 +7274,15 @@ def discover_file_relationships(
         )
 
     # ── 提取列信息和样本数据（只读快照 backing） ──
+    from excelmanus.workspace.identity import display_name_for
+
     file_columns: dict[str, dict[str, list[str]]] = {}  # rel_path → {sheet → [cols]}
     file_dfs: dict[str, dict[str, pd.DataFrame]] = {}  # rel_path → {sheet → df}
     file_display: dict[str, str] = {}  # rel_path → display_name
 
     for fp in paths:
         rel_path = str(fp.relative_to(guard.workspace_root)) if fp.is_relative_to(guard.workspace_root) else str(fp)
-        file_display[rel_path] = fp.name
+        file_display[rel_path] = display_name_for(rel_path)
 
         snap, snap_err = _open_tool_snapshot(rel_path)
         if snap_err is not None or snap is None:

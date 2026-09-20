@@ -14,7 +14,7 @@ import { CapabilityBadges } from "./capability-widgets";
 import {
   isModelUnhealthy, getHealthError, inferProfileProvider, getProviderBrandColor,
   withAlpha, EMPTY_PROFILE_DRAFT, groupProfilesByProvider, getProfileProviderId,
-  isCodexProfile, isProfileConnected, pickDefaultProfile, profileToDraft,
+  isSubscriptionProfile, isProfileConnected, pickDefaultProfile, profileToDraft,
 } from "./helpers";
 import type { ProviderGroup } from "./helpers";
 import type { ModelCapabilities, ProfileEntry } from "./types";
@@ -90,7 +90,7 @@ export function ProviderSection() {
   };
 
   const beginEdit = (profile: ProfileEntry) => {
-    if (isCodexProfile(profile)) return;
+    if (isSubscriptionProfile(profile)) return;
     setEditingProfile(profile.name);
     setNewProfile(false);
     setSiblingSourceName(null);
@@ -211,7 +211,9 @@ export function ProviderSection() {
               const unhealthy = group.profiles.some((p) => isModelUnhealthy(capsMap[p.name]));
               const highlighted = group.profiles.some((p) => highlightProfile === p.name);
               const first = group.profiles[0];
-              const siblingSource = group.profiles.find((profile) => !isCodexProfile(profile));
+              // OAuth（Codex）组没有可复制的 API Key 档案，回退到首个 profile 作为 sibling 模板，
+              // 让「添加模型」入口对 OAuth 提供商同样可用。
+              const siblingSource = group.profiles.find((profile) => !isSubscriptionProfile(profile)) ?? first;
 
               return (
                 <div
@@ -247,7 +249,7 @@ export function ProviderSection() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="font-semibold text-sm">{group.label}</span>
-                        {group.profiles.some(isCodexProfile) && (
+                        {group.profiles.some(isSubscriptionProfile) && (
                           <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold bg-[var(--em-primary)]/15 text-[var(--em-primary)]">
                             <Lock className="h-2 w-2" />
                             OAuth
@@ -284,7 +286,7 @@ export function ProviderSection() {
                             <Plus className="h-3.5 w-3.5" />
                           </button>
                       )}
-                      {first && !isCodexProfile(first) && (
+                      {first && !isSubscriptionProfile(first) && (
                         <button
                           title="编辑"
                           className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60"
@@ -330,7 +332,7 @@ export function ProviderSection() {
                         >
                           <Plus className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--em-primary)" }} />
                           <span className="font-medium text-foreground/80">添加模型</span>
-                          <span className="text-[10px] truncate">沿用此提供商的连接</span>
+                          <span className="text-[10px] truncate">{siblingSource && isSubscriptionProfile(siblingSource) ? "沿用 OAuth 订阅凭证" : "沿用此提供商的连接"}</span>
                         </button>
                       )}
                     </div>
@@ -380,7 +382,7 @@ function ProviderMemberRow({
   rowRef: (el: HTMLDivElement | null) => void;
 }) {
   const isUnhealthy = isModelUnhealthy(caps);
-  const codex = isCodexProfile(profile);
+  const codex = isSubscriptionProfile(profile);
   const providerId = inferProfileProvider(profile);
   const providerColor = getProviderBrandColor(providerId);
 

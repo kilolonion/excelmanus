@@ -2954,6 +2954,36 @@ class TestAdminGuardForModelConfig:
         assert resp.status_code == 200
         assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer test-key"
 
+    @pytest.mark.asyncio
+    async def test_list_remote_models_codex_profile_returns_supported_catalog(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Codex（OAuth）档案无 API Key，应直接返回订阅支持的模型目录。"""
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_profile.return_value = {
+            "name": "openai-codex/gpt-5.6-sol",
+            "model": "openai-codex/gpt-5.6-sol",
+            "api_key": "",
+            "base_url": "https://api.openai.com/v1",
+            "protocol": "openai_responses",
+        }
+        mock_cfg_store.list_profiles.return_value = []
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", mock_cfg_store)
+        monkeypatch.setattr(api_runtime(), "config_store", mock_cfg_store)
+
+        mock_get = AsyncMock()
+        with patch("httpx.AsyncClient.get", new=mock_get):
+            resp = await client.post(
+                "/api/v1/config/models/list-remote",
+                json={"name": "openai-codex/gpt-5.6-sol"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = {m.get("id") for m in data.get("models", [])}
+        assert "openai-codex/gpt-5.6-sol" in ids
+        assert not data.get("error")
+        mock_get.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_probe_job_codex_profile_uses_runtime_resolver(
@@ -2978,7 +3008,8 @@ class TestAdminGuardForModelConfig:
         body = resp.json()
         assert "job_id" in body
         assert body.get("state") in ("queued", "running")
-        resolver.resolve_sync.assert_called_once_with("gpt-5.2-codex")
+        # 带前缀的原始模型名传给 resolver：前缀匹配优先于裸模型名匹配
+        resolver.resolve_sync.assert_called_once_with("openai-codex/gpt-5.2-codex")
 
     @pytest.mark.asyncio
     async def test_switch_model_rejects_deprecated_profile_model(

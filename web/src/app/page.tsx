@@ -8,10 +8,11 @@ import { CommandResultDialog, useCommandResult } from "@/components/modals/Comma
 import { WorkspaceViewHost } from "@/components/workspace/WorkspaceViewHost";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
-import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { ensureLandingSession } from "@/lib/session-actions";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
+import { OpenWorkbookDialog } from "@/components/excel/OpenWorkbookDialog";
+import { WorkbookConversationWelcome, useWorkbookConversation } from "@/components/excel/WorkbookConversation";
 
 export default function Home() {
   const messageOrder = useChatStore((s) => s.messageOrder);
@@ -19,24 +20,26 @@ export default function Home() {
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
   const loadedSessionId = useChatStore((s) => s.loadedSessionId);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const compareMode = useExcelStore((s) => s.compareMode);
+  const { target: workbookTarget } = useWorkbookConversation();
   const cmdResult = useCommandResult();
   const [composerDraft, setComposerDraft] = useState<{ seq: number; text: string; files: File[] } | null>(null);
 
-  const handleSend = async (text: string, files?: AttachedFile[]) => {
+  const handleSend = async (text: string, files?: AttachedFile[], capturedSessionId?: string | null) => {
+    if (capturedSessionId && capturedSessionId !== useSessionStore.getState().activeSessionId) return false;
     setComposerDraft(null);
     let sid = useSessionStore.getState().activeSessionId;
     if (!sid) {
       try {
         const session = await ensureLandingSession();
         sid = session?.id ?? null;
-        if (!sid) return;
+        if (!sid) return false;
       } catch (err) {
         console.error("创建对话失败:", err);
-        return;
+        return false;
       }
     }
     sendMessage(text, files, sid);
+    return true;
   };
 
   const handleSuggestionClick = useCallback((text: string, files?: File[]) => {
@@ -55,7 +58,14 @@ export default function Home() {
 
   return (
     <div className="flex flex-col h-full">
-      <WorkspaceViewHost>
+      <WorkspaceViewHost composer={
+        <div className="em-composer-dock relative z-30 pt-6 -mt-6 pointer-events-none flex-shrink-0">
+          <div className="mx-auto w-full max-w-4xl pointer-events-auto">
+            <ChatInput onSend={handleSend} onCommandResult={cmdResult.show} disabled={false}
+              isStreaming={isStreaming} onStop={handleStop} composerDraft={composerDraft} />
+          </div>
+        </div>
+      }>
         {hasMessages ? (
           <MessageStream
             isStreaming={isStreaming}
@@ -69,6 +79,8 @@ export default function Home() {
               retryAssistantMessage(assistantMessageId, activeSessionId, modelName);
             }}
           />
+        ) : workbookTarget ? (
+          <WorkbookConversationWelcome onSuggestion={handleSuggestionClick} />
         ) : isRestoringSession ? (
           <div className="flex-1" />
         ) : (
@@ -76,20 +88,7 @@ export default function Home() {
         )}
       </WorkspaceViewHost>
 
-      {!compareMode && (
-        <div className="em-composer-dock relative z-30 pt-6 -mt-6 pointer-events-none flex-shrink-0">
-          <div className="mx-auto w-full max-w-4xl pointer-events-auto">
-            <ChatInput
-              onSend={handleSend}
-              onCommandResult={cmdResult.show}
-              disabled={false}
-              isStreaming={isStreaming}
-              onStop={handleStop}
-              composerDraft={composerDraft}
-            />
-          </div>
-        </div>
-      )}
+      <OpenWorkbookDialog />
 
       <CommandResultDialog
         open={cmdResult.state.open}

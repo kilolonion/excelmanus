@@ -12,6 +12,7 @@ import {
   jevPresetById,
   jevProviderDetail,
   newCustomJevDraft,
+  validateJevProvider,
   type JevProviderDraft,
   type JevProviderPublic,
 } from "@/lib/jev-settings";
@@ -27,8 +28,8 @@ function ProviderMark({ id, name }: { id: string; name: string }) {
     <span
       className="inline-flex h-8 w-8 items-center justify-center rounded-xl shrink-0 text-[13px] font-semibold border"
       style={{
-        backgroundColor: "color-mix(in srgb, var(--em-gold) 16%, white)",
-        color: "color-mix(in srgb, var(--em-gold) 55%, #3d2a00)",
+        backgroundColor: "var(--em-primary-alpha-10)",
+        color: "var(--em-primary)",
         borderColor: "color-mix(in srgb, var(--em-gold) 45%, transparent)",
       }}
       aria-hidden
@@ -52,19 +53,27 @@ export function JevProviderSection() {
     hasProviderChanges,
     saveProvider,
     saveProviders,
+    reload,
+    resetDraft,
   } = useJevSettings();
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formDraft, setFormDraft] = useState<JevProviderDraft>(EMPTY_JEV_PROVIDER_DRAFT);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [sectionOpen, setSectionOpen] = useState(true);
 
   const beginAdd = () => {
+    setSectionOpen(true);
+    setFormError(null);
     setFormOpen(true);
     setEditingId(null);
     setFormDraft(draftFromJevPreset(jevPresetById("typesafe")!));
   };
 
   const beginEdit = (provider: JevProviderPublic) => {
+    setFormError(null);
     setFormOpen(true);
     setEditingId(provider.id);
     setExpandedId(provider.id);
@@ -72,6 +81,7 @@ export function JevProviderSection() {
   };
 
   const handleSelectPreset = (presetId: string) => {
+    setFormError(null);
     const preset = jevPresetById(presetId);
     if (!preset) return;
     const existing = providers.find((item) => item.id === preset.id);
@@ -80,6 +90,9 @@ export function JevProviderSection() {
   };
 
   const handleSaveForm = async () => {
+    const validation = validateJevProvider(formDraft);
+    setFormError(validation);
+    if (validation) return;
     const name = formDraft.name.trim() || jevPresetById(formDraft.id)?.label || "自定义";
     const nextProvider: JevProviderPublic = {
       id: formDraft.id || newCustomJevDraft().id,
@@ -90,32 +103,36 @@ export function JevProviderSection() {
       configured: Boolean(formDraft.api_key.trim()) || Boolean(providers.find((item) => item.id === formDraft.id)?.configured),
       last4: providers.find((item) => item.id === formDraft.id)?.last4 || "",
     };
-    const next = [
-      ...providers.filter((item) => item.id !== nextProvider.id),
-      nextProvider,
-    ];
     const previous = providers.find((item) => item.id === nextProvider.id);
-    const activeId = draft.jev_active_provider || nextProvider.id;
-    await saveProviders(next, {
+    const next = previous ? providers.map((item) => item.id === nextProvider.id ? nextProvider : item) : [...providers, nextProvider];
+    const activeId = activeProvider?.id || nextProvider.id;
+    const success = await saveProviders(next, {
       activeId,
       providerId: nextProvider.id,
       apiKey: formDraft.api_key.trim() || undefined,
-      clearKey: Boolean(previous?.configured && !formDraft.api_key.trim()),
+      timeout: draft.jev_timeout_seconds,
+      model: activeId === nextProvider.id ? nextProvider.model : undefined,
     });
-    setFormOpen(false);
-    setEditingId(null);
+    if (success) {
+      setFormOpen(false);
+      setEditingId(null);
+      setFormDraft(EMPTY_JEV_PROVIDER_DRAFT);
+    }
   };
 
   const handleActivate = async (provider: JevProviderPublic) => {
     const model = provider.model || draft.jev_model;
-    setDraft((prev) => ({ ...prev, jev_active_provider: provider.id, jev_model: model }));
-    await saveProviders(providers, { activeId: provider.id, model });
+    await saveProviders(providers, { activeId: provider.id, model, timeout: draft.jev_timeout_seconds });
   };
 
   const handleDelete = async (providerId: string) => {
     const next = providers.filter((item) => item.id !== providerId);
-    const activeId = draft.jev_active_provider === providerId ? (next[0]?.id || "") : draft.jev_active_provider;
-    await saveProviders(next, { activeId });
+    const replacement = next.find((provider) => provider.configured) || next[0];
+    const deletingActive = activeProvider?.id === providerId;
+    const activeId = deletingActive ? (replacement?.id || "") : activeProvider?.id || "";
+    const success = await saveProviders(next, { activeId, model: deletingActive ? replacement?.model : undefined, timeout: draft.jev_timeout_seconds });
+    if (!success) return;
+    setDeleteId(null);
     if (editingId === providerId) {
       setFormOpen(false);
       setEditingId(null);
@@ -133,6 +150,8 @@ export function JevProviderSection() {
       description="添加 TypeSafe、Vercel 或自定义决策服务，然后选择默认提供商"
       icon={<Gauge className="h-4 w-4" style={{ color: "var(--em-primary)" }} />}
       coachId="coach-settings-jev-provider"
+      open={sectionOpen}
+      onOpenChange={setSectionOpen}
       actions={
         <Button
           size="sm"
@@ -140,6 +159,7 @@ export function JevProviderSection() {
           className="h-7 text-[11px] gap-1 shrink-0"
           style={{ color: "var(--em-primary)", borderColor: "color-mix(in srgb, var(--em-primary) 35%, transparent)" }}
           onClick={beginAdd}
+          disabled={loading || saving || !runtime}
         >
           <Plus className="h-3 w-3" />
           添加提供商
@@ -152,8 +172,10 @@ export function JevProviderSection() {
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
             加载配置…
           </div>
+        ) : !runtime ? (
+          <div className="rounded-xl bg-muted/40 p-5 text-center"><p role="alert" className="text-xs text-destructive">{error || "暂时无法读取配置"}</p><Button className="mt-3" size="sm" variant="outline" onClick={() => void reload()}>重新加载</Button></div>
         ) : (
-          <>
+          <fieldset disabled={saving} className="min-w-0 space-y-3">
             {formOpen && (
               <>
                 <JevPresetPicker
@@ -165,15 +187,17 @@ export function JevProviderSection() {
                   }}
                 />
                 <JevProviderForm
+                  key={formDraft.id}
                   draft={formDraft}
                   configured={Boolean(providers.find((item) => item.id === formDraft.id)?.configured)}
-                  onChange={setFormDraft}
+                  onChange={(value) => { setFormDraft(value); setFormError(null); }}
                 />
+                {(formError || error) && <p role="alert" className="text-xs text-destructive">{formError || error}</p>}
                 <div className="flex justify-end gap-2">
-                  <Button size="sm" variant="outline" onClick={() => { setFormOpen(false); setEditingId(null); }}>
+                  <Button size="sm" variant="outline" onClick={() => { setFormOpen(false); setEditingId(null); setFormDraft(EMPTY_JEV_PROVIDER_DRAFT); setFormError(null); }}>
                     取消
                   </Button>
-                  <Button size="sm" disabled={saving || !formDraft.name.trim()} onClick={() => void handleSaveForm()}>
+                  <Button size="sm" disabled={saving} onClick={() => void handleSaveForm()}>
                     {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
                     {editingId ? "保存" : "添加"}
                   </Button>
@@ -200,20 +224,8 @@ export function JevProviderSection() {
                         : "border-border/70 bg-card hover:border-border hover:bg-muted/20",
                     )}
                   >
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      className="flex items-center gap-3 px-3 py-2.5 cursor-pointer"
-                      onClick={() => {
-                        setExpandedId(isExpanded ? null : provider.id);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setExpandedId(isExpanded ? null : provider.id);
-                        }
-                      }}
-                    >
+                    <div className="flex flex-wrap items-center gap-2 px-3 py-2.5">
+                      <button type="button" aria-expanded={isExpanded} aria-label={`${provider.name} 连接详情`} onClick={() => setExpandedId(isExpanded ? null : provider.id)} className="flex min-w-0 flex-1 items-center gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                       <ProviderMark id={provider.id} name={provider.name} />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5 flex-wrap">
@@ -221,17 +233,21 @@ export function JevProviderSection() {
                           <span className="rounded-full border border-border/80 px-1.5 py-px text-[10px] font-medium text-muted-foreground">
                             {provider.protocol === "gateway" ? "Gateway" : "TypeSafe"}
                           </span>
-                          <JevStatusChip tone={status.tone} chip={status.chip} />
+                          <JevStatusChip tone={provider.configured ? "ready" : status.tone} chip={provider.configured ? "已配置密钥" : status.chip} />
                         </div>
                         <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
                           {jevProviderDetail({ configured: provider.configured, last4: provider.last4 })}
                         </p>
                       </div>
+                      <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform", isExpanded && "rotate-90")} />
+                      </button>
                       <div className="flex items-center gap-1 shrink-0">
                         {!isDefault && (
                           <button
                             type="button"
-                            className="rounded-md px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                            disabled={!provider.configured || saving}
+                            title={provider.configured ? "设为默认提供商" : "请先编辑并添加密钥"}
+                            className="rounded-md px-1.5 py-2 text-[11px] text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-40"
                             onClick={(event) => {
                               event.stopPropagation();
                               void handleActivate(provider);
@@ -249,6 +265,7 @@ export function JevProviderSection() {
                         <button
                           type="button"
                           title="编辑"
+                          aria-label={`编辑 ${provider.name}`}
                           className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60"
                           onClick={(event) => {
                             event.stopPropagation();
@@ -260,21 +277,22 @@ export function JevProviderSection() {
                         <button
                           type="button"
                           title="删除"
+                          aria-label={`删除 ${provider.name}`}
                           className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
                           onClick={(event) => {
                             event.stopPropagation();
-                            void handleDelete(provider.id);
+                            setDeleteId(provider.id);
                           }}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
-                        <ChevronRight className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform", isExpanded && "rotate-90")} />
                       </div>
                     </div>
+                    {deleteId === provider.id && <div className="border-t border-destructive/20 bg-destructive/5 p-3 text-xs"><p>删除 {provider.name} 及其已保存的密钥？{isDefault ? "这是当前默认提供商，删除后将使用其他已配置的服务。" : ""}</p><div className="mt-3 flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => setDeleteId(null)}>取消</Button><Button size="sm" variant="destructive" onClick={() => void handleDelete(provider.id)}>确认删除</Button></div></div>}
                     {isExpanded && (
                       <div className="px-3 pb-3 border-t border-border/50 pt-2 text-[11px] text-muted-foreground space-y-1">
-                        <p className="font-mono truncate">{provider.model}</p>
-                        <p className="font-mono truncate">{provider.base_url}</p>
+                        <p className="break-all font-mono">{provider.model}</p>
+                        <p className="break-all font-mono">{provider.base_url}</p>
                       </div>
                     )}
                   </div>
@@ -284,7 +302,8 @@ export function JevProviderSection() {
               {providers.length === 0 && !formOpen && (
                 <div className="flex flex-col items-center gap-2 py-8 text-center">
                   <p className="text-xs text-muted-foreground">还没有添加决策提供商</p>
-                  <p className="text-[10px] text-muted-foreground/60">点击右上角「添加提供商」，从 TypeSafe 或 Vercel 预填开始</p>
+                  <p className="text-xs leading-5 text-muted-foreground">选择预设并粘贴密钥，即可在模型配置中开启 Jev。</p>
+                  <Button variant="outline" size="sm" onClick={beginAdd}><Plus className="size-3.5" />添加第一个提供商</Button>
                 </div>
               )}
             </div>
@@ -332,11 +351,12 @@ export function JevProviderSection() {
                 hasChanges={hasProviderChanges}
                 saving={saving}
                 saved={saved}
-                error={error}
+                error={formOpen ? null : error}
                 onSave={() => void saveProvider()}
+                onReset={resetDraft}
               />
             </div>
-          </>
+          </fieldset>
         )}
       </div>
     </SettingsFoldSection>

@@ -9,6 +9,7 @@ import { useSessionStore } from "@/stores/session-store";
 import {
   activeSession,
   fileRefKey,
+  versionStoreKey,
   workspaceKeyFromSession,
   type WorkspaceFileRef,
 } from "@/lib/workspace-file-ref";
@@ -102,12 +103,15 @@ interface PendingBatch {
   onError?: (message: string) => void;
   timer: ReturnType<typeof setTimeout> | null;
   startedAt: number;
+  discarded?: boolean;
 }
 
 const pendingByPath = new Map<string, PendingBatch>();
 const inFlightByPath = new Map<string, Promise<void>>();
 const pausedByPath = new Set<string>();
-const acknowledgedVersions = new Map<string, { before: string; after: string }>();
+const acknowledgedVersions = new Map<string, Map<string, string>>();
+// Includes failed and serialized batches until saved or explicitly discarded.
+const unsavedByPath = new Map<string, Set<PendingBatch>>();
 const editListeners = new Set<() => void>();
 
 export function subscribeWorkbookEdits(listener: () => void): () => void {
@@ -119,6 +123,14 @@ function emitEditState() { for (const listener of editListeners) listener(); }
 
 export function isWorkbookEditPaused(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): boolean {
   return isPaused(fileRefKey(file), file.relative);
+}
+
+/** Advance a viewed version only through acknowledged edits made in this client. */
+export function acknowledgedWorkbookVersion(
+  file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">,
+  viewedVersion?: string,
+): string | undefined {
+  return viewedVersion ? acknowledgedVersions.get(fileRefKey(file))?.get(viewedVersion) ?? viewedVersion : undefined;
 }
 
 /** 将 0-based 列索引转换为 Excel 列字母（0→A, 25→Z, 26→AA）。 */
@@ -372,7 +384,7 @@ export async function persistExcelCellEdits(
   deps?: Partial<PersistExcelCellEditsDeps>,
 ): Promise<PersistExcelCellEditsResult> {
   const changes = opts.changes ?? [];
-  const operations = [...changesToSetValuesOps(changes, opts.sheet), ...(opts.operations || [])];
+  const operations = [...(opts.operations || []), ...changesToSetValuesOps(changes, opts.sheet)];
   if (!opts.path || (changes.length === 0 && operations.length === 0)) return { kind: "skipped" };
   if (isDemoExcelPath(opts.path)) return { kind: "skipped" };
 
@@ -388,7 +400,7 @@ export async function persistExcelCellEdits(
   const workspaceKey = opts.workspaceKey ?? workspaceKeyFromSession(session);
   const sessionId = opts.sessionId !== undefined ? opts.sessionId ?? undefined : resolved.getSessionId() ?? undefined;
   const expectedVersion =
-    opts.expectedVersion ?? resolved.getExpectedVersion(opts.path, workspaceKey);
+    opts.expectedVersion !== undefined ? opts.expectedVersion : resolved.getExpectedVersion(opts.path, workspaceKey);
   if (!expectedVersion) {
     return { kind: "conflict", code: "VERSION_CONFLICT" };
   }
@@ -396,6 +408,8 @@ export async function persistExcelCellEdits(
     return { kind: "error", message: "无法确定工作区，请从会话重新打开文件" };
   }
 
+  const changeKey = versionStoreKey(opts.path, workspaceKey);
+  const changeSequence = useExcelStore.getState().workbookChanges[changeKey]?.sequence;
   try {
     const result = await resolved.writeExcelCells({
       path: opts.path,
@@ -409,11 +423,18 @@ export async function persistExcelCellEdits(
     if (isExcelWriteConflict(result)) {
       return { kind: "conflict", code: result.code || "VERSION_CONFLICT" };
     }
-    if (result.content_version) {
+    const latestChange = useExcelStore.getState().workbookChanges[changeKey];
+    const changedDuringSave = latestChange?.sequence !== changeSequence
+      && latestChange?.version !== result.content_version && latestChange?.version !== expectedVersion;
+    if (result.content_version && !changedDuringSave) {
       resolved.setContentVersion(opts.path, result.content_version, workspaceKey);
     }
     resolved.invalidateCaches({ workspaceKey, relative: opts.path });
-    useExcelStore.getState().notifyWorkbookChanged(opts.path, workspaceKey, result.content_version, "local");
+    // A later remote mutation can arrive before this HTTP acknowledgement.
+    // Keep its refresh/version; publishing this receipt would rewind the view.
+    if (!changedDuringSave) {
+      useExcelStore.getState().notifyWorkbookChanged(opts.path, workspaceKey, result.content_version, "local");
+    }
     useExcelStore.getState().bumpWorkspaceFilesVersion();
     return { kind: "ok", contentVersion: result.content_version };
   } catch (err) {
@@ -467,7 +488,23 @@ export function discardWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceKey"
   pendingByPath.delete(key);
   pausedByPath.delete(key);
   acknowledgedVersions.delete(key);
+  for (const batch of unsavedByPath.get(key) || []) batch.discarded = true;
+  unsavedByPath.delete(key);
   emitEditState();
+}
+
+/** Recovery artifact retains operation order, scope and original snapshot version. */
+export function workbookEditDraft(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): string {
+  return JSON.stringify({ file, batches: [...(unsavedByPath.get(fileRefKey(file)) || [])].map((batch) => ({
+    expected_version: batch.expectedVersion,
+    operations: [...batch.operations, ...changesToSetValuesOps(batch.changes, batch.sheet)],
+  })) }, null, 2);
+}
+
+function trackUnsaved(key: string, batch: PendingBatch): void {
+  const batches = unsavedByPath.get(key) || new Set<PendingBatch>();
+  batches.add(batch);
+  unsavedByPath.set(key, batches);
 }
 
 export function enqueueExcelCellEdit(opts: {
@@ -500,7 +537,7 @@ export function enqueueExcelCellEdit(opts: {
       workspaceId: opts.file?.workspaceId ?? session?.workspaceId ?? null,
       workspaceKey,
       expectedVersion:
-        opts.expectedVersion ??
+        opts.expectedVersion !== undefined ? opts.expectedVersion :
         useExcelStore.getState().getContentVersion(opts.path, workspaceKey),
       viewGeneration: opts.viewGeneration ?? useExcelStore.getState().viewGeneration,
       onConflict: opts.onConflict,
@@ -509,6 +546,7 @@ export function enqueueExcelCellEdit(opts: {
       startedAt: Date.now(),
     };
     pendingByPath.set(key, batch);
+    trackUnsaved(key, batch);
   }
   if (opts.sheet && !batch.sheet) batch.sheet = opts.sheet;
   if (opts.onConflict) batch.onConflict = opts.onConflict;
@@ -555,7 +593,7 @@ export function enqueueWorkbookCommand(opts: {
       workspaceId: opts.file?.workspaceId ?? session?.workspaceId ?? null,
       workspaceKey,
       expectedVersion:
-        opts.expectedVersion ??
+        opts.expectedVersion !== undefined ? opts.expectedVersion :
         useExcelStore.getState().getContentVersion(opts.path, workspaceKey),
       viewGeneration: opts.viewGeneration ?? useExcelStore.getState().viewGeneration,
       onConflict: opts.onConflict,
@@ -564,10 +602,12 @@ export function enqueueWorkbookCommand(opts: {
       startedAt: Date.now(),
     };
     pendingByPath.set(key, batch);
+    trackUnsaved(key, batch);
   }
   if (opts.onConflict) batch.onConflict = opts.onConflict;
   if (opts.onError) batch.onError = opts.onError;
-  batch.operations.push(...opts.operations);
+  batch.operations.push(...changesToSetValuesOps(batch.changes, batch.sheet), ...opts.operations);
+  batch.changes = [];
   if (batch.timer) clearTimeout(batch.timer);
   batch.timer = setTimeout(() => {
     void flushPath(key);
@@ -583,13 +623,16 @@ async function flushPath(key: string): Promise<void> {
     clearTimeout(batch.timer);
     batch.timer = null;
   }
-  if (isPaused(key, batch.path) || (batch.changes.length === 0 && batch.operations.length === 0)) return;
+  if (isPaused(key, batch.path) || (batch.changes.length === 0 && batch.operations.length === 0)) {
+    emitEditState();
+    return;
+  }
 
   const run = async () => {
-    if (isPaused(key, batch.path)) return;
+    if (batch.discarded || isPaused(key, batch.path)) return;
     let expected = batch.expectedVersion;
     const ack = acknowledgedVersions.get(key);
-    if (ack && expected === ack.before) expected = ack.after;
+    if (expected && ack?.has(expected)) expected = ack.get(expected)!;
     const result = await runPersist({
       path: batch.path,
       sheet: batch.sheet,
@@ -601,8 +644,21 @@ async function flushPath(key: string): Promise<void> {
       expectedVersion: expected,
       viewGeneration: batch.viewGeneration,
     });
+    if (batch.discarded) return;
+    if (result.kind === "ok" || result.kind === "skipped") {
+      const unsaved = unsavedByPath.get(key);
+      unsaved?.delete(batch);
+      if (!unsaved?.size) unsavedByPath.delete(key);
+    }
     if (result.kind === "ok" && result.contentVersion && expected) {
-      acknowledgedVersions.set(key, { before: batch.expectedVersion || expected, after: result.contentVersion });
+      const versions = acknowledgedVersions.get(key) || new Map<string, string>();
+      for (const [before, after] of versions) {
+        if (after === expected) versions.set(before, result.contentVersion);
+      }
+      versions.set(expected, result.contentVersion);
+      // Old entries may safely conflict; never replace them with a remote version.
+      while (versions.size > 128) versions.delete(versions.keys().next().value!);
+      acknowledgedVersions.set(key, versions);
     } else if (result.kind === "conflict") {
       pausedByPath.add(key);
       batch.onConflict?.();
@@ -655,4 +711,5 @@ export function resetExcelCellEditStateForTests(): void {
   inFlightByPath.clear();
   pausedByPath.clear();
   acknowledgedVersions.clear();
+  unsavedByPath.clear();
 }

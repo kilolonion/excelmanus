@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from excelmanus.logger import get_logger
+from excelmanus.model_identity import matches_token_sequence, token_sequence_pattern
 from excelmanus.providers.stream_types import (
     InlineThinkingStateMachine,
     StreamDelta,
@@ -44,16 +45,14 @@ _ADAPTIVE_THINKING_MARKERS = (
     "claude-fable",
     "claude-mythos",
     "claude-opus-4.7",
-    "claude-opus-4-7",
     "claude-opus-4.8",
-    "claude-opus-4-8",
 )
+_ADAPTIVE_THINKING_PATTERN = token_sequence_pattern(_ADAPTIVE_THINKING_MARKERS)
 
 
 def uses_adaptive_thinking(model: str) -> bool:
     """判断模型是否必须使用 adaptive thinking（不能再传 budget_tokens）。"""
-    lowered = (model or "").strip().lower()
-    return any(marker in lowered for marker in _ADAPTIVE_THINKING_MARKERS)
+    return matches_token_sequence(model, _ADAPTIVE_THINKING_PATTERN)
 
 
 def _apply_thinking_to_body(

@@ -51,6 +51,7 @@ from excelmanus.session import (
     SessionNotFoundError,
 )
 from excelmanus.session_title import instant_session_title, title_from_messages
+from excelmanus.workspace.paths import workspace_title_from_path
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -85,6 +86,16 @@ class ImageAttachment(BaseModel):
         return self
 
 
+class SheetContext(BaseModel):
+    """Current browser view, used only as a bounded suggestion, never authority."""
+
+    model_config = ConfigDict(extra="forbid")
+    workspace_id: str = Field(max_length=128)
+    path: str = Field(max_length=300)
+    sheet: str = Field(default="", max_length=100)
+    range: str = Field(default="", max_length=100)
+
+
 class ChatRequest(BaseModel):
     """对话请求体。"""
 
@@ -98,6 +109,117 @@ class ChatRequest(BaseModel):
     ] | None = None
     chat_mode: Literal["write", "read", "plan"] = "write"
     images: list[ImageAttachment] = Field(default_factory=list)
+    sheet_context: SheetContext | None = None
+
+
+def _workspace_activity_index(manager: Any, rows: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Recent session titles and touched file names per workspace.
+
+    The lightweight index lets the workspace question match '昨天的销售表'
+    without opening another workspace's workbooks. Bounded: 40 sessions,
+    affected-file reads only for the 10 most recent ones.
+    """
+    history = getattr(manager, "_chat_history", None)
+    if history is None or not rows:
+        return {}
+    try:
+        sessions = history.list_sessions(limit=40)
+    except Exception:
+        return {}
+    from excelmanus.workspace.paths import canonicalize_workspace_path
+
+    by_path: dict[str, str] = {}
+    for row in rows:
+        path = str(row.get("path") or "").strip()
+        wid = str(row.get("id") or "").strip()
+        if path and wid:
+            try:
+                by_path[canonicalize_workspace_path(path)] = wid
+            except Exception:
+                continue
+    index: dict[str, list[str]] = {}
+    file_reads = 0
+    for sess in sessions:
+        if not isinstance(sess, dict):
+            continue
+        wid = str(sess.get("workspace_id") or "").strip()
+        if not wid:
+            raw_path = str(sess.get("workspace_path") or "").strip()
+            if raw_path:
+                try:
+                    wid = by_path.get(canonicalize_workspace_path(raw_path), "")
+                except Exception:
+                    wid = ""
+        if not wid:
+            continue
+        bucket = index.setdefault(wid, [])
+        title = str(sess.get("title") or "").strip()[:50]
+        if title and sum(1 for h in bucket if h.startswith("会话:")) < 3:
+            hint = f"会话:{title}"
+            if hint not in bucket:
+                bucket.append(hint)
+        sid = str(sess.get("id") or "")
+        if sid and file_reads < 10 and sum(1 for h in bucket if h.startswith("文件:")) < 4:
+            file_reads += 1
+            try:
+                files = history.load_affected_files(sid)
+            except Exception:
+                files = []
+            for item in files[-3:]:
+                name = str(item).replace("\\", "/").rsplit("/", 1)[-1].strip()[:60]
+                hint = f"文件:{name}" if name else ""
+                if hint and hint not in bucket:
+                    bucket.append(hint)
+    return {wid: hints[:6] for wid, hints in index.items() if hints}
+
+
+def _context_input(request: ChatRequest) -> dict[str, Any]:
+    from excelmanus.system_one.policy import gate_for_pack, jev_is_active, live_jev_settings
+
+    settings = live_jev_settings(get_config())
+    if not jev_is_active(settings) or gate_for_pack("context.resolve", settings) == "off":
+        return {}
+    manager = get_session_manager()
+    try:
+        rows = manager.list_workspaces() if manager is not None else []
+        recent = _workspace_activity_index(manager, rows)
+        workspaces = [
+            {
+                "id": row.get("id"),
+                "title": row.get("title"),
+                "recent": recent.get(str(row.get("id") or ""), []),
+                "is_default": bool(row.get("is_default")),
+            }
+            for row in rows[:100]
+        ]
+    except Exception:
+        logger.debug("Workspace candidates unavailable", exc_info=True)
+        workspaces = []
+    return {"sheet_context": request.sheet_context.model_dump() if request.sheet_context else None,
+            "workspaces": workspaces}
+
+
+def _session_workspace_fields(session_id: str | None, route_decision: Any = None) -> dict[str, Any]:
+    """workspace_id/title/routed fields for session_init and ChatResponse."""
+    manager = get_session_manager()
+    if manager is None or not session_id:
+        return {}
+    try:
+        path = manager.workspace_path_for_session(session_id)
+        if not isinstance(path, str):
+            path = ""
+        ws_id = manager.workspace_id_for_session(session_id)
+        return {
+            "workspace_id": ws_id if isinstance(ws_id, str) and ws_id else None,
+            "workspace_path": path,
+            "workspace_title": workspace_title_from_path(path) if path else "",
+            "workspace_routed": bool(
+                route_decision is not None
+                and (route_decision.extras or {}).get("routed_workspace")
+            ),
+        }
+    except Exception:
+        return {}
 
 
 class ChatResponse(BaseModel):
@@ -117,6 +239,10 @@ class ChatResponse(BaseModel):
     total_tokens: int = 0
     # 自动生成的会话标题（仅首轮返回）
     title: str | None = None
+    # 会话实际绑定的工作区（JEV 路由后可能与请求时不同）
+    workspace_id: str | None = None
+    workspace_title: str = ""
+    workspace_routed: bool = False
 
 class ErrorResponse(BaseModel):
     """错误响应体（不暴露内部堆栈）。"""
@@ -418,9 +544,25 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             detail="模型尚未配置，请先在设置页面添加模型档案。",
         )
 
+    context_input = _context_input(request)
+    route_decision = None
+    try:
+        from excelmanus.system_one.intent_context import route_session_workspace
+
+        routed_session_id, route_decision = await route_session_workspace(
+            get_session_manager(),
+            get_config(),
+            request.session_id,
+            request.message,
+            context_input,
+        )
+    except Exception:
+        routed_session_id = None
+        logger.debug("工作区路由判断失败", exc_info=True)
+
     try:
         session_id, engine = await get_session_manager().acquire_for_chat(
-            request.session_id,
+            routed_session_id or request.session_id,
         )
     except SessionBusyError:
         queued = await get_session_manager().enqueue_user_interrupt(
@@ -435,6 +577,14 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 route_mode="queued_interrupt",
             )
         raise
+
+    if route_decision is not None:
+        try:
+            from excelmanus.system_one.trace import emit_jev_trace
+
+            emit_jev_trace(engine, route_decision, pack_id="context.resolve")
+        except Exception:
+            logger.debug("工作区路由 trace 发送失败", exc_info=True)
 
     if _is_save_command(request.message):
         try:
@@ -468,6 +618,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             chat_mode=request.chat_mode,
             display_text=display_text,
             mention_contexts=mention_contexts,
+            context_input=context_input,
         )
         chat_result = chat_turn.result
     except AttachmentError as _attachment_exc:
@@ -560,6 +711,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         completion_tokens=chat_result.completion_tokens,
         total_tokens=chat_result.total_tokens,
         title=generated_title,
+        **_session_workspace_fields(session_id, route_decision),
     )
 
 
@@ -615,9 +767,24 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             })
 
             # ── 延迟初始化：会话获取（可能创建 Engine + MCP sync） ──
+            context_input = _context_input(request)
+            route_decision = None
+            try:
+                from excelmanus.system_one.intent_context import route_session_workspace
+
+                routed_session_id, route_decision = await route_session_workspace(
+                    get_session_manager(),
+                    get_config(),
+                    request.session_id,
+                    request.message,
+                    context_input,
+                )
+            except Exception:
+                routed_session_id = None
+                logger.debug("工作区路由判断失败", exc_info=True)
             try:
                 session_id, engine = await get_session_manager().acquire_for_chat(
-                    request.session_id,
+                    routed_session_id or request.session_id,
                 )
                 acquired = True
             except SessionBusyError:
@@ -645,7 +812,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 return
 
             assert session_id is not None and engine is not None
-            yield _sse_format("session_init", {"session_id": session_id})
+            yield _sse_format("session_init", {
+                "session_id": session_id,
+                **_session_workspace_fields(session_id, route_decision),
+            })
 
             # ── 保存命令快速路径 ──
             if _is_save_command(request.message):
@@ -762,6 +932,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         chat_mode=request.chat_mode,
                         display_text=display_text,
                         mention_contexts=mention_contexts,
+                        context_input=context_input,
                     )
                     return outcome.result
                 finally:
@@ -770,6 +941,15 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     acquired = False
 
             # ── 启动 chat 任务 ──
+            if route_decision is not None:
+                try:
+                    from excelmanus.system_one.trace import emit_jev_trace
+
+                    emit_jev_trace(
+                        engine, route_decision, pack_id="context.resolve", on_event=_on_event,
+                    )
+                except Exception:
+                    logger.debug("工作区路由 trace 发送失败", exc_info=True)
             chat_task = asyncio.create_task(_run_chat_inner())
             _app_state.get_runtime().active_chat_tasks[session_id] = chat_task
 

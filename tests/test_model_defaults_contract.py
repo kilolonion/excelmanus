@@ -51,7 +51,8 @@ def test_frontend_anthropic_presets_use_latest_sonnet_alias() -> None:
     assert 'model: "claude-sonnet-4-6"' not in presets
     assert 'model: "anthropic/claude-sonnet-4-6"' not in presets
 
-    assert 'CANONICAL_PRESETS = [...PROVIDER_PRESETS, CODEX_OAUTH_PRESET]' in guides
+    assert 'OAUTH_PRESETS = [CODEX_OAUTH_PRESET, WORKBUDDY_CN_OAUTH_PRESET, WORKBUDDY_GLOBAL_OAUTH_PRESET, ANTIGRAVITY_OAUTH_PRESET]' in guides
+    assert 'CANONICAL_PRESETS = [...PROVIDER_PRESETS, ...OAUTH_PRESETS]' in guides
     assert 'model: preset.model' in guides
 
 
@@ -154,3 +155,34 @@ def test_gemini_3_preview_context_windows_match_official_limits() -> None:
     assert _infer_context_tokens_for_model("gemini-3.0-flash-preview-02-2026") == 1_048_576
     assert _infer_context_tokens_for_model("gemini-3.0-flash-lite-preview-02-2026") == 1_048_576
     assert _infer_context_tokens_for_model("gemini-3.0-flash-thinking-preview-02-2026") == 262_144
+
+
+def test_normalized_context_lookup_covers_namespace_and_dotted_ids() -> None:
+    assert _infer_context_tokens_for_model("anthropic.claude-opus-5") == 1_000_000
+    assert _infer_context_tokens_for_model("us.anthropic.claude-sonnet-4-5-20250929-v1:0") == 200_000
+    assert _infer_context_tokens_for_model("grok-4.1-fast-reasoning") == 2_000_000
+    assert _infer_context_tokens_for_model("llama3.1:8b") == 131_072
+    assert _infer_context_tokens_for_model("meta.llama3-1-70b-instruct-v1:0") == 131_072
+    assert _infer_context_tokens_for_model("glm-5.1") == 200_000
+    assert _infer_context_tokens_for_model("glm-4.7") == 200_000
+    assert _infer_context_tokens_for_model("gpt-5.6-cyber") == 400_000
+    assert _infer_context_tokens_for_model("gpt-6-astra-pro") == 1_050_000
+    assert _infer_context_tokens_for_model("gemini-3.1-flash-image") == 128_000
+    assert _infer_context_tokens_for_model("anthropic/claude-sonnet-5:thinking") == 1_000_000
+    assert _infer_context_tokens_for_model("claude-haiku-4-5@20251001") == 200_000
+    # gpt-4.10 不能误命中 gpt-4.1 前缀
+    assert _infer_context_tokens_for_model("gpt-4.10-mystery") == 256_000
+
+
+def test_deprecated_lookup_uses_longest_prefix_with_version_guard() -> None:
+    assert get_deprecated_model_replacement("deepseek-v4-flash") == (
+        "deepseek-v4-flash", "deepseek-flash",
+    )
+    assert get_deprecated_model_replacement("gemini-2.0-flash-lite-001") == (
+        "gemini-2.0-flash-lite", "gemini-3.5-flash-lite",
+    )
+    assert get_deprecated_model_replacement("claude-3.5-sonnet-20241022") == (
+        "claude-3-5-sonnet", "claude-sonnet-5",
+    )
+    assert get_deprecated_model_replacement("kimi-k2-0905") == ("kimi-k2", "kimi-k3")
+    assert get_deprecated_model_replacement("claude-opus-4.7") is None

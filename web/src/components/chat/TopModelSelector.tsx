@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown, Check, Loader2, AlertTriangle, Search, Sparkles, Crown } from "lucide-react";
+import { ChevronDown, Check, Loader2, AlertTriangle, Search, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -302,95 +302,8 @@ export function TopModelSelector() {
 
         {/* ── Model list ── */}
         <div className="max-h-[50dvh] overflow-y-auto py-1 model-selector-scroll">
-          {/* ── Active model hero card ── */}
-          {activeModel && !search.trim() && (() => {
-            const providerColor = getProviderColor(activeProvider);
-            const isUnhealthy = capsMap[activeModel.name]?.healthy === false;
-            return (
-              <div className="mx-2 mt-1 mb-2">
-                <div
-                  className="relative overflow-hidden rounded-lg p-px"
-                  style={{
-                    background: `linear-gradient(135deg, ${providerColor}40, ${providerColor}18)`,
-                  }}
-                >
-                  <div
-                    className="relative rounded-[7px] px-3 py-2.5 flex items-center gap-3 cursor-default"
-                    style={{
-                      background: `linear-gradient(135deg, ${providerColor}08, transparent)`,
-                    }}
-                  >
-                    {/* Subtle glow */}
-                    <div
-                      className="absolute -top-6 -right-6 h-16 w-16 rounded-full blur-2xl opacity-20 pointer-events-none"
-                      style={{ backgroundColor: providerColor }}
-                    />
-                    {/* Crown + dot */}
-                    <div className="relative shrink-0">
-                      <span
-                        className="h-2.5 w-2.5 rounded-full block"
-                        style={{
-                          backgroundColor: isUnhealthy ? "var(--em-error)" : providerColor,
-                          boxShadow: isUnhealthy
-                            ? "0 0 8px var(--em-error)"
-                            : `0 0 8px ${providerColor}50`,
-                        }}
-                      />
-                      <Crown
-                        className="absolute -top-1.5 -right-1.5 h-2 w-2"
-                        style={{ color: providerColor, opacity: 0.7 }}
-                      />
-                    </div>
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-semibold leading-tight truncate">
-                          {displayModelLabel(activeModel)}
-                        </span>
-                        <span
-                          className="text-[9px] px-1.5 py-px rounded-full font-semibold uppercase tracking-wider shrink-0"
-                          style={{
-                            backgroundColor: `${providerColor}18`,
-                            color: providerColor,
-                          }}
-                        >
-                          当前
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1 mt-0.5">
-                        {activeModel.name !== resolvedModel(activeModel) && !isUnhealthy && (
-                          <span className="text-[10px] text-muted-foreground/50 font-mono truncate">
-                            {resolvedModel(activeModel)}
-                          </span>
-                        )}
-                        {activeModel.description && (
-                          <span className="text-[10px] text-muted-foreground/40 truncate">
-                            {activeModel.name !== resolvedModel(activeModel) && !isUnhealthy
-                              ? `· ${activeModel.description}`
-                              : activeModel.description}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    {/* Check */}
-                    <span
-                      className="h-5 w-5 rounded-full flex items-center justify-center shrink-0"
-                      style={{ backgroundColor: `${providerColor}20` }}
-                    >
-                      <Check className="h-3 w-3" style={{ color: providerColor }} />
-                    </span>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
           {/* ── Provider groups ── */}
           {groups.map((group, gi) => {
-            const remainingModels = !search.trim()
-              ? group.models.filter((m) => m.name !== currentModel)
-              : group.models;
-            if (remainingModels.length === 0) return null;
             const color = getProviderColor(group.provider);
             return (
               <div key={group.provider}>
@@ -409,7 +322,7 @@ export function TopModelSelector() {
                   </span>
                 </div>
                 {/* Model items */}
-                {group.models.filter((m) => !search.trim() ? m.name !== currentModel : true).map((m) => {
+                {group.models.map((m) => {
                   const isSelected = m.name === currentModel;
                   const isUnhealthy = capsMap[m.name]?.healthy === false;
                   const hasHealthData = m.name in capsMap;

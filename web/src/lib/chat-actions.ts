@@ -20,6 +20,7 @@ import {
   type DeltaBatcher as DeltaBatcherInterface,
 } from "./sse-event-handler";
 import { resolveFailureActions } from "./failure-recovery";
+import { buildJevSheetContext } from "./jev-context";
 
 type ChatImagePayload = {
   media_type: string;
@@ -394,6 +395,7 @@ export async function sendMessage(
   }
 
   const effectiveSessionId = sessionId || getActiveSessionId();
+  const sheetContext = buildJevSheetContext(effectiveSessionId);
 
   // 选中态只写 session-store。bindLoadedSession 避免 SessionSync 在消息占位后误切会话清空。
   if (effectiveSessionId && sessionStore.activeSessionId !== effectiveSessionId) {
@@ -544,6 +546,7 @@ export async function sendMessage(
         message: messageContent,
         session_id: effectiveSessionId,
         chat_mode: useUIStore.getState().chatMode,
+        sheet_context: sheetContext,
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {

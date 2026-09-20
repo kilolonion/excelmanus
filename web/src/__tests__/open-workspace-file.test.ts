@@ -108,8 +108,13 @@ describe("openWorkspaceFile", () => {
 
   it("uses full intent for spreadsheet and word", () => {
     openWorkspaceFile("book.xlsx", { intent: "full", sheet: "明细" });
-    expect(excel.openFullView).toHaveBeenCalledWith("book.xlsx", "明细");
+    expect(excel.openFullView).toHaveBeenCalledWith("book.xlsx", "明细", undefined);
     openWorkspaceFile("a.docx", { intent: "full" });
     expect(word.openFullView).toHaveBeenCalledWith("a.docx");
+  });
+
+  it("passes the explicitly requested spreadsheet layout", () => {
+    openWorkspaceFile("book.xlsx", { intent: "full", workbookLayout: "split" });
+    expect(excel.openFullView).toHaveBeenCalledWith("book.xlsx", undefined, "split");
   });
 });

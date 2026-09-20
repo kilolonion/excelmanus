@@ -387,6 +387,35 @@ class SessionManager:
             return
         self._session_workspace[session_id] = (workspace_path, workspace_id)
 
+    def rebind_blank_session(
+        self,
+        session_id: str,
+        workspace_id: str,
+    ) -> dict[str, Any] | None:
+        """Rebind a still-blank session to a registered workspace.
+
+        Only sessions with no committed messages may move; the store re-checks
+        blank inside the UPDATE. Returns the refreshed session meta, or None
+        when the session is not eligible or the workspace is gone.
+        """
+        if not session_id or not workspace_id or self._chat_history is None:
+            return None
+        if session_id in self._sessions or session_id in self._pending_creates:
+            return None
+        try:
+            path, ws_id = self.resolve_workspace_binding(workspace_id, None)
+        except (WorkspacePathError, FileNotFoundError, OSError):
+            return None
+        meta = self._chat_history.get_session_meta(session_id)
+        if not isinstance(meta, dict) or not meta.get("blank"):
+            return None
+        if int(meta.get("message_count") or 0) > 0:
+            return None
+        if not self._chat_history.rebind_session_workspace(session_id, path, ws_id):
+            return None
+        self.remember_session_workspace(session_id, path, ws_id)
+        return self._chat_history.get_session_meta(session_id)
+
     def session_has_file_scope(self, session_id: str) -> bool:
         sid = (session_id or "").strip()
         if not sid:
@@ -555,44 +584,61 @@ class SessionManager:
     ) -> None:
         """为已有 DB profile 注入进程级订阅 OAuth 凭证。
 
-        对 name 以 ``openai-codex/`` 开头的 profile，用 CredentialStore 中的
-        access_token 替换空 api_key，并更新 base_url。
+        遍历已注册的订阅 provider，对 name/model 以其 ``MODEL_NAME_PREFIX``
+        开头的 profile，用 CredentialStore 中的 access_token 替换空 api_key、
+        更新 base_url，并把 provider 专属请求头写入 custom_extra_headers。
         """
-        from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+        import json as _json
+
+        from excelmanus.auth.providers.registry import list_all as _list_providers
 
         if self._credential_store is None:
             return
 
-        try:
-            active_cred = self._credential_store.get_active_profile("openai-codex")
-        except Exception:
-            logger.debug("读取进程级 Codex 凭证失败", exc_info=True)
-            return
+        for provider_name, provider in _list_providers().items():
+            prefix = getattr(provider, "MODEL_NAME_PREFIX", "")
+            if not prefix:
+                continue
+            try:
+                active_cred = self._credential_store.get_active_profile(provider_name)
+            except Exception:
+                logger.debug("读取进程级 %s 凭证失败", provider_name, exc_info=True)
+                continue
+            if active_cred is None or not active_cred.access_token:
+                continue
 
-        if active_cred is None or not active_cred.access_token:
-            return
+            api_key, base_url = provider.get_api_credential(active_cred.access_token)
+            req_headers = provider.get_request_headers(active_cred)
 
-        api_key, base_url = OpenAICodexProvider().get_api_credential(active_cred.access_token)
+            augmented: list[ModelProfile] = []
+            changed = False
+            for p in engine._config.models:
+                if p.name.startswith(prefix) or p.model.startswith(prefix):
+                    extra_headers = p.custom_extra_headers
+                    if req_headers:
+                        merged: dict[str, str] = {}
+                        if extra_headers:
+                            try:
+                                parsed = _json.loads(extra_headers)
+                                if isinstance(parsed, dict):
+                                    merged = parsed
+                            except (ValueError, TypeError):
+                                pass
+                        merged.update(req_headers)
+                        extra_headers = _json.dumps(merged, ensure_ascii=False)
+                    augmented.append(replace(
+                        p,
+                        api_key=api_key,
+                        base_url=base_url,
+                        protocol=getattr(provider, "PROTOCOL", p.protocol),
+                        custom_extra_headers=extra_headers,
+                    ))
+                    changed = True
+                else:
+                    augmented.append(p)
 
-        augmented: list[ModelProfile] = []
-        changed = False
-        for p in engine._config.models:
-            if (
-                OpenAICodexProvider.is_codex_profile_name(p.name)
-                or OpenAICodexProvider.is_codex_profile_name(p.model)
-            ):
-                augmented.append(replace(
-                    p,
-                    api_key=api_key,
-                    base_url=base_url,
-                    protocol=OpenAICodexProvider.PROTOCOL,
-                ))
-                changed = True
-            else:
-                augmented.append(p)
-
-        if changed:
-            engine.sync_model_profiles(tuple(augmented))
+            if changed:
+                engine.sync_model_profiles(tuple(augmented))
 
     def reset_mcp_initialized(self) -> None:
         """MCP 热重载后重置初始化标志。"""
@@ -645,13 +691,34 @@ class SessionManager:
 
     def drain_workspace_events(self) -> None:
         from excelmanus.workspace.file_service import WorkspaceFileService
+        from excelmanus.workspace.paths import paths_equal
         roots = set(self._migrated_workspace_paths)
         roots.update(str(entry.engine._workspace.root_dir) for entry in self._sessions.values())
         for root in roots:
             try:
                 WorkspaceFileService(root).deliver_outbox(self._consume_file_event, consumer_id="session-manager")
+                # Each session has its own durable cursor. Edits made while a
+                # session was unloaded must still reach it after restoration.
+                for sid, entry in list(self._sessions.items()):
+                    if paths_equal(entry.engine._workspace.root_dir, root):
+                        WorkspaceFileService(root).deliver_outbox(
+                            lambda event, engine=entry.engine: self._deliver_user_edit(engine, event),
+                            consumer_id=f"workbook-context:{sid}",
+                        )
             except Exception:
                 logger.warning("文件事件消费失败，将重试: %s", root, exc_info=True)
+
+    @staticmethod
+    def _deliver_user_edit(engine: AgentEngine, event: dict) -> None:
+        context = event.get("context") or {}
+        if context.get("source") != "user" or not context.get("summary"):
+            return
+        from excelmanus.workbook_commit import normalize_version_path
+        path = normalize_version_path(event["path"])
+        for key in list(engine._state.file_content_versions):
+            if normalize_version_path(key) == path or key.endswith(f"::{path}"):
+                engine._state.file_content_versions.pop(key, None)
+        engine._driver.inject_workbook_change(event)
 
     def _consume_file_event(self, event: dict) -> None:
         from excelmanus.workspace.paths import paths_equal
@@ -682,7 +749,9 @@ class SessionManager:
             engine._registry_refresh_needed = True
             stream = get_runtime().session_stream_states.setdefault(sid, SessionStreamState())
             stream.deliver(ToolCallEvent(event_type=EventType.MUTATION, changed_files=changed,
-                mutations=changed_mutations(changed), tool_call_id=event["event_id"]))
+                mutations=changed_mutations(changed, content_versions={f"./{path}": event.get("after_version")},
+                                            source=(event.get("context") or {}).get("source", "runtime")),
+                tool_call_id=event["event_id"]))
 
     def _resolve_user_config_store(self, user_id: str | None = None) -> Any:
         """返回进程级 UserConfigStore（用于 active_model 等偏好）。"""
@@ -878,15 +947,6 @@ class SessionManager:
         engine_config = self._config
         overrides: dict[str, Any] = {"workspace_root": str(isolated_ws.root_dir)}
         _target_model = self._config.model
-        try:
-            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-            if isinstance(_target_model, str) and OpenAICodexProvider.is_codex_profile_name(_target_model):
-                _resolved_model = OpenAICodexProvider.model_from_profile_name(_target_model)
-                if _resolved_model:
-                    _target_model = _resolved_model
-                    overrides["model"] = _resolved_model
-        except Exception:
-            logger.debug("Codex 模型前缀解析失败", exc_info=True)
         if self._credential_resolver is not None:
             try:
                 _resolved_cred = self._credential_resolver.resolve_sync(_target_model)
@@ -902,6 +962,14 @@ class SessionManager:
                     )
             except Exception:
                 logger.debug("订阅凭证解析失败", exc_info=True)
+        try:
+            from excelmanus.auth.providers.registry import strip_managed_prefix
+            if isinstance(_target_model, str):
+                _resolved_model = strip_managed_prefix(_target_model)
+                if _resolved_model and _resolved_model != _target_model:
+                    overrides["model"] = _resolved_model
+        except Exception:
+            logger.debug("订阅模型前缀解析失败", exc_info=True)
         engine_config = replace(self._config, **overrides)
         persistent_memory = self._create_memory_components()
         from excelmanus.workspace.refs import WorkspaceRef
@@ -1047,6 +1115,7 @@ class SessionManager:
                 entry.last_access = now
                 entry.restored_readonly = False  # B4: 活跃使用时恢复正常 TTL
                 logger.debug("复用会话并加锁 %s", session_id)
+                self.drain_workspace_events()
                 return session_id, entry.engine
 
             # 另一个请求正在创建同一会话
@@ -1157,6 +1226,7 @@ class SessionManager:
         except Exception:
             logger.debug("prompt cache 预热任务创建失败，跳过", exc_info=True)
 
+        self.drain_workspace_events()
         return new_id, engine
 
     async def release_for_chat(self, session_id: str) -> None:

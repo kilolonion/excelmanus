@@ -241,6 +241,8 @@ class AgentEngine:
         self._credential_resolver: Any = None  # CredentialResolver，由 SessionManager 注入
         self._pool_account_id: str | None = None  # 号池账号 ID（pool_oauth 来源时设置）
         self._pool_profile_name: str | None = None  # 号池 profile 名称
+        # 订阅凭证附带的 provider 专属请求头（resolver 每次解析后更新）
+        self._oauth_extra_headers: dict[str, str] | None = None
         self._subagent_runtime: SubagentRuntime | None = None
         self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
         self._approval = ApprovalManager(config.workspace_root, database=database)
@@ -1964,6 +1966,7 @@ class AgentEngine:
         approval_resolver: ApprovalResolver | None = None,
         question_resolver: QuestionResolver | None = None,
         chat_mode: str = "write",
+        context_input: dict[str, Any] | None = None,
     ) -> ChatResult:
         from excelmanus.agent.session_api import followup as _impl
         return await _impl(
@@ -1977,6 +1980,7 @@ class AgentEngine:
             approval_resolver=approval_resolver,
             question_resolver=question_resolver,
             chat_mode=chat_mode,
+            context_input=context_input,
         )
 
 
@@ -3043,23 +3047,28 @@ class AgentEngine:
         此时热更新 _client 和相关字段，确保后续 LLM 调用使用新凭证。
         同时通过 SSE 通知前端 token 状态变化。
         """
-        # 安全解析：如果 _active_model 含 provider 前缀（如 openai-codex/gpt-6-astra），
-        # 先剥离为实际模型 ID（gpt-6-astra），避免发送无效 model 到 API。
-        from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-        if OpenAICodexProvider.is_codex_profile_name(self._active_model):
-            _real_model = OpenAICodexProvider.model_from_profile_name(self._active_model)
-            if _real_model:
+        # 安全解析：如果 _active_model 含订阅 provider 前缀（如
+        # openai-codex/gpt-6-astra、workbuddy/glm-5），剥离为实际模型 ID，
+        # 避免发送无效 model 到 API。注意凭证解析用原始带前缀名，
+        # 前缀匹配优先于裸模型名匹配。
+        _original_model = self._active_model
+        try:
+            from excelmanus.auth.providers.registry import strip_managed_prefix
+            _real_model = strip_managed_prefix(_original_model)
+            if _real_model != _original_model:
                 logger.info(
                     "修正 _active_model 前缀: %s -> %s",
-                    self._active_model, _real_model,
+                    _original_model, _real_model,
                 )
                 self._active_model = _real_model
+        except Exception:
+            logger.debug("订阅模型前缀解析失败", exc_info=True)
 
         resolver = self._credential_resolver
         if resolver is None:
             return
         try:
-            resolved = await resolver.resolve(self._active_model)
+            resolved = await resolver.resolve(_original_model)
         except Exception:
             logger.debug("OAuth 凭证刷新检查失败", exc_info=True)
             # 刷新失败，通知前端
@@ -3076,6 +3085,7 @@ class AgentEngine:
             # 非池来源时清零，防止前一次 pool_oauth 残留导致误记账
             self._pool_account_id = None
             self._pool_profile_name = None
+            self._oauth_extra_headers = None
             return
 
         # 记录或清零池账号信息供 api 层台账使用
@@ -3085,6 +3095,9 @@ class AgentEngine:
         else:
             self._pool_account_id = None
             self._pool_profile_name = None
+
+        # provider 专属请求头随凭证解析结果更新（token 刷新后 refresh token 也会轮换）
+        self._oauth_extra_headers = resolved.extra_headers
 
         next_api_key = resolved.api_key or self._active_api_key
         next_base_url = resolved.base_url or self._active_base_url

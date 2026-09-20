@@ -12,6 +12,7 @@ import {
   fetchExcelCompare,
 } from "@/lib/api";
 import { activeFileRef } from "@/lib/workspace-file-ref";
+import { displayFileName } from "@/lib/file-identity";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -96,8 +97,8 @@ export function ExcelCompareView() {
   const [activeTabB, setActiveTabB] = useState<string | null>(compareSheetB);
   const [mobilePane, setMobilePane] = useState<"A" | "B">("A");
 
-  const fileNameA = compareFileA?.split("/").pop() || "文件 A";
-  const fileNameB = compareFileB?.split("/").pop() || "文件 B";
+  const fileNameA = displayFileName(compareFileA ?? "") || "文件 A";
+  const fileNameB = displayFileName(compareFileB ?? "") || "文件 B";
 
   const fileUrlA = useMemo(
     () => (compareFileA ? buildExcelFileUrl(compareFileA, activeSessionId, activeWorkspaceId) : ""),

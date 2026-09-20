@@ -22,7 +22,8 @@ import { apiPost, apiPut, testModelConnection } from "@/lib/api";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
 import { PROVIDER_LOGO_SLUG } from "../../settings/model/constants";
-import type { ProviderGuide } from "../provider-guides";
+import { requestModelSubTab } from "../../settings/model/model-subtab";
+import { OAUTH_PROVIDER_IDS, type ProviderGuide } from "../provider-guides";
 
 function ProviderLogo({ id }: { id: string }) {
   const slug = PROVIDER_LOGO_SLUG[id];
@@ -137,6 +138,13 @@ export function ProviderGuideStep({ provider, onBack, onComplete, onSkip }: Prov
     window.setTimeout(() => setCopied(false), 2000);
   }, [provider.purchaseUrl]);
 
+  const handleGoOAuth = useCallback(() => {
+    requestModelSubTab("subscription");
+    useOnboardingStore.getState().skipAll();
+    useUIStore.getState().openSettings("model");
+  }, []);
+
+  const isOAuthProvider = OAUTH_PROVIDER_IDS.has(provider.id);
   const canProceed = apiKey.trim().length > 0;
 
   return (
@@ -166,7 +174,7 @@ export function ProviderGuideStep({ provider, onBack, onComplete, onSkip }: Prov
           >
             <span>
               <span className="em-onboarding-guide-kicker">连接前准备</span>
-              <strong id="provider-guide-title">如何获取 API Key</strong>
+              <strong id="provider-guide-title">{isOAuthProvider ? "如何连接订阅" : "如何获取 API Key"}</strong>
             </span>
             {expandedGuide ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
           </button>
@@ -206,65 +214,84 @@ export function ProviderGuideStep({ provider, onBack, onComplete, onSkip }: Prov
           <div className="em-onboarding-config-heading">
             <div>
               <span className="em-onboarding-guide-kicker">连接信息</span>
-              <h3 id="provider-config-title">填入模型配置</h3>
+              <h3 id="provider-config-title">{isOAuthProvider ? "完成订阅授权" : "填入模型配置"}</h3>
             </div>
             <span className="em-onboarding-secure-note"><CheckCircle2 aria-hidden="true" /> 私密保存</span>
           </div>
 
-          <label className="em-onboarding-field">
-            <span>Model ID</span>
-            <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder={provider.model} autoComplete="off" spellCheck={false} />
-          </label>
-          <label className="em-onboarding-field">
-            <span>Base URL</span>
-            <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={provider.base_url} autoComplete="url" spellCheck={false} />
-          </label>
-          <label className="em-onboarding-field">
-            <span>API Key</span>
-            <span className="em-onboarding-key-input">
-              <Input
-                value={apiKey}
-                onChange={(e) => { setApiKey(e.target.value); setTestResult(null); }}
-                type={showKey ? "text" : "password"}
-                placeholder="粘贴你的 API Key"
-                autoComplete="off"
-                spellCheck={false}
-                aria-label="API Key"
-              />
-              <button type="button" onClick={() => setShowKey((shown) => !shown)} aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}>
-                {showKey ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
-              </button>
-            </span>
-          </label>
+          {isOAuthProvider ? (
+            <>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                {provider.label} 使用订阅账号浏览器授权连接，无需填写 API Key。点击下方按钮前往「设置 → 订阅与 OAuth」完成授权，连接成功后会自动创建模型档案。
+              </p>
+              <div className="em-onboarding-config-actions">
+                <div className="em-onboarding-config-spacer" />
+                {onSkip && <Button variant="ghost" onClick={onSkip}>跳过</Button>}
+                <Button onClick={handleGoOAuth} className="em-onboarding-primary-action">
+                  <ExternalLink aria-hidden="true" />
+                  前往授权
+                </Button>
+              </div>
+              <p className="em-onboarding-config-footnote">授权在设置页完成；授权成功后回到本向导或直接在模型选择器中选用。</p>
+            </>
+          ) : (
+            <>
+              <label className="em-onboarding-field">
+                <span>Model ID</span>
+                <Input value={model} onChange={(e) => setModel(e.target.value)} placeholder={provider.model} autoComplete="off" spellCheck={false} />
+              </label>
+              <label className="em-onboarding-field">
+                <span>Base URL</span>
+                <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={provider.base_url} autoComplete="url" spellCheck={false} />
+              </label>
+              <label className="em-onboarding-field">
+                <span>API Key</span>
+                <span className="em-onboarding-key-input">
+                  <Input
+                    value={apiKey}
+                    onChange={(e) => { setApiKey(e.target.value); setTestResult(null); }}
+                    type={showKey ? "text" : "password"}
+                    placeholder="粘贴你的 API Key"
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-label="API Key"
+                  />
+                  <button type="button" onClick={() => setShowKey((shown) => !shown)} aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}>
+                    {showKey ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}
+                  </button>
+                </span>
+              </label>
 
-          <AnimatePresence initial={false}>
-            {testResult && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className={`em-onboarding-test-result ${testResult.ok ? "is-success" : "is-error"}`}
-                role="status"
-              >
-                {testResult.ok ? <CheckCircle2 aria-hidden="true" /> : <XCircle aria-hidden="true" />}
-                <span>{testResult.ok ? "连接成功，模型可以使用。" : testResult.error || "连接失败，请检查配置。"}</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
+              <AnimatePresence initial={false}>
+                {testResult && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className={`em-onboarding-test-result ${testResult.ok ? "is-success" : "is-error"}`}
+                    role="status"
+                  >
+                    {testResult.ok ? <CheckCircle2 aria-hidden="true" /> : <XCircle aria-hidden="true" />}
+                    <span>{testResult.ok ? "连接成功，模型可以使用。" : testResult.error || "连接失败，请检查配置。"}</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
-          <div className="em-onboarding-config-actions">
-            <Button variant="outline" onClick={handleTest} disabled={!canProceed || testing} className="em-onboarding-test-button">
-              {testing ? <Loader2 className="animate-spin" aria-hidden="true" /> : testResult?.ok ? <CheckCircle2 aria-hidden="true" /> : null}
-              测试连接
-            </Button>
-            <div className="em-onboarding-config-spacer" />
-            {onSkip && <Button variant="ghost" onClick={onSkip}>跳过</Button>}
-            <Button onClick={handleSave} disabled={!canProceed || saving} className="em-onboarding-primary-action">
-              {saving ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ArrowRight aria-hidden="true" />}
-              保存并继续
-            </Button>
-          </div>
-          <p className="em-onboarding-config-footnote">配置会保存为模型档案并立即激活，之后可在设置中添加更多模型。</p>
+              <div className="em-onboarding-config-actions">
+                <Button variant="outline" onClick={handleTest} disabled={!canProceed || testing} className="em-onboarding-test-button">
+                  {testing ? <Loader2 className="animate-spin" aria-hidden="true" /> : testResult?.ok ? <CheckCircle2 aria-hidden="true" /> : null}
+                  测试连接
+                </Button>
+                <div className="em-onboarding-config-spacer" />
+                {onSkip && <Button variant="ghost" onClick={onSkip}>跳过</Button>}
+                <Button onClick={handleSave} disabled={!canProceed || saving} className="em-onboarding-primary-action">
+                  {saving ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ArrowRight aria-hidden="true" />}
+                  保存并继续
+                </Button>
+              </div>
+              <p className="em-onboarding-config-footnote">配置会保存为模型档案并立即激活，之后可在设置中添加更多模型。</p>
+            </>
+          )}
         </section>
       </div>
     </div>

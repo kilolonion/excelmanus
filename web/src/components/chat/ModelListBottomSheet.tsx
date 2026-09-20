@@ -284,7 +284,6 @@ function SwitchSheet({
   const groups = groupByProvider(filtered);
   const showSearch = models.length >= 4;
   const showProviderHeaders = groups.length > 1;
-  const activeModel = models.find((m) => m.name === currentModel);
 
   return (
     <BottomSheetPortal>
@@ -379,62 +378,8 @@ function SwitchSheet({
               style={{ WebkitOverflowScrolling: "touch" }}
               onPointerDownCapture={(e) => e.stopPropagation()}
             >
-              {activeModel && !search.trim() && (() => {
-                const provider = providerOf(activeModel);
-                const providerColor = getProviderColor(provider);
-                const isUnhealthy = capsMap[activeModel.name]?.healthy === false;
-                return (
-                  <div className="mx-3 mt-1.5 mb-2">
-                    <div
-                      className={[
-                        "flex items-center gap-3 rounded-2xl border px-3 py-3 cursor-default",
-                        isUnhealthy
-                          ? "border-destructive/30 bg-destructive/[0.04]"
-                          : "border-border/70 bg-muted/30",
-                      ].join(" ")}
-                    >
-                      <ProviderAvatar
-                        id={provider}
-                        label={displayLabel(activeModel)}
-                        color={isUnhealthy ? undefined : providerColor}
-                        className="h-11 w-11"
-                        iconClassName="h-5 w-5"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold leading-tight truncate">
-                          {displayLabel(activeModel)}
-                        </p>
-                        <p className="mt-0.5 text-[11px] text-muted-foreground truncate">
-                          {isUnhealthy ? "当前不可用" : getProviderDisplayName(provider)}
-                        </p>
-                      </div>
-                      {isUnhealthy ? (
-                        <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive font-medium shrink-0">
-                          <AlertTriangle className="h-2.5 w-2.5" />
-                          不可用
-                        </span>
-                      ) : (
-                        <span
-                          className="text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0"
-                          style={{
-                            backgroundColor: `${providerColor}18`,
-                            color: providerColor,
-                          }}
-                        >
-                          当前
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-
               {/* ── Provider groups ── */}
               {groups.map((group, gi) => {
-                const remainingModels = !search.trim()
-                  ? group.models.filter((m) => m.name !== currentModel)
-                  : group.models;
-                if (remainingModels.length === 0) return null;
                 const color = getProviderColor(group.provider);
                 return (
                   <div key={group.provider}>
@@ -458,7 +403,7 @@ function SwitchSheet({
                       </div>
                     )}
                     {/* Model items — 44px touch targets */}
-                    {remainingModels.map((m) => {
+                    {group.models.map((m) => {
                       const isSelected = m.name === currentModel;
                       const isUnhealthy = capsMap[m.name]?.healthy === false;
                       return (

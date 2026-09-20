@@ -7,6 +7,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS, hasWrapText, formatCellByPattern } from "./cell-style-utils";
 import { buildMergeMaps, getMergeInfo } from "./merge-utils";
 import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
+import { displayFileName } from "@/lib/file-identity";
 
 interface ExcelPreviewTableProps {
   data: ExcelPreviewData;
@@ -43,7 +44,7 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
         <div className="flex items-center gap-2 text-muted-foreground min-w-0">
           <Table2 className="h-3.5 w-3.5 flex-shrink-0 text-[var(--em-primary)]" />
           <span className="font-semibold text-foreground truncate text-[11px]">
-            {data.filePath.split("/").pop() || data.filePath}
+            {displayFileName(data.filePath) || data.filePath}
           </span>
           {data.sheet && (
             <>

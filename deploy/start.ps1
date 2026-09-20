@@ -414,15 +414,32 @@ function Test-Dependencies {
             }
         }
 
-        # web/node_modules
+        # A node_modules directory can survive an interrupted npm install.
+        # Check the files required by Next.js startup instead of trusting the
+        # directory alone, so the launcher can repair a partial installation.
         $webDir = Join-Path $Script:PROJECT_ROOT "web"
         $nodeModules = Join-Path $webDir "node_modules"
-        if (-not (Test-Path $nodeModules)) {
-            Write-Info "首次启动，安装前端依赖..."
-            Push-Location $webDir
-            & npm install
-            if ($LASTEXITCODE -ne 0) { Write-Err "npm install 失败"; $ok = $false }
-            Pop-Location
+        $frontendDependencyFiles = @(
+            (Join-Path $nodeModules "next\package.json"),
+            (Join-Path $nodeModules "next\dist\build\webpack\loaders\next-flight-client-entry-loader.js"),
+            (Join-Path $nodeModules "typescript\package.json")
+        )
+        $frontendDependenciesReady = $true
+        foreach ($dependencyFile in $frontendDependencyFiles) {
+            if (-not (Test-Path -LiteralPath $dependencyFile -PathType Leaf)) {
+                $frontendDependenciesReady = $false
+                break
+            }
+        }
+        if (-not $frontendDependenciesReady) {
+            Write-Info "前端依赖缺失或不完整，正在修复..."
+            try {
+                Push-Location $webDir
+                & npm install
+                if ($LASTEXITCODE -ne 0) { Write-Err "npm install 失败"; $ok = $false }
+            } finally {
+                Pop-Location
+            }
         }
 
         # 生产模式需要先构建

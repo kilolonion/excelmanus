@@ -11,6 +11,17 @@ import {
 import { demoWorkbookView } from "@/lib/workbook-view";
 
 describe("workbook cache identity", () => {
+  it("normalizes Windows upload paths without losing drive or UNC roots", () => {
+    expect(normalizeExcelPath(".\\uploads\\中文.xlsx")).toBe("./uploads/中文.xlsx");
+    expect(normalizeExcelPath("C:\\工作区\\中文.xlsx")).toBe("C:/工作区/中文.xlsx");
+    expect(normalizeExcelPath("\\\\server\\share\\中文.xlsx")).toBe("//server/share/中文.xlsx");
+    expect(normalizeExcelPath("/Users/me/中文.xlsx")).toBe("/Users/me/中文.xlsx");
+  });
+
+  it("invalidates Windows and POSIX spellings of the same workbook together", () => {
+    const key = snapshotCacheKey(".\\uploads\\report.xlsx", { workspaceKey: "id:ws-a" });
+    expect(matchesFileCacheKey(key, { workspaceKey: "id:ws-a", relative: "uploads/report.xlsx" })).toBe(true);
+  });
   it("uses the same workspaceKey|path prefix for snapshot and view keys", () => {
     const prefix = fileCachePrefix("id:ws-a", "./report.xlsx");
     expect(prefix).toBe("id:ws-a|./report.xlsx");
@@ -48,6 +59,15 @@ describe("workbook request lifecycle", () => {
   const data = () => ({ ...demoWorkbookView("book.xlsx"), file: { workspaceKey: "id:ws", relative: "book.xlsx" } });
   beforeEach(() => invalidateWorkbookViewCache());
   afterEach(() => { invalidateWorkbookViewCache(); vi.unstubAllGlobals(); });
+
+  it("accepts a POSIX snapshot for a Windows upload path and shares its cached view", async () => {
+    const result = { ...data(), file: { workspaceKey: "id:ws", relative: "uploads/book.xlsx" } };
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(result)));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(fetchWorkbookView({ ...opts, path: ".\\uploads\\book.xlsx" })).resolves.toMatchObject({ content_version: "sha256:demo" });
+    await fetchWorkbookView({ ...opts, path: "uploads/book.xlsx" });
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
 
   it("reuses a completed open hint and promotes it to the exact version and active sheet", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify(data())));

@@ -178,7 +178,9 @@ class PreparedRequest:
 
     def create_kwargs(self) -> dict[str, Any]:
         body = thaw_json(self.provider_body)
-        if self.route.protocol in {"anthropic", "gemini", "openai_responses"}:
+        if self.route.protocol in {
+            "anthropic", "gemini", "openai_responses", "antigravity",
+        }:
             # The adapter's transport consumes this exact compiled native body.
             kwargs = {"model": self.route.model, "messages": [], "_prepared_body": body}
         else:

@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -30,8 +29,11 @@ from excelmanus.api_app_state import (
     resolve_workspace_root as _resolve_workspace_root_impl,
 )
 from excelmanus.logger import get_logger
-from excelmanus.security.source_isolation import is_product_source_path
-from excelmanus.workspace.identity import is_hidden_name
+from excelmanus.workbook.read_cache import ReadCache
+
+# Immutable, serialized view responses; live bytes are still version-checked on
+# every request, so external edits cannot be hidden by a time-based cache.
+_view_responses: ReadCache[JSONResponse] = ReadCache(max_bytes=16 * 1024 * 1024)
 
 logger = get_logger("api.files")
 
@@ -55,6 +57,20 @@ _NOT_TEXT_SUFFIXES = frozenset({
     ".pdf", ".zip", ".gz", ".tar", ".tgz", ".7z", ".rar", ".bin", ".exe",
 })
 _NO_STORE_HEADERS = {"Cache-Control": "private, no-store"}
+
+
+def _display_filename(served_path: str | Path, ws_root: str | Path | None) -> str:
+    """Download label: strip ``uploads/{8hex}_`` prefixes and backup suffixes."""
+    from excelmanus.workspace.identity import display_name_for
+
+    p = Path(served_path)
+    rel = p.name
+    if ws_root:
+        try:
+            rel = p.resolve().relative_to(Path(ws_root).resolve()).as_posix()
+        except (ValueError, OSError):
+            pass
+    return display_name_for(rel) or p.name
 
 
 def is_text_preview_file(file_path: Path) -> bool:
@@ -251,7 +267,7 @@ async def get_excel_file(request: Request) -> StreamingResponse:
         _iter_file(),
         media_type=content_type,
         headers={
-            "Content-Disposition": _make_content_disposition(file_path.name),
+            "Content-Disposition": _make_content_disposition(_display_filename(file_path, ws_root)),
             **_NO_STORE_HEADERS,
         },
     )
@@ -279,6 +295,8 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
 
     if not path:
         return _error_json_response(400, "缺少 path 参数")
+
+    from excelmanus.workspace.identity import display_name_for
 
     ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
     if scope_error is not None:
@@ -333,7 +351,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
                 converted_rows.append(conv)
 
             snap_csv: dict[str, Any] = {
-                "file": os.path.basename(resolved),
+                "file": display_name_for(snap.file.relative),
                 "deprecated_for_editor": True,
                 "sheet": "Sheet1",
                 "sheets": ["Sheet1"],
@@ -346,7 +364,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
             }
             if all_sheets:
                 return JSONResponse(content=_with_bound_version({
-                    "file": os.path.basename(resolved),
+                    "file": display_name_for(snap.file.relative),
                     "sheets": ["Sheet1"],
                     "all_snapshots": [snap_csv],
                 }, bound_version))
@@ -364,6 +382,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         from io import BytesIO
 
         snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
+        file_display = display_name_for(snap.file.relative)
         file_bytes, bound_version = snap.read_bytes(), snap.content_version
         wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=not with_styles)
         sheet_names = wb.sheetnames
@@ -466,7 +485,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
                 snapshots.append(_read_sheet(ws_obj))
             wb.close()
             return JSONResponse(content=_with_bound_version({
-                "file": os.path.basename(resolved),
+                "file": file_display,
                 "deprecated_for_editor": True,
                 "sheets": sheet_names,
                 "all_snapshots": snapshots,
@@ -479,7 +498,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
             return _error_json_response(404, "工作表不存在")
 
         snap = _read_sheet(ws)
-        snap["file"] = os.path.basename(resolved)
+        snap["file"] = file_display
         snap["sheets"] = sheet_names
         wb.close()
         payload = _with_bound_version(snap, bound_version)
@@ -530,9 +549,15 @@ async def get_excel_view(request: Request) -> JSONResponse:
                     "error": "视图版本已变化，请重新加载", "code": "STALE_VIEW",
                     "content_version": snap.content_version, "expected_version": expected_version,
                 })
-            view = project_view(snap, [base], with_styles=with_styles, active_sheet_default=True)
-            view["deprecated_for_editor"] = False
-            return JSONResponse(content=view)
+            def build_view() -> tuple[JSONResponse, int]:
+                view = project_view(snap, [base], with_styles=with_styles, active_sheet_default=True)
+                view["deprecated_for_editor"] = False
+                response = JSONResponse(content=view)
+                return response, len(response.body)
+
+            return _view_responses.get_or_create(
+                (snap.id.key(), snap.suffix, base, with_styles), build_view,
+            )
 
         return await run_in_threadpool(read_view)
     except SnapshotStale as exc:
@@ -582,6 +607,7 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
     from openpyxl import load_workbook
 
     from excelmanus.workbook.view_mutate import apply_workbook_operations, changes_to_operations
+    from excelmanus.workbook.user_edits import summarize_operations
     from excelmanus.workbook_commit import CommitError
     from excelmanus.workspace.file_service import WorkspaceFileService
 
@@ -637,6 +663,8 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
             expected_version=request.expected_version,
             operation_id=request.operation_id,
             intent={"operations": ops},
+            event_context={"source": "user", "session_id": request.session_id,
+                           "summary": summarize_operations(ops)},
         )
         if receipt.state == "conflict" or receipt.error_code == "VERSION_CONFLICT":
             return UnicodeJSONResponse(
@@ -663,6 +691,14 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
             "cells_written": captured.get("cells_written", 0),
             "content_version": receipt.primary_version(),
         })
+        manager = get_session_manager()
+        if manager is not None:
+            # Deliver on the event loop, after releasing the file transaction lock.
+            # The durable outbox remains retryable if notification fails.
+            try:
+                manager.drain_workspace_events()
+            except Exception:
+                logger.warning("用户编辑已保存，改动通知等待重试", exc_info=True)
         return JSONResponse(content=body)
     except CommitError as exc:
         status = 409 if exc.code == "VERSION_CONFLICT" else 400 if exc.code == "PATH_INVALID" else 500
@@ -687,62 +723,19 @@ async def list_excel_files(request: Request) -> JSONResponse:
 
 
 def _list_excel_files(request: Request) -> JSONResponse:
-    """扫描当前用户 workspace 中所有 Excel 文件，返回路径列表。"""
+    """List workbook identities using the same fast scanner as the file tree."""
     assert get_config() is not None, "服务未初始化"
-    from pathlib import Path as _Path
+    from excelmanus.workspace.listing import scan_workspace
 
-    workspace = _Path(_resolve_workspace_root(request)).resolve()
-    excel_exts = {".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"}
-    skip_dirs = {"node_modules", "__pycache__", ".venv", ".git", ".next"}
-    results: list[dict[str, Any]] = []
-
-    import re
-    _upload_prefix_re = re.compile(r"^[0-9a-f]{8}_")
-    uploads_dir = str(workspace / "uploads")
-    backups_dir = str((workspace / "outputs" / "backups").resolve())
-    audits_dir = str((workspace / "outputs" / "audits").resolve())
-
-    for root, dirs, filenames in os.walk(workspace):
-        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")
-                   and not is_product_source_path(_Path(root) / d, workspace)]
-        root_resolved = str(_Path(root).resolve())
-        if root_resolved.startswith(backups_dir) or root_resolved.startswith(audits_dir):
-            dirs.clear()
-            continue
-        for fname in filenames:
-            if is_hidden_name(fname):
-                continue
-            ext = os.path.splitext(fname)[1].lower()
-            if ext not in excel_exts:
-                continue
-            full = os.path.join(root, fname)
-            try:
-                rel = os.path.relpath(full, workspace)
-                mtime = os.path.getmtime(full)
-            except OSError:
-                continue
-            display_name = fname
-            if root == uploads_dir and _upload_prefix_re.match(fname):
-                display_name = fname[9:]
-            results.append({
-                "path": f"./{rel}",
-                "filename": display_name,
-                "modified_at": mtime,
-            })
-
-    results.sort(key=lambda x: x["modified_at"], reverse=True)
+    files, _ = scan_workspace(_resolve_workspace_root(request), limit=None, excel_only=True)
+    results = [{"path": f"./{f['path']}", "filename": f["filename"],
+                "modified_at": f["modified_at"]} for f in files]
+    results.sort(key=lambda item: item["modified_at"], reverse=True)
     return JSONResponse(content={"files": results})
+
 
 _MAX_WORKSPACE_FILES = 2000
 
-# 工作区内部目录，不向前端暴露
-_WORKSPACE_HIDDEN_DIRS = frozenset({
-    ".tmp", ".staging", ".versions", ".git", ".venv",
-    "__pycache__", "node_modules",
-})
-
-# uploads/ 下 hash 前缀正则（8位hex + 下划线）
-_UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{8}_")
 
 @router.get("/api/v1/files/workspace/list")
 async def list_workspace_files(request: Request) -> JSONResponse:
@@ -750,86 +743,14 @@ async def list_workspace_files(request: Request) -> JSONResponse:
 
 
 def _list_workspace_files(request: Request) -> JSONResponse:
-    """扫描用户工作区根目录中的文件与文件夹（用于文件树视图）。
-
-    扫描范围：完整工作区根目录（包含 agent 创建的文件、uploads/ 等）。
-    排除：隐藏目录/文件、内部目录（.tmp/.staging/scripts/temp 等）。
-    """
     assert get_config() is not None, "服务未初始化"
+    from excelmanus.workspace.listing import scan_workspace
 
-    ws = _resolve_workspace(request)
-    ws_root = str(ws.root_dir)  # 完整工作区根目录
-
-    results: list[dict[str, Any]] = []
-    for root, dirs, filenames in os.walk(ws_root):
-        # 统一使用 / 分隔符（兼容 Windows）
-        rel_root = os.path.relpath(root, ws_root).replace("\\", "/")
-
-        # 过滤隐藏目录与内部目录
-        dirs[:] = sorted(
-            d for d in dirs
-            if not d.startswith(".")
-            and d not in _WORKSPACE_HIDDEN_DIRS
-            and not is_product_source_path(Path(root) / d, ws_root)
-            # scripts/temp 是 run_code 临时脚本目录，不展示
-            and not (rel_root == "scripts" and d == "temp")
-            # outputs/backups 和 outputs/audits 是内部备份/审计目录
-            and not (rel_root == "outputs" and d in ("backups", "audits"))
-        )
-        # uploads/ 优先枚举：用户上传文件不能因 _MAX_WORKSPACE_FILES 截断而缺席
-        if rel_root == "." and "uploads" in dirs:
-            dirs.remove("uploads")
-            dirs.insert(0, "uploads")
-
-        for dname in dirs:
-            if len(results) >= _MAX_WORKSPACE_FILES:
-                break
-            full = os.path.join(root, dname)
-            try:
-                mtime = os.path.getmtime(full)
-            except OSError:
-                continue
-            rel = f"{rel_root}/{dname}" if rel_root != "." else dname
-            results.append({
-                "path": rel,
-                "filename": dname,
-                "modified_at": mtime,
-                "is_dir": True,
-            })
-        for fname in sorted(filenames):
-            if len(results) >= _MAX_WORKSPACE_FILES:
-                break
-            if is_hidden_name(fname) or fname.startswith("_rc_") or fname.startswith("_sw_"):
-                continue
-            full = os.path.join(root, fname)
-            if is_product_source_path(full, ws_root):
-                continue
-            try:
-                mtime = os.path.getmtime(full)
-            except OSError:
-                continue
-            display_name = fname
-            # uploads/ 下的 hash 前缀文件显示原始名
-            if rel_root == "uploads" or (rel_root != "." and rel_root.startswith("uploads/")):
-                if _UPLOAD_PREFIX_RE.match(fname):
-                    display_name = fname[9:]
-            rel = f"{rel_root}/{fname}" if rel_root != "." else fname
-            results.append({
-                "path": rel,
-                "filename": display_name,
-                "modified_at": mtime,
-                "is_dir": False,
-            })
-            if len(results) >= _MAX_WORKSPACE_FILES:
-                break
-        if len(results) >= _MAX_WORKSPACE_FILES:
-            break
-
-    results.sort(key=lambda x: (not x["is_dir"], x["path"].lower()))
+    ws_root = str(_resolve_workspace(request).root_dir)
+    files, truncated = scan_workspace(ws_root, limit=_MAX_WORKSPACE_FILES)
+    files.sort(key=lambda item: (not item["is_dir"], item["path"].lower()))
     return JSONResponse(content={
-        "files": results,
-        "truncated": len(results) >= _MAX_WORKSPACE_FILES,
-        "workspace_path": ws_root,
+        "files": files, "truncated": truncated, "workspace_path": ws_root,
     })
 
 
@@ -1137,7 +1058,7 @@ async def get_image_file(request: Request) -> StreamingResponse:
         _iter_image(),
         media_type=content_type,
         headers={
-            "Content-Disposition": _make_content_disposition(file_path.name),
+            "Content-Disposition": _make_content_disposition(_display_filename(file_path, ws_root)),
             **_NO_STORE_HEADERS,
         },
     )
@@ -1214,7 +1135,7 @@ async def download_file(request: Request) -> StreamingResponse:
         _iter_file(),
         media_type=content_type,
         headers={
-            "Content-Disposition": _make_content_disposition(file_path.name),
+            "Content-Disposition": _make_content_disposition(_display_filename(file_path, ws_root)),
             **_NO_STORE_HEADERS,
         },
     )
@@ -1251,9 +1172,14 @@ async def get_excel_compare(request: Request) -> JSONResponse:
 
     import asyncio
 
+    from excelmanus.workspace.identity import display_name_for
+
     def _load_snapshot(resolved: str) -> dict[str, Any]:
         """自包含的 snapshot 加载（支持 xlsx/xls/xlsb/csv）。"""
         basename = os.path.basename(resolved)
+        file_display = display_name_for(
+            os.path.relpath(resolved, ws_root).replace("\\", "/")
+        )
         ext = os.path.splitext(resolved)[1].lower()
 
         # ── CSV 快捷路径 ──
@@ -1300,19 +1226,19 @@ async def get_excel_compare(request: Request) -> JSONResponse:
                                     conv.append(v)
                     converted.append(conv)
                 snap_csv = {
-                    "file": basename, "sheet": "Sheet1", "sheets": ["Sheet1"],
+                    "file": file_display, "sheet": "Sheet1", "sheets": ["Sheet1"],
                     "shape": {"rows": total, "columns": total_cols},
                     "column_letters": col_letters, "headers": headers,
                     "rows": converted, "total_rows": total,
                     "truncated": total > max_rows + 1,
                 }
                 return _with_bound_version(
-                    {"file": basename, "sheets": ["Sheet1"], "all_snapshots": [snap_csv]},
+                    {"file": file_display, "sheets": ["Sheet1"], "all_snapshots": [snap_csv]},
                     bound_version,
                 )
             except Exception as exc:
                 logger.error("Compare CSV snapshot 失败: %s — %s", resolved, exc)
-                return {"file": basename, "sheets": [], "all_snapshots": [], "error": str(exc)}
+                return {"file": file_display, "sheets": [], "all_snapshots": [], "error": str(exc)}
 
         # ── xlsx/xlsm 主路径（xls 转换由 open_snapshot_at 完成）──
         from openpyxl import load_workbook as _lwb
@@ -1363,17 +1289,17 @@ async def get_excel_compare(request: Request) -> JSONResponse:
             for sn in sheet_names:
                 ws_obj = wb[sn]
                 snap = _read_ws(ws_obj)
-                snap["file"] = basename
+                snap["file"] = file_display
                 snap["sheets"] = sheet_names
                 snapshots.append(snap)
             wb.close()
             return _with_bound_version(
-                {"file": basename, "sheets": sheet_names, "all_snapshots": snapshots},
+                {"file": file_display, "sheets": sheet_names, "all_snapshots": snapshots},
                 bound_version,
             )
         except Exception as exc:
             logger.error("Compare snapshot 失败: %s — %s", resolved, exc)
-            return {"file": basename, "sheets": [], "all_snapshots": [], "error": str(exc)}
+            return {"file": file_display, "sheets": [], "all_snapshots": [], "error": str(exc)}
 
     snap_a, snap_b = await asyncio.gather(
         asyncio.to_thread(_load_snapshot, resolved_a),
@@ -1482,7 +1408,7 @@ async def get_word_file(request: Request) -> StreamingResponse:
         _iter_file(),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={
-            "Content-Disposition": _make_content_disposition(file_path.name),
+            "Content-Disposition": _make_content_disposition(_display_filename(file_path, ws_root)),
             **_NO_STORE_HEADERS,
         },
     )
@@ -1511,7 +1437,8 @@ async def get_word_snapshot(request: Request) -> JSONResponse:
         import asyncio
         snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
         snapshot = await asyncio.to_thread(_build_word_snapshot, str(file_path), max_paragraphs)
-        snapshot["file"] = path
+        from excelmanus.workspace.identity import display_name_for
+        snapshot["file"] = display_name_for(snap.file.relative)
         snapshot["content_version"] = snap.content_version
         return JSONResponse(content=snapshot)
     except Exception as exc:

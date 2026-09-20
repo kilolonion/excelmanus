@@ -1,4 +1,5 @@
 import { normalizeExcelPath } from "@/lib/api";
+import { displayFileName } from "@/lib/file-identity";
 
 /* ── Tree data types & helpers ── */
 
@@ -51,7 +52,7 @@ export function buildTree(files: { path: string; filename: string; is_dir?: bool
       }
       const leafName = parts[parts.length - 1];
       current.children.push({
-        name: leafName,
+        name: displayFileName(normalized) || leafName,
         fullPath: normalized,
         children: [],
         file,
@@ -145,8 +146,7 @@ export function filterWorkspaceFiles(
 
 function _basename(path: string): string {
   const normalized = normalizePath(path);
-  const parts = normalized.split("/").filter(Boolean);
-  return parts[parts.length - 1] || normalized;
+  return displayFileName(normalized) || normalized.split("/").filter(Boolean).pop() || normalized;
 }
 
 /**

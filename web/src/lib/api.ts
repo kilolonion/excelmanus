@@ -1,9 +1,13 @@
-import type { SessionDetail, SubagentRun, WorkspaceFolder } from "@/lib/types";
+import type { SessionDetail, SessionTaskList, SubagentRun, WorkspaceFolder } from "@/lib/types";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
+import { getRuntimeConfig } from "@/lib/runtime-config";
+import { saveBlob } from "@/lib/save-blob";
 import { formatApiErrorMessage } from "@/lib/api-error";
+import { displayFileName } from "@/lib/file-identity";
 
 const API_BASE_PATH = "/api/v1";
 const MANAGE_TOKEN_STORAGE_KEY = "excelmanus_manage_token";
+export const AUTH_REQUIRED_EVENT = "excelmanus:auth-required";
 
 /** 普通 REST 请求的默认超时（毫秒）。上传/下载等大体积操作使用更长的超时。 */
 const _DEFAULT_TIMEOUT_MS = 30_000;
@@ -60,15 +64,10 @@ export function getAuthHeaders(): Record<string, string> {
  * 请求传入 direct=true。
  */
 function resolveApiBase(opts?: { direct?: boolean }): string {
-  // 没有运行时后端地址时，大多数浏览器请求通过 Next.js rewrite 代理，保持同源。
-  // SSE（Server-Sent Events）流仍需传入 direct=true，避免 Next.js rewrite 缓冲响应。
-  if (typeof window !== "undefined") {
-    const directOrigin = resolveDirectBackendOrigin();
-    if (directOrigin) return `${directOrigin}${API_BASE_PATH}`;
-    if (opts?.direct) return `${directOrigin}${API_BASE_PATH}`;
-    return API_BASE_PATH;
-  }
-  if (opts?.direct) {
+  // Only an explicit runtime origin opts ordinary REST calls out of the Web
+  // proxy. The local :8000 fallback belongs to direct/streaming requests.
+  const runtimeOrigin = getRuntimeConfig("backendOrigin");
+  if (opts?.direct || runtimeOrigin) {
     return `${resolveDirectBackendOrigin()}${API_BASE_PATH}`;
   }
   return API_BASE_PATH;
@@ -99,11 +98,30 @@ function _isCrossOrigin(url: RequestInfo | URL): boolean {
  * 为跨域 URL 自动追加 credentials: "include" 到 RequestInit。
  * 同源 URL 不做任何修改，保持浏览器默认行为（same-origin）。
  */
-function _withCredentials(url: string, init: RequestInit): RequestInit {
+function _withCredentials(url: RequestInfo | URL, init: RequestInit): RequestInit {
   if (_isCrossOrigin(url)) {
     return { ...init, credentials: init.credentials ?? "include" };
   }
   return init;
+}
+
+/** One attempt, preserving the caller's body, signal and authentication.
+ * All API requests use this so multipart, previews and exports also work on
+ * the desktop app's cross-origin backend. Mutations are never retried here.
+ */
+export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const method = (init.method || (typeof Request !== "undefined" && input instanceof Request ? input.method : "GET")).toUpperCase();
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const original = init.headers ?? (typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined);
+    const headers = original instanceof Headers || Array.isArray(original) ? Object.fromEntries(new Headers(original)) : original;
+    init = { ...init, headers: { ...headers, "X-Requested-With": "ExcelManus" } };
+  }
+  const response = await fetch(input, _withCredentials(input, init));
+  if (response.status === 401 && response.headers.get("X-ExcelManus-Auth") === "required" && typeof window !== "undefined") {
+    setManageToken("");
+    window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+  }
+  return response;
 }
 
 /** 判断是否为可重试的暂态错误（网络异常或 502/503/504）。 */
@@ -126,7 +144,7 @@ export async function directFetch(
     const headers = new Headers(init?.headers);
     const signal = init?.signal ?? _withTimeout(_DEFAULT_TIMEOUT_MS);
     const credentials: RequestCredentials | undefined = _isCrossOrigin(input) ? "include" : undefined;
-    return fetch(input, { ...init, headers, signal, credentials: init?.credentials ?? credentials });
+    return apiFetch(input, { ...init, headers, signal, credentials: init?.credentials ?? credentials });
   };
 
   let res: Response;
@@ -161,7 +179,7 @@ export async function apiGet<T = unknown>(
   opts?: { direct?: boolean; signal?: AbortSignal; timeoutMs?: number },
 ): Promise<T> {
   const url = buildApiUrl(path, opts);
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(opts?.timeoutMs ?? _DEFAULT_TIMEOUT_MS, opts?.signal),
   }));
@@ -175,7 +193,7 @@ export async function apiPost<T = unknown>(
   opts?: { direct?: boolean; timeoutMs?: number },
 ): Promise<T> {
   const url = buildApiUrl(path, opts);
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
@@ -191,7 +209,7 @@ export async function apiPut<T = unknown>(
   opts?: { direct?: boolean },
 ): Promise<T> {
   const url = buildApiUrl(path, opts);
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
@@ -207,7 +225,7 @@ export async function apiPatch<T = unknown>(
   opts?: { direct?: boolean },
 ): Promise<T> {
   const url = buildApiUrl(path, opts);
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
@@ -219,7 +237,7 @@ export async function apiPatch<T = unknown>(
 
 export async function apiDelete<T = void>(path: string, opts?: { direct?: boolean }): Promise<T> {
   const url = buildApiUrl(path, opts);
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "DELETE",
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
@@ -238,6 +256,13 @@ export async function fetchSubagentRuns(sessionId: string): Promise<SubagentRun[
     `/sessions/${encodeURIComponent(sessionId)}/subagents`,
   );
   return data.runs;
+}
+
+export async function fetchSessionTaskList(sessionId: string): Promise<SessionTaskList | null> {
+  const data = await apiGet<{ task_list: SessionTaskList | null }>(
+    `/sessions/${encodeURIComponent(sessionId)}/task-list`,
+  );
+  return data.task_list ?? null;
 }
 
 export type SubagentControlAction = "send" | "pause" | "cancel" | "resume";
@@ -316,7 +341,7 @@ export async function deleteWorkspaceFolder(workspaceId: string): Promise<void> 
 export async function fetchSessionDetail(
   sessionId: string
 ): Promise<SessionDetail | null> {
-  const res = await fetch(buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}`), {
+  const res = await apiFetch(buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}`), {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
@@ -390,7 +415,7 @@ export async function clearAllSessions(): Promise<{
   sessions_deleted: number;
   messages_deleted: number;
 }> {
-  const res = await fetch(buildApiUrl("/sessions"), {
+  const res = await apiFetch(buildApiUrl("/sessions"), {
     method: "DELETE",
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
@@ -490,7 +515,7 @@ export async function exportSession(
   const url = buildApiUrl(
     `/sessions/${encodeURIComponent(sessionId)}/export?${params.toString()}`,
   );
-  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_UPLOAD_TIMEOUT_MS) });
+  const res = await apiFetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_UPLOAD_TIMEOUT_MS) });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(formatApiErrorMessage(data, res.status));
@@ -501,15 +526,7 @@ export async function exportSession(
     `session.${format}`,
   );
 
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(a.href);
-    a.remove();
-  }, 100);
+  saveBlob(blob, filename);
 }
 
 export interface ApprovalRecord {
@@ -558,7 +575,7 @@ export async function answerQuestion(
   answer: string,
 ): Promise<{ status: string; resume_required?: boolean }> {
   const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/answer`, { direct: true });
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ question_id: questionId, answer }),
@@ -577,7 +594,7 @@ export async function submitApproval(
   decision: "accept" | "reject" | "fullaccess",
 ): Promise<{ status: string; resume_required?: boolean }> {
   const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/approve`, { direct: true });
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ approval_id: approvalId, decision }),
@@ -595,7 +612,7 @@ export async function toggleFullAccess(
   enabled: boolean,
 ): Promise<{ session_id: string; full_access_enabled: boolean }> {
   const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/full-access`, { direct: true });
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ enabled }),
@@ -610,7 +627,7 @@ export async function toggleFullAccess(
 
 export async function abortChat(sessionId: string): Promise<{ status: string }> {
   const url = buildApiUrl("/chat/abort", { direct: true });
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ session_id: sessionId }),
@@ -634,7 +651,7 @@ export async function rollbackChat(opts: {
   turn_index: number;
 }> {
   const rollbackUrl = buildApiUrl("/chat/rollback", { direct: true });
-  const res = await fetch(rollbackUrl, _withCredentials(rollbackUrl, {
+  const res = await apiFetch(rollbackUrl, _withCredentials(rollbackUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
@@ -672,7 +689,7 @@ export async function rollbackPreview(
   turnIndex: number,
 ): Promise<RollbackPreviewResult> {
   const previewUrl = buildApiUrl("/chat/rollback/preview", { direct: true });
-  const res = await fetch(previewUrl, _withCredentials(previewUrl, {
+  const res = await apiFetch(previewUrl, _withCredentials(previewUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ session_id: sessionId, turn_index: turnIndex }),
@@ -706,15 +723,18 @@ export interface ExcelSnapshot {
  * - Double slashes: ``./uploads//foo.xlsx`` -> ``./uploads/foo.xlsx``
  */
 export function normalizeExcelPath(path: string): string {
-  const raw = String(path ?? "").trim();
+  // Native Windows uploads use backslashes, while API snapshots use POSIX
+  // separators. Both must have the same identity and cache key.
+  const raw = String(path ?? "").trim().replace(/\\/g, "/");
   if (!raw) return "";
   if (raw.startsWith("<path>/")) {
     const basename = raw.slice("<path>/".length).trim();
     return basename ? `./${basename}` : "";
   }
   let p = raw.replace(/\/\/+/g, "/");
+  if (raw.startsWith("//")) p = `/${p}`; // Preserve UNC server/share roots.
   // 保留绝对路径不变，以便后端可根据工作区进行校验。
-  if (p.startsWith("/")) return p;
+  if (p.startsWith("/") || /^[a-zA-Z]:\//.test(p)) return p;
   if (!p.startsWith("./")) p = `./${p}`;
   return p;
 }
@@ -801,7 +821,7 @@ export async function fetchWordSnapshot(
   opts?: { maxParagraphs?: number } & WorkspaceRequestScope,
 ): Promise<WordSnapshotResponse> {
   const url = buildWordSnapshotUrl(path, opts);
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   }));
@@ -822,7 +842,7 @@ export async function writeWordContent(
     throw new Error("Word write 必须提供 expected_version");
   }
   const url = buildApiUrl("/files/word/write");
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
@@ -853,7 +873,7 @@ export async function fetchExcelFiles(sessionId?: string | null, workspaceId?: s
   appendWorkspaceScope(params, { sessionId, workspaceId });
   const qs = params.toString();
   const url = buildApiUrl(`/files/excel/list${qs ? `?${qs}` : ""}`);
-  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+  const res = await apiFetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
@@ -870,7 +890,7 @@ export async function fetchWorkspaceFiles(sessionId?: string | null, workspaceId
   appendWorkspaceScope(params, { sessionId, workspaceId });
   const qs = params.toString();
   const url = buildApiUrl(`/files/workspace/list${qs ? `?${qs}` : ""}`);
-  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+  const res = await apiFetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`工作区文件列表加载失败: ${res.status}`);
   const data = await res.json();
   return { files: data.files ?? [], truncated: !!data.truncated };
@@ -1036,7 +1056,7 @@ export async function fetchExcelCompare(
   appendWorkspaceScope(params, opts);
   if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
   const url = buildApiUrl(`/files/excel/compare?${params.toString()}`);
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
@@ -1051,7 +1071,7 @@ export async function fetchExcelCompare(
 
 export async function workspaceMkdir(path: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/mkdir");
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ path, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
@@ -1065,7 +1085,7 @@ export async function workspaceMkdir(path: string, sessionId?: string | null, wo
 
 export async function workspaceCreateFile(path: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/create");
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ path, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
@@ -1079,7 +1099,7 @@ export async function workspaceCreateFile(path: string, sessionId?: string | nul
 
 export async function workspaceDeleteItem(path: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/item");
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: "DELETE",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ path, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
@@ -1093,7 +1113,7 @@ export async function workspaceDeleteItem(path: string, sessionId?: string | nul
 
 export async function workspaceRenameItem(oldPath: string, newPath: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/rename");
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ old_path: oldPath, new_path: newPath, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
@@ -1116,7 +1136,7 @@ export async function uploadFileToFolder(
   formData.append("folder", folder);
   if (sessionId) formData.append("session_id", sessionId);
   if (workspaceId) formData.append("workspace_id", workspaceId);
-  const res = await fetch(buildApiUrl("/upload"), {
+  const res = await apiFetch(buildApiUrl("/upload"), {
     method: "POST",
     headers: { ...getAuthHeaders() },
     body: formData,
@@ -1226,7 +1246,7 @@ export async function fetchAllSheetsSnapshot(
     appendWorkspaceScope(params, opts);
     params.set("with_styles", opts?.withStyles !== false ? "1" : "0");
     const url = buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
-    const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+    const res = await apiFetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(formatApiErrorMessage(data, res.status));
@@ -1250,7 +1270,7 @@ export async function fetchExcelSnapshot(
   path: string,
   opts?: { sheet?: string; maxRows?: number } & WorkspaceRequestScope,
 ): Promise<ExcelSnapshot> {
-  const res = await fetch(buildExcelSnapshotUrl(path, opts), {
+  const res = await apiFetch(buildExcelSnapshotUrl(path, opts), {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
@@ -1368,6 +1388,26 @@ export async function fetchWorkbookView(opts: {
   const inflight = _viewInflight.get(inflightKey);
   if (inflight && !inflight.controller.signal.aborted) return readViewFlight(inflight, opts.signal);
 
+  // An explicit-sheet open can reuse the implicit "active sheet" request when it
+  // resolves to the same sheet and window — the prefetch key uses `*`.
+  if (opts.sheet && !opts.expectedVersion) {
+    const wildKey = viewCacheKey({
+      workspaceKey: opts.workspaceKey, relative: opts.path,
+      rect: opts.rect, withStyles: opts.withStyles,
+    });
+    const wildCached = _viewCache.get(wildKey);
+    if (wildCached && Date.now() - wildCached.ts < _VIEW_OPEN_TTL_MS
+      && wildCached.data.windows.length === 1 && wildCached.data.windows[0].sheet === opts.sheet) {
+      return wildCached.data;
+    }
+    const wildFlight = _viewInflight.get(wildKey);
+    if (wildFlight && !wildFlight.controller.signal.aborted) {
+      const view = await readViewFlight(wildFlight, opts.signal).catch(() => null);
+      opts.signal?.throwIfAborted();
+      if (view && view.windows.length === 1 && view.windows[0].sheet === opts.sheet) return view;
+    }
+  }
+
   const controller = new AbortController();
   const flight: ViewFlight = { controller, readers: new Set(), promise: null! };
   flight.promise = (async () => {
@@ -1378,7 +1418,7 @@ export async function fetchWorkbookView(opts: {
     if (opts.rect) params.set("rect", opts.rect);
     params.set("with_styles", opts.withStyles !== false ? "1" : "0");
     if (opts.expectedVersion) params.set("expected_version", opts.expectedVersion);
-    const res = await fetch(buildApiUrl(`/files/excel/view?${params.toString()}`), {
+    const res = await apiFetch(buildApiUrl(`/files/excel/view?${params.toString()}`), {
       headers: { ...getAuthHeaders() },
       signal: _withTimeout(_DEFAULT_TIMEOUT_MS, controller.signal),
     });
@@ -1422,6 +1462,14 @@ export async function fetchWorkbookView(opts: {
       workspaceKey: opts.workspaceKey, relative: opts.path, version: result.content_version,
       sheet: result.windows[0].sheet, rect: opts.rect, withStyles: opts.withStyles,
     }), result);
+    // …and vice versa: an explicit request that resolved to the active sheet
+    // also satisfies a later implicit open.
+    if (opts.sheet && result.windows.length === 1 && result.active_sheet === result.windows[0].sheet) {
+      cacheView(viewCacheKey({ workspaceKey: opts.workspaceKey, relative: opts.path,
+        version: result.content_version, rect: opts.rect, withStyles: opts.withStyles }), result);
+      if (!opts.expectedVersion) cacheView(viewCacheKey({ workspaceKey: opts.workspaceKey,
+        relative: opts.path, rect: opts.rect, withStyles: opts.withStyles }), result);
+    }
     return result;
   })().finally(() => {
     if (_viewInflight.get(inflightKey) === flight) {
@@ -1464,7 +1512,7 @@ export async function writeExcelCells(opts: {
   operationId?: string;
 }): Promise<ExcelWriteResponse> {
   const url = buildApiUrl("/files/excel/write");
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
@@ -1509,7 +1557,7 @@ export async function fetchFileBlob(path: string, sessionId?: string | null, wor
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   appendWorkspaceScope(params, { sessionId, workspaceId });
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   }));
@@ -1541,7 +1589,7 @@ export async function downloadFile(
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   appendWorkspaceScope(params, { sessionId, workspaceId });
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
-  const res = await fetch(url, _withCredentials(url, {
+  const res = await apiFetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   }));
@@ -1550,15 +1598,8 @@ export async function downloadFile(
     throw new Error(formatApiErrorMessage(data, res.status));
   }
   const blob = await res.blob();
-  const name = filename || path.split("/").pop() || "download";
-  const objectUrl = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = objectUrl;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(objectUrl);
+  // 下载名不给用户看见内部编码名（uploads/{8hex}_、时间戳备份后缀等）。
+  saveBlob(blob, filename || displayFileName(normalizeExcelPath(path)) || "download");
 }
 
 export async function uploadFile(file: File, sessionId?: string | null, workspaceId?: string | null): Promise<{
@@ -1570,7 +1611,7 @@ export async function uploadFile(file: File, sessionId?: string | null, workspac
   formData.append("file", file);
   if (sessionId) formData.append("session_id", sessionId);
   if (workspaceId) formData.append("workspace_id", workspaceId);
-  const res = await fetch(buildApiUrl("/upload"), {
+  const res = await apiFetch(buildApiUrl("/upload"), {
     method: "POST",
     headers: { ...getAuthHeaders() },
     body: formData,
@@ -1592,7 +1633,7 @@ export async function uploadFileFromUrl(
   path: string;
   size: number;
 }> {
-  const res = await fetch(buildApiUrl("/upload-from-url"), {
+  const res = await apiFetch(buildApiUrl("/upload-from-url"), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
@@ -1656,7 +1697,7 @@ export async function fetchOperations(
   if (opts?.offset != null) params.set("offset", String(opts.offset));
   const qs = params.toString() ? `?${params}` : "";
   const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/operations${qs}`);
-  const res = await fetch(url, { headers: getAuthHeaders(), signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+  const res = await apiFetch(url, { headers: getAuthHeaders(), signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) await handleAuthError(res);
   return res.json();
 }
@@ -1668,7 +1709,7 @@ export async function fetchOperationDetail(
   const url = buildApiUrl(
     `/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(approvalId)}`,
   );
-  const res = await fetch(url, { headers: getAuthHeaders(), signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+  const res = await apiFetch(url, { headers: getAuthHeaders(), signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) await handleAuthError(res);
   return res.json();
 }
@@ -1680,7 +1721,7 @@ export async function undoOperation(
   const url = buildApiUrl(
     `/sessions/${encodeURIComponent(sessionId)}/operations/${encodeURIComponent(approvalId)}/undo`,
   );
-  const res = await fetch(url, {
+  const res = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),

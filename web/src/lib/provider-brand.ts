@@ -2,6 +2,11 @@
 export const PROVIDER_COLORS: Record<string, string> = {
   openai: "#10a37f",
   "openai-codex": "#10a37f",
+  workbuddy: "#0052d9",
+  "workbuddy-cn": "#0052d9",
+  "workbuddy-global": "#0052d9",
+  codebuddy: "#0052d9",
+  antigravity: "#4285f4",
   anthropic: "#d4a574",
   claude: "#d4a574",
   gemini: "#4285f4",
@@ -50,6 +55,11 @@ export const PROVIDER_COLORS: Record<string, string> = {
 export const PROVIDER_DISPLAY: Record<string, string> = {
   openai: "OpenAI",
   "openai-codex": "OpenAI Codex",
+  workbuddy: "WorkBuddy",
+  "workbuddy-cn": "WorkBuddy 国内版",
+  "workbuddy-global": "WorkBuddy Global",
+  codebuddy: "CodeBuddy",
+  antigravity: "Antigravity",
   anthropic: "Anthropic",
   claude: "Anthropic",
   gemini: "Google Gemini",
@@ -125,6 +135,12 @@ interface ModelBrandSource {
 const PROVIDER_ALIASES: Record<string, string> = {
   openai: "openai",
   "openai-codex": "openai-codex",
+  workbuddy: "workbuddy",
+  "workbuddy-cn": "workbuddy",
+  "workbuddy-global": "workbuddy",
+  codebuddy: "workbuddy",
+  copilot: "workbuddy",
+  antigravity: "antigravity",
   anthropic: "anthropic",
   claude: "anthropic",
   google: "gemini",
@@ -167,6 +183,9 @@ const PROVIDER_ALIASES: Record<string, string> = {
 
 const MODEL_BRAND_PATTERNS: Array<[string, RegExp]> = [
   ["openai-codex", /openai[-_\s/]?codex|\bcodex[-_\s/]+gpt/],
+  // antigravity 模型 ID 内含 claude-/gemini-/gpt-oss，必须先于品牌规则命中
+  ["antigravity", /antigravity|cloudcode[-_]pa/],
+  ["workbuddy", /workbuddy|codebuddy|copilot\.tencent/],
   ["deepseek", /deep[-_\s]?seek/],
   ["anthropic", /anthropic|claude/],
   ["gemini", /gemini|generativelanguage\.googleapis/],

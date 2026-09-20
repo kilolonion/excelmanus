@@ -13,9 +13,10 @@ import { useWordStore } from "@/stores/word-store";
 import { useFilePreviewStore } from "@/stores/file-preview-store";
 import { useJevStore } from "@/stores/jev-store";
 import { classifyWorkspaceFile } from "@/lib/file-kind";
+import { displayFileName } from "@/lib/file-identity";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import { getIsMobile } from "@/hooks/use-mobile";
-import type { AssistantBlock, TaskItem } from "@/lib/types";
+import type { AssistantBlock, Session, TaskItem } from "@/lib/types";
 import { instantSessionTitle } from "@/lib/session-title";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 
@@ -105,7 +106,7 @@ export function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
   });
 }
 
-function normalizeTaskItems(taskListPayload: unknown): TaskItem[] {
+export function normalizeTaskItems(taskListPayload: unknown): TaskItem[] {
   let rawItems: unknown[] = [];
   if (Array.isArray(taskListPayload)) {
     rawItems = taskListPayload;
@@ -119,6 +120,12 @@ function normalizeTaskItems(taskListPayload: unknown): TaskItem[] {
   }
   return rawItems.map((rawItem, i) => {
     const item = rawItem as Record<string, unknown>;
+    const rawVerification = item.verification;
+    const verification = typeof rawVerification === "string"
+      ? rawVerification || undefined
+      : typeof (rawVerification as { expected?: unknown } | null)?.expected === "string"
+        ? (rawVerification as { expected: string }).expected || undefined
+        : undefined;
     return {
       content:
         (item.content as string)
@@ -127,7 +134,7 @@ function normalizeTaskItems(taskListPayload: unknown): TaskItem[] {
         || `任务 ${i + 1}`,
       status: (item.status as string) || "pending",
       index: typeof item.index === "number" ? item.index : i,
-      verification: (item.verification as string) || undefined,
+      verification,
     };
   });
 }
@@ -265,6 +272,20 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       if (!ctx.isFirstSend) break; // continuation / subscribe 跳过
       const sid = data.session_id as string;
       const ss = useSessionStore.getState();
+      // JEV 路由可能在会话获取前重绑了工作区；以服务端事实为准。
+      const wsPatch: Partial<Session> = {};
+      if (typeof data.workspace_id === "string" && data.workspace_id) {
+        wsPatch.workspaceId = data.workspace_id;
+      }
+      if (typeof data.workspace_path === "string" && data.workspace_path) {
+        wsPatch.workspacePath = data.workspace_path;
+      }
+      if (typeof data.workspace_title === "string" && data.workspace_title) {
+        wsPatch.workspaceTitle = data.workspace_title;
+      }
+      if (Object.keys(wsPatch).length > 0) {
+        ss.patchSession(sid, wsPatch);
+      }
       if (ss.activeSessionId !== sid) {
         ss.setActiveSession(sid);
       }
@@ -609,7 +630,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         const parts: string[] = [];
         if (args.sheet) parts.push(String(args.sheet));
         if (args.range) parts.push(String(args.range));
-        if (args.file_path) parts.push(String(args.file_path).split("/").pop() || "");
+        if (args.file_path) parts.push(displayFileName(String(args.file_path)));
         if (args.code_preview) parts.push(String(args.code_preview));
         return {
           ...b,
@@ -935,7 +956,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     case "file_download": {
       ctx.hadPersistedToolWork = true;
       const dlFilePath = (data.file_path as string) || "";
-      const dlFilename = (data.filename as string) || dlFilePath.split("/").pop() || "download";
+      const dlFilename = (data.filename as string) || displayFileName(dlFilePath) || "download";
       const dlDescription = (data.description as string) || "";
       if (dlFilePath) {
         S().appendBlock(msgId, {

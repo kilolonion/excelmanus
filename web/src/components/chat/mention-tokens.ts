@@ -1,3 +1,5 @@
+import { displayFileName } from "@/lib/file-identity";
+
 export interface MentionToken {
   start: number;
   end: number;
@@ -93,7 +95,7 @@ function formatRangeLabel(rangeSpec: string): string {
 
 export function mentionCapsuleLabel(token: MentionToken): string {
   if (token.kind === "file" || token.kind === "bare-file" || token.kind === "path") {
-    const base = token.value.split(/[/\\]/).pop() || token.value;
+    const base = displayFileName(token.value) || token.value;
     return token.rangeSpec ? `${base} · ${formatRangeLabel(token.rangeSpec)}` : base;
   }
   return token.raw;

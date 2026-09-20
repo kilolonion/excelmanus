@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useExcelStore } from "@/stores/excel-store";
 import { formatFileMention, trackRecentExcelFile } from "./chat-input-insert";
+import { fileBaseName } from "@/lib/revision-display";
 
 interface ChatSelectionChipProps {
   insertMentionTokens: (fullTokens: string[], afterInsert?: () => void) => void;
@@ -19,8 +20,8 @@ export function ChatSelectionChip({ insertMentionTokens }: ChatSelectionChipProp
   useEffect(() => {
     if (!pendingSelection) return;
     const { filePath, sheet, range } = pendingSelection;
-    const filename = filePath.split("/").pop() || filePath;
-    const version = useExcelStore.getState().getContentVersion(filePath);
+    const filename = fileBaseName(filePath) || filePath;
+    const version = pendingSelection.contentVersion ?? useExcelStore.getState().getContentVersion(filePath);
     insertMentionTokens([formatFileMention({ path: filePath, sheet, range, version })]);
     trackRecentExcelFile(filePath, filename);
     clearPendingSelection();

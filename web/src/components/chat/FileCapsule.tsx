@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Download } from "lucide-react";
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import { isSpreadsheetFile } from "@/lib/file-kind";
+import { displayFilePath } from "@/lib/file-identity";
 
 const COLLAPSED_COUNT = 4;
 
@@ -72,7 +73,7 @@ export function RelatedFilesCard({
               type="button"
               onClick={file.onOpen}
               className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
-              title={file.filePath || file.filename}
+              title={file.filePath ? displayFilePath(file.filePath) : file.filename}
             >
               <FileTypeIcon filename={file.filename} className="h-4 w-4 flex-shrink-0" />
               <span className="min-w-0 truncate text-[13px] text-foreground">

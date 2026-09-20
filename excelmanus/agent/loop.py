@@ -47,6 +47,7 @@ from excelmanus.message_serialization import (
 )
 from excelmanus.skillpacks import SkillMatchResult
 from excelmanus.agent.budget import TurnBudgetExceeded
+from excelmanus.workbook.user_edits import has_pending_user_edits
 
 logger = get_logger("agent.loop")
 
@@ -687,7 +688,7 @@ async def run_tool_loop(
             )
 
         # 步前压缩挂在 Driver 附件上，不在循环体里分支。
-        _claim_step = iteration > start_iteration or not skip_initial_inbox_claim
+        _claim_step = iteration > start_iteration or not skip_initial_inbox_claim or has_pending_user_edits(driver)
         if driver is not None and _claim_step:
             _step_claimed = await driver.consume_next_step(iteration=iteration)
             if _step_claimed:
@@ -1277,10 +1278,26 @@ async def run_tool_loop(
         _planned_calls = [tc for batch in _batches for tc in batch.tool_calls]
         for tc in _planned_calls:
             engine._tool_runtime.prepare_call(tc, on_event, iteration, retain=True)
+
+        def _skip_for_user_edit(tc: Any) -> bool:
+            if not has_pending_user_edits(driver):
+                return False
+            text = "USER_EDIT_PENDING: 用户已修改工作簿；本工具尚未执行。请先阅读下一步改动简报，重新读取后再决定操作。"
+            result = ToolCallResult(tool_name=tc.function.name, arguments={}, result=text,
+                                    success=False, error="USER_EDIT_PENDING")
+            result = engine._tool_runtime.finish_queued(tc, result)
+            all_tool_results.append(result)
+            _schedule_results[id(tc)] = result
+            if tc.id:
+                engine._memory.add_tool_result(tc.id, result.result)
+            return True
+
         try:
             for _batch in _batches:
                 ready_calls = []
                 for tc in _batch.tool_calls:
+                    if _skip_for_user_edit(tc):
+                        continue
                     blocked = _plan.blocked_result(tc, _schedule_results)
                     if blocked is None:
                         ready_calls.append(tc)
@@ -1380,6 +1397,8 @@ async def run_tool_loop(
                         tool_name = getattr(function, "name", "")
                         tool_call_id = getattr(tc, "id", "")
 
+                        if _skip_for_user_edit(tc):
+                            continue
                         if breaker_triggered:
                             all_tool_results.append(
                                 ToolCallResult(

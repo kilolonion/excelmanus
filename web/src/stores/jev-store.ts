@@ -29,7 +29,7 @@ export const useJevStore = create<JevState>()(
       pending: false,
       drawerOpen: false,
       pinned: false,
-      railCollapsed: false,
+      railCollapsed: true,
       chatEnabled: false,
       seq: 0,
       beginTurn: (sessionId) => {

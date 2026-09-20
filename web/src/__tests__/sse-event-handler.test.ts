@@ -346,6 +346,34 @@ describe("sse-event-handler", () => {
         "识别截图中的表格，还原数据",
       );
     });
+
+    it("携带工作区字段时同步到 session-store（JEV 路由后归属可见）", () => {
+      dispatchSSEEvent(
+        makeEvent("session_init", {
+          session_id: "test-session",
+          workspace_id: "ws-sales",
+          workspace_path: "/data/销售",
+          workspace_title: "销售",
+          workspace_routed: true,
+        }),
+        makeCtx(),
+      );
+
+      expect(sessionMock.patchSession).toHaveBeenCalledWith("test-session", {
+        workspaceId: "ws-sales",
+        workspacePath: "/data/销售",
+        workspaceTitle: "销售",
+      });
+    });
+
+    it("缺少工作区字段时不改写会话归属", () => {
+      dispatchSSEEvent(
+        makeEvent("session_init", { session_id: "test-session" }),
+        makeCtx(),
+      );
+
+      expect(sessionMock.patchSession).not.toHaveBeenCalled();
+    });
   });
 
   // ── seq 追踪（普通事件）────────────────────────────────────

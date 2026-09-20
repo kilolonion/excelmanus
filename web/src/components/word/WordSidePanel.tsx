@@ -7,6 +7,7 @@ import { Download, FileText, History, Maximize2, RefreshCw, X } from "lucide-rea
 import { useShallow } from "zustand/react/shallow";
 import { RevisionTimelinePanel } from "@/components/chat/CheckpointTimeline";
 import { buildWordFileUrl, downloadFile } from "@/lib/api";
+import { displayFileName } from "@/lib/file-identity";
 import { panelSlideVariants } from "@/lib/sidebar-motion";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
@@ -49,7 +50,7 @@ export function WordSidePanel() {
 
   const fileName = useMemo(() => {
     if (!activeDocPath) return "";
-    return activeDocPath.split("/").pop() || activeDocPath;
+    return displayFileName(activeDocPath) || activeDocPath;
   }, [activeDocPath]);
 
   const viewScope = `${activeWorkspaceId ?? activeSessionId ?? ""}:${activeDocPath ?? ""}`;

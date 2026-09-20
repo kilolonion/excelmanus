@@ -481,6 +481,63 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
         """检查模型是否属于 OpenAI Codex 订阅范畴。"""
         return bool(_CODEX_MODEL_PATTERN.search(model))
 
+    # ── 订阅档案钩子（连接建档 / 状态展示） ────────────────────
+
+    # 连接成功后的默认模型档案；兼容去重覆盖历史自动创建的名称/模型。
+    _DEFAULT_PROFILE_NAME = "openai-codex/gpt-6-astra"
+    _LEGACY_PROFILE_NAMES = {
+        "Codex 5.3", "codex-5.3", "codex-oauth",
+        "Codex Spark", "codex-spark", "Codex 5.2", "codex-5.2",
+    }
+    _LEGACY_PROFILE_MODELS = {
+        "gpt-5.3-codex", "gpt-5.3-codex-spark",
+        "gpt-5.2-codex", "openai-codex/gpt-5.2-codex",
+    }
+
+    async def subscription_profiles_on_connect(
+        self,
+        record: Any,
+        existing_profiles: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """连接成功后自动创建默认 Codex 档案（已有同名/同模型则跳过）。"""
+        all_names = {self._DEFAULT_PROFILE_NAME} | self._LEGACY_PROFILE_NAMES
+        all_models = {self._DEFAULT_PROFILE_NAME} | self._LEGACY_PROFILE_MODELS
+        for p in existing_profiles:
+            if p.get("name", "") in all_names or p.get("model", "") in all_models:
+                return []
+        return [{
+            "name": self._DEFAULT_PROFILE_NAME,
+            "model": self._DEFAULT_PROFILE_NAME,
+            "api_key": "",
+            "base_url": "https://api.openai.com/v1",
+            "description": "GPT-6 Astra - OAuth 登录（无需 API Key）",
+            "protocol": self.PROTOCOL,
+            "thinking_mode": "openai_reasoning",
+            "model_family": "gpt",
+        }]
+
+    def profile_display_info(self, profile: Any) -> dict[str, Any]:
+        """status 端点展示字段：从凭证 extra_data / JWT claims 提取邮箱。"""
+        raw = getattr(profile, "extra_data", None)
+        data: Any = None
+        if isinstance(raw, str) and raw:
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = None
+        elif isinstance(raw, dict):
+            data = raw
+        if isinstance(data, dict):
+            email = data.get("email")
+            if isinstance(email, str) and email.strip():
+                return {"email": email.strip()}
+        access = getattr(profile, "access_token", None)
+        if access:
+            email = _extract_email(_parse_jwt_claims(access))
+            if email:
+                return {"email": email}
+        return {}
+
     @staticmethod
     def _parse_expires(raw_data: dict[str, Any]) -> str:
         """从多种格式解析过期时间为 ISO 8601 字符串。"""

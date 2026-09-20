@@ -1019,21 +1019,19 @@ class FileRegistry:
         支持 .xlsx/.xlsm (openpyxl)、.xls (xlrd)、.xlsb (pyxlsb)、.csv。
         """
         ext = fp.suffix.lower()
-
-        # CSV 文件不走 openpyxl
-        if ext == ".csv":
-            return FileRegistry._scan_csv_sheets(fp, header_scan_rows)
-
-        # .xls → xlrd 直接读取元数据（不转换）
-        if ext == ".xls":
-            return FileRegistry._scan_xls_sheets(fp, header_scan_rows)
-
-        # .xlsb → pyxlsb 直接读取元数据（不转换）
-        if ext == ".xlsb":
-            return FileRegistry._scan_xlsb_sheets(fp, header_scan_rows)
-
-        # .xlsx/.xlsm → openpyxl
-        return FileRegistry._scan_xlsx_sheets(fp, header_scan_rows)
+        before = fp.stat()
+        scanner = {
+            ".csv": FileRegistry._scan_csv_sheets,
+            ".xls": FileRegistry._scan_xls_sheets,
+            ".xlsb": FileRegistry._scan_xlsb_sheets,
+        }.get(ext, FileRegistry._scan_xlsx_sheets)
+        sheets = scanner(fp, header_scan_rows)
+        after = fp.stat()
+        # A freshness hint, never a substitute for the tool's content_version.
+        if (before.st_mtime_ns, before.st_size) == (after.st_mtime_ns, after.st_size):
+            for sheet in sheets:
+                sheet["cache_stamp"] = f"{after.st_mtime_ns}:{after.st_size}"
+        return sheets
 
     @staticmethod
     def _scan_csv_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
@@ -1077,6 +1075,7 @@ class FileRegistry:
             "rows": total_rows,
             "columns": total_cols,
             "headers": headers,
+            "column_names": [v.strip() if v and v.strip() else None for v in rows_raw[best_idx]] if rows_raw else [],
             "header_heuristic": True,
             "header_row": (best_idx + 1) if rows_raw else None,
         }]
@@ -1205,6 +1204,8 @@ class FileRegistry:
                 total_cols = ws.max_column or 0
 
                 headers: list[str] = []
+                column_names: list[str | None] = []
+                detected_header: int | None = None
                 if total_rows > 0:
                     scan_limit = min(header_scan_rows, total_rows)
                     rows_raw: list[list[Any]] = []
@@ -1228,6 +1229,9 @@ class FileRegistry:
                                 best_score = score
                                 best_idx = idx
                         header_row = rows_raw[best_idx]
+                        detected_header = best_idx + 1
+                        column_names = [str(v).strip() if v is not None and str(v).strip() else None
+                                        for v in header_row]
                         headers = [
                             str(v).strip()
                             for v in header_row
@@ -1239,6 +1243,8 @@ class FileRegistry:
                     "rows": total_rows,
                     "columns": total_cols,
                     "headers": headers,
+                    "column_names": column_names,
+                    "header_row": detected_header,
                     "header_heuristic": True,
                 })
         finally:

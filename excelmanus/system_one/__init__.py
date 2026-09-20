@@ -3,6 +3,7 @@
 片 I / C 入口与审批 shadow。片 J/K/L/N/O/F/M/P/E 已接线；G 保留为显式
 calibration hook，但主循环不再自动调用，因为当前没有消费者。片 D 未签字：
 即使 ENABLED=enforce 也不得 applied，不改 wire / UI / 偏好 / model_text / 目录 / 循环 / 冷修剪 / 审批结果。
+context.resolve 是独立的纯建议题包；enforce 可向主模型补充上下文建议，不调用执行器。
 """
 
 from __future__ import annotations

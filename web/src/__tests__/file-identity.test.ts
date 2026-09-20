@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   collectHistoryAffectedFiles,
   displayFileName,
+  displayFilePath,
   mergeAffectedFiles,
   toPublicFileIdentity,
 } from "@/lib/file-identity";
@@ -23,6 +24,13 @@ describe("toPublicFileIdentity", () => {
     expect(toPublicFileIdentity("./outputs/backups/report.xlsx")).toBeNull();
     expect(toPublicFileIdentity(".excelmanus/revisions/x.xlsx")).toBeNull();
     expect(toPublicFileIdentity("foo_20260911T091344_abcd.xlsx")).toBeNull();
+  });
+
+  it("drops internal runtime scripts and staging paths", () => {
+    expect(toPublicFileIdentity("_rc_12345678.py")).toBeNull();
+    expect(toPublicFileIdentity("./_sw_abcdef12.py")).toBeNull();
+    expect(toPublicFileIdentity("scripts/temp/_rc_12345678.py")).toBeNull();
+    expect(toPublicFileIdentity("scripts/temp/staging.xlsx")).toBeNull();
   });
 });
 
@@ -46,6 +54,33 @@ describe("mergeAffectedFiles", () => {
 describe("displayFileName", () => {
   it("strips uploads hex prefix", () => {
     expect(displayFileName("./uploads/abcd1234_sales.xlsx")).toBe("sales.xlsx");
+    expect(displayFileName("uploads/abcd1234_sales.xlsx")).toBe("sales.xlsx");
+  });
+
+  it("strips the hex prefix at any depth under uploads/", () => {
+    expect(displayFileName("uploads/sub/abcd1234_sales.xlsx")).toBe("sales.xlsx");
+  });
+
+  it("strips the timestamped backup suffix", () => {
+    expect(displayFileName("outputs/backups/sales_20260911T091344_f525.xlsx")).toBe("sales.xlsx");
+    expect(displayFileName("sales_20260911T091344_f525.xlsx")).toBe("sales.xlsx");
+  });
+
+  it("strips both prefix and suffix on backup copies of uploads", () => {
+    expect(displayFileName("outputs/backups/abcd1234_sales_20260911T091344_f525.xlsx")).toBe("sales.xlsx");
+  });
+
+  it("keeps ordinary names untouched", () => {
+    expect(displayFileName("销售明细.xlsx")).toBe("销售明细.xlsx");
+    expect(displayFileName("deadbeef.xlsx")).toBe("deadbeef.xlsx");
+    expect(displayFileName("data/ab12_report.xlsx")).toBe("ab12_report.xlsx");
+  });
+});
+
+describe("displayFilePath", () => {
+  it("keeps the directory and cleans only the leaf", () => {
+    expect(displayFilePath("./uploads/abcd1234_sales.xlsx")).toBe("./uploads/sales.xlsx");
+    expect(displayFilePath("outputs/backups/x_20260911T091344_abcd.csv")).toBe("outputs/backups/x.csv");
   });
 });
 

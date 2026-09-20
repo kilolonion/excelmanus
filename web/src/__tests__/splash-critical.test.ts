@@ -19,4 +19,12 @@ describe("splash first paint", () => {
     expect(html).toContain("#ffffff");
     expect(html).not.toContain("var(--card)");
   });
+
+  it("keeps essential liveness feedback moving in reduced motion", () => {
+    const block = SPLASH_CRITICAL_CSS.match(/@media \(prefers-reduced-motion:reduce\)\{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(block).toMatch(/\.em-splash-arc\{[^}]*animation:\s*none/);
+    expect(block).toMatch(/\.em-splash-progress-fill\{[^}]*animation-duration:/);
+    expect(block).not.toMatch(/\.em-splash-(progress-fill|spinner)\{[^}]*animation:\s*none/);
+    expect(block).not.toContain("translateX(75%)");
+  });
 });

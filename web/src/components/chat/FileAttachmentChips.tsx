@@ -9,7 +9,9 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { isImageFile, isVisionImageFile } from "@/lib/file-kind";
+import { isImageFile, isVisionImageFile, isSpreadsheetFile } from "@/lib/file-kind";
+import { ensureWorkbookSession, openWorkbookForConversation } from "@/lib/open-workbook";
+import { workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import type { AttachedFile } from "@/lib/types";
 
 interface FileAttachmentChipsProps {
@@ -29,6 +31,8 @@ export function FileAttachmentChips({
 }: FileAttachmentChipsProps) {
   const isMobile = useIsMobile();
   const [expanded, setExpanded] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+  const [opening, setOpening] = useState<string | null>(null);
 
   if (files.length === 0) return null;
 
@@ -104,6 +108,17 @@ export function FileAttachmentChips({
                 <AlertCircle className="h-3 w-3 flex-shrink-0" />
               )}
               <span className="truncate">{af.file.name}</span>
+              {af.status === "success" && af.uploadResult && isSpreadsheetFile(af.file.name) && <button type="button"
+                disabled={!!opening} className="shrink-0 rounded px-1 py-0.5 hover:bg-[var(--em-primary-alpha-20)] disabled:opacity-50"
+                aria-label={`打开并讨论 ${af.file.name}`} onClick={async () => {
+                  setOpening(af.id); setOpenError(null);
+                  try {
+                    const session = await ensureWorkbookSession();
+                    if (af.workspaceKey && af.workspaceKey !== workspaceKeyFromSession(session)) throw new Error("附件属于另一个工作区，请切回原工作区后打开");
+                    await openWorkbookForConversation(af.uploadResult!.path, session);
+                  } catch (err) { setOpenError(err instanceof Error ? err.message : "打开失败"); }
+                  finally { setOpening(null); }
+                }}>{opening === af.id ? <Loader2 className="h-3 w-3 animate-spin" /> : "打开"}</button>}
               {af.status === "failed" && (
                 <button
                   type="button"
@@ -140,6 +155,7 @@ export function FileAttachmentChips({
         )}
       </div>
       {/* Inline error messages for failed uploads */}
+      {openError && <p role="alert" className="text-xs text-destructive">{openError}</p>}
       {files.some((af) => af.status === "failed") && (
         <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-destructive">
           {files

@@ -15,6 +15,7 @@ import {
   OverlayCardHeader,
 } from "@/components/ui/overlay-card";
 import { downloadFile } from "@/lib/api";
+import { displayFilePath } from "@/lib/file-identity";
 
 /* ── ExcelFilesDialog ── */
 
@@ -89,7 +90,7 @@ export function ExcelFilesDialog({
                     onDoubleClickFile(file.path);
                     onClose();
                   }}
-                  title={file.path}
+                  title={displayFilePath(file.path)}
                 >
                   <FileSpreadsheet
                     className="h-4 w-4 flex-shrink-0"
@@ -100,7 +101,7 @@ export function ExcelFilesDialog({
                       {file.filename}
                     </div>
                     <div className="truncate text-[10px] text-muted-foreground">
-                      {file.path}
+                      {displayFilePath(file.path)}
                     </div>
                   </div>
                   <span className="text-[10px] text-muted-foreground whitespace-nowrap">

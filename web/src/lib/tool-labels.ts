@@ -1,5 +1,7 @@
 /** 把工具名和参数转成用户能读懂的动作标题与上下文，不编造缺失数字。 */
 
+import { displayFileName } from "@/lib/file-identity";
+
 const WRITE_TOOLS = new Set([
   "edit_spreadsheet",
   "format_spreadsheet",
@@ -46,6 +48,8 @@ export function isReadTool(name: string): boolean {
 }
 
 export function basenameOf(path: string): string {
+  const clean = displayFileName(path);
+  if (clean) return clean;
   const trimmed = path.replace(/\\/g, "/");
   const parts = trimmed.split("/");
   return parts[parts.length - 1] || path;

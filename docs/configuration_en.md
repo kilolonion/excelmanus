@@ -18,7 +18,11 @@ The process may use a few **locators** to find the data volume and bind ports. S
 | `EXCELMANUS_DEPLOY_MODE` | `auto`/`standalone`/`server`. `auto` and unknown values are standalone; `server` must be set explicitly | `auto` |
 | `EXCELMANUS_API_HOST` / `EXCELMANUS_API_PORT` / `EXCELMANUS_BACKEND_PORT` / `EXCELMANUS_FRONTEND_PORT` | Bind address and ports | See start scripts |
 | `EXCELMANUS_WEB_WORKERS` | uvicorn worker count; API warns about process-local session and cache state when `>1`. Keep `1` on a single host | Set by `deploy/start.*`, default `1` |
-| `EXCELMANUS_MANAGE_TOKEN` | Required when binding a non-loopback address (at least 16 characters). With a valid token, API requests except health and CORS preflight require `Authorization: Bearer` | empty (loopback may omit it) |
+| `EXCELMANUS_MANAGE_TOKEN` | Optional automation/desktop token, at least 16 characters; accepts `Authorization: Bearer` or `X-ExcelManus-Token`, not URL query parameters | empty |
+| `EXCELMANUS_LOGIN_USERNAME` | Initial administrator username; Settings → Security takes precedence | `admin` |
+| `EXCELMANUS_LOGIN_PASSWORD` | Initial administrator password, at least 12 characters; Settings → Security takes precedence | empty (local protection off by default) |
+| `EXCELMANUS_LOGIN_SESSION_HOURS` | Browser session lifetime, integer 1–168 hours | `12` |
+| `EXCELMANUS_LOGIN_COOKIE_SECURE` | `auto` follows the request HTTPS scheme; HTTPS reverse proxies can set `true` explicitly | `auto` |
 | `EXCELMANUS_SECRET_KEY` | Fernet key seed (tests / custom volumes) | empty → `{EXCELMANUS_HOME}/.secret_key` |
 | `EXCELMANUS_DESKTOP` | Desktop marker, set by the desktop launcher | Unset for source launches |
 | `EXCELMANUS_RUN_PYTHON` | Python executable for `run_code`; desktop sets its bundled runtime | Depends on the runtime |
@@ -98,14 +102,17 @@ down the service stops them.
 
 Use `GET /api/v1/sessions/{session_id}/subagents` and
 `POST /api/v1/sessions/{session_id}/subagents/{run_id}` with `action` and optional
-`message` / `wait_seconds`. The Tasks button in the chat toolbar lists background
-runs, results, and changed files. It supports steering, question answers, pause,
-cancel, and continuation. Active background runs in the selected session are polled
-every two seconds, even after the main chat ends or is stopped. Returning to a
-session or reloading the page fetches its records again. Continue creates a new run
-and keeps the previous record. Settled runs refresh their changed file views.
-The panel shows the selected session; tasks are started through `delegate` in chat
-and are not automatically resumed when the page loads.
+`message` / `wait_seconds`. `GET /api/v1/sessions/{session_id}/task-list` returns
+the session's current task list snapshot (`null` when none exists). The Tasks
+button in the chat toolbar shows the assistant's task list progress plus
+background runs, results, and changed files. It supports steering, question
+answers, pause, cancel, and continuation. Active background runs in the
+selected session are polled every two seconds, even after the main chat ends or
+is stopped. Returning to a session or reloading the page fetches its records
+again. Continue creates a new run and keeps the previous record. Settled runs
+refresh their changed file views. The panel shows the selected session; tasks
+are started through `delegate` in chat and are not automatically resumed when
+the page loads.
 
 ## Context Auto-Compaction
 
@@ -372,7 +379,7 @@ Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Verce
 | Setting key | Description | Default |
 |---|---|---|
 | `EXCELMANUS_JEV_ENABLED` | Master gate: `off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_EXPOSURE` | Exposure-family gate | `off` |
+| `EXCELMANUS_JEV_EXPOSURE` | Tool exposure and workspace/spreadsheet context suggestions | `off` |
 | `EXCELMANUS_JEV_OBSERVATION` | Observation policy: `off` / `shadow` / `enforce` | `off` |
 | `EXCELMANUS_JEV_VERIFICATION` | Post-mutation check suggestions: `off` / `shadow` / `enforce` | `off` |
 | `EXCELMANUS_JEV_RECOVERY` | Error-recovery suggestions: `off` / `shadow` / `enforce` | `off` |
@@ -386,7 +393,7 @@ Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Verce
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe direct key (synced with the provider list) | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway key (synced with the provider list) | — |
 
-This optional, experimental feature requires the `system-one` extra. `off` disables it; `shadow` records suggestions without applying them. `enforce` also requires valid calibration and sign-off for the relevant pack or policy family. The repository currently has no signed entries; setting `EXCELMANUS_JEV_CALIBRATED=true` alone is insufficient. `bench/jev_live_calibrate.py` reads keys from the database, contacts external services for live calibration, and never signs results automatically.
+This optional, experimental feature requires the `system-one` extra. `off` disables it; `shadow` records suggestions without applying them. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. Other execution effects still require valid calibration and sign-off for the relevant pack or policy family. The repository currently has no signed entries; setting `EXCELMANUS_JEV_CALIBRATED=true` alone is insufficient for those effects. `bench/jev_live_calibrate.py` reads keys from the database, contacts external services for live calibration, and never signs results automatically.
 
 ## Encryption Configuration
 
@@ -417,7 +424,11 @@ File discovery, the sidebar, mentions and tool access ignore product source and 
 
 `EXCELMANUS_AUTH_ENABLED` / `NEXT_PUBLIC_AUTH_ENABLED` / `EXCELMANUS_SESSION_ISOLATION` are removed. Codex subscription OAuth remains (process-level, not bound to a login user).
 
-The API listens on `127.0.0.1` by default. Binding a non-loopback address requires `EXCELMANUS_MANAGE_TOKEN` (at least 16 characters). With a valid token, API requests except health and CORS preflight require `Authorization: Bearer`. Server deploys should reverse-proxy to `127.0.0.1:8000` instead of exposing the app port on `0.0.0.0`.
+The API listens on `127.0.0.1` by default. **Settings → Security → Login protection** enables or disables a single administrator gate for the whole instance. Set the username/password there; leave the password blank to retain it. Saving applies immediately, revokes all browser sessions and persists across restarts. Explicitly disabling protection permits direct access, including endpoints previously protected by the management token. There is no registration, user database or tenant isolation; model subscription OAuth remains independent.
+
+The first server-mode startup (including loopback behind a proxy) or non-loopback bind requires an administrator password or management token, or previously saved login settings. Missing credentials and short passwords/tokens refuse startup. An explicit disabled choice saved in Settings is respected. Use HTTPS with a same-origin frontend/API reverse proxy. See [server login setup](server-login.md) for configuration and recovery.
+
+Access settings and sessions live in `{EXCELMANUS_HOME}/access.db`, outside product configuration imports/exports. Saved passwords use salted scrypt hashes. Browsers receive only an HttpOnly, SameSite=Strict session cookie. Only login, status, minimal health and preflight requests are public; files, SSE, subscription APIs and API documentation require authentication. Anonymous health responses omit model, onboarding and session details. Sessions, revocation and the limit of 10 login attempts per minute are shared by workers on the same home directory.
 
 ### Manual `users/` migration
 
