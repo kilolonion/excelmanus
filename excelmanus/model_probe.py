@@ -903,10 +903,19 @@ async def _try_thinking_stream(
             return False
 
         try:
-            found = await asyncio.wait_for(_consume(), timeout=timeout)
-        except asyncio.TimeoutError:
-            return False, f"thinking probe timeout after {timeout:.1f}s"
-        return found, ""
+            try:
+                found = await asyncio.wait_for(_consume(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return False, f"thinking probe timeout after {timeout:.1f}s"
+            return found, ""
+        finally:
+            # 探测提前返回（找到结果或超时）时释放底层流，避免连接悬挂。
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                try:
+                    await aclose()
+                except Exception:
+                    pass
     except Exception as exc:
         return False, str(exc)[:200]
 

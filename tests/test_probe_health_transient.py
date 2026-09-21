@@ -16,6 +16,8 @@ import pytest
 from excelmanus.model_probe import (
     ModelCapabilities,
     _is_permanent_health_failure,
+    _try_thinking_stream,
+    capabilities_cache_is_fresh,
     probe_health,
     run_full_probe,
 )
@@ -284,6 +286,133 @@ class TestRunFullProbeTransientHealth:
             )
             assert caps2.healthy is True
             assert mock_save.call_count == 1  # 成功结果被保存
+
+
+# ── 探测缓存新鲜度 ─────────────────────────────────────────
+
+
+class TestCapabilitiesCacheFreshness:
+    """capabilities_cache_is_fresh：过期/不完整缓存不得当作永久有效。"""
+
+    def _caps(self, **overrides) -> ModelCapabilities:
+        base = ModelCapabilities(
+            model="m",
+            base_url="http://x/v1",
+            healthy=True,
+            supports_tool_calling=True,
+            supports_vision=True,
+            supports_thinking=False,
+        )
+        for key, value in overrides.items():
+            setattr(base, key, value)
+        return base
+
+    def test_manual_override_always_fresh(self):
+        assert capabilities_cache_is_fresh(self._caps(manual_override=True)) is True
+
+    def test_unknown_health_not_fresh(self):
+        assert capabilities_cache_is_fresh(self._caps(healthy=None)) is False
+
+    def test_partial_capabilities_not_fresh(self):
+        assert capabilities_cache_is_fresh(self._caps(supports_vision=None)) is False
+
+    def test_fresh_until_in_future(self):
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(tz=timezone.utc) + timedelta(hours=1)).isoformat()
+        assert capabilities_cache_is_fresh(self._caps(fresh_until=future)) is True
+
+    def test_fresh_until_expired(self):
+        from datetime import datetime, timedelta, timezone
+        past = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        assert capabilities_cache_is_fresh(self._caps(fresh_until=past)) is False
+
+    def test_detected_at_fallback_window(self):
+        """旧缓存没有 fresh_until：detected_at + 1h 内有效，过期后重探。"""
+        from datetime import datetime, timedelta, timezone
+        recent = (datetime.now(tz=timezone.utc) - timedelta(minutes=30)).isoformat()
+        old = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        assert capabilities_cache_is_fresh(self._caps(detected_at=recent)) is True
+        assert capabilities_cache_is_fresh(self._caps(detected_at=old)) is False
+
+    @pytest.mark.asyncio
+    async def test_stale_cache_triggers_reprobe(self):
+        """run_full_probe 命中过期缓存时应重新探测而非直接返回。"""
+        from datetime import datetime, timedelta, timezone
+        expired = self._caps(
+            fresh_until=(datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat(),
+        )
+        with patch("excelmanus.model_probe.load_capabilities", return_value=expired), \
+             patch("excelmanus.model_probe.probe_health", new=AsyncMock(return_value=(True, ""))), \
+             patch("excelmanus.model_probe.probe_tool_calling", new=AsyncMock(return_value=(False, ""))), \
+             patch("excelmanus.model_probe.probe_vision", new=AsyncMock(return_value=(False, ""))), \
+             patch("excelmanus.model_probe.probe_thinking", new=AsyncMock(return_value=(False, "", ""))):
+            caps = await run_full_probe(
+                client=MagicMock(), model="m", base_url="http://x/v1",
+                skip_if_cached=True, db=MagicMock(),
+            )
+
+        assert caps.source == "auto_probe"
+        assert caps.supports_tool_calling is False
+
+
+# ── thinking 流式探测超时 ─────────────────────────────────
+
+
+class TestThinkingStreamTimeout:
+    """_try_thinking_stream 的超时必须覆盖消费阶段，而非只覆盖建流。"""
+
+    @pytest.mark.asyncio
+    async def test_consume_phase_timeout(self):
+        """建流成功但 chunk 迟迟不到 → 消费超时返回 (False, timeout err)。"""
+        closed = False
+
+        class _TrickleStream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                yield SimpleNamespace()  # 无 choices / delta → 继续等待
+                await asyncio.sleep(60)
+
+            async def aclose(self):
+                nonlocal closed
+                closed = True
+
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=_TrickleStream())
+
+        ok, err = await _try_thinking_stream(
+            client, "m", [{"role": "user", "content": "hi"}],
+            timeout=0.05, extra_kwargs={},
+        )
+
+        assert ok is False
+        assert "timeout" in err
+        assert closed is True
+
+    @pytest.mark.asyncio
+    async def test_responses_probe_omits_max_tokens(self):
+        """OpenAIResponsesClient 的 thinking 探测不得带 max_tokens。"""
+        client = OpenAIResponsesClient.__new__(OpenAIResponsesClient)
+
+        class _EmptyStream:
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                return
+                yield  # pragma: no cover
+
+        create = AsyncMock(return_value=_EmptyStream())
+        client.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
+
+        ok, _err = await _try_thinking_stream(
+            client, "gpt-6-astra", [{"role": "user", "content": "hi"}],
+            timeout=1.0, extra_kwargs={},
+        )
+
+        assert ok is False
+        assert "max_tokens" not in create.await_args.kwargs
 
 
 # ── 前端兼容性测试 ─────────────────────────────────────────

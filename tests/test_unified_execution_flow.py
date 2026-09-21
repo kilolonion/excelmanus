@@ -91,7 +91,7 @@ async def test_direct_inspect_programmatic_write_direct_inspect_in_one_turn(tmp_
 
 
 @pytest.mark.asyncio
-async def test_mcp_detail_loads_next_request_and_new_turn_starts_fresh(tmp_path):
+async def test_mcp_detail_loads_next_request_and_persists_across_turns(tmp_path):
     call = Mock(return_value=ToolResult(success=True, model_text="count: 7", value={"count": 7}))
     registry = ToolRegistry()
     registry.register_tools([ToolDef(
@@ -129,7 +129,8 @@ async def test_mcp_detail_loads_next_request_and_new_turn_starts_fresh(tmp_path)
     assert visible == [False, False, True, True]
     second = await engine.followup("开始独立的新任务")
     assert second.reply == "完成"
-    assert visible == [False, False, True, True, False]
+    # 工具披露属于会话级状态：新一轮仍保留已披露工具，保持 tools 前缀稳定。
+    assert visible == [False, False, True, True, True]
 
 
 @pytest.mark.asyncio
@@ -192,7 +193,8 @@ async def test_builtin_version_tool_stays_loaded_after_real_compaction(tmp_path,
     assert visible == [False, True, True]
     assert len(summaries) == 1
     await engine.followup("新的只读任务", chat_mode="read")
-    assert visible == [False, True, True, False]
+    # 披露会话内保留；仍与当前授权目录求交，run_code 不会泄露进只读模式。
+    assert visible == [False, True, True, True]
     actual = load_workbook(tmp_path / "book.xlsx")
     try:
         assert actual.active["A1"].value == "unchanged"

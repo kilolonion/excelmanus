@@ -11,7 +11,7 @@ from excelmanus.providers import gemini as gemini_provider
 from excelmanus.providers import openai_responses as responses_provider
 from excelmanus.providers.claude import ClaudeClient
 from excelmanus.providers.gemini import GeminiClient
-from excelmanus.providers.openai_responses import OpenAIResponsesClient
+from excelmanus.providers.openai_responses import OpenAIResponsesClient, ResponsesAPIError
 from excelmanus.providers.stream_types import StreamDelta
 
 
@@ -250,3 +250,184 @@ async def test_openai_responses_stream_forwards_reasoning_effort() -> None:
 
     assert captured_body.get("reasoning", {}).get("effort") == "high"
     assert captured_body.get("reasoning", {}).get("summary") == "detailed"
+
+
+# ── Responses 终态/失败事件与异常断流 ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_raises_on_response_failed() -> None:
+    """response.failed 是已确认失败：抛出携带映射状态码的错误，而非静默结束。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.output_text.delta","delta":"半截"}',
+            'data: {"type":"response.failed","response":{"id":"resp_f","status":"failed","error":{"code":"server_error","message":"upstream boom"}}}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5", messages=[{"role": "user", "content": "hi"}],
+        )
+        with pytest.raises(ResponsesAPIError) as exc_info:
+            async for _ in stream:
+                pass
+        assert exc_info.value.status_code == 500
+        assert "upstream boom" in str(exc_info.value)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_raises_on_error_event() -> None:
+    """error 事件同样属于已确认失败，错误码映射到 HTTP 语义状态码。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"error","code":"rate_limit_exceeded","message":"slow down"}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5", messages=[{"role": "user", "content": "hi"}],
+        )
+        with pytest.raises(ResponsesAPIError) as exc_info:
+            async for _ in stream:
+                pass
+        assert exc_info.value.status_code == 429
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_incomplete_is_terminal_length() -> None:
+    """response.incomplete 是合法终态：finish_reason=length，不回退报错。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.output_text.delta","delta":"partial"}',
+            'data: {"type":"response.incomplete","response":{"id":"resp_i","status":"incomplete","output":[{"type":"message","content":[{"type":"output_text","text":"partial"}]}],"usage":{"input_tokens":3,"output_tokens":2}}}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5", messages=[{"role": "user", "content": "hi"}],
+        )
+        deltas = [d async for d in stream]
+        finish = next(d for d in deltas if d.finish_reason)
+        assert finish.finish_reason == "length"
+        assert finish.usage is not None
+        assert finish.usage.prompt_tokens == 3
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_premature_end_raises() -> None:
+    """无终态事件且无 [DONE] 的断流必须报错（可重试），不得静默成功。"""
+    from excelmanus.engine_core.llm_caller import is_retryable_llm_error
+
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.output_text.delta","delta":"半截输出"}',
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5", messages=[{"role": "user", "content": "hi"}],
+        )
+        with pytest.raises(ResponsesAPIError) as exc_info:
+            async for _ in stream:
+                pass
+        assert is_retryable_llm_error(exc_info.value)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_done_without_terminal_falls_back() -> None:
+    """兼容不发终态事件的代理：[DONE] 视为正常收尾，补发 finish。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.output_text.delta","delta":"ok"}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5", messages=[{"role": "user", "content": "hi"}],
+        )
+        deltas = [d async for d in stream]
+        finish = next(d for d in deltas if d.finish_reason)
+        assert finish.finish_reason == "stop"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_generate_raises_on_failed_event() -> None:
+    """非流式（收集式）路径同样把 response.failed 转成错误。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"invalid_prompt","message":"bad input"}}}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        with pytest.raises(ResponsesAPIError) as exc_info:
+            await client._generate(
+                model="gpt-5", messages=[{"role": "user", "content": "hi"}],
+            )
+        assert exc_info.value.status_code == 422
+        assert "bad input" in str(exc_info.value)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_generate_raises_without_terminal_event() -> None:
+    """非流式路径在流结束却无终态事件时报错（可重试）。"""
+    from excelmanus.engine_core.llm_caller import is_retryable_llm_error
+
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.output_text.delta","delta":"x"}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        with pytest.raises(ResponsesAPIError) as exc_info:
+            await client._generate(
+                model="gpt-5", messages=[{"role": "user", "content": "hi"}],
+            )
+        assert is_retryable_llm_error(exc_info.value)
+    finally:
+        await client.close()

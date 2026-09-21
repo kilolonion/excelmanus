@@ -117,6 +117,26 @@ class TestSkillpackLoader:
 
         assert loaded["workspace_skill"].description == "workspace-local"
 
+    def test_invalidate_caches_reloads_other_loaders(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """管理器写入后 invalidate_caches：其他会话的 loader 下次读取时重载。"""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        config = _make_config(tmp_path / "system", tmp_path / "user", project_dir)
+        loader = SkillpackLoader(config, _tool_registry())
+        assert loader.load_all() == {}
+
+        _write_skillpack(project_dir, "late_skill", description="added later")
+        # 未失效前仍读到旧缓存
+        assert loader.get_skillpack("late_skill") is None
+
+        SkillpackLoader.invalidate_caches()
+
+        assert loader.get_skillpack("late_skill") is not None
+        assert loader.get_skillpack("late_skill").description == "added later"
+
     def test_project_overrides_user_and_system(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"

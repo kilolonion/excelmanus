@@ -99,7 +99,7 @@ class TestControlCommandFullAccess:
         engine = AgentEngine(config, registry)
         result = await engine.followup('/fullaccess status')
         assert isinstance(result, ChatResult)
-        assert 'restricted' in result.reply
+        assert '受限' in result.reply
         assert engine.full_access_enabled is False
         assert engine.last_route_result.route_mode == 'control_command'
 
@@ -113,7 +113,7 @@ class TestControlCommandFullAccess:
         assert engine.full_access_enabled is True
         assert engine.last_route_result.route_mode == 'control_command'
         off_result = await engine.followup('/fullaccess off')
-        assert 'restricted' in off_result.reply
+        assert '受限' in off_result.reply
         assert engine.full_access_enabled is False
         assert engine.last_route_result.route_mode == 'control_command'
 
@@ -126,7 +126,7 @@ class TestControlCommandFullAccess:
         engine._client.chat.completions.create = mocked_create
         before_count = len(engine.memory.get_messages())
         result = await engine.followup('/full_access status')
-        assert 'restricted' in result.reply
+        assert '受限' in result.reply
         mocked_create.assert_not_called()
         after_count = len(engine.memory.get_messages())
         assert before_count == after_count == 1
@@ -1002,7 +1002,7 @@ class TestMetaToolDefinitions:
         first_enum = first[0]['function']['parameters']['properties']['name']['enum']
         second_enum = second[0]['function']['parameters']['properties']['name']['enum']
         assert first_enum == ['data_basic']
-        assert second_enum == ['data_basic', 'chart_basic']
+        assert second_enum == ['chart_basic', 'data_basic']
 
 class TestSkillMCPRequirements:
     """Skill 的 MCP 依赖校验。"""

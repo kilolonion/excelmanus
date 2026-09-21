@@ -90,6 +90,7 @@ def install_acl_mocks(monkeypatch, *, count=1):
     monkeypatch.setitem(sys.modules,'win32security',security)
     monkeypatch.setitem(sys.modules,'win32api',SimpleNamespace(GetCurrentProcess=lambda:42))
     monkeypatch.setitem(sys.modules,'win32con',SimpleNamespace(TOKEN_QUERY=8,FILE_ALL_ACCESS=0x1f01ff))
+    monkeypatch.setitem(sys.modules,'ntsecuritycon',SimpleNamespace(FILE_ALL_ACCESS=0x1f01ff))
     return security,token,acl,sid
 
 

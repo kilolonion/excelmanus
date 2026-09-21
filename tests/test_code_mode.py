@@ -669,7 +669,7 @@ class TestDockerOffWording:
             disclaimer=FULL_ACCESS_SANDBOX_DISCLAIMER,
         )
         assert payload["sandbox_note"] == FULL_ACCESS_SANDBOX_DISCLAIMER
-        assert "允许网络" in source
+        assert "网络" in source
         assert "子进程" in source
 
 

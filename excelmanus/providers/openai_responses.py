@@ -48,6 +48,50 @@ class ResponsesAPIError(Exception):
         super().__init__(message)
 
 
+def _status_from_error_code(code: str) -> int:
+    """Responses 流式失败事件携带的是错误码而非 HTTP 状态，映射为重试/分类可用的状态码。"""
+    normalized = (code or "").strip().lower()
+    if normalized.isdigit():
+        return int(normalized)
+    if "rate_limit" in normalized or "too_many" in normalized:
+        return 429
+    if any(token in normalized for token in ("server_error", "internal", "overloaded", "unavailable")):
+        return 500
+    if any(token in normalized for token in ("auth", "api_key", "permission", "forbidden", "unauthorized")):
+        return 401
+    if "not_found" in normalized or "expired" in normalized:
+        return 404
+    if any(token in normalized for token in ("content_filter", "safety", "moderation")):
+        return 400
+    return 422
+
+
+def _stream_failure_error(event_data: dict[str, Any]) -> ResponsesAPIError | None:
+    """把已确认失败的流事件（response.failed / error）转成 ResponsesAPIError。"""
+    event_type = str(event_data.get("type") or "")
+    if event_type == "error":
+        code = str(event_data.get("code") or "")
+        message = str(event_data.get("message") or "stream error")
+        return ResponsesAPIError(
+            _status_from_error_code(code),
+            f"Responses API stream error (code={code or 'unknown'}): {message[:300]}",
+        )
+    if event_type != "response.failed":
+        return None
+    response_obj = event_data.get("response")
+    error = response_obj.get("error") if isinstance(response_obj, dict) else None
+    if not isinstance(error, dict):
+        error = event_data.get("error")
+    if not isinstance(error, dict):
+        error = {}
+    code = str(error.get("code") or "")
+    message = str(error.get("message") or "response failed")
+    return ResponsesAPIError(
+        _status_from_error_code(code),
+        f"Responses API response failed (code={code or 'unknown'}): {message[:300]}",
+    )
+
+
 # ── 响应数据结构 ─────────────────────────────────────────────
 
 
@@ -671,11 +715,16 @@ class OpenAIResponsesClient:
                 except json.JSONDecodeError:
                     continue
 
-                if event_data.get("type") == "response.completed":
+                failure = _stream_failure_error(event_data)
+                if failure is not None:
+                    raise failure
+                if event_data.get("type") in ("response.completed", "response.incomplete"):
                     completed_response = event_data.get("response", {})
 
         if completed_response is None:
-            raise ResponsesAPIError(0, "Responses API 流未返回 response.completed 事件")
+            raise ResponsesAPIError(
+                0, "Responses API stream ended prematurely without terminal response event"
+            )
 
         result = _responses_output_to_openai(completed_response, model)
         logger.debug(
@@ -826,6 +875,9 @@ class OpenAIResponsesClient:
             _reasoning_text_emitted = False  # 是否已输出过 reasoning 摘要文本
             _reasoning_pending_sep = False   # 下一段摘要文本前需补换行分隔
 
+            terminal_seen = False
+            saw_done = False
+
             def _merge_function_item(output_index: int, item: dict[str, Any]) -> dict[str, Any]:
                 raw_arguments = item.get("arguments", "")
                 if not isinstance(raw_arguments, str):
@@ -853,6 +905,7 @@ class OpenAIResponsesClient:
                         continue
                     raw = line[6:]
                     if raw.strip() == "[DONE]":
+                        saw_done = True
                         break
                     try:
                         event_data = json.loads(raw)
@@ -860,6 +913,12 @@ class OpenAIResponsesClient:
                         continue
 
                     event_type = event_data.get("type", "")
+
+                    # 已确认失败事件（response.failed / error）：携带 provider 错误码，
+                    # 立即失败而非把半截输出当作完整响应。
+                    failure = _stream_failure_error(event_data)
+                    if failure is not None:
+                        raise failure
 
                     # 新的 reasoning summary part 开始（GPT/Codex 摘要通常是 **标题** 行）。
                     # part 边界在 delta 事件流中不可见，这里补换行分隔，
@@ -929,7 +988,8 @@ class OpenAIResponsesClient:
                                     "arguments": tool["arguments"],
                                 }])
 
-                    elif event_type == "response.completed":
+                    elif event_type in ("response.completed", "response.incomplete"):
+                        terminal_seen = True
                         response_obj = event_data.get("response", {})
                         response_id = response_obj.get("id") or event_data.get("response_id")
                         usage_data = response_obj.get("usage", {})
@@ -970,7 +1030,11 @@ class OpenAIResponsesClient:
                             if isinstance(item, dict)
                         )
                         yield StreamDelta(
-                            finish_reason="tool_calls" if has_tool else "stop",
+                            finish_reason=(
+                                "tool_calls" if has_tool
+                                else "length" if event_type == "response.incomplete"
+                                else "stop"
+                            ),
                             usage=u,
                             replay_state=(
                                 {"response_id": response_id}
@@ -978,6 +1042,20 @@ class OpenAIResponsesClient:
                                 else None
                             ),
                         )
+
+            # 异常断流：连接断开且未收到终态事件时不能静默吞掉半截响应。
+            if not terminal_seen:
+                if saw_done:
+                    # 兼容不发送终态事件的代理：[DONE] 视为对端正常收尾。
+                    logger.warning("Responses 流缺少终态事件，按 [DONE] 收尾")
+                    yield StreamDelta(
+                        finish_reason="tool_calls" if emitted_tool_indexes else "stop",
+                    )
+                else:
+                    raise ResponsesAPIError(
+                        0,
+                        "Responses API stream ended prematurely without terminal response event",
+                    )
 
         return _stream_generator()
 

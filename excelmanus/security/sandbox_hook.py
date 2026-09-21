@@ -221,6 +221,8 @@ def _is_sandbox_ephemeral(resolved):
     return False
 
 def _should_pending_write(resolved):
+    if _FULL_ACCESS_FILES:
+        return False
     if _is_under_pending(resolved):
         return False
     if _is_sandbox_ephemeral(resolved):
