@@ -653,3 +653,360 @@ async def test_trace_request_records_cache_identity():
     assert span.attributes["prompt_cache_key"] == prepared.header.prompt_cache_key
     assert span.attributes["model_idle_seconds"] == 12.5
     assert span.attributes["tools_digest"]
+
+
+@pytest.mark.asyncio
+async def test_idle_tracker_exclusive_buckets():
+    import time
+
+    from excelmanus.engine_core.idle_tracker import idle_segment
+
+    engine = SimpleNamespace()
+    started = time.monotonic()
+    with idle_segment(engine, "tool"):
+        await asyncio.sleep(0.03)
+        with idle_segment(engine, "approval"):
+            await asyncio.sleep(0.06)
+        await asyncio.sleep(0.03)
+    outer = time.monotonic() - started
+    totals = engine._idle_tracker["totals"]
+    assert engine._idle_tracker["stack"] == []
+    # 内层时长计入 approval，并从外层 tool 中独占扣除。
+    assert totals["approval"] >= 0.05
+    assert totals["approval"] <= outer + 0.5
+    assert totals["tool"] >= 0.05
+    assert totals["tool"] <= outer - totals["approval"] + 0.5
+    assert totals["tool"] + totals["approval"] <= outer + 0.5
+
+
+@pytest.mark.asyncio
+async def test_idle_tracker_resets_each_gap():
+    from excelmanus.engine_core.idle_tracker import idle_segment, reset_idle_tracker
+
+    engine = SimpleNamespace()
+    with idle_segment(engine, "tool"):
+        await asyncio.sleep(0.01)
+    assert engine._idle_tracker["totals"]
+    reset_idle_tracker(engine)
+    assert engine._idle_tracker["totals"] == {}
+    assert engine._idle_tracker["stack"] == []
+
+
+@pytest.mark.asyncio
+async def test_idle_breakdown_includes_residual_other():
+    import time
+    from unittest.mock import AsyncMock
+
+    from excelmanus.trace import TraceRecorder
+
+    engine = engine_for()
+    prepared = await prepare(engine)
+    engine._trace = TraceRecorder()
+    engine._idle_tracker = {"totals": {"tool": 1.0}, "stack": []}
+    engine._last_model_response_at = time.monotonic() - 5
+    create = AsyncMock(return_value=SimpleNamespace(choices=[], usage=None))
+    engine._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    await LLMCaller(engine).create_chat_completion_with_retry(
+        prepared.create_kwargs()
+    )
+    create.assert_awaited_once()
+    breakdown = engine._model_idle_breakdown
+    assert breakdown["tool"] == 1.0
+    assert breakdown["other"] == pytest.approx(engine._model_idle_seconds - 1.0)
+    assert 3.0 <= breakdown["other"] <= 6.0
+    span = next(s for s in engine._trace.spans if s.kind == "request")
+    assert span.attributes["idle_breakdown"] == breakdown
+    assert span.attributes["model_idle_seconds"] == engine._model_idle_seconds
+
+
+@pytest.mark.asyncio
+async def test_question_wait_records_question_segment():
+    from excelmanus.engine_core.idle_tracker import idle_segment
+    from excelmanus.engine_core.interaction_handler import InteractionHandler
+
+    engine = engine_for()
+    engine._interaction_handler = InteractionHandler(engine)
+
+    async def resolver(_pending):
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    engine._question_resolver = resolver
+    pending_q = SimpleNamespace(question_id="q1", raw="?")
+    result = await engine._interaction_handler.await_question_answer(pending_q)
+    assert result is not None
+    totals = engine._idle_tracker["totals"]
+    assert totals["question"] > 0
+    assert totals["question"] < 5.0
+    # 再确认段挂在 engine 上且可叠加：外层同名段不再重复计满。
+    with idle_segment(engine, "question"):
+        pass
+    assert engine._idle_tracker["totals"]["question"] >= 0.04
+
+
+def _collect_cache_controls(value) -> list:
+    markers = []
+    if isinstance(value, dict):
+        marker = value.get("cache_control")
+        if isinstance(marker, dict):
+            markers.append(marker)
+        for item in value.values():
+            markers.extend(_collect_cache_controls(item))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            markers.extend(_collect_cache_controls(item))
+    return markers
+
+
+def _engine_with_retention(protocol, base_url, retention):
+    engine = engine_for(protocol)
+    engine._active_base_url = base_url
+    object.__setattr__(engine._config, "prompt_cache_retention", retention)
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_retention_capability_only_first_party():
+    from excelmanus.request.route import resolve_route
+
+    def cache_retention(protocol, base_url, retention="extended"):
+        engine = _engine_with_retention(protocol, base_url, retention)
+        return resolve_route(engine).cache_retention
+
+    assert cache_retention("anthropic", "https://api.anthropic.com") == "extended"
+    assert cache_retention("anthropic", "https://staging.anthropic.com") == "extended"
+    assert cache_retention("openai", "https://api.openai.com/v1") == "extended"
+    assert cache_retention("openai_responses", "https://api.openai.com/v1") == "extended"
+    # 兼容网关 / 自部署 / 其他协议：即使配置为 extended 也一律不支持。
+    assert cache_retention("anthropic", "https://gateway.example.com/anthropic") == ""
+    assert cache_retention("anthropic", "https://anthropic.example.com") == ""
+    assert cache_retention("openai", "https://api.deepseek.com/v1") == ""
+    assert cache_retention("openai_responses", "https://api.deepseek.com/v1") == ""
+    assert cache_retention("openai", "https://openai.example.com/v1") == ""
+    assert cache_retention("gemini", "https://generativelanguage.googleapis.com") == ""
+    # default 配置即使一方端点也不启用。
+    assert cache_retention("anthropic", "https://api.anthropic.com", "default") == ""
+    assert cache_retention("openai", "https://api.openai.com/v1", "default") == ""
+    # config 缺失按 default 处理。
+    engine = engine_for("anthropic")
+    engine._active_base_url = "https://api.anthropic.com"
+    engine._config = None
+    engine.config = None
+    assert resolve_route(engine).cache_retention == ""
+
+
+@pytest.mark.asyncio
+async def test_claude_extended_retention_marks_ttl_and_beta():
+    engine = _engine_with_retention(
+        "anthropic", "https://api.anthropic.com", "extended"
+    )
+    prepared = await prepare(engine)
+    kwargs = prepared.create_kwargs()
+    markers = _collect_cache_controls(kwargs["_prepared_body"])
+    assert markers
+    assert all(marker.get("ttl") == "1h" for marker in markers)
+    beta = kwargs["extra_headers"]["anthropic-beta"]
+    assert "extended-cache-ttl-2025-04-11" in beta.split(",")
+    # transport_headers 冻结在 prepared 上，且与 kwargs 一致。
+    assert prepared.transport_headers["anthropic-beta"] == beta
+
+    # default 配置：marker 不加 ttl、不发 beta header。
+    plain = await prepare(
+        _engine_with_retention("anthropic", "https://api.anthropic.com", "default")
+    )
+    plain_kwargs = plain.create_kwargs()
+    plain_markers = _collect_cache_controls(plain_kwargs["_prepared_body"])
+    assert plain_markers
+    assert all("ttl" not in marker for marker in plain_markers)
+    assert "extra_headers" not in plain_kwargs
+
+    # 兼容网关：即使配置 extended 也不加 ttl、不发 beta。
+    gateway = await prepare(
+        _engine_with_retention(
+            "anthropic", "https://gateway.example.com/anthropic", "extended"
+        )
+    )
+    gateway_kwargs = gateway.create_kwargs()
+    gateway_markers = _collect_cache_controls(gateway_kwargs["_prepared_body"])
+    assert gateway_markers
+    assert all("ttl" not in marker for marker in gateway_markers)
+    assert "extra_headers" not in gateway_kwargs
+
+    # 已有 anthropic-beta 值时合并去重而非覆盖。
+    merged_engine = _engine_with_retention(
+        "anthropic", "https://api.anthropic.com", "extended"
+    )
+    merged = await prepare(
+        merged_engine,
+        extra={"extra_headers": {"anthropic-beta": "extended-cache-ttl-2025-04-11,other-beta"}},
+    )
+    betas = merged.create_kwargs()["extra_headers"]["anthropic-beta"].split(",")
+    assert betas.count("extended-cache-ttl-2025-04-11") == 1
+    assert "other-beta" in betas
+
+
+@pytest.mark.asyncio
+async def test_openai_extended_retention_sets_field():
+    for protocol in ("openai", "openai_responses"):
+        engine = _engine_with_retention(
+            protocol, "https://api.openai.com/v1", "extended"
+        )
+        prepared = await prepare(engine)
+        kwargs = prepared.create_kwargs()
+        body = kwargs.get("_prepared_body") or kwargs
+        assert body["prompt_cache_retention"] == "24h"
+
+        default_engine = _engine_with_retention(
+            protocol, "https://api.openai.com/v1", "default"
+        )
+        default_kwargs = (await prepare(default_engine)).create_kwargs()
+        default_body = default_kwargs.get("_prepared_body") or default_kwargs
+        assert "prompt_cache_retention" not in default_body
+
+    for protocol in ("openai", "openai_responses"):
+        deepseek = _engine_with_retention(
+            protocol, "https://api.deepseek.com/v1", "extended"
+        )
+        kwargs = (await prepare(deepseek)).create_kwargs()
+        body = kwargs.get("_prepared_body") or kwargs
+        assert "prompt_cache_retention" not in body
+
+
+@pytest.mark.asyncio
+async def test_retention_config_parse():
+    from excelmanus.config import _load_context_optimization_config, load_config
+    from excelmanus.settings_runtime import using_values
+
+    # get_setting 不读进程环境；using_values 等价于主库/覆盖层中的设置值。
+    with using_values({"EXCELMANUS_PROMPT_CACHE_RETENTION": "extended"}):
+        assert _load_context_optimization_config().prompt_cache_retention == "extended"
+    with using_values({"EXCELMANUS_PROMPT_CACHE_RETENTION": " Extended "}):
+        assert _load_context_optimization_config().prompt_cache_retention == "extended"
+    with using_values({"EXCELMANUS_PROMPT_CACHE_RETENTION": "bogus"}):
+        assert _load_context_optimization_config().prompt_cache_retention == "default"
+    with using_values({}):
+        assert _load_context_optimization_config().prompt_cache_retention == "default"
+
+    config = load_config({
+        "EXCELMANUS_API_KEY": "k",
+        "EXCELMANUS_BASE_URL": "https://api.openai.com/v1",
+        "EXCELMANUS_MODEL": "gpt-5",
+        "EXCELMANUS_PROMPT_CACHE_RETENTION": "extended",
+    })
+    assert config.prompt_cache_retention == "extended"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_set_change_is_classified_not_prefix_rewrite():
+    engine = engine_for()
+    first = await prepare(engine)
+    series_of(engine).accept(first.header)
+    baseline_tools = list(engine._meta_tool_builder.build_v5_tools.return_value)
+    baseline_names = list(engine._registry.get_tool_names.return_value)
+
+    # MCP 工具上线：授权目录与 wire schema 同步新增一个 MCP 工具。
+    mcp_tool = {
+        "type": "function",
+        "function": {"name": "mcp_docs_search", "description": "d", "parameters": {}},
+    }
+    engine._meta_tool_builder.build_v5_tools.return_value = [*baseline_tools, mcp_tool]
+    engine._registry.get_tool_names.return_value = [*baseline_names, "mcp_docs_search"]
+    engine.memory.add_user_message("after mcp join")
+
+    added = await prepare(engine)
+    assert added.header.tools_digest != first.header.tools_digest
+    assert added.header.catalog_digest != first.header.catalog_digest
+    # 消息仍是追加式：内容身份与原生逐块前缀都只做前缀延伸。
+    assert added.header.content_payload.startswith(first.header.content_payload)
+    added_prefix = added.header.provider_prefix
+    assert added_prefix[:len(first.header.provider_prefix)] == first.header.provider_prefix
+    # 变化被分类为 catalog/change；编译成功本身即证明没有误报历史改写。
+    assert any(e["type"] == "catalog/change" for e in series_of(engine).events)
+    assert not any(e["type"] == "request/failed" for e in series_of(engine).events)
+    series_of(engine).accept(added.header)
+
+    # MCP 工具下线：同样归类为 catalog/change，而不是前缀改写错误。
+    engine._meta_tool_builder.build_v5_tools.return_value = baseline_tools
+    engine._registry.get_tool_names.return_value = baseline_names
+    engine.memory.add_user_message("after mcp leave")
+    removed = await prepare(engine)
+    assert removed.header.tools_digest == first.header.tools_digest
+    removed_prefix = removed.header.provider_prefix
+    assert removed_prefix[:len(added_prefix)] == added_prefix
+    assert sum(e["type"] == "catalog/change" for e in series_of(engine).events) >= 2
+    assert series_of(engine).last_accepted == added.header
+
+
+@pytest.mark.asyncio
+async def test_chat_subscribe_emits_heartbeat_while_idle(monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    import excelmanus.api_routes_chat as chat_routes
+    from excelmanus.api import app
+    from excelmanus.api_sse import SessionStreamState
+    from excelmanus.engine import ChatResult
+    from tests.test_api import _setup_api_globals
+
+    monkeypatch.setattr(chat_routes, "_CHAT_HEARTBEAT_SECONDS", 0.05)
+
+    async def idle_chat() -> ChatResult:
+        await asyncio.sleep(0.3)
+        return ChatResult(reply="ok")
+
+    with _setup_api_globals() as state:
+        manager = state["manager"]
+        # 轻量构造活跃 stream：真实会话 + 注入 stream_state 与在途 chat 任务，
+        # subscribe 与 /chat/stream 共用同一等待循环，无需先跑完整流式请求。
+        session_id, _engine = await manager.acquire_for_chat(None)
+        runtime = app.state.runtime
+        runtime.session_stream_states[session_id] = SessionStreamState()
+        runtime.active_chat_tasks[session_id] = asyncio.create_task(idle_chat())
+        try:
+            transport = ASGITransport(app=app, raise_app_exceptions=False)
+            async with AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/chat/subscribe",
+                    json={"session_id": session_id, "after_seq": 0},
+                )
+        finally:
+            runtime.active_chat_tasks.pop(session_id, None)
+            runtime.session_stream_states.pop(session_id, None)
+            await manager.release_for_chat(session_id)
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert "event: session_init" in body
+    assert '"status": "reconnected"' in body
+    assert "event: heartbeat\ndata: {}" in body
+    assert body.index("event: heartbeat") < body.index("event: done")
+    assert "event: error" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["/compact", "/rollback", "/clear", "/undo"])
+async def test_history_rewrite_commands_rejected_while_running(command):
+    from excelmanus.engine_core.command_handler import CommandHandler
+
+    engine = engine_for()
+    engine._command_handler = CommandHandler(engine)
+    engine._driver = SimpleNamespace(running=True)
+    series = series_of(engine)
+    series_id = series.series_id
+    messages_before = len(engine.memory.messages)
+
+    reply = await engine._command_handler.handle(command)
+    assert reply is not None and "正在执行" in reply
+    # 历史与 series 基线均未被执行路径触碰。
+    assert len(engine.memory.messages) == messages_before
+    assert series.series_id == series_id
+    assert series.last_accepted is None
+
+    # driver 空闲后同一入口恢复正常路径。
+    engine._driver = SimpleNamespace(running=False)
+    idle_reply = await engine._command_handler.handle("/rollback")
+    assert idle_reply is not None and "正在执行" not in idle_reply
+    assert "用户对话轮次" in idle_reply

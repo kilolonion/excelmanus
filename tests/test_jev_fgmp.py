@@ -112,8 +112,9 @@ def _exposure_decision(*, domain: str = "chitchat", chat: float = 0.95, applied:
 
 
 @pytest.mark.asyncio
-async def test_f_default_catalog_unchanged() -> None:
-    engine = _stub()
+async def test_f_disabled_catalog_unchanged() -> None:
+    # 二态契约默认全 enforce；总闸 off 时不评估、不改目录。
+    engine = _stub(config=_config(jev_enabled="off"))
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
         await maybe_pin_skills(engine)
         mocked.assert_not_called()
@@ -123,7 +124,8 @@ async def test_f_default_catalog_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_f_unsigned_enforce_does_not_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_f_enforce_pins_without_signoff() -> None:
+    # 二态契约：enforce 下 applied 决策直接置顶，无需标定签字。
     engine = _stub(
         config=_config(jev_enabled="enforce", jev_exposure="enforce", jev_calibrated=True),
     )
@@ -135,9 +137,9 @@ async def test_f_unsigned_enforce_does_not_pin(monkeypatch: pytest.MonkeyPatch) 
     )
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
         await maybe_pin_skills(engine)
-    assert engine._skill_pin is None
+    assert engine._skill_pin == "beta"
     text = attach_skill_catalog(engine)
-    assert "likely match" not in text
+    assert "likely match" in text
 
 
 @pytest.mark.asyncio
@@ -184,8 +186,9 @@ def test_f_render_does_not_drop_skills() -> None:
 
 
 @pytest.mark.asyncio
-async def test_g_default_does_not_evaluate() -> None:
-    engine = _stub()
+async def test_g_disabled_does_not_evaluate() -> None:
+    # 二态契约默认全 enforce；总闸 off 时不评估。
+    engine = _stub(config=_config(jev_enabled="off"))
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
         await maybe_suggest_loop_wrap(engine)
         mocked.assert_not_called()
@@ -193,7 +196,8 @@ async def test_g_default_does_not_evaluate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_g_unsigned_does_not_take_over_loop() -> None:
+async def test_g_enforce_advice_does_not_take_over_loop() -> None:
+    # 二态契约：enforce 下建议直接 applied，但仍只是建议——不改写记忆、不接管循环。
     engine = _stub(
         config=_config(jev_enabled="enforce", jev_calibrated=True),
         memory=SimpleNamespace(
@@ -210,7 +214,7 @@ async def test_g_unsigned_does_not_take_over_loop() -> None:
     )
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
         await maybe_suggest_loop_wrap(engine)
-    assert engine._loop_wrap["applied"] is False
+    assert engine._loop_wrap["applied"] is True
     assert engine.memory.messages == [{"role": "user", "content": "你好"}]
 
 
@@ -289,13 +293,13 @@ async def test_m_signed_chitchat_minimal_and_skips_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_m_mention_or_image_keeps_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    _sign(monkeypatch, "exposure.turn")
+async def test_m_mention_or_image_keeps_catalog() -> None:
+    # 二态契约下无需签字；@mention 或图片都不得跳过目录快照。
     engine = _stub(
         config=_config(jev_enabled="enforce", jev_exposure="enforce", jev_calibrated=True),
         memory=SimpleNamespace(
             get_messages=lambda: [{"role": "user", "content": "看看 @file:a.xlsx"}],
-            messages=[],
+            messages=[{"role": "user", "content": "看看 @file:a.xlsx"}],
         ),
     )
     engine._memory = engine.memory
@@ -372,11 +376,12 @@ async def test_p_signed_stubs_old_keeps_recent_k(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_p_unsigned_enforce_does_not_prune(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_p_gate_off_does_not_prune() -> None:
+    # 二态契约：observation 子闸 off 时不评估也不修剪。
     engine = _stub(
         config=_config(
             jev_enabled="enforce",
-            jev_observation="enforce",
+            jev_observation="off",
             jev_calibrated=True,
         ),
     )
@@ -387,8 +392,9 @@ async def test_p_unsigned_enforce_does_not_prune(monkeypatch: pytest.MonkeyPatch
         extras={"prune": True, "still_relevant": 0.1},
         applied=True,
     )
-    with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
+    with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)) as mocked:
         n = await maybe_prune_observations(engine, memory)
+        mocked.assert_not_called()
     assert n == 0
     assert all("已收起" not in str(m.get("content")) for m in memory.messages if m.get("role") == "tool")
 

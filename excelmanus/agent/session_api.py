@@ -456,10 +456,15 @@ def finalize_driver_turn(
     )
     from excelmanus.system_one.host import (
         clear_turn_exposure,
+        emit_recovery_outcome,
         remember_turn_tools,
     )
 
     remember_turn_tools(engine, chat_result)
+    try:
+        emit_recovery_outcome(engine, on_event=on_event)
+    except Exception:
+        logger.debug("Jev 恢复结果记录失败；继续回合收尾", exc_info=True)
     clear_turn_exposure(engine)
 
 

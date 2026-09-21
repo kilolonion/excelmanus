@@ -74,6 +74,15 @@ class CommandHandler:
             result = await e._driver.resume(text.partition(" ")[2], on_event=on_event)
             return result.reply
 
+        # 改写 durable 历史的命令与在途请求竞争会破坏 series 前缀基线：
+        # 压缩/回滚先 start_new，随后在途响应把旧 header accept 进新系列，
+        # 导致后续 compile 持续 fail-closed。与 POST /sessions/{id}/compact
+        # 的 409 守卫对齐，这里统一拒绝。
+        if command in ("/compact", "/rollback", "/clear", "/undo"):
+            driver = getattr(e, "_driver", None)
+            if driver is not None and getattr(driver, "running", False):
+                return "当前会话正在执行，请在步骤结束后再执行该命令。"
+
         from excelmanus.skillpacks.router import SkillMatchResult
         e._last_route_result = SkillMatchResult(
             skills_used=[],

@@ -56,12 +56,16 @@ def test_calibration_blocks_enforce_without_signoff() -> None:
     assert calibration_allows_enforce("approval.tool_call", flipped) is False
 
 
-def test_stamp_application_unsigned_never_narrows() -> None:
+def test_stamp_application_follows_binary_gate() -> None:
+    # 二态契约：enforce 直接生效（无需签字），off 才不应用。
     decision = Decision.noop("domain:inspect_only", profile="inspect", wire_narrow=True)
     stamped = stamp_application("exposure.turn", decision, _settings(calibrated=True, enabled="enforce"))
-    assert stamped.applied is False
-    assert stamped.extras.get("wire_narrow") is False
+    assert stamped.applied is True
+    assert stamped.extras.get("wire_narrow") is True
     assert stamped.extras.get("profile") == "inspect"
+    gated_off = stamp_application("exposure.turn", decision, _settings(enabled="off"))
+    assert gated_off.applied is False
+    assert gated_off.extras.get("wire_narrow") is False
 
 
 @pytest.mark.asyncio

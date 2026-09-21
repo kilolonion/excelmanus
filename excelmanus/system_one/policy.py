@@ -634,6 +634,27 @@ def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]
             and int(facts.get("write_evidence_count") or 0) == 0
         )
     )
+    checklist = state.get("checklist")
+    checklist = checklist if isinstance(checklist, (list, tuple)) else []
+    items: list[dict[str, Any]] = []
+    missing_items = 0
+    for index, entry in enumerate(checklist[:5]):
+        answer = choice_of(evaluation.answers.get(f"item_{index + 1}"))
+        if answer is None or answer.choice not in {"evidenced", "missing", "conflict", "not_applicable"}:
+            verdict = "unknown"
+            confidence = 0.0
+        else:
+            verdict = str(answer.choice)
+            confidence = float(answer.confidence or 0.0)
+        items.append({
+            "id": f"item_{index + 1}",
+            "text": str(entry.get("text") if isinstance(entry, Mapping) else entry or "")[:80],
+            "verdict": verdict,
+            "confidence": round(confidence, 3),
+        })
+        if verdict == "unknown" or (verdict in {"missing", "conflict"} and confidence >= T_SUGGEST):
+            missing_items += 1
+    items_extra: dict[str, Any] = {"items": items, "missing_items": missing_items}
     if satisfied < T_SUGGEST or scope_ok < T_SUGGEST:
         return Decision(
             kind="noop",
@@ -643,6 +664,7 @@ def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]
                 "satisfied": satisfied,
                 "scope_ok": scope_ok,
                 "next": "inspect_more",
+                **items_extra,
             },
         )
     if evidence_incomplete:
@@ -655,19 +677,26 @@ def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]
                 "scope_ok": scope_ok,
                 "next": "inspect_more",
                 "next_confidence": float(next_answer.confidence) if next_answer is not None else 0.0,
+                **items_extra,
             },
         )
+    reason = f"next:{next_action}"
     if next_answer is None or next_answer.confidence < T_SUGGEST:
         next_action = "none" if satisfied >= T_CODE and scope_ok >= T_CODE else "inspect_more"
+        reason = f"next:{next_action}"
+    if missing_items > 0 and next_action == "none":
+        next_action = "inspect_more"
+        reason = "checklist_items_unevidenced"
     return Decision(
         kind="noop",
-        reason=f"next:{next_action}",
+        reason=reason,
         evaluation=evaluation,
         extras={
             "satisfied": satisfied,
             "scope_ok": scope_ok,
             "next": next_action,
             "next_confidence": float(next_answer.confidence) if next_answer is not None else 0.0,
+            **items_extra,
         },
     )
 

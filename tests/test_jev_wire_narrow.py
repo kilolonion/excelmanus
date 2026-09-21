@@ -150,10 +150,11 @@ def _epoch(catalog_digest: str, tools: list[dict]) -> object:
     )
 
 
-def test_default_config_keeps_core_wire_even_if_profile_inspect(tmp_path: Path) -> None:
+def test_gate_off_keeps_core_wire_even_if_profile_inspect(tmp_path: Path) -> None:
+    # 二态契约默认全 enforce；exposure 子闸 off 时即使有 applied 记录也不收窄。
     engine = _engine(
         tmp_path,
-        config=_config(),
+        config=_config(jev_exposure="off"),
         exposure=_inspect_record(applied=True, sticky="inspect"),
     )
     catalog = catalog_from_engine(engine)
@@ -289,13 +290,11 @@ async def test_new_turn_preserves_loaded_tools_even_when_jev_is_off(tmp_path: Pa
     assert engine._tools_cache is None
 
 
-def test_master_shadow_child_enforce_does_not_narrow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _sign_exposure(monkeypatch)
+def test_master_off_child_enforce_does_not_narrow(tmp_path: Path) -> None:
+    # 二态契约：总闸 off 时子闸 enforce 也不收窄（原来 shadow 降级的位置）。
     engine = _engine(
         tmp_path,
-        config=_config(jev_enabled="shadow", jev_exposure="enforce", jev_calibrated=True),
+        config=_config(jev_enabled="off", jev_exposure="enforce", jev_calibrated=True),
         exposure=_inspect_record(applied=True, sticky="inspect"),
     )
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
@@ -303,15 +302,9 @@ def test_master_shadow_child_enforce_does_not_narrow(
     assert "edit_spreadsheet" in names
 
 
-def test_calibrated_without_signed_packs_does_not_narrow(tmp_path: Path) -> None:
-    engine = _engine(
-        tmp_path,
-        config=_config(jev_enabled="enforce", jev_exposure="enforce", jev_calibrated=True),
-        exposure=_inspect_record(applied=True, sticky="inspect"),
-    )
-    names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert turn_wire_profile(engine) == "full"
-    assert "edit_spreadsheet" in names
+# 原 test_calibrated_without_signed_packs_does_not_narrow 已删除：
+# 二态契约下没有签字门禁，enforce + applied 即收窄，
+# 与 test_signed_profiles_change_schema_not_digest_or_epoch 场景重复。
 
 
 def test_child_session_does_not_narrow(

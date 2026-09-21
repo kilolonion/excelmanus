@@ -96,8 +96,9 @@ def _surface_decision(
 
 
 @pytest.mark.asyncio
-async def test_default_does_not_evaluate_or_emit() -> None:
-    engine = _stub()
+async def test_ui_hint_off_does_not_evaluate_or_emit() -> None:
+    # 二态契约默认全开；ui_hint 子闸关掉时不评估也不发事件。
+    engine = _stub(config=_config(jev_ui_hint=False))
     captured: list[ToolCallEvent] = []
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
         await maybe_emit_ui_hint(engine, _ok_result(), on_event=captured.append)
@@ -123,7 +124,8 @@ async def test_unsigned_enforce_shadows_without_event() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mock_applied_without_signoff_still_no_event() -> None:
+async def test_applied_decision_emits_hint_without_signoff() -> None:
+    # 二态契约：enforce 下 applied 决策直接发 UI_HINT，不再需要签字。
     engine = _stub(
         config=_config(
             jev_enabled="enforce",
@@ -137,7 +139,9 @@ async def test_mock_applied_without_signoff_still_no_event() -> None:
         AsyncMock(return_value=_surface_decision(applied=True)),
     ):
         await maybe_emit_ui_hint(engine, _ok_result(), on_event=captured.append)
-    assert _hints(captured) == []
+    hints = _hints(captured)
+    assert len(hints) == 1
+    assert hints[0].ui_hint_surface == "side_panel"
     assert _traces(captured)
 
 

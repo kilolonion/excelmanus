@@ -57,14 +57,18 @@ def _ask_engine(*, jev_enabled: str = "shadow"):
 async def test_high_risk_shadow_logs_but_still_creates_pending(caplog: pytest.LogCaptureFixture) -> None:
     engine, pending = _ask_engine(jev_enabled="shadow")
     handler = HighRiskApprovalHandler(engine=engine, dispatcher=MagicMock())
-    with caplog.at_level(logging.INFO, logger="excelmanus.system_one"):
-        outcome = await handler.handle(
-            "delete_file",
-            "call-1",
-            {"file_path": "trash.xlsx"},
-            tool_scope=["delete_file"],
-        )
-    assert "jev shadow pack=approval.tool_call" in caplog.text
+    # 不能依赖真实网络失败：连得通但慢时会走 evaluate_for_host 的静默超时路径，
+    # 没有决策日志。直接让 evaluate 抛错，断言 fail-closed 与日志记录。
+    with patch("excelmanus.system_one.evaluate", AsyncMock(side_effect=RuntimeError("boom"))):
+        with caplog.at_level(logging.INFO, logger="excelmanus.system_one"):
+            outcome = await handler.handle(
+                "delete_file",
+                "call-1",
+                {"file_path": "trash.xlsx"},
+                tool_scope=["delete_file"],
+            )
+    # 二态契约：决策日志照常记录（gate=enforce），评估不可用时 fail-closed 走原审批
+    assert "jev decision pack=approval.tool_call" in caplog.text
     engine.approval.create_pending.assert_called_once()
     assert outcome.pending_approval is True
     assert outcome.approval_id == pending.approval_id
@@ -103,11 +107,12 @@ async def test_fullaccess_never_skips_jev() -> None:
 
 
 @pytest.mark.asyncio
-async def test_known_dangerous_skips_evaluate_keeps_pending() -> None:
-    engine, pending = _ask_engine(jev_enabled="shadow")
+async def test_known_dangerous_skips_evaluate_and_denies() -> None:
+    # 二态契约：enforce 下已知危险形不走 evaluate，直接确定性 DENY。
+    engine, _pending = _ask_engine(jev_enabled="enforce")
     handler = HighRiskApprovalHandler(engine=engine, dispatcher=MagicMock())
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
-        with patch("excelmanus.system_one.host.record_shadow") as logged:
+        with patch("excelmanus.system_one.host.record_jev_decision") as logged:
             outcome = await handler.handle(
                 "run_shell",
                 "call-1",
@@ -117,10 +122,10 @@ async def test_known_dangerous_skips_evaluate_keeps_pending() -> None:
             logged.assert_called_once()
             decision = logged.call_args.kwargs["decision"]
             assert decision.kind == "deny"
-            assert decision.applied is False
-    engine.approval.create_pending.assert_called_once()
-    assert outcome.pending_approval is True
-    assert outcome.approval_id == pending.approval_id
+            assert decision.applied is True
+    engine.approval.create_pending.assert_not_called()
+    assert outcome.pending_approval is False
+    assert outcome.success is False
 
 
 @pytest.mark.asyncio
@@ -148,7 +153,7 @@ async def test_approval_unavailable_logs_ask_keeps_pending(caplog: pytest.LogCap
     with patch("excelmanus.system_one.evaluate", _boom):
         with caplog.at_level(logging.INFO, logger="excelmanus.system_one"):
             outcome = await handler.handle("delete_file", "call-1", {"file_path": "a.xlsx"})
-    assert "jev shadow pack=approval.tool_call" in caplog.text
+    assert "jev decision pack=approval.tool_call" in caplog.text
     assert "unavailable:RuntimeError" in caplog.text
     engine.approval.create_pending.assert_called_once()
     assert outcome.pending_approval is True

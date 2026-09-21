@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildGridAskPrompt,
   buildRibbonAskPrompt,
   buildSelectionAgentPrompt,
   nativeRibbonTabFromLabel,
@@ -123,6 +124,16 @@ describe("selection Agent actions", () => {
     });
     expect(prompt).toContain("@file:uploads/订单.xlsx[明细!B2:F20]@sha256:1234");
     expect(prompt).toContain("不要修改表格");
+  });
+});
+
+describe("grid ask prompts", () => {
+  const ctx = { path: "sales.xlsx", sheet: "明细", range: "C2", version: "sha256:v1" };
+
+  it("delegates prompts to the formula or selection builders", () => {
+    expect(buildGridAskPrompt("explain-formula", ctx)).toBe(buildRibbonAskPrompt("explain-formula", ctx));
+    expect(buildGridAskPrompt("trace-formula", ctx)).toBe(buildRibbonAskPrompt("trace-formula", ctx));
+    expect(buildGridAskPrompt("clean-selection", ctx)).toBe(buildSelectionAgentPrompt("clean-selection", ctx));
   });
 });
 

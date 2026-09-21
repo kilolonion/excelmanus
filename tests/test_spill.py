@@ -318,6 +318,119 @@ class TestWriteVerification:
         assert payload["shown"] <= MAX_WRITE_VERIFY_ENTRIES
 
 
+class TestStyleVerification:
+    """A1.1：format_spreadsheet 的样式/结构回读。"""
+
+    def _styled_book(self, path: Path) -> Path:
+        from openpyxl.styles import Font, PatternFill
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        for row in ws["A1:B2"]:
+            for cell in row:
+                cell.fill = PatternFill(start_color="FFFF0000", end_color="FFFF0000", fill_type="solid")
+                cell.font = Font(bold=True, size=14)
+                cell.number_format = "0.00"
+        wb.save(path)
+        wb.close()
+        return path
+
+    def test_style_all_match(self, tmp_path: Path) -> None:
+        path = self._styled_book(tmp_path / "style.xlsx")
+        payload = verify_write(
+            "format_spreadsheet",
+            {
+                "file_path": str(path),
+                "operations": [{
+                    "kind": "format",
+                    "sheet": "Sheet1",
+                    "range": "A1:B2",
+                    "fill": {"color": "FF0000"},
+                    "font": {"bold": True, "size": 14},
+                    "number_format": "0.00",
+                }],
+            },
+            workspace_root=str(tmp_path),
+        )
+        assert payload["status"] == "success"
+        assert payload["verification_kind"] == "style"
+        assert payload["style_changes"]
+        assert payload["mismatch_count"] == 0
+        assert payload["total_changes"] >= 4
+
+    def test_fill_color_mismatch(self, tmp_path: Path) -> None:
+        path = self._styled_book(tmp_path / "style_bad.xlsx")
+        payload = verify_write(
+            "format_spreadsheet",
+            {
+                "file_path": str(path),
+                "operations": [{
+                    "kind": "format",
+                    "sheet": "Sheet1",
+                    "range": "A1:B2",
+                    "fill": {"color": "0000FF"},
+                }],
+            },
+            workspace_root=str(tmp_path),
+        )
+        assert payload["status"] == "error"
+        assert payload["error_code"] == "RESULT_UNCERTAIN"
+        assert payload["style_mismatches"]
+        assert payload["style_mismatches"][0]["prop"] == "fill"
+
+    def test_merge_and_conditional_format_verified(self, tmp_path: Path) -> None:
+        from openpyxl.formatting.rule import CellIsRule
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "x"
+        ws.merge_cells("A1:B1")
+        ws.conditional_formatting.add(
+            "A1:A5", CellIsRule(operator="greaterThan", formula=["0"])
+        )
+        path = tmp_path / "struct.xlsx"
+        wb.save(path)
+        wb.close()
+        payload = verify_write(
+            "format_spreadsheet",
+            {
+                "file_path": str(path),
+                "operations": [
+                    {"kind": "merge", "sheet": "Sheet1", "range": "A1:B1"},
+                    {"kind": "conditional_format", "sheet": "Sheet1", "range": "A1:A5"},
+                ],
+            },
+            workspace_root=str(tmp_path),
+        )
+        assert payload["status"] == "success"
+        by_kind = {item["kind"]: item for item in payload["structure_changes"]}
+        assert by_kind["merge"]["verified"] is True
+        assert by_kind["conditional_format"]["verified"] is True
+        assert by_kind["conditional_format"]["rule_count"] >= 1
+
+    def test_formula_overwritten_count(self, tmp_path: Path) -> None:
+        path = _book(tmp_path / "overwritten.xlsx", {"A1": 42})
+        payload = verify_write(
+            "edit_spreadsheet",
+            {
+                "file_path": str(path),
+                "operations": [{
+                    "kind": "write",
+                    "sheet": "Sheet1",
+                    "start_cell": "A1",
+                    "values": [["=B1+1"]],
+                }],
+            },
+            workspace_root=str(tmp_path),
+        )
+        assert payload["status"] == "error"
+        assert payload["formula_intended_count"] == 1
+        assert payload["formula_verified_count"] == 0
+        assert payload["formula_overwritten_count"] == 1
+
+
 def test_default_thresholds_documented() -> None:
     assert DEFAULT_SPILL_CHAR_THRESHOLD == 8000
     assert DEFAULT_SPILL_BYTE_THRESHOLD == 24_000

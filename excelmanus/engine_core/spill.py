@@ -17,6 +17,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -651,6 +652,465 @@ def _error_verification(
     return payload
 
 
+def _open_post_write_workbook(
+    abs_path: Path,
+    file_path: str,
+    workspace_root: str,
+    arguments: dict[str, Any],
+) -> tuple[Any, Any] | dict[str, Any]:
+    """按写后版本打开工作簿快照；失败时返回 error payload 而不是抛异常。"""
+    try:
+        from excelmanus.workbook.snapshot import SnapshotError, open_snapshot_at
+        from excelmanus.workspace.refs import WorkspaceRef
+
+        rel = str(file_path).replace("\\", "/")
+        try:
+            rel = str(abs_path.resolve().relative_to(Path(workspace_root).resolve())).replace("\\", "/")
+        except ValueError:
+            pass
+        # content_version 是写前乐观锁版本，写后必然过期——只认提交管线回传的 after_version
+        expected = str(arguments.get("after_version") or "").strip() or None
+        snap = open_snapshot_at(
+            abs_path,
+            relative=rel,
+            workspace=WorkspaceRef.from_root(workspace_root),
+            expected_version=expected,
+        )
+        wb = snap.open_workbook(data_only=False, read_only=False)
+        return snap, wb
+    except SnapshotError as exc:
+        return _error_verification(
+            f"写后回读打开失败：{exc}",
+            error_code=getattr(exc, "code", TOOL_ERROR),
+            failure_class=FAILURE_INTERNAL,
+            file_path=file_path,
+        )
+    except Exception as exc:
+        return _error_verification(
+            f"写后回读打开失败：{exc}",
+            error_code=TOOL_ERROR,
+            failure_class=FAILURE_INTERNAL,
+            file_path=file_path,
+        )
+
+
+def _short_scalar(value: Any, limit: int = 80) -> Any:
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    text = str(value)
+    return text[:limit]
+
+
+def _style_color_tail(value: Any) -> str | None:
+    """归一颜色到末 6 位 hex（大写）；非 hex（theme:/indexed:）返回 None。"""
+    if value in (None, ""):
+        return None
+    from excelmanus.workbook.styles import _resolve_color
+
+    resolved = _resolve_color(str(value).strip())
+    if not resolved:
+        return None
+    text = str(resolved).strip().lstrip("#")
+    if len(text) >= 6 and all(c in "0123456789abcdefABCDEF" for c in text):
+        return text[-6:].upper()
+    return None
+
+
+def _check_style_cell(cell: Any, op: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    """对单格核对 op 声明的样式属性；返回 (ok_props, mismatches)。"""
+    from excelmanus.workbook.styles import _extract_alignment, _extract_border, _extract_fill, _extract_font
+
+    ok: list[str] = []
+    bad: list[dict[str, Any]] = []
+
+    def record(prop: str, matched: bool, expected: Any, actual: Any) -> None:
+        if matched:
+            ok.append(prop)
+        else:
+            bad.append({
+                "prop": prop,
+                "expected": _short_scalar(expected),
+                "actual": _short_scalar(actual),
+            })
+
+    fill_cfg = _op_get(op, "fill")
+    if fill_cfg:
+        requested = (
+            _op_get(fill_cfg, "color", "fgColor", "fg_color", "start_color")
+            if isinstance(fill_cfg, Mapping)
+            else fill_cfg if isinstance(fill_cfg, str) else None
+        )
+        info = _extract_fill(cell.fill)
+        if requested is not None:
+            exp_tail = _style_color_tail(requested)
+            act_tail = (
+                _style_color_tail(info.get("color"))
+                if isinstance(info, Mapping)
+                else None
+            )
+            record(
+                "fill",
+                exp_tail is not None and act_tail is not None and exp_tail == act_tail,
+                requested,
+                (info.get("color") if isinstance(info, Mapping) and info.get("color") else "none"),
+            )
+        else:
+            record("fill", bool(info), "non-empty fill", "none" if not info else "present")
+
+    font_cfg = _op_get(op, "font")
+    if isinstance(font_cfg, Mapping):
+        info = _extract_font(cell.font) or {}
+        for prop in ("bold", "italic", "underline", "size", "color", "name"):
+            if prop not in font_cfg:
+                continue
+            expected = font_cfg[prop]
+            actual = info.get(prop)
+            if prop in {"bold", "italic"}:
+                matched = bool(expected) == bool(actual)
+            elif prop == "underline":
+                if isinstance(expected, bool):
+                    matched = bool(actual) == expected
+                else:
+                    matched = str(actual or "") == str(expected)
+            elif prop == "size":
+                try:
+                    matched = float(expected) == float(actual)
+                except (TypeError, ValueError):
+                    matched = False
+            elif prop == "color":
+                matched = (
+                    _style_color_tail(expected) is not None
+                    and _style_color_tail(expected) == _style_color_tail(actual)
+                )
+            else:
+                matched = str(actual or "") == str(expected)
+            record(f"font.{prop}", matched, expected, actual if actual is not None else "default")
+
+    number_format = _op_get(op, "number_format", "numberFormat", "numFmt")
+    if number_format is not None:
+        record(
+            "number_format",
+            str(cell.number_format) == str(number_format),
+            number_format,
+            cell.number_format,
+        )
+
+    if _op_get(op, "border"):
+        info = _extract_border(cell.border)
+        record("border", bool(info), "non-empty border", "none" if not info else "present")
+
+    align_cfg = _op_get(op, "alignment")
+    if isinstance(align_cfg, Mapping):
+        info = _extract_alignment(cell.alignment) or {}
+        aliases = {"wrapText": "wrap_text", "horizontalAlignment": "horizontal", "verticalAlignment": "vertical"}
+        seen: set[str] = set()
+        for raw_prop in ("horizontal", "vertical", "wrap_text", "wrapText"):
+            prop = aliases.get(raw_prop, raw_prop)
+            if prop in seen or raw_prop not in align_cfg:
+                continue
+            seen.add(prop)
+            expected = align_cfg[raw_prop]
+            actual = info.get(prop)
+            default = {"horizontal": "general", "vertical": "bottom", "wrap_text": False}[prop]
+            if actual is None:
+                actual = default
+            if prop == "wrap_text":
+                matched = bool(expected) == bool(actual)
+            else:
+                matched = str(actual) == str(expected)
+            record(f"alignment.{prop}", matched, expected, actual)
+
+    return ok, bad
+
+
+def _rect_bounds(rect: Any, ws: Any) -> tuple[int, int, int, int]:
+    """RectRef → 有界 min_row/min_col/max_row/max_col；整行整列裁到已用范围。"""
+    min_row, max_row = int(rect.min_row), int(rect.max_row)
+    min_col, max_col = int(rect.min_col), int(rect.max_col)
+    if getattr(rect, "whole_column", False):
+        max_row = min(max_row, max(1, int(ws.max_row or 1)))
+    if getattr(rect, "whole_row", False):
+        max_col = min(max_col, max(1, int(ws.max_column or 1)))
+    return min_row, min_col, max_row, max_col
+
+
+def _ranges_intersect(a_min_col: int, a_min_row: int, a_max_col: int, a_max_row: int, other: Any) -> bool:
+    return not (
+        other.max_col < a_min_col or other.min_col > a_max_col
+        or other.max_row < a_min_row or other.min_row > a_max_row
+    )
+
+
+def _verify_write_style(
+    arguments: dict[str, Any],
+    file_path: str,
+    abs_path: Path,
+    workspace_root: str,
+    entry_limit: int,
+) -> dict[str, Any]:
+    """样式/结构类写入的回读：抽样核对声明的样式属性与结构改动。"""
+    opened = _open_post_write_workbook(abs_path, file_path, workspace_root, arguments)
+    if isinstance(opened, dict):
+        return opened
+    snap, wb = opened
+
+    from excelmanus.workbook.refs import parse_rect
+    from excelmanus.workbook.snapshot import require_default_sheet
+
+    try:
+        from excelmanus.tools.intent_tools import (
+            _canonical_format_kind,
+            _format_rects,
+            _freeze_cell_from_op,
+        )
+    except Exception:  # pragma: no cover - 防御性回退
+        _aliases = {
+            "conditionalformat": "conditional_format",
+            "cf": "conditional_format",
+            "datavalidation": "data_validation",
+            "dv": "data_validation",
+        }
+
+        def _canonical_format_kind(kind: str) -> str:  # type: ignore[no-redef]
+            return _aliases.get(kind, kind)
+
+        _format_rects = None  # type: ignore[assignment]
+        _freeze_cell_from_op = None  # type: ignore[assignment]
+
+    default_sheet = str(arguments.get("sheet") or arguments.get("sheet_name") or "")
+    style_changes: list[dict[str, Any]] = []
+    style_mismatches: list[dict[str, Any]] = []
+    structure_changes: list[dict[str, Any]] = []
+    sampled = 0
+    sample_capped = False
+    sheets_available = list(wb.sheetnames)
+    ops = arguments.get("operations")
+    ops = ops if isinstance(ops, list) else []
+
+    def _resolve_sheet(op: dict[str, Any], raw_range: str) -> tuple[str | None, list[str]]:
+        """(sheet, local rects)。失败返回 (sheet or None, [])。"""
+        explicit = _op_get(op, "sheet", "sheet_name")
+        if _format_rects is not None and str(raw_range or "").strip():
+            try:
+                sheet, locals_ = _format_rects(op, raw_range, allow_union=True)
+                return sheet or (str(explicit) if explicit else None), locals_
+            except Exception:
+                return (str(explicit) if explicit else None), []
+        locals_: list[str] = []
+        sheet = str(explicit) if explicit else None
+        for part in re.split(r"[\s,]+", str(raw_range or "").strip()):
+            if not part:
+                continue
+            if "!" in part:
+                prefix, part = part.split("!", 1)
+                sheet = sheet or prefix.strip("'")
+            locals_.append(part.replace("$", ""))
+        return sheet, locals_
+
+    try:
+        for raw in ops:
+            if not isinstance(raw, dict):
+                continue
+            kind_raw = str(_op_get(raw, "kind") or "format")
+            kind = _canonical_format_kind(kind_raw)
+            raw_range = str(_op_get(raw, "range", "cell_range") or "")
+            sheet_name, locals_ = _resolve_sheet(raw, raw_range)
+            try:
+                title = require_default_sheet(sheets_available, sheet_name or default_sheet)
+            except Exception:
+                structure_changes.append({
+                    "kind": kind,
+                    "sheet": str(sheet_name or default_sheet or ""),
+                    "range": raw_range[:80],
+                    "verified": False,
+                })
+                continue
+            if title not in wb.sheetnames:
+                structure_changes.append({
+                    "kind": kind,
+                    "sheet": str(title),
+                    "range": raw_range[:80],
+                    "verified": False,
+                })
+                continue
+            ws = wb[title]
+
+            if kind == "format":
+                if not locals_:
+                    structure_changes.append({
+                        "kind": "format",
+                        "sheet": ws.title,
+                        "range": raw_range[:80],
+                        "verified": False,
+                    })
+                    continue
+                for local in locals_:
+                    try:
+                        rect = parse_rect(local)
+                    except Exception:
+                        structure_changes.append({
+                            "kind": "format",
+                            "sheet": ws.title,
+                            "range": local[:80],
+                            "verified": False,
+                        })
+                        continue
+                    min_row, min_col, max_row, max_col = _rect_bounds(rect, ws)
+                    remaining = MAX_WRITE_VERIFY_SAMPLE - sampled
+                    if remaining <= 0:
+                        sample_capped = True
+                        break
+                    coords = _sample_grid_coords(max_row - min_row + 1, max_col - min_col + 1, remaining)
+                    for r_off, c_off in coords:
+                        row = min_row + r_off
+                        col = min_col + c_off
+                        cell = ws.cell(row=row, column=col)
+                        ok, bad = _check_style_cell(cell, raw)
+                        addr = _cell_addr(row, col)
+                        sampled += 1
+                        if ok:
+                            style_changes.append({"sheet": ws.title, "cell": addr, "ok": ok})
+                        for entry in bad:
+                            entry["sheet"] = ws.title
+                            entry["cell"] = addr
+                            style_mismatches.append(entry)
+            elif kind in {"merge", "unmerge"}:
+                local = locals_[0] if locals_ else raw_range.replace("$", "")
+                try:
+                    rect = parse_rect(local)
+                    target = rect.to_a1(include_sheet=False).replace("$", "")
+                except Exception:
+                    target = local.replace("$", "")
+                merged = {str(r) for r in ws.merged_cells.ranges}
+                present = target in merged
+                structure_changes.append({
+                    "kind": kind,
+                    "sheet": ws.title,
+                    "range": target[:80],
+                    "verified": present if kind == "merge" else not present,
+                })
+            elif kind == "freeze":
+                requested: str | None = None
+                loose = False
+                if _freeze_cell_from_op is not None:
+                    try:
+                        requested = _freeze_cell_from_op(raw)
+                    except Exception:
+                        requested = None
+                if requested is None:
+                    loose = True
+                panes = str(ws.freeze_panes or "")
+                if loose:
+                    verified = bool(panes)
+                elif requested == "":
+                    verified = not panes or panes == "A1"
+                else:
+                    verified = panes == requested.replace("$", "").upper()
+                entry = {
+                    "kind": "freeze",
+                    "sheet": ws.title,
+                    "range": str(requested or "")[:80],
+                    "verified": verified,
+                }
+                if loose:
+                    entry["loose"] = True
+                structure_changes.append(entry)
+            elif kind in {"conditional_format", "data_validation"}:
+                remove = bool(_op_get(raw, "remove", "delete", "clear"))
+                rule_count = 0
+                if kind == "conditional_format":
+                    configured = [
+                        rng
+                        for cf in ws.conditional_formatting
+                        for rng in getattr(cf.sqref, "ranges", [])
+                    ]
+                else:
+                    configured = [
+                        rng
+                        for dv in getattr(ws.data_validations, "dataValidation", [])
+                        for rng in getattr(dv.sqref, "ranges", [])
+                    ]
+                for local in locals_ or [raw_range.replace("$", "")]:
+                    try:
+                        rect = parse_rect(local)
+                        min_row, min_col, max_row, max_col = _rect_bounds(rect, ws)
+                    except Exception:
+                        continue
+                    rule_count += sum(
+                        1
+                        for rng in configured
+                        if _ranges_intersect(min_col, min_row, max_col, max_row, rng)
+                    )
+                structure_changes.append({
+                    "kind": kind,
+                    "sheet": ws.title,
+                    "range": raw_range[:80],
+                    "verified": (rule_count == 0) if remove else (rule_count > 0),
+                    "rule_count": rule_count,
+                })
+            elif kind == "size":
+                structure_changes.append({"kind": "size", "sheet": ws.title, "verified": None})
+            if sample_capped:
+                break
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+    mismatch_count = len(style_mismatches)
+    shown_changes = style_changes[:entry_limit]
+    shown_mismatches = style_mismatches[:entry_limit]
+    shown_structure = structure_changes[:entry_limit]
+    total_changes = sampled + len(structure_changes)
+    truncated = (
+        sample_capped
+        or len(style_changes) > len(shown_changes)
+        or len(style_mismatches) > len(shown_mismatches)
+        or len(structure_changes) > len(shown_structure)
+    )
+    sheet_hint = str(
+        arguments.get("sheet")
+        or arguments.get("sheet_name")
+        or (style_changes[0].get("sheet") if style_changes else "")
+        or (structure_changes[0].get("sheet") if structure_changes else "")
+        or ""
+    )
+    base: dict[str, Any] = {
+        "sheet": sheet_hint,
+        "verification_kind": "style",
+        "sampled": True,
+        "style_changes": shown_changes,
+        "style_mismatches": shown_mismatches,
+        "structure_changes": shown_structure,
+        "value_changes": [],
+        "formula_changes": [],
+        "total_changes": total_changes,
+        "shown": len(shown_changes) + len(shown_mismatches) + len(shown_structure),
+        "mismatch_count": mismatch_count,
+        "truncated": truncated,
+        "coverage": {
+            "kind": "sampled",
+            "sample_size": sampled,
+            "snapshot_id": snap.id.key(),
+        },
+        "snapshot_id": snap.id.key(),
+        "content_version": snap.content_version,
+    }
+    unverified_structure = sum(
+        1 for entry in structure_changes if entry.get("verified") is False
+    )
+    if mismatch_count or unverified_structure:
+        return _error_verification(
+            f"写后样式抽样发现 {mismatch_count} 项属性不符、"
+            f"{unverified_structure} 项结构未确认（抽样 {sampled} 格 / 结构 {len(structure_changes)} 项）",
+            error_code=RESULT_UNCERTAIN,
+            **base,
+        )
+    base["status"] = "success"
+    return base
+
+
 def verify_write(
     tool_name: str,
     arguments: dict[str, Any] | None,
@@ -675,14 +1135,6 @@ def verify_write(
     if tool_name not in excel_tools:
         return {"skipped": True, "status": "success"}
 
-    if tool_name == "format_spreadsheet":
-        return {
-            "skipped": True,
-            "status": "success",
-            "verification_kind": "style",
-            "reason": "样式/合并/验证规则未纳入值回读抽样；请以 appearance 与工具 warnings 为准",
-        }
-
     file_path = str(arguments.get("file_path") or arguments.get("path") or "").strip()
     if not file_path:
         return {"skipped": True, "status": "success"}
@@ -696,39 +1148,15 @@ def verify_write(
             file_path=file_path,
         )
 
-    intended, total_intended, structure = collect_intended_cells(arguments)
-    try:
-        from excelmanus.workbook.snapshot import SnapshotError, open_snapshot_at, require_default_sheet
-        from excelmanus.workspace.refs import WorkspaceRef
+    if tool_name == "format_spreadsheet":
+        return _verify_write_style(arguments, file_path, abs_path, workspace_root, entry_limit)
 
-        rel = str(file_path).replace("\\", "/")
-        try:
-            rel = str(abs_path.resolve().relative_to(Path(workspace_root).resolve())).replace("\\", "/")
-        except ValueError:
-            pass
-        # content_version 是写前乐观锁版本，写后必然过期——只认提交管线回传的 after_version
-        expected = str(arguments.get("after_version") or "").strip() or None
-        snap = open_snapshot_at(
-            abs_path,
-            relative=rel,
-            workspace=WorkspaceRef.from_root(workspace_root),
-            expected_version=expected,
-        )
-        wb = snap.open_workbook(data_only=False, read_only=False)
-    except SnapshotError as exc:
-        return _error_verification(
-            f"写后回读打开失败：{exc}",
-            error_code=getattr(exc, "code", TOOL_ERROR),
-            failure_class=FAILURE_INTERNAL,
-            file_path=file_path,
-        )
-    except Exception as exc:
-        return _error_verification(
-            f"写后回读打开失败：{exc}",
-            error_code=TOOL_ERROR,
-            failure_class=FAILURE_INTERNAL,
-            file_path=file_path,
-        )
+    intended, total_intended, structure = collect_intended_cells(arguments)
+    opened = _open_post_write_workbook(abs_path, file_path, workspace_root, arguments)
+    if isinstance(opened, dict):
+        return opened
+    snap, wb = opened
+    from excelmanus.workbook.snapshot import SnapshotError, require_default_sheet
 
     value_changes: list[dict[str, Any]] = []
     formula_changes: list[dict[str, Any]] = []
@@ -825,10 +1253,20 @@ def verify_write(
             if bucket:
                 sheet_hint = str(bucket[0].get("sheet") or "")
                 break
+    formula_intended = sum(1 for item in intended if item.get("kind") == "formula")
+    formula_verified = len(formula_changes)
+    formula_overwritten = sum(
+        1
+        for item in mismatches
+        if item.get("kind") == "formula" and not _is_formula(item.get("actual"))
+    )
     base: dict[str, Any] = {
         "sheet": sheet_hint,
         "value_changes": shown_values,
         "formula_changes": shown_formulas,
+        "formula_intended_count": formula_intended,
+        "formula_verified_count": formula_verified,
+        "formula_overwritten_count": formula_overwritten,
         "structure_changes": structure[:entry_limit],
         "total_changes": total_changes,
         "shown": listed,
@@ -914,6 +1352,27 @@ def format_write_verification_line(payload: dict[str, Any]) -> str:
             f"当前段落数={payload.get('paragraphs', 0)}，"
             f"表格数={payload.get('tables', 0)}"
         )
+    if payload.get("verification_kind") == "style":
+        changes = payload.get("style_changes") or []
+        mismatches = payload.get("style_mismatches") or []
+        structures = payload.get("structure_changes") or []
+        ok_count = sum(len(item.get("ok") or []) for item in changes)
+        n_mis = payload.get("mismatch_count") or len(mismatches)
+        n_structure_ok = sum(1 for item in structures if item.get("verified") is True)
+        sample_size = (payload.get("coverage") or {}).get("sample_size") or len(changes) + len(mismatches)
+        sheet = str(payload.get("sheet") or "")
+        prefix = f"{sheet} " if sheet else ""
+        line = (
+            f"\n样式回读: {prefix}抽样 {sample_size} 格，属性 {ok_count} 项通过，"
+            f"{n_mis} 项不符；结构 {n_structure_ok}/{len(structures)} 项已确认"
+        )
+        if mismatches:
+            head = "；".join(
+                f"{item.get('cell','')}.{item.get('prop','')} {item.get('expected','')}→{item.get('actual','')}"
+                for item in mismatches[:3]
+            )
+            line += f"（不符: {head}）"
+        return line
     if payload.get("verification_kind") == "readability":
         return f"\n回读确认: {payload.get('sheet', '')} 文件可打开；未核验本次对象、结构或样式效果。"
     n_val = len(payload.get("value_changes") or [])
@@ -927,10 +1386,14 @@ def format_write_verification_line(payload: dict[str, Any]) -> str:
                 break
     sheet_bit = f"{sheet} " if sheet else ""
     trunc = " 已截断" if payload.get("truncated") else ""
-    return (
+    line = (
         f"\n回读确认: {sheet_bit}值核验 {n_val} 公式核验 {n_fml}（仅写后值，无编辑前值）"
         f"（共 {total}，显示 {payload.get('shown', n_val + n_fml)}）{trunc}"
-    ).replace("  ", " ")
+    )
+    formula_intended = int(payload.get("formula_intended_count") or 0)
+    if formula_intended:
+        line += f"；公式 保留 {int(payload.get('formula_verified_count') or 0)}/{formula_intended}"
+    return line.replace("  ", " ")
 
 
 def compact_write_verification(payload: dict[str, Any] | None) -> str:
@@ -938,6 +1401,11 @@ def compact_write_verification(payload: dict[str, Any] | None) -> str:
         return ""
     if payload.get("status") == "error" or payload.get("error_code"):
         return f"verify {payload.get('error_code')}"
+    if payload.get("verification_kind") == "style":
+        ok_count = sum(len(item.get("ok") or []) for item in payload.get("style_changes") or [])
+        n_mis = payload.get("mismatch_count") or len(payload.get("style_mismatches") or [])
+        n_structure = len(payload.get("structure_changes") or [])
+        return f"verify style_ok={ok_count} style_mismatch={n_mis} structure={n_structure} total={payload.get('total_changes', 0)}"
     n_val = len(payload.get("value_changes") or [])
     n_fml = len(payload.get("formula_changes") or [])
     return f"verify value={n_val} formula={n_fml} total={payload.get('total_changes', n_val + n_fml)}"

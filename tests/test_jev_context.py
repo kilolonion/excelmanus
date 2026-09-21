@@ -226,11 +226,13 @@ def test_bound_state_does_not_send_arbitrary_context():
 
 
 def test_advice_enforce_does_not_enable_actuator_packs(tmp_path):
+    # 二态契约：各题包只看自己的子闸；exposure 子闸关掉时 exposure.turn 不生效。
+    settings = settings_from(config(tmp_path, jev_exposure="off"))
+    assert not decision_is_applied("exposure.turn", settings)
     settings = settings_from(config(tmp_path))
     assert decision_is_applied(PACK, settings)
-    assert not decision_is_applied("exposure.turn", settings)
-    assert not decision_is_applied("approval.tool_call", settings)
-    assert not decision_is_applied(PACK, settings_from(config(tmp_path, jev_enabled="shadow")))
+    assert decision_is_applied("approval.tool_call", settings)  # master 闸直接生效
+    assert not decision_is_applied(PACK, settings_from(config(tmp_path, jev_enabled="off")))
 
 
 @pytest.mark.asyncio
@@ -244,11 +246,12 @@ async def test_off_and_child_do_not_evaluate(tmp_path, mode, child):
 
 
 @pytest.mark.asyncio
-async def test_shadow_records_but_enforce_delivers_advice(tmp_path):
+async def test_off_skips_but_enforce_delivers_advice(tmp_path):
+    # 二态契约：总闸 off 不评估不出建议；enforce 直接投递建议。
     from dataclasses import replace
     decision = replace(synthesize(PACK, evaluation(edit_intent="from_context"), state()), applied=True)
     with patch("excelmanus.system_one.runtime.evaluate_for_host", AsyncMock(return_value=decision)):
-        assert await suggest_context(engine(tmp_path, jev_enabled="shadow"), "继续") == ""
+        assert await suggest_context(engine(tmp_path, jev_enabled="off"), "继续") == ""
         text = await suggest_context(engine(tmp_path), "继续")
         assert "承接最近对话" in text
         assert "sales.xlsx" in text
@@ -428,14 +431,15 @@ async def test_routing_stays_advice_only_for_current_or_unknown(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_shadow_gate_never_routes(tmp_path):
+async def test_off_gate_never_routes(tmp_path):
+    # 二态契约：总闸 off 时不评估也不改路由。
     from excelmanus.system_one.intent_context import route_session_workspace
     meta = {"id": "s1", "blank": 1, "message_count": 0,
             "workspace_path": str(tmp_path), "workspace_id": "sales"}
     manager = _route_manager(tmp_path, meta=meta)
     with patch("excelmanus.system_one.runtime.evaluate_for_host", AsyncMock()) as evaluate:
         assert await route_session_workspace(
-            manager, config(tmp_path, jev_enabled="shadow"),
+            manager, config(tmp_path, jev_enabled="off"),
             "s1", "继续昨天的销售表", _ROUTE_WORKSPACES) == (None, None)
         evaluate.assert_not_called()
 

@@ -234,14 +234,14 @@ def test_settings_from_config_does_not_cross_protocol_fallback() -> None:
     assert jev_is_active(parsed) is False
 
 
-def test_gate_matrix_master_shadow_downgrades_enforce() -> None:
-    assert effective_gate("shadow", "enforce") == "shadow"
-    assert effective_gate("shadow", "shadow") == "shadow"
-    assert effective_gate("shadow", "off") == "off"
-    assert effective_flag("shadow", True) == "shadow"
+def test_gate_matrix_legacy_shadow_migrates_to_enforce() -> None:
+    # 二态契约：effective_gate 只有 off/enforce；持久化的 shadow 经 settings_from 迁成 enforce。
+    assert effective_gate("off", "enforce") == "off"
+    assert effective_gate("enforce", "enforce") == "enforce"
+    assert effective_flag("enforce", True) == "enforce"
     settings = SimpleNamespace(
         jev_enabled="shadow",
-        jev_exposure="enforce",
+        jev_exposure="shadow",
         jev_mode_hint=True,
         jev_observation="enforce",
         jev_ui_hint=True,
@@ -250,15 +250,16 @@ def test_gate_matrix_master_shadow_downgrades_enforce() -> None:
         jev_timeout_seconds=1.5,
     )
     parsed = settings_from(settings)
-    assert gate_for_pack("exposure.turn", parsed) == "shadow"
-    assert gate_for_pack("observation.shape", parsed) == "shadow"
-    assert gate_for_pack("ui.surface", parsed) == "shadow"
-    assert gate_for_pack("approval.tool_call", parsed) == "shadow"
+    assert parsed.enabled == "enforce"
+    assert gate_for_pack("exposure.turn", parsed) == "enforce"
+    assert gate_for_pack("observation.shape", parsed) == "enforce"
+    assert gate_for_pack("ui.surface", parsed) == "enforce"
+    assert gate_for_pack("approval.tool_call", parsed) == "enforce"
 
 
 def test_gate_matrix_master_enforce_keeps_child() -> None:
     assert effective_gate("enforce", "enforce") == "enforce"
-    assert effective_gate("enforce", "shadow") == "shadow"
+    # 二态契约：子闸只认 enforce/off，其它输入一律视为 off
     assert effective_gate("enforce", "off") == "off"
 
 
@@ -315,15 +316,18 @@ def test_jev_config_defaults() -> None:
         base_url="https://example.com/v1",
         model="m",
     )
-    assert cfg.jev_enabled == "off"
-    assert cfg.jev_exposure == "off"
-    assert cfg.jev_mode_hint is False
-    assert cfg.jev_observation == "off"
-    assert cfg.jev_ui_hint is False
+    assert cfg.jev_enabled == "enforce"
+    assert cfg.jev_exposure == "enforce"
+    assert cfg.jev_mode_hint is True
+    assert cfg.jev_observation == "enforce"
+    assert cfg.jev_verification == "enforce"
+    assert cfg.jev_recovery == "enforce"
+    assert cfg.jev_ui_hint is True
     assert cfg.jev_model == "jev-1.13.0"
     assert cfg.typesafe_api_key is None
     assert cfg.jev_timeout_seconds == pytest.approx(1.5)
     assert _parse_jev_gate(None, "EXCELMANUS_JEV_ENABLED", "off") == "off"
+    assert _parse_jev_gate("shadow", "EXCELMANUS_JEV_ENABLED") == "enforce"
 
 
 def test_exposure_does_not_classify_call_syntax() -> None:
@@ -347,7 +351,7 @@ def test_jev_settings_come_from_store_not_process_env(monkeypatch: pytest.Monkey
     assert not is_locator_key("EXCELMANUS_TYPESAFE_API_KEY")
     assert get_setting("EXCELMANUS_JEV_ENABLED") is None
     parsed = settings_from(None)
-    assert parsed.enabled == "off"
+    assert parsed.enabled == "enforce"  # 二态契约默认 enforce
     key, name = resolve_jev_api_key()
     assert key is None
     assert name == ""
@@ -362,13 +366,14 @@ def test_jev_settings_come_from_store_not_process_env(monkeypatch: pytest.Monkey
     })
     assert get_setting("EXCELMANUS_JEV_ENABLED") == "shadow"
     parsed = settings_from(None)
-    assert parsed.enabled == "shadow"
-    assert parsed.exposure == "shadow"
-    assert parsed.observation == "shadow"
+    # 持久化的 shadow 值按现行契约迁移为 enforce
+    assert parsed.enabled == "enforce"
+    assert parsed.exposure == "enforce"
+    assert parsed.observation == "enforce"
     assert parsed.ui_hint is True
     assert parsed.calibrated is False
     assert parsed.api_key == "vck_test_not_real"
-    assert gate_for_pack("exposure.turn", parsed) == "shadow"
+    assert gate_for_pack("exposure.turn", parsed) == "enforce"
     key, name = resolve_jev_api_key()
     assert name == "EXCELMANUS_AI_GATEWAY_API_KEY"
     assert key == "vck_test_not_real"

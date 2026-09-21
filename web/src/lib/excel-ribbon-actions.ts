@@ -105,6 +105,16 @@ export function buildSelectionAgentPrompt(kind: SelectionAgentKind, ctx: RibbonA
   }
 }
 
+/**
+ * 右键网格菜单的 ask 动作：公式单元格额外提供公式专用入口。
+ */
+export type GridAskKind = SelectionAgentKind | "explain-formula" | "trace-formula";
+
+export function buildGridAskPrompt(kind: GridAskKind, ctx: RibbonAskContext): string {
+  if (kind === "explain-formula" || kind === "trace-formula") return buildRibbonAskPrompt(kind, ctx);
+  return buildSelectionAgentPrompt(kind, ctx);
+}
+
 /** 与 Univer classic 页签同一套 class，避免「历史」看起来像外挂。 */
 export const NATIVE_RIBBON_TAB_CLASS =
   "univer-focus:outline-none univer-focus:ring-2 univer-focus:ring-primary-500 dark:!univer-focus:ring-primary-300 univer-flex univer-cursor-pointer univer-appearance-none univer-items-center univer-gap-1 univer-rounded-sm univer-border-none univer-px-2 univer-py-1 univer-text-sm univer-transition-colors";

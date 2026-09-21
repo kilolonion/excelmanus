@@ -11,6 +11,7 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.engine_core.idle_tracker import idle_segment
 from excelmanus.logger import get_logger, log_tool_call
 
 if TYPE_CHECKING:
@@ -383,12 +384,13 @@ class DelegationHandler(BaseToolHandler):
 
         from excelmanus.subagent.result import format_parent_reply
 
-        sub_result = await e.delegate_to_subagent(
-            task=task_value.strip(),
-            agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
-            file_paths=raw_file_paths,
-            on_event=on_event,
-        )
+        with idle_segment(e, "delegate"):
+            sub_result = await e.delegate_to_subagent(
+                task=task_value.strip(),
+                agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
+                file_paths=raw_file_paths,
+                on_event=on_event,
+            )
         result_str = format_parent_reply(sub_result)
         success = sub_result.success
         error = None if success else result_str
@@ -425,7 +427,8 @@ class DelegationHandler(BaseToolHandler):
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         try:
-            pd_outcome = await e.parallel_delegate_to_subagents(tasks=raw_tasks, on_event=on_event)
+            with idle_segment(e, "delegate"):
+                pd_outcome = await e.parallel_delegate_to_subagents(tasks=raw_tasks, on_event=on_event)
             result_str = pd_outcome.reply
             success = pd_outcome.success
             error = None if success else result_str

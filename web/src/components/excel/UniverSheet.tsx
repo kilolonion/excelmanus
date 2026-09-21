@@ -2,7 +2,7 @@
 
 import { readActiveRange } from "@/lib/excel-selection";
 
-import { useEffect, useRef, useCallback, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { ICellData, IDisposable, IRange } from "@univerjs/core";
 import type { FUniver, IEventParamConfig } from "@univerjs/core/facade";
@@ -28,7 +28,7 @@ import {
 import { saveBlob } from "@/lib/save-blob";
 import { letterToColIndex, windowCellPatch, demoWorkbookView, viewMatchesLease, viewSnapshotToUniver, type WorkbookViewSnapshot } from "@/lib/workbook-view";
 import { pageForCell, pagesForViewport, rangeIsLoaded, mergeViewWindows, firstUnloadedCell } from "@/lib/workbook-window";
-import { versionStoreKey, type WorkspaceFileRef } from "@/lib/workspace-file-ref";
+import { normalizeRelativePath, versionStoreKey, type WorkspaceFileRef } from "@/lib/workspace-file-ref";
 import { activateWorkbookSheet } from "@/lib/excel-univer-lifecycle";
 import {
   ensureHistoryRibbonStyle,
@@ -38,13 +38,12 @@ import {
   removeRibbonCommandHost,
   setHistoryRibbonMode,
   setRibbonToolbarHidden,
-  buildSelectionAgentPrompt,
-  type SelectionAgentKind,
+  buildGridAskPrompt,
   type NativeRibbonTab,
 } from "@/lib/excel-ribbon-actions";
 import { getUniverModules } from "@/lib/univer-modules";
 import type { WorkbookViewState } from "@/stores/workbook-conversation-store";
-import { ExcelSelectionContextMenu, type ExcelSelectionContextMenuState } from "@/components/excel/ExcelSelectionContextMenu";
+import { registerAgentContextMenu, type AgentMenuSelection } from "@/lib/excel-agent-menu";
 
 export { prefetchUniverModules, warmUniverModules } from "@/lib/univer-modules";
 
@@ -234,7 +233,6 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   const [ribbonTablist, setRibbonTablist] = useState<HTMLElement | null>(null);
   const [nativeRibbonTab, setNativeRibbonTab] = useState<NativeRibbonTab | null>(null);
   const [ribbonCommandHost, setRibbonCommandHost] = useState<HTMLElement | null>(null);
-  const [contextMenu, setContextMenu] = useState<ExcelSelectionContextMenuState | null>(null);
   const onNativeRibbonTabRef = useRef(onNativeRibbonTab);
   onNativeRibbonTabRef.current = onNativeRibbonTab;
 
@@ -383,76 +381,53 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   filePathRef.current = filePath;
 
   useEffect(() => {
-    setContextMenu(null);
+    const path = filePathRef.current;
+    const store = useExcelStore.getState();
+    if (store.liveSelection && normalizeRelativePath(store.liveSelection.path) !== normalizeRelativePath(path)) {
+      store.setLiveSelection(null);
+    }
+    return () => {
+      const current = useExcelStore.getState();
+      if (current.liveSelection && normalizeRelativePath(current.liveSelection.path) === normalizeRelativePath(path)) {
+        current.setLiveSelection(null);
+      }
+    };
   }, [fileUrl]);
 
   /**
-   * The native Univer menu is disabled because it does not know about our
-   * workbook conversation.  Keep the browser event at the grid boundary and
-   * expose the current selection through the same store/prompt path used by
-   * the ribbon and the explicit selection mode.
+   * 供原生右键「交给 Agent」子菜单读取的当前选区；
+   * 条件与原自建菜单一致：视图未就绪或无选区时返回 null。
    */
-  const handleGridContextMenu = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement) || !target.closest("canvas")) return;
-    const selection = readActiveRange(univerRef.current);
-    if (!selection.sheet || !selection.range) return;
-
-    event.preventDefault();
-    const host = containerRef.current?.parentElement;
-    const rect = host?.getBoundingClientRect();
-    if (!rect) return;
-    const menuWidth = 250;
-    const menuHeight = 300;
-    const x = Math.min(Math.max(8, event.clientX - rect.left), Math.max(8, rect.width - menuWidth - 8));
-    const y = Math.min(Math.max(8, event.clientY - rect.top), Math.max(8, rect.height - menuHeight - 8));
-    setContextMenu({
-      x,
-      y,
+  const readAgentSelection = (api: FUniver): AgentMenuSelection | null => {
+    if (loadingShellFileRef.current || !viewRef.current) return null;
+    const selection = readActiveRange(api);
+    if (!selection.sheet || !selection.range) return null;
+    let formula: string | undefined;
+    try {
+      const ws = api.getActiveWorkbook()?.getActiveSheet();
+      const r = ws?.getSelection()?.getActiveRange();
+      if (r && r.getHeight?.() === 1 && r.getWidth?.() === 1) {
+        let raw: unknown = r.getFormula?.();
+        if (typeof raw !== "string" || !raw) raw = r.getCellData?.()?.f;
+        if (typeof raw === "string" && raw.trim()) {
+          const text = raw.trim();
+          formula = text.startsWith("=") ? text : `=${text}`;
+        }
+      }
+    } catch {
+      /* Facade 公式读取不可用 */
+    }
+    const path = filePathRef.current;
+    return {
+      path,
       sheet: selection.sheet,
       range: selection.range,
-      version: viewRef.current?.content_version ?? useExcelStore.getState().getContentVersion(filePath) ?? undefined,
-      path: filePath,
-    });
-  }, [filePath]);
-
-  const referenceContextSelection = useCallback(() => {
-    if (!contextMenu?.sheet || !contextMenu.range || !contextMenu.path) return;
-    useExcelStore.getState().confirmSelection({
-      filePath: contextMenu.path,
-      sheet: contextMenu.sheet,
-      range: contextMenu.range,
-      contentVersion: contextMenu.version ?? undefined,
-    });
-  }, [contextMenu]);
-
-  const askAboutContextSelection = useCallback((kind: SelectionAgentKind) => {
-    if (!contextMenu?.sheet || !contextMenu.range || !contextMenu.path) return;
-    useExcelStore.getState().setPendingTemplateMessage(buildSelectionAgentPrompt(kind, {
-      path: contextMenu.path,
-      sheet: contextMenu.sheet,
-      range: contextMenu.range,
-      version: contextMenu.version,
-    }));
-  }, [contextMenu]);
-
-  useEffect(() => {
-    if (!contextMenu) return;
-    const close = () => setContextMenu(null);
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
+      version: viewRef.current?.content_version ?? useExcelStore.getState().getContentVersion(path) ?? undefined,
+      formula,
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [contextMenu]);
+  };
+  const readAgentSelectionRef = useRef(readAgentSelection);
+  readAgentSelectionRef.current = readAgentSelection;
 
   const beginSuppressEdits = () => {
     suppressEditsRef.current = true;
@@ -863,6 +838,18 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
         api = univerAPI;
         univerRef.current = univerAPI;
+        try {
+          registerAgentContextMenu(univerAPI, {
+            readSelection: () => readAgentSelectionRef.current(univerAPI),
+            onReference: (sel) => useExcelStore.getState().confirmSelection({
+              filePath: sel.path, sheet: sel.sheet, range: sel.range,
+              contentVersion: sel.version ?? undefined,
+            }),
+            onAsk: (kind, sel) => useExcelStore.getState().setPendingTemplateMessage(buildGridAskPrompt(kind, sel)),
+          });
+        } catch (error) {
+          console.warn("Agent context menu registration skipped:", error);
+        }
         const subscriptions: IDisposable[] = [];
         subscriptions.push(univerAPI.addEvent(univerAPI.Event.CommandExecuted, (event) => {
           emitMutationRef.current(event);
@@ -885,6 +872,14 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           if (!view || !identityRef.current.fileRef || !viewMatchesLease(view, identityRef.current.fileRef)
             || requestRef.current || loadingShellFileRef.current || suppressEditsRef.current) return;
           const selection = readActiveRange(univerAPI);
+          if (activeRef.current && selection.sheet && selection.range) {
+            useExcelStore.getState().setLiveSelection({
+              path: filePathRef.current,
+              sheet: selection.sheet,
+              range: selection.range,
+              contentVersion: view.content_version,
+            });
+          }
           onViewStateRef.current?.({
             status: "ready", version: view.content_version,
             sheet: selection.sheet, range: selection.range,
@@ -1229,17 +1224,8 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         className="w-full h-full bg-white dark:bg-gray-800"
         data-univer-container
         style={{ position: "relative", visibility: (viewRef.current && (isDemoPath(filePath) || !fileRef || viewMatchesLease(viewRef.current, fileRef))) || loadingShellKey === loadingFileKey(fileRef, filePath) ? "visible" : "hidden" }}
-        onContextMenu={handleGridContextMenu}
         {...(isMobile && selectionMode ? touchGestureHandlers : {})}
       />
-      {contextMenu && (
-        <ExcelSelectionContextMenu
-          state={contextMenu}
-          onClose={() => setContextMenu(null)}
-          onReference={referenceContextSelection}
-          onAsk={askAboutContextSelection}
-        />
-      )}
       {/* 移动端提示：首次加载显示，4 秒后自动淡出 */}
       {isMobile && hintVisible && !selectionMode && !loading && !error && (
         <div

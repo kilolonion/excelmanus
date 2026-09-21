@@ -315,6 +315,7 @@ async def traced_request(engine: Any, create: Any, kwargs: dict[str, Any]) -> An
                 "tools_digest": header.tools_digest, "system_digest": header.system_head_digest,
                 "transport": header.transport, "continuation": bool(header.continuation_id),
                 "model_idle_seconds": getattr(engine, "_model_idle_seconds", None),
+                "idle_breakdown": getattr(engine, "_model_idle_breakdown", None),
             }
         key = scope_key(engine, f"request:{uuid4().hex}")
         driver = getattr(engine, "_driver", None)

@@ -595,6 +595,24 @@ PACKS: dict[str, PackSpec] = {
                     "false": "Scope is wider, different, or not evidenced",
                 },
             ),
+            *(
+                QuestionSpec(
+                    qid=f"item_{index}",
+                    kind="choice",
+                    instructions=(
+                        f"Checklist item {index} from state.checklist (skip if absent). "
+                        "Using only verification_facts and write_evidence, is this "
+                        "requested item evidenced by the commit/read-back facts?"
+                    ),
+                    criteria={
+                        "evidenced": "Read-back or commit facts cover this item",
+                        "missing": "No evidence covers this item yet",
+                        "conflict": "Evidence contradicts this item",
+                        "not_applicable": "state.checklist has no such item",
+                    },
+                )
+                for index in range(1, 6)
+            ),
         ),
     ),
     "recovery.next_step": PackSpec(

@@ -41,6 +41,7 @@ _ANSWER_KEYS = (
     "still_relevant",
     "satisfied",
     "scope_ok",
+    "missing_items",
     "retryable",
     "needs_user",
     "done_enough",
@@ -74,6 +75,8 @@ def public_transport(api_key: str | None, protocol: str | None = None) -> str:
 
 def synthesized_action(pack_id: str, decision: Decision) -> str:
     extras = decision.extras or {}
+    if decision.kind == "outcome":
+        return f"恢复结果 {extras.get('outcome') or ''}".rstrip()
     if pack_id == "approval.tool_call":
         return str(decision.kind or "ask")
     if pack_id == "observation.prune":
@@ -152,6 +155,7 @@ def curated_answers(pack_id: str, decision: Decision) -> dict[str, str | float |
         "surface",
         "next",
         "pin",
+        "missing_items",
     ):
         if key in out:
             continue
@@ -183,6 +187,14 @@ def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
     if not decision.applied or gate != "enforce":
         return "本次未应用建议，任务继续按原流程处理"
     extras = decision.extras or {}
+    if decision.kind == "outcome":
+        return {
+            "escaped": "建议后已摆脱同一失败",
+            "repeated": "建议后仍重复同一失败",
+            "not_continued": "建议后未再调用工具",
+            "not_delivered": "建议未送达主模型",
+            "stopped": "按熔断停止",
+        }.get(str(extras.get("outcome") or ""), "恢复结果已记录")
     if pack_id == "context.resolve":
         routed = str(extras.get("routed_workspace") or "")
         if routed:
@@ -211,6 +223,9 @@ def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
     if pack_id == "observation.prune":
         return "已将旧观察收成指针" if extras.get("prune") else "保留旧观察"
     if pack_id == "mutation.verify":
+        missing = extras.get("missing_items")
+        if isinstance(missing, (int, float)) and missing:
+            return f"写入后验证建议 {extras.get('next') or 'none'}；缺证据事项 {int(missing)} 项"
         return f"写入后验证建议 {extras.get('next') or 'none'}"
     if pack_id == "recovery.next_step":
         return f"失败后建议 {extras.get('next') or 'stop'}"
@@ -253,6 +268,9 @@ def build_jev_trace_payload(
         payload["calibration_fingerprint"] = calibration_fingerprint(pack_id)
     except Exception:
         payload["calibration_fingerprint"] = ""
+    if "outcome" in extras:
+        payload["outcome"] = str(extras.get("outcome") or "")[:40]
+        payload["source"] = str(extras.get("source") or "")[:40]
     budget = extras.get("budget")
     if isinstance(budget, Mapping):
         payload["budget"] = {

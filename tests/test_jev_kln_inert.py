@@ -116,7 +116,7 @@ async def test_mode_switch_signed_high_confidence_enqueues(
     engine = _stub(
         config=_config(
             jev_enabled="enforce",
-            jev_exposure="shadow",
+            jev_exposure="enforce",
             jev_mode_hint=True,
             jev_calibrated=True,
         ),
@@ -124,7 +124,9 @@ async def test_mode_switch_signed_high_confidence_enqueues(
     )
     with patch(
         "excelmanus.system_one.evaluate",
-        AsyncMock(return_value=_decision(mode_hint="suggest_write", mode_conf=0.95)),
+        AsyncMock(return_value=replace(
+            _decision(mode_hint="suggest_write", mode_conf=0.95), applied=True,
+        )),
     ):
         await maybe_record_turn_exposure(engine, "把表里的错改掉")
     assert engine._question_flow.has_pending() is True
@@ -260,8 +262,9 @@ def _big_result(*, success: bool = True, extra_ui: ToolUiMeta | None = None) -> 
 
 
 @pytest.mark.asyncio
-async def test_observation_default_does_not_reshape() -> None:
-    engine = _stub()
+async def test_observation_gate_off_does_not_reshape() -> None:
+    # 二态契约：observation 子闸 off 时不评估、不改 model_text。
+    engine = _stub(config=_config(jev_observation="off"))
     original = _big_result()
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
         out = await maybe_shape_observation(

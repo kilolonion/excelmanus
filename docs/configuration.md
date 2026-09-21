@@ -61,6 +61,7 @@
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS 允许来源（逗号分隔）。启动时还会自动补上 `localhost` / `127.0.0.1` / `[::1]` 与前端端口 | `http://localhost:3000,http://127.0.0.1:3000` |
 | `EXCELMANUS_MAX_CONTEXT_TOKENS` | 显式设置时覆盖模型推断的上下文上限 | 按模型推断；未知模型回退 `256000` |
 | `EXCELMANUS_PROMPT_CACHE_KEY_ENABLED` | 向 API 发送 prompt_cache_key 提升缓存命中率 | `true` |
+| `EXCELMANUS_PROMPT_CACHE_RETENTION` | 提示词缓存保留策略（`default`/`extended`）。`extended` 仅对一方端点生效：Anthropic（`api.anthropic.com`）为各 `cache_control` 断点加 `ttl=1h` 并发送 `anthropic-beta: extended-cache-ttl-2025-04-11`；OpenAI（`api.openai.com`，Chat 与 Responses）发送顶层 `prompt_cache_retention=24h`。兼容网关与自部署端点不发送这些字段 | `default` |
 
 ## Skillpack 与路由配置
 

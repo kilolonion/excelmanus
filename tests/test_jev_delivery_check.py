@@ -1,0 +1,199 @@
+"""Jev 交付检查接线：写入回合的纯文本答复先暂存，核对通过才放行。禁止打网。"""
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from excelmanus.agent.loop import run_tool_loop
+from excelmanus.config import ExcelManusConfig
+from excelmanus.engine import AgentEngine
+from excelmanus.engine_types import ToolCallResult
+from excelmanus.events import EventType
+from excelmanus.providers.stream_types import StreamDelta
+from excelmanus.skillpacks import SkillMatchResult
+from excelmanus.system_one.types import Decision
+from excelmanus.tools import ToolRegistry
+
+
+def _config(**overrides: object) -> ExcelManusConfig:
+    values: dict[str, object] = {
+        "api_key": "test-key",
+        "base_url": "https://test.example.com/v1",
+        "model": "test-model",
+        "max_iterations": 8,
+        "max_consecutive_failures": 3,
+        "workspace_root": str(Path(__file__).resolve().parent),
+        "ai_gateway_api_key": "vck_test",
+    }
+    values.update(overrides)
+    return ExcelManusConfig(**values)
+
+
+def _route() -> SkillMatchResult:
+    return SkillMatchResult(skills_used=[], route_mode="fallback", system_contexts=[])
+
+
+async def _text_stream(text: str):
+    yield StreamDelta(content_delta=text)
+    yield StreamDelta(
+        finish_reason="stop",
+        usage={"prompt_tokens": 2, "completion_tokens": 1},
+    )
+
+
+def _queue_streams(engine: AgentEngine, texts: list[str]) -> AsyncMock:
+    """每次 LLM 调用返回一条新的流式响应。"""
+    streams = [_text_stream(text) for text in texts]
+    mocked = AsyncMock(side_effect=lambda **_kwargs: streams.pop(0))
+    engine._client.chat.completions.create = mocked
+    return mocked
+
+
+def _text_deltas(events: list) -> list[str]:
+    return [
+        ev.text_delta
+        for ev in events
+        if getattr(ev, "event_type", None) == EventType.TEXT_DELTA
+    ]
+
+
+def _verify_decision(next_step: str) -> Decision:
+    return Decision(
+        kind="noop",
+        reason=f"next:{next_step}",
+        extras={"satisfied": 0.8, "scope_ok": 0.9, "next": next_step},
+        applied=True,
+    )
+
+
+def _written_engine(**overrides: object) -> AgentEngine:
+    engine = AgentEngine(_config(**overrides), ToolRegistry())
+    engine._state.affected_files = ["a.xlsx"]
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_delivery_check_holds_text_and_reasks() -> None:
+    """inspect_more：草稿的 TEXT_DELTA 不外发，注入隐藏建议后再跑一迭代。"""
+    engine = _written_engine()
+    mocked_create = _queue_streams(engine, ["草稿答复", "核对后的最终答复"])
+    events: list = []
+    initial = [ToolCallResult("edit_spreadsheet", {"file_path": "a.xlsx"}, "ok", True)]
+    with patch(
+        "excelmanus.system_one.evaluate",
+        AsyncMock(return_value=_verify_decision("inspect_more")),
+    ) as mocked_eval:
+        result = await run_tool_loop(
+            engine, _route(), on_event=events.append,
+            initial_tool_results=initial,
+        )
+    mocked_eval.assert_awaited_once()
+    assert mocked_create.await_count == 2
+    # 草稿文本被暂存后丢弃，最终答复正常流式发出
+    assert _text_deltas(events) == ["核对后的最终答复"]
+    assert result.reply == "核对后的最终答复"
+    # 草稿进了记忆但不展示；隐藏建议消息已注入
+    hidden = [
+        m for m in engine._memory.messages
+        if m.get("_prompt_kind") == "jev_delivery_check"
+    ]
+    assert len(hidden) == 1
+    assert hidden[0].get("_ui_hidden") is True
+    assert "交付检查" in hidden[0]["content"]
+    assert engine._mutation_verification["next"] == "inspect_more"
+
+
+@pytest.mark.asyncio
+async def test_delivery_check_pass_flushes_held_text() -> None:
+    """next=none：暂存的 TEXT_DELTA 按原顺序在最终答复前放出。"""
+    engine = _written_engine()
+    events: list = []
+    engine._client.chat.completions.create = AsyncMock(
+        side_effect=lambda **_kw: _multi_chunk_stream(),
+    )
+    initial = [ToolCallResult("edit_spreadsheet", {"file_path": "a.xlsx"}, "ok", True)]
+    with patch(
+        "excelmanus.system_one.evaluate",
+        AsyncMock(return_value=_verify_decision("none")),
+    ) as mocked_eval:
+        result = await run_tool_loop(
+            engine, _route(), on_event=events.append,
+            initial_tool_results=initial,
+        )
+    mocked_eval.assert_awaited_once()
+    assert _text_deltas(events) == ["第一部分", "第二部分"]
+    assert result.reply == "第一部分第二部分"
+
+
+async def _multi_chunk_stream():
+    yield StreamDelta(content_delta="第一部分")
+    yield StreamDelta(content_delta="第二部分")
+    yield StreamDelta(
+        finish_reason="stop",
+        usage={"prompt_tokens": 2, "completion_tokens": 2},
+    )
+
+
+@pytest.mark.asyncio
+async def test_delivery_check_lists_unevidenced_items() -> None:
+    """A1.5：inspect_more 且 items 有缺证据项时，建议列出待核对事项与如实收尾要求。"""
+    engine = _written_engine()
+    mocked_create = _queue_streams(engine, ["草稿答复", "最终答复"])
+    events: list = []
+    initial = [ToolCallResult("edit_spreadsheet", {"file_path": "a.xlsx"}, "ok", True)]
+    decision = Decision(
+        kind="noop",
+        reason="checklist_items_unevidenced",
+        extras={
+            "satisfied": 0.9,
+            "scope_ok": 0.9,
+            "next": "inspect_more",
+            "missing_items": 1,
+            "items": [
+                {"id": "item_1", "text": "把 A 列标红", "verdict": "evidenced", "confidence": 0.9},
+                {"id": "item_2", "text": "汇总 B 列", "verdict": "missing", "confidence": 0.9},
+            ],
+        },
+        applied=True,
+    )
+    with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
+        result = await run_tool_loop(
+            engine, _route(), on_event=events.append,
+            initial_tool_results=initial,
+        )
+    assert mocked_create.await_count == 2
+    hidden = [
+        m for m in engine._memory.messages
+        if m.get("_prompt_kind") == "jev_delivery_check"
+    ]
+    assert len(hidden) == 1
+    content = hidden[0]["content"]
+    assert "待核对事项" in content
+    assert "汇总 B 列" in content
+    assert "如实列为未完成" in content
+    # 第二次答复不再被拦：暂存文本正常放出
+    assert _text_deltas(events) == ["最终答复"]
+    assert result.reply == "最终答复"
+
+
+@pytest.mark.asyncio
+async def test_read_only_turn_streams_live_without_evaluate() -> None:
+    """只读回合不暂存、不评估，TEXT_DELTA 实时发出。"""
+    engine = AgentEngine(_config(), ToolRegistry())
+    events: list = []
+    engine._client.chat.completions.create = AsyncMock(
+        side_effect=lambda **_kw: _text_stream("只读答复"),
+    )
+    with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked_eval:
+        result = await run_tool_loop(engine, _route(), on_event=events.append)
+    mocked_eval.assert_not_awaited()
+    assert _text_deltas(events) == ["只读答复"]
+    assert result.reply == "只读答复"
+    assert not any(
+        m.get("_prompt_kind") == "jev_delivery_check"
+        for m in engine._memory.messages
+        if isinstance(m, dict)
+    )

@@ -10,7 +10,8 @@ describe("Jev sheet context", () => {
     useSessionStore.setState({ sessions: [{ id: "s1", workspaceId: "w1" }] as Session[] });
     useWorkbookConversationStore.setState({ targets: {}, views: {} });
     useExcelStore.setState({ activeWorkspaceKey: "id:w1", panelOpen: true,
-      activeFilePath: "./sales.xlsx", activeSheet: "明细", fullViewPath: null, draftRange: null });
+      activeFilePath: "./sales.xlsx", activeSheet: "明细", fullViewPath: null, draftRange: null,
+      liveSelection: null });
   });
 
   it("sends only the visible workbook identity", () => {
@@ -30,6 +31,18 @@ describe("Jev sheet context", () => {
     expect(buildJevSheetContext("s1")?.range).toBe("");
     useExcelStore.setState({ draftRange: { path: "sales.xlsx", sheet: "明细", range: "B2:B5" } });
     expect(buildJevSheetContext("s1")?.range).toBe("B2:B5");
+  });
+
+  it("falls back to the live selection reported by the grid", () => {
+    useExcelStore.setState({ liveSelection: { path: "sales.xlsx", sheet: "明细", range: "C2:C9" } });
+    expect(buildJevSheetContext("s1")?.range).toBe("C2:C9");
+    useExcelStore.setState({ liveSelection: { path: "sales.xlsx", sheet: "汇总", range: "C2:C9" } });
+    expect(buildJevSheetContext("s1")?.range).toBe("");
+    useExcelStore.setState({
+      liveSelection: { path: "sales.xlsx", sheet: "明细", range: "C2:C9" },
+      draftRange: { path: "sales.xlsx", sheet: "明细", range: "B2" },
+    });
+    expect(buildJevSheetContext("s1")?.range).toBe("B2");
   });
 
   it("uses the session's ready workbook and normal selection", () => {

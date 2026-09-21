@@ -393,6 +393,15 @@ class LLMCaller:
 
         previous = getattr(e, "_last_model_response_at", None)
         e._model_idle_seconds = max(0.0, time.monotonic() - previous) if isinstance(previous, (int, float)) else None
+        # 空闲细分：按停止原因独占记账，未覆盖部分归入 other。
+        tracker = getattr(e, "_idle_tracker", None)
+        raw_totals = tracker.get("totals") if isinstance(tracker, dict) else None
+        totals = dict(raw_totals) if isinstance(raw_totals, dict) else {}
+        e._model_idle_breakdown = (
+            {**totals, "other": max(0.0, e._model_idle_seconds - sum(totals.values()))}
+            if e._model_idle_seconds is not None
+            else None
+        )
         return await traced_request(e, e._client.chat.completions.create, kwargs)
 
     # ── 流式消费 ──────────────────────────────────────────

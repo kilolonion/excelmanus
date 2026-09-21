@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import Any, Literal
 
 from excelmanus.engine_core.error_payload import PRE_EXECUTE_DENIED, SDK_CONTRACT_VIOLATION
+from excelmanus.engine_core.idle_tracker import idle_segment
 from excelmanus.engine_core.tool_result import (
     ToolResult,
     annotate_shadow_schema_violations,
@@ -326,30 +327,32 @@ class ToolRuntime:
             row.cancel_event.set()
             if not row.cancel_requested and not row.task.done():
                 row.task.cancel()
-            # Repeated stop requests cannot detach a still-running sync thread.
-            while not row.task.done():
-                try:
-                    await asyncio.shield(row.task)
-                except asyncio.CancelledError:
-                    parent_cancelled = parent_cancelled or parent_stopping()
-                    continue
-                except Exception:
-                    break
-            # A stopped SDK bridge can return before a non-cooperative child
-            # finishes. Keep the enclosing tool's execution slot until it drains.
-            child_tasks = [child.task for child in self._calls.values()
-                           if child.parent_execution_id == row.execution_id and child.task is not None]
-            for task in child_tasks:
-                while not task.done():
+            # 取消排空等待按 cancel_drain 记入空闲细分；CancelledError 传播不变。
+            with idle_segment(self.engine, "cancel_drain"):
+                # Repeated stop requests cannot detach a still-running sync thread.
+                while not row.task.done():
                     try:
-                        await asyncio.shield(task)
+                        await asyncio.shield(row.task)
                     except asyncio.CancelledError:
                         parent_cancelled = parent_cancelled or parent_stopping()
+                        continue
                     except Exception:
                         break
-            for task in [row.task, *child_tasks]:
-                if task.done() and not task.cancelled():
-                    task.exception()  # Retrieve failures even if cancellation won the race.
+                # A stopped SDK bridge can return before a non-cooperative child
+                # finishes. Keep the enclosing tool's execution slot until it drains.
+                child_tasks = [child.task for child in self._calls.values()
+                               if child.parent_execution_id == row.execution_id and child.task is not None]
+                for task in child_tasks:
+                    while not task.done():
+                        try:
+                            await asyncio.shield(task)
+                        except asyncio.CancelledError:
+                            parent_cancelled = parent_cancelled or parent_stopping()
+                        except Exception:
+                            break
+                for task in [row.task, *child_tasks]:
+                    if task.done() and not task.cancelled():
+                        task.exception()  # Retrieve failures even if cancellation won the race.
             result = self._cancelled_result(row)
             self._finish_call(row, result)
             if parent_cancelled or not row.cancel_requested:

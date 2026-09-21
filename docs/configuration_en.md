@@ -57,6 +57,7 @@ Model-profile API keys are encrypted in the main database. The Fernet key lives 
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS allowed origins (comma-separated). Runtime also adds `localhost` / `127.0.0.1` / `[::1]` plus the frontend port | `http://localhost:3000,http://127.0.0.1:3000` |
 | `EXCELMANUS_MAX_CONTEXT_TOKENS` | Explicit override for the inferred model context limit | Inferred from the model; `256000` fallback |
 | `EXCELMANUS_PROMPT_CACHE_KEY_ENABLED` | Send prompt_cache_key to API to improve cache hit rate | `true` |
+| `EXCELMANUS_PROMPT_CACHE_RETENTION` | Prompt cache retention policy (`default`/`extended`). `extended` applies only to first-party endpoints: Anthropic (`api.anthropic.com`) adds `ttl=1h` to every `cache_control` breakpoint and sends `anthropic-beta: extended-cache-ttl-2025-04-11`; OpenAI (`api.openai.com`, Chat and Responses) sends top-level `prompt_cache_retention=24h`. Compatible gateways and self-hosted endpoints never receive these fields | `default` |
 
 ## Skillpack & Routing Configuration
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -94,6 +95,7 @@ _PACK_FIELDS: dict[str, tuple[str, ...]] = {
         "verification_facts",
         "write_evidence",
         "write_operations",
+        "checklist",
     ),
     "recovery.next_step": (
         "user_text",
@@ -381,6 +383,46 @@ def ui_surface_state_from_engine(
     )
 
 
+_CHECKLIST_SPLIT_RE = re.compile(
+    r"[，,；;、。]|以及|另外|然后|同时|并且?|再(?:把|将|给)?|\band\b",
+    re.IGNORECASE,
+)
+_CHECKLIST_GREETINGS = frozenset(
+    {"你好", "您好", "hi", "hello", "hey", "谢谢", "thanks", "在吗", "早上好", "下午好", "晚上好"}
+)
+
+
+def delivery_checklist(engine: Any, *, limit: int = 5) -> list[dict[str, str]]:
+    """用户请求的可核对事项清单（≤5 项），供 mutation.verify 逐项判定。
+
+    优先取任务清单的子任务标题；无任务时把 user_text 按子句切分；
+    仍为空则整段回退为单项。
+    """
+    items: list[str] = []
+    store = getattr(engine, "_task_store", None)
+    task_list = getattr(store, "current", None) if store is not None else None
+    if task_list is not None:
+        for item in getattr(task_list, "items", None) or ():
+            title = str(getattr(item, "title", "") or "").strip()
+            if title:
+                items.append(title)
+    if not items:
+        text = last_user_text(engine).strip()
+        for part in _CHECKLIST_SPLIT_RE.split(text):
+            piece = part.strip(" \t，,；;、。")
+            if len(piece) < 4:
+                continue
+            if piece.lower() in _CHECKLIST_GREETINGS:
+                continue
+            items.append(piece)
+        if not items and text:
+            items.append(text.strip())
+    return [
+        {"id": f"item_{index + 1}", "text": _clip_text(text, 80)}
+        for index, text in enumerate(items[:limit])
+    ]
+
+
 def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = None) -> dict[str, Any]:
     """Project deterministic post-write facts for ``mutation.verify``."""
     state = getattr(engine, "_state", None)
@@ -409,6 +451,9 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
             verification = value.get("write_verification")
         if isinstance(verification, Mapping):
             mismatches = verification.get("mismatches") or []
+            style_changes = verification.get("style_changes") or []
+            style_mismatches = verification.get("style_mismatches") or []
+            structure_changes = verification.get("structure_changes") or []
             write_evidence.append({
                 "tool": name,
                 "file_path": str((getattr(item, "arguments", None) or {}).get("file_path") or ""),
@@ -421,6 +466,17 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
                 "total_changes": max(0, int(verification.get("total_changes") or 0)),
                 "value_changes": len(verification.get("value_changes") or []),
                 "formula_changes": len(verification.get("formula_changes") or []),
+                "formula_intended": max(0, int(verification.get("formula_intended_count") or 0)),
+                "formula_verified": max(0, int(verification.get("formula_verified_count") or 0)),
+                "formula_overwritten": max(0, int(verification.get("formula_overwritten_count") or 0)),
+                "style_ok_count": sum(len(c.get("ok") or []) for c in style_changes if isinstance(c, Mapping)),
+                "style_mismatch_count": len(style_mismatches) if isinstance(style_mismatches, list) else 0,
+                "structure_verified": sum(
+                    1 for c in structure_changes if isinstance(c, Mapping) and c.get("verified") is True
+                ) if isinstance(structure_changes, list) else 0,
+                "structure_unverified": sum(
+                    1 for c in structure_changes if isinstance(c, Mapping) and c.get("verified") is False
+                ) if isinstance(structure_changes, list) else 0,
                 "mismatch_count": max(int(verification.get("mismatch_count") or 0), len(mismatches) if isinstance(mismatches, list) else 0),
                 "truncated": bool(verification.get("truncated")),
                 "sampled": bool(verification.get("sampled")),
@@ -428,6 +484,9 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
             })
         if not bool(getattr(item, "success", True)):
             failed_tools += 1
+    style_mismatch_total = sum(int(item.get("style_mismatch_count") or 0) for item in write_evidence)
+    formula_overwritten_total = sum(int(item.get("formula_overwritten") or 0) for item in write_evidence)
+    structure_unverified_total = sum(int(item.get("structure_unverified") or 0) for item in write_evidence)
     verification_facts = {
         "success": bool(getattr(chat_result, "success", True)) if chat_result is not None else True,
         "truncated": bool(getattr(chat_result, "truncated", False)) if chat_result is not None else False,
@@ -439,11 +498,17 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
             1 for item in write_evidence if item.get("status") in {"success", "ok"} and not item.get("skipped")
         ),
         "mismatch_count": sum(int(item.get("mismatch_count") or 0) for item in write_evidence),
+        "style_mismatch_count": style_mismatch_total,
+        "formula_overwritten_count": formula_overwritten_total,
+        "structure_unverified_count": structure_unverified_total,
         "evidence_truncated": len(write_evidence) > 10 or len(all_operations) > 10,
         "has_incomplete_evidence": bool(
             not write_evidence or len(write_evidence) < len(all_operations)
             or any(item.get("truncated") or item.get("skipped") for item in write_evidence)
             or any(item.get("status") not in {"success", "ok"} for item in write_evidence)
+            or style_mismatch_total > 0
+            or formula_overwritten_total > 0
+            or structure_unverified_total > 0
         ),
         "has_version_conflict": any("conflict" in str(item).lower() for item in operations),
     }
@@ -458,6 +523,7 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
             "verification_facts": verification_facts,
             "write_evidence": write_evidence[-10:],
             "write_operations": operations,
+            "checklist": delivery_checklist(engine),
         },
     )
 

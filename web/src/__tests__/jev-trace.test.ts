@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  ANSWER_LABELS,
   cardTone,
   jevEmptyCopy,
   parseJevTrace,
@@ -40,15 +41,16 @@ describe("jev-trace", () => {
     useJevStore.setState({ drawerOpen: false, pinned: false, railCollapsed: false, chatEnabled: true, seq: 0 });
   });
 
-  it("parses a shadow exposure.turn card", () => {
+  it("parses a legacy shadow exposure.turn card as enforce", () => {
     const trace = makeTrace();
     expect(trace).not.toBeNull();
     expect(trace?.pack).toBe("exposure.turn");
     expect(packTitle(trace!.pack)).toBe("回合入口");
-    expect(trace?.gate).toBe("shadow");
+    // 二态契约：旧的 shadow 事件值归一为 enforce
+    expect(trace?.gate).toBe("enforce");
     expect(trace?.applied).toBe(false);
     expect(trace?.answers.domain).toBe("chitchat");
-    expect(cardTone(trace!)).toBe("shadow");
+    expect(cardTone(trace!)).toBe("unavailable");
   });
 
   it("drops secrets and oversized state from answers", () => {
@@ -93,10 +95,10 @@ describe("jev-trace", () => {
     expect(cardTone(makeTrace({ applied: true, gate: "enforce" })!)).toBe("applied");
   });
 
-  it("does not present an observed denial as an actual intervention", () => {
+  it("does not present an unapplied denial as an actual intervention", () => {
     const trace = makeTrace({ kind: "deny", action: "deny" })!;
-    expect(cardTone(trace)).toBe("shadow");
-    expect(traceStatus(trace).label).toBe("仅观察");
+    expect(cardTone(trace)).toBe("unavailable");
+    expect(traceStatus(trace).label).toBe("未采纳");
     expect(traceActionLabel(trace)).toBe("建议拒绝");
     expect(traceNeedsAttention(trace)).toBe(false);
   });
@@ -143,6 +145,46 @@ describe("jev-trace", () => {
     expect(formatLatency(Infinity)).toBe("—");
     expect(formatLatency(1250)).toBe("1.25 s");
     expect(makeTrace({ latency_ms: Infinity })!.latencyMs).toBe(0);
+  });
+
+  it("parses recovery outcome traces and keeps the advice source", () => {
+    const trace = parseJevTrace(
+      {
+        pack: "recovery.next_step",
+        gate: "enforce",
+        applied: true,
+        transport: "gateway",
+        kind: "outcome",
+        action: "恢复结果 escaped",
+        outcome: "escaped",
+        source: "deterministic",
+        impact: "建议后已摆脱同一失败",
+      },
+      "jev-outcome",
+    );
+    expect(trace?.outcome).toBe("escaped");
+    expect(trace?.source).toBe("deterministic");
+    expect(trace?.kind).toBe("outcome");
+  });
+
+  it("labels missing evidence items on mutation.verify cards", () => {
+    expect(ANSWER_LABELS.missing_items).toBe("缺证据事项");
+    const trace = makeTrace({
+      pack: "mutation.verify",
+      gate: "enforce",
+      applied: true,
+      action: "inspect_more",
+      answers: { satisfied: 0.9, scope_ok: 0.9, missing_items: 2 },
+    })!;
+    expect(traceActionLabel(trace)).toBe("2 项待核对");
+    const clean = makeTrace({
+      pack: "mutation.verify",
+      gate: "enforce",
+      applied: true,
+      action: "none",
+      answers: { satisfied: 0.9, scope_ok: 0.9, missing_items: 0 },
+    })!;
+    expect(traceActionLabel(clean)).not.toContain("待核对");
   });
 
   it("handler accumulates live jev_trace and skips replay", () => {

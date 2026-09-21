@@ -14,6 +14,7 @@ from copy import deepcopy
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.engine_core.idle_tracker import idle_segment
 from excelmanus.engine_utils import (
     _SYSTEM_Q_MODE_SWITCH,
     _SYSTEM_Q_PLAN_EXIT,
@@ -170,7 +171,8 @@ class InteractionHandler:
         if record.get("approval", {}).get("approval_id") == approval_id and record.get("decision") is not None:
             return {"decision": record["decision"], "approval_id": approval_id}
         fut = self._engine._interaction_registry.create(approval_id)
-        return await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
+        with idle_segment(self._engine, "approval"):
+            return await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
 
     async def resume_pending(self, on_event: "EventCallback | None", *,
                              approval_resolver: Any = None, question_resolver: Any = None) -> Any:
@@ -201,8 +203,9 @@ class InteractionHandler:
                     self._persist()
                     self.emit_pending_approval_event(pending=pending, on_event=on_event, iteration=0,
                                                      tool_call_id=record["tool_call_id"])
-                    payload = (await approval_resolver(pending) if approval_resolver is not None
-                               else await self.wait_approval_decision(approval_id))
+                    with idle_segment(e, "approval"):
+                        payload = (await approval_resolver(pending) if approval_resolver is not None
+                                   else await self.wait_approval_decision(approval_id))
                     self.record_approval_decision(approval_id, payload["decision"] if isinstance(payload, dict) else str(payload))
                 updates, _ = await e._apply_approval_decision(
                     record["decision"], pending, approval_id, record["tool_call_id"], on_event, 0, "恢复审批",
@@ -399,7 +402,8 @@ class InteractionHandler:
             try:
                 if resolver is not None:
                     try:
-                        raw_answer = await resolver(pending_q)
+                        with idle_segment(e, "question"):
+                            raw_answer = await resolver(pending_q)
                     except Exception as exc:
                         logger.warning("question_resolver 异常: %s", exc)
                         raw_answer = ""
@@ -409,7 +413,8 @@ class InteractionHandler:
                         payload = {"raw_input": raw_answer}
                 else:
                     assert fut is not None
-                    payload = await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
+                    with idle_segment(e, "question"):
+                        payload = await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
             except asyncio.CancelledError:
                 e._question_flow.clear()
                 e._interaction_registry.cancel(pending_q.question_id)
@@ -455,7 +460,8 @@ class InteractionHandler:
         e = self._engine
         resolver = e._question_resolver
         if resolver is not None:
-            raw_answer = await resolver(pending_q)
+            with idle_segment(e, "question"):
+                raw_answer = await resolver(pending_q)
             try:
                 parsed = e._question_flow.parse_answer(raw_answer, question=pending_q)
                 return parsed.to_tool_result()
@@ -463,7 +469,8 @@ class InteractionHandler:
                 return {"raw_input": raw_answer}
         else:
             fut = e._interaction_registry.create(pending_q.question_id)
-            return await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
+            with idle_segment(e, "question"):
+                return await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
 
     def handle_plan_exit_answer(
         self,

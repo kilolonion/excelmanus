@@ -505,6 +505,9 @@ class ExcelManusConfig:
     max_context_tokens: int = _DEFAULT_CONTEXT_TOKENS
     # 提示词缓存优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
     prompt_cache_key_enabled: bool = True
+    # 提示词缓存保留策略：default|extended；仅一方 Anthropic/OpenAI 端点生效，
+    # 兼容网关与自部署端点不会收到扩展 TTL/retention 字段
+    prompt_cache_retention: str = "default"
     # 上下文自动压缩（Compaction）：增强版对话摘要，后台静默执行
     compaction_enabled: bool = True
     compaction_threshold_ratio: float = 0.85
@@ -591,6 +594,7 @@ class _ContextOptimizationConfig:
 
     max_context_tokens: int
     prompt_cache_key_enabled: bool
+    prompt_cache_retention: str
     compaction_enabled: bool
     compaction_threshold_ratio: float
     compaction_keep_recent_turns: int
@@ -986,6 +990,15 @@ def _load_context_optimization_config(model: str = "") -> _ContextOptimizationCo
         max_context_tokens = _infer_context_tokens_for_model(model)
     else:
         max_context_tokens = _DEFAULT_CONTEXT_TOKENS
+    retention_raw = (_s("EXCELMANUS_PROMPT_CACHE_RETENTION") or "").strip().lower()
+    if retention_raw in ("", "default", "extended"):
+        prompt_cache_retention = retention_raw or "default"
+    else:
+        logger.warning(
+            "EXCELMANUS_PROMPT_CACHE_RETENTION=%r 无效，回退到 default",
+            retention_raw,
+        )
+        prompt_cache_retention = "default"
     return _ContextOptimizationConfig(
         max_context_tokens=max_context_tokens,
         prompt_cache_key_enabled=_parse_bool(
@@ -993,6 +1006,7 @@ def _load_context_optimization_config(model: str = "") -> _ContextOptimizationCo
             "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
             True,
         ),
+        prompt_cache_retention=prompt_cache_retention,
         compaction_enabled=_parse_bool(
             _s("EXCELMANUS_COMPACTION_ENABLED"),
             "EXCELMANUS_COMPACTION_ENABLED",
@@ -1602,6 +1616,7 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         friendly_error_messages=friendly_error_messages,
         max_context_tokens=context_optimization.max_context_tokens,
         prompt_cache_key_enabled=context_optimization.prompt_cache_key_enabled,
+        prompt_cache_retention=context_optimization.prompt_cache_retention,
         compaction_enabled=context_optimization.compaction_enabled,
         compaction_threshold_ratio=context_optimization.compaction_threshold_ratio,
         compaction_keep_recent_turns=context_optimization.compaction_keep_recent_turns,

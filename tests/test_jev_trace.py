@@ -68,11 +68,11 @@ def test_payload_shape_is_bounded_and_has_impact() -> None:
     payload = build_jev_trace_payload(
         "exposure.turn",
         _decision(),
-        gate="shadow",
+        gate="enforce",
         transport="gateway",
     )
     assert payload["pack"] == "exposure.turn"
-    assert payload["gate"] == "shadow"
+    assert payload["gate"] == "enforce"  # 二态契约：gate 只有 off/enforce
     assert payload["applied"] is False
     assert payload["transport"] == "gateway"
     assert payload["latency_ms"] == pytest.approx(312.4)
@@ -80,7 +80,7 @@ def test_payload_shape_is_bounded_and_has_impact() -> None:
     assert payload["answers"]["domain"] == "chitchat"
     assert payload["answers"]["needs_write"] == pytest.approx(0.02)
     assert payload["answers"]["mode_hint"] == "keep"
-    assert "仅观察" in payload["impact"]
+    assert "未应用" in payload["impact"]
     blob = str(payload)
     assert "user_text" not in blob
     assert "api_key" not in blob
@@ -113,10 +113,10 @@ def test_unavailable_payload_still_names_pack() -> None:
     assert "不可用" in payload["impact"]
 
 
-def test_emit_sends_jev_trace_on_shadow() -> None:
+def test_emit_sends_jev_trace_on_enforce() -> None:
     captured: list[ToolCallEvent] = []
     engine = SimpleNamespace(
-        config=_config(jev_enabled="shadow", jev_exposure="shadow"),
+        config=_config(jev_enabled="enforce", jev_exposure="enforce"),
         _subagent_config=None,
         _is_host_session=True,
         _driver=SimpleNamespace(_on_event=None),
@@ -126,7 +126,7 @@ def test_emit_sends_jev_trace_on_shadow() -> None:
     traces = [item for item in captured if item.event_type == EventType.JEV_TRACE]
     assert traces
     assert traces[0].jev_trace["pack"] == "exposure.turn"
-    assert traces[0].jev_trace["gate"] == "shadow"
+    assert traces[0].jev_trace["gate"] == "enforce"
 
 
 def test_emit_is_silent_when_jev_is_inactive() -> None:

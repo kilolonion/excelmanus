@@ -84,15 +84,18 @@ async def test_e_default_still_pending() -> None:
 
 
 @pytest.mark.asyncio
-async def test_e_unsigned_enforce_deny_still_pending() -> None:
-    engine, pending = _ask_engine(jev_enabled="enforce", jev_calibrated=True)
+async def test_e_enforce_deny_rejects_without_signoff() -> None:
+    # 二态契约：enforce 下 deny 直接生效，不再需要标定签字。
+    engine, _pending = _ask_engine(jev_enabled="enforce", jev_calibrated=True)
     handler = HighRiskApprovalHandler(engine=engine, dispatcher=MagicMock())
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=_deny())):
         outcome = await handler.handle("delete_file", "c1", {"file_path": "a.xlsx"})
-    engine.approval.create_pending.assert_called_once()
+    engine.approval.create_pending.assert_not_called()
     engine.execute_tool_with_audit.assert_not_called()
-    assert outcome.pending_approval is True
-    assert outcome.approval_id == pending.approval_id
+    assert outcome.pending_approval is False
+    assert outcome.success is False
+    assert outcome.error == PRE_EXECUTE_DENIED
+    assert "destructive_or_exfil" in outcome.result_str
 
 
 @pytest.mark.asyncio

@@ -211,6 +211,9 @@ interface ExcelState {
   pendingSelection: { filePath: string; sheet: string; range: string; contentVersion?: string } | null;
   draftRange: { range: string; sheet: string; path?: string; contentVersion?: string } | null;
 
+  // 普通模式下表格实时上报的当前选区（供 agent 上下文与对话芯片使用）
+  liveSelection: { path: string; sheet: string; range: string; contentVersion?: string } | null;
+
   // 快速添加文件提及到聊天输入（由侧栏设置，ChatInput 消费）
   pendingFileMention: { path: string; filename: string } | null;
 
@@ -309,6 +312,7 @@ interface ExcelState {
   exitSelectionMode: () => void;
   confirmSelection: (sel: { filePath: string; sheet: string; range: string; contentVersion?: string }) => void;
   setDraftRange: (range: { range: string; sheet: string; path?: string; contentVersion?: string } | null) => void;
+  setLiveSelection: (sel: ExcelState["liveSelection"]) => void;
   clearPendingSelection: () => void;
   /** Insert @file:filename into chat input from sidebar click. */
   mentionFileToInput: (file: { path: string; filename: string }) => void;
@@ -365,6 +369,7 @@ export const useExcelStore = create<ExcelState>()(
   selectionMode: false,
   pendingSelection: null,
   draftRange: null,
+  liveSelection: null,
   pendingFileMention: null,
   pendingFileMentions: null,
   pendingTemplateMessage: null,
@@ -507,6 +512,7 @@ export const useExcelStore = create<ExcelState>()(
         selectionMode: false,
         pendingSelection: null,
         draftRange: null,
+        liveSelection: null,
         compareMode: false,
         compareFileA: null,
         compareFileB: null,
@@ -754,6 +760,16 @@ export const useExcelStore = create<ExcelState>()(
     });
   },
 
+  setLiveSelection: (sel) =>
+    set((state) => {
+      const prev = state.liveSelection;
+      if (prev === sel) return state;
+      if (!prev || !sel) return { liveSelection: sel ?? null };
+      if (prev.path === sel.path && prev.sheet === sel.sheet && prev.range === sel.range
+        && prev.contentVersion === sel.contentVersion) return state;
+      return { liveSelection: sel };
+    }),
+
   clearPendingSelection: () => set({ pendingSelection: null }),
 
   mentionFileToInput: (file) => set({ pendingFileMention: file }),
@@ -992,6 +1008,7 @@ export const useExcelStore = create<ExcelState>()(
       selectionMode: false,
       pendingSelection: null,
       draftRange: null,
+      liveSelection: null,
       pendingFileMentions: null,
       pendingTemplateMessage: null,
       operations: [],

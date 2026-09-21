@@ -58,7 +58,8 @@ class TestPostWriteCheckpointEditSpreadsheet:
 
 
 class TestPostWriteCheckpointFormat:
-    def test_format_spreadsheet_reports_dimensions(self, tmp_path):
+    def test_format_spreadsheet_reports_style_readback(self, tmp_path):
+        # format_spreadsheet 现在做样式回读，不再走「未核验」的跳过分支
         fp = _create_test_xlsx(tmp_path, sheets={"Sheet1": [[1], [2], [3]]})
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
         result = ToolDispatcher._post_write_checkpoint(
@@ -66,7 +67,7 @@ class TestPostWriteCheckpointFormat:
             {"file_path": str(fp), "sheet": "Sheet1"},
             str(tmp_path),
         )
-        assert "未核验" in result
+        assert "样式回读" in result
         assert "Sheet1" in result
 
 

@@ -530,21 +530,34 @@ async def maybe_verify_mutation(
 
     state = mutation_verify_state_from_engine(engine, chat_result)
     decision = await _eval_traced(engine, "mutation.verify", state, on_event=on_event)
+    extras = decision.extras or {}
+    items = [
+        item for item in (extras.get("items") or [])
+        if isinstance(item, Mapping) and str(item.get("verdict") or "") != "evidenced"
+    ]
     engine._mutation_verification = {  # type: ignore[attr-defined]
-        "next": str((decision.extras or {}).get("next") or "none"),
-        "satisfied": float((decision.extras or {}).get("satisfied") or 0.0),
-        "scope_ok": float((decision.extras or {}).get("scope_ok") or 0.0),
+        "next": str(extras.get("next") or "none"),
+        "satisfied": float(extras.get("satisfied") or 0.0),
+        "scope_ok": float(extras.get("scope_ok") or 0.0),
+        "items": items[:5],
+        "missing_items": int(extras.get("missing_items") or 0),
         "applied": decision_can_apply("mutation.verify", decision, settings),
         "reason": decision.reason,
     }
     if not decision_can_apply("mutation.verify", decision, settings):
         return ""
     action = engine._mutation_verification["next"]
-    return {
+    advice = {
         "inspect_more": "写入覆盖情况仍需核对。请根据用户原始要求和实际提交记录，做一次有界的只读检查；缺少证据时如实说明，勿重复写入。",
         "ask_user": "写入结果与要求的对应关系尚不明确。先核对已有证据；确需用户补充时合并为一个必要问题，勿声称全部完成。",
         "none": "",
     }.get(action, "")
+    if action == "inspect_more" and advice:
+        pending = [str(item.get("text") or "")[:80] for item in items if str(item.get("text") or "")]
+        if pending:
+            advice += "\n待核对事项：" + " ".join(f"{i}) {text}" for i, text in enumerate(pending[:5], 1))
+            advice += "\n核对后仍无法证实的事项，请在最终答复中如实列为未完成或未验证，不要重复写入，也不要再次宣称全部完成。"
+    return advice
 
 
 def should_check_delivery(engine: Any) -> bool:
@@ -583,12 +596,16 @@ async def maybe_suggest_recovery(
     classes = {item.get("failure_class") for item in errors}
     # Stable error codes already carry the right recovery. No semantic call is
     # needed to refresh a missing sheet/version or respect a rejection.
+    source = "jev"
     if breaker_triggered or classes & {"permission_denied", "approval_denied", "approval_timeout", "blocked"}:
         decision = Decision(kind="noop", reason="deterministic_stop", extras={"next": "stop"}, applied=True)
+        source = "deterministic"
     elif any(item.get("committed") or item.get("commit_unknown") for item in errors):
         decision = Decision(kind="noop", reason="commit_requires_inspection", extras={"next": "inspect_more"}, applied=True)
+        source = "deterministic"
     elif classes and classes <= {"not_found", "conflict"}:
         decision = Decision(kind="noop", reason="refresh_target", extras={"next": "inspect_more"}, applied=True)
+        source = "deterministic"
     else:
         decision = await _eval_traced(engine, "recovery.next_step", state, on_event=on_event)
     engine._recovery_hint = {  # type: ignore[attr-defined]
@@ -597,6 +614,8 @@ async def maybe_suggest_recovery(
         "needs_user": float((decision.extras or {}).get("needs_user") or 0.0),
         "applied": decision_can_apply("recovery.next_step", decision, settings),
         "reason": decision.reason,
+        "source": source,
+        "breaker_triggered": bool(breaker_triggered),
         "delivered": False,
         "result_count": len(tool_results),
         "error_codes": [item.get("error_code") for item in errors],
@@ -612,6 +631,46 @@ async def maybe_suggest_recovery(
         "ask_user": "继续操作需要用户补充范围或意图。请核对现有信息后提出一个必要问题。",
         "stop": "本次失败不适合继续重复操作。请说明失败原因和已完成部分；权限、审批与停止条件仍然有效。",
     }.get(action, "")
+
+
+def emit_recovery_outcome(engine: Any, *, on_event: Any | None = None) -> None:
+    """回合末把恢复建议的采纳结果记成一条 outcome 决策。child 不发。"""
+    if engine is None or is_child_session(engine):
+        return
+    hint = getattr(engine, "_recovery_hint", None)
+    if not isinstance(hint, dict) or not hint.get("applied"):
+        return
+    if (
+        str(hint.get("next") or "") == "stop"
+        and str(hint.get("reason") or "") == "deterministic_stop"
+        and bool(hint.get("breaker_triggered"))
+    ):
+        outcome = "stopped"
+    elif not hint.get("delivered"):
+        outcome = "not_delivered"
+    elif hint.get("following_success") is None:
+        outcome = "not_continued"
+    elif hint.get("same_failure_repeated"):
+        outcome = "repeated"
+    else:
+        outcome = "escaped"
+    settings = live_jev_settings(getattr(engine, "config", None))
+    try:
+        gate = gate_for_pack("recovery.next_step", settings)
+    except Exception:
+        gate = "off"
+    decision = Decision(
+        kind="outcome",
+        reason=f"recovery_outcome:{outcome}",
+        applied=True,
+        extras={
+            "next": str(hint.get("next") or ""),
+            "source": str(hint.get("source") or "jev"),
+            "outcome": outcome,
+        },
+    )
+    record_jev_decision(pack_id="recovery.next_step", gate=gate, decision=decision)
+    emit_jev_trace(engine, decision, pack_id="recovery.next_step", on_event=on_event)
 
 
 def _has_at_mention(text: str) -> bool:

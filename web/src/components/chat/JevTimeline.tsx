@@ -43,7 +43,9 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
           {status.label}
         </span>
       </div>
-      <p className="mt-2 break-words text-sm font-semibold leading-6 text-foreground">{traceActionLabel(trace)}</p>
+      <p className="mt-2 break-words text-sm font-semibold leading-6 text-foreground">
+        {trace.outcome && trace.impact ? trace.impact : traceActionLabel(trace)}
+      </p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">{status.description}</p>
       {trace.pack === "context.resolve" && (
         <dl className="mt-3 grid gap-2 rounded-lg bg-muted/40 p-2.5 text-xs">
@@ -68,6 +70,12 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
               <dd className="min-w-0 break-words text-right">{formatContextAnswer(key, value)}</dd>
             </div>
           ))}
+          {trace.source && (
+            <div className="flex justify-between gap-3">
+              <dt className="text-muted-foreground">建议来源</dt>
+              <dd>{trace.source === "deterministic" ? "确定性规则" : "Jev"}</dd>
+            </div>
+          )}
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">评估模式</dt><dd>{jevGateLabel(trace.gate)}</dd></div>
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">连接方式</dt><dd>{trace.transport === "typesafe" ? "TypeSafe 直连" : trace.transport === "gateway" ? "AI Gateway" : "不可用"}</dd></div>
           {trace.reason && <div className="border-t border-border/50 pt-2"><dt className="text-muted-foreground">诊断原因</dt><dd className="mt-1 break-all font-mono text-muted-foreground">{trace.reason}</dd></div>}

@@ -53,6 +53,18 @@ def resolve_route(engine: Any) -> ResolvedRoute:
     purpose = None
     if files_ok:
         purpose = "user_data" if "deepseek" in (endpoint or "").lower() else "assistants"
+    # 扩展缓存保留只发给一方端点；兼容网关/自部署一律不声明该能力。
+    retention_pref = str(
+        getattr(config, "prompt_cache_retention", "") or ""
+    ).strip().lower()
+    cache_retention = ""
+    if retention_pref == "extended":
+        if protocol == "anthropic":
+            if host == "api.anthropic.com" or host.endswith(".anthropic.com"):
+                cache_retention = "extended"
+        elif protocol in {"openai", "openai_responses"}:
+            if host == "api.openai.com":
+                cache_retention = "extended"
     thinking: dict[str, Any] = {}
     tc = getattr(engine, "_thinking_config", None)
     if tc is not None:
@@ -88,6 +100,7 @@ def resolve_route(engine: Any) -> ResolvedRoute:
         files_purpose=purpose,
         call_config=call_config_from_engine(engine),
         workspace_key=workspace_key,
+        cache_retention=cache_retention,
     )
 
 

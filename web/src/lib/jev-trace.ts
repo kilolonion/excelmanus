@@ -27,6 +27,8 @@ export interface JevTrace {
   reason: string;
   answers: Record<string, string | number | boolean>;
   impact: string;
+  outcome?: string;
+  source?: string;
   at: number;
 }
 
@@ -73,6 +75,8 @@ export function parseJevTrace(data: Record<string, unknown>, id: string): JevTra
     reason: String(data.reason || "").slice(0, 200),
     answers: asAnswers(data.answers),
     impact: String(data.impact || "").slice(0, 200),
+    ...(data.outcome ? { outcome: String(data.outcome).slice(0, 40) } : {}),
+    ...(data.source ? { source: String(data.source).slice(0, 40) } : {}),
     at: Date.now(),
   };
 }
@@ -141,8 +145,9 @@ export const ANSWER_LABELS: Record<string, string> = {
   next: "下一步",
   pin: "置顶技能",
   action: "动作",
-  satisfied: "是否完成",
-  scope_ok: "范围符合",
+  satisfied: "已完成置信",
+  scope_ok: "范围一致",
+  missing_items: "缺证据事项",
   retryable: "可重试",
   needs_user: "需要用户",
   still_relevant: "后续仍需使用",
@@ -217,6 +222,10 @@ export function traceActionLabel(trace: JevTrace): string {
     stay: "保持当前界面", side_panel: "打开表格侧栏", sheet_full: "打开完整表格", compare: "查看差异", files_tab: "打开文件列表",
   };
   if (trace.pack === "skill.pin" && !["none", "noop"].includes(trace.action)) return `建议置顶 · ${trace.action}`;
+  if (trace.pack === "mutation.verify") {
+    const missing = Number(trace.answers.missing_items);
+    if (Number.isFinite(missing) && missing > 0) return `${missing} 项待核对`;
+  }
   return labels[trace.action] || "查看评估建议";
 }
 

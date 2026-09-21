@@ -28,7 +28,10 @@ export function buildJevSheetContext(sessionId?: string | null) {
   if (!path || path.length > 300) return undefined;
   const sheet = (excel.fullViewPath ? excel.fullViewSheet : excel.activeSheet) || "";
   const draft = excel.draftRange;
+  const live = excel.liveSelection;
   const range = draft?.path && normalizeRelativePath(draft.path) === normalizeRelativePath(path)
-    && draft.sheet === sheet ? draft.range : "";
+    && draft.sheet === sheet ? draft.range
+    : live && normalizeRelativePath(live.path) === normalizeRelativePath(path)
+      && live.sheet === sheet ? live.range : "";
   return { workspace_id: session.workspaceId, path, sheet, range };
 }

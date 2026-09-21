@@ -17,7 +17,7 @@ PackId = Literal[
     "skill.pin",
     "loop.wrap",
 ]
-DecisionKind = Literal["auto", "ask", "deny", "escalate", "noop"]
+DecisionKind = Literal["auto", "ask", "deny", "escalate", "noop", "outcome"]
 # JEV has a binary runtime contract.  Legacy ``shadow`` values are migrated
 # to ``enforce`` at the configuration boundary and must never reach the host.
 GateLevel = Literal["off", "enforce"]

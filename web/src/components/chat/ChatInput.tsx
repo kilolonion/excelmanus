@@ -53,6 +53,7 @@ import {
 import { ChatDropzone, ChatUploadButton } from "./ChatUploadButton";
 import { ChatSelectionChip } from "./ChatSelectionChip";
 import { WorkbookContextChip } from "@/components/excel/WorkbookConversation";
+import { ChatLiveSelectionChip } from "./ChatLiveSelectionChip";
 import { prepareWorkbookMessage } from "@/lib/workbook-conversation";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { useChatUpload } from "./use-chat-upload";
@@ -871,6 +872,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     >
       <ChatSelectionChip insertMentionTokens={insertMentionTokens} />
       <WorkbookContextChip />
+      <ChatLiveSelectionChip />
       <ChatMentionList
         popover={popover}
         popoverItems={popoverItems}

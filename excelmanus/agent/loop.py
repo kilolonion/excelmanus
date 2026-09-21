@@ -8,6 +8,7 @@ from dataclasses import replace
 from itertools import count
 from typing import Any
 
+from excelmanus.engine_core.idle_tracker import idle_segment, reset_idle_tracker
 from excelmanus.engine_core.llm_caller import (
     compute_retry_delay,
     is_content_filter_error,
@@ -81,7 +82,8 @@ async def _execute_and_resolve_tool(
             approval_id = tc_result.approval_id or pending.approval_id
             logger.info("内联审批等待决策: %s", approval_id)
             try:
-                decision = await approval_resolver(pending)
+                with idle_segment(engine, "approval"):
+                    decision = await approval_resolver(pending)
             except asyncio.CancelledError:
                 # Cancellation is a control signal, never an
                 # approval decision.  Close the pending gate,
@@ -105,7 +107,8 @@ async def _execute_and_resolve_tool(
             approval_id = tc_result.approval_id or (pending.approval_id if pending else "")
             logger.info("阻塞等待审批决策: %s", approval_id)
             try:
-                decision_payload = await engine._interaction_handler.wait_approval_decision(approval_id)
+                with idle_segment(engine, "approval"):
+                    decision_payload = await engine._interaction_handler.wait_approval_decision(approval_id)
             except asyncio.TimeoutError:
                 reject_msg = engine._approval.reject_pending(
                     approval_id, timeout=True,
@@ -773,15 +776,23 @@ async def run_tool_loop(
                     hold_text = False
                     logger.debug("Jev 交付检查前置判断失败", exc_info=True)
 
+            def _forward(event: Any) -> None:
+                # consume_stream 已经通过 engine._emit 盖章/trace/审计过一次，
+                # 这里只负责把事件交给外部回调，避免重复记录。
+                try:
+                    on_event(event)
+                except Exception as exc:
+                    logger.warning("事件回调异常: %s", exc)
+
             def _stream_on_event(event: Any) -> None:
                 if getattr(event, "event_type", None) == EventType.TEXT_DELTA:
                     held_text.append(event)
                     return
-                engine._emit(on_event, event)
+                _forward(event)
 
             def _flush_held_text() -> None:
                 for _held_ev in held_text:
-                    engine._emit(on_event, _held_ev)
+                    _forward(_held_ev)
                 held_text.clear()
 
             # ── LLM 调用 + 5xx/429 自动重试 ──
@@ -1078,6 +1089,7 @@ async def run_tool_loop(
 
         tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
         engine._last_model_response_at = time.monotonic()
+        reset_idle_tracker(engine)  # 每个响应-请求间隔只统计本间隔内的空闲段
 
         _llm_elapsed_ms = (time.monotonic() - _llm_start_ts) * 1000
         _tc_names = [getattr(getattr(tc, "function", None), "name", "?") for tc in (tool_calls or [])]
@@ -1407,10 +1419,11 @@ async def run_tool_loop(
                         _batch = _ToolCallBatch(list(_batch.tool_calls), False)
                 if _batch.parallel:
                     # ── 并行路径：只读工具并发执行 ──
-                    _parallel_results = await engine._execute_tool_calls_parallel(
-                        _batch.tool_calls, tool_scope, on_event, iteration,
-                        route_result=current_route_result,
-                    )
+                    with idle_segment(engine, "tool"):
+                        _parallel_results = await engine._execute_tool_calls_parallel(
+                            _batch.tool_calls, tool_scope, on_event, iteration,
+                            route_result=current_route_result,
+                        )
                     # P3-a 同批同因折叠：durable 存全文，wire 投影存指针。
                     _dedup_plan = plan_parallel_dedup(list(_parallel_results))
                     for _p_index, (_p_tc, _p_tc_result) in enumerate(_parallel_results):
@@ -1481,11 +1494,12 @@ async def run_tool_loop(
                                 engine._memory.add_tool_result(tool_call_id, breaker_skip_error)
                             continue
 
-                        tc_result = await engine._tool_runtime.run_managed(
-                            tc, lambda: _execute_and_resolve_tool(
-                                engine, tc, tool_scope, on_event, iteration, current_route_result, approval_resolver,
-                            ), on_event, iteration,
-                        )
+                        with idle_segment(engine, "tool"):
+                            tc_result = await engine._tool_runtime.run_managed(
+                                tc, lambda: _execute_and_resolve_tool(
+                                    engine, tc, tool_scope, on_event, iteration, current_route_result, approval_resolver,
+                                ), on_event, iteration,
+                            )
                         all_tool_results.append(tc_result)
                         if not tc_result.defer_tool_result and tool_call_id:
                             if getattr(tc, "_pending_result_written", False):

@@ -280,6 +280,9 @@ def _provider_body(
     header: RequestHeader,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    # extra_headers 必须写回调用方 dict 才会进入 PreparedRequest.transport_headers；
+    # 本地拷贝只服务于本函数内的弹出/覆盖语义。
+    caller_extra = extra if isinstance(extra, dict) else None
     extra = dict(extra or {})
     if route.protocol == "openai_responses":
         previous = extra.get("_responses_previous_response_id") or extra.get("previous_response_id")
@@ -333,7 +336,58 @@ def _provider_body(
         native.pop("prompt_cache_key", None)
         if isinstance(native.get("extra_body"), dict):
             native["extra_body"].pop("prompt_cache_key", None)
+    _apply_cache_retention(route, native, caller_extra)
     return native
+
+
+_EXTENDED_CACHE_TTL_BETA = "extended-cache-ttl-2025-04-11"
+
+
+def _extend_cache_control_ttl(value: Any) -> None:
+    """Pin ``ttl: "1h"`` on every cache_control marker; existing ttl wins."""
+    if isinstance(value, dict):
+        marker = value.get("cache_control")
+        if isinstance(marker, dict):
+            marker.setdefault("ttl", "1h")
+        for item in value.values():
+            _extend_cache_control_ttl(item)
+    elif isinstance(value, list):
+        for item in value:
+            _extend_cache_control_ttl(item)
+
+
+def _apply_cache_retention(
+    route: ResolvedRoute,
+    body: dict[str, Any],
+    extra: dict[str, Any] | None,
+) -> None:
+    """Attach the provider-supported retention policy to the finalized body.
+
+    ``route.cache_retention`` is only set for first-party endpoints, so
+    compatible gateways and self-hosted relays never receive these fields.
+    Anthropic takes the extended-ttl beta header plus a per-marker ``ttl``;
+    OpenAI / Responses take the top-level ``prompt_cache_retention`` field.
+    ``extra`` is the caller-owned dict so ``extra_headers`` reaches
+    ``PreparedRequest.transport_headers`` → ``create_kwargs`` → HTTP headers.
+    """
+    if route.cache_retention != "extended":
+        return
+    if route.protocol == "anthropic":
+        _extend_cache_control_ttl(body)
+        if isinstance(extra, dict):
+            headers = extra.get("extra_headers")
+            merged = dict(headers) if isinstance(headers, dict) else {}
+            betas = [
+                item.strip()
+                for item in str(merged.get("anthropic-beta") or "").split(",")
+                if item.strip()
+            ]
+            if _EXTENDED_CACHE_TTL_BETA not in betas:
+                betas.append(_EXTENDED_CACHE_TTL_BETA)
+            merged["anthropic-beta"] = ",".join(betas)
+            extra["extra_headers"] = merged
+    elif route.protocol in {"openai", "openai_responses"}:
+        body["prompt_cache_retention"] = "24h"
 
 
 def _without_cache_markers(value: Any) -> Any:

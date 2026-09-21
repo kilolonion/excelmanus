@@ -68,6 +68,8 @@ class ResolvedRoute:
     files_purpose: str | None = None
     call_config: Mapping[str, Any] = field(default_factory=dict)
     workspace_key: str | None = None
+    # 扩展缓存保留能力："" = 不支持或未启用；"extended" = 一方端点可用
+    cache_retention: str = ""
 
     def __post_init__(self) -> None:
         for name in ("thinking", "capabilities", "call_config"):
