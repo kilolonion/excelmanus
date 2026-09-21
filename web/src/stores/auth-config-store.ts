@@ -1,7 +1,6 @@
 import { create } from "zustand";
-import { buildDirectHealthUrl } from "@/lib/backend-origin";
 import { useOnboardingStore } from "@/stores/onboarding-store";
-import { apiFetch, getAuthHeaders } from "@/lib/api";
+import { apiGet } from "@/lib/api";
 
 export type DeployMode = "standalone" | "server";
 
@@ -13,6 +12,9 @@ interface AuthConfigState {
   checkBackendHealth: (force?: boolean) => Promise<boolean>;
 }
 
+let healthRequest: Promise<boolean> | null = null;
+let healthGeneration = 0;
+
 export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
   deployMode: "standalone",
   checked: false,
@@ -20,10 +22,30 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
 
   checkBackendHealth: async (force = false) => {
     if (get().checked && !force) return true;
-    try {
-      const res = await apiFetch(buildDirectHealthUrl(), { cache: "no-store", headers: getAuthHeaders(), signal: AbortSignal.timeout(10_000) });
-      if (res.ok) {
-        const data = await res.json();
+    if (healthRequest && !force) return healthRequest;
+
+    const generation = ++healthGeneration;
+    const request = (async () => {
+      try {
+        const data = await apiGet<{
+          status?: string;
+          deploy_mode?: string;
+          auth_required?: boolean;
+          authenticated?: boolean;
+          configured?: boolean;
+          onboarding?: unknown;
+        }>("/health", {
+          direct: true,
+          timeoutMs: 10_000,
+          cache: "no-store",
+        });
+        if (data.status === "draining") {
+          throw new Error("backend_draining");
+        }
+
+        // A forced probe may supersede the initial probe. Do not let the late
+        // initial response roll the auth/config state back to an older view.
+        if (generation !== healthGeneration) return true;
         const deployMode: DeployMode =
           data.deploy_mode === "server" ? "server" : "standalone";
         const authRequired = Boolean(data.auth_required);
@@ -37,10 +59,15 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
           }
         }
         return true;
+      } catch {
+        throw new Error("backend_unreachable");
       }
-    } catch {
-      throw new Error("backend_unreachable");
+    })();
+    if (!force) healthRequest = request;
+    try {
+      return await request;
+    } finally {
+      if (healthRequest === request) healthRequest = null;
     }
-    throw new Error("backend_unhealthy");
   },
 }));

@@ -1,7 +1,7 @@
 "use client";
 
-import { useId, useMemo, useState } from "react";
-import { Activity, ArrowUpRight, Ban, Check, ChevronDown, CircleDot, CircleHelp, CircleMinus, CircleSlash, Clock3, Eye, Gauge, Info, Pin, PinOff, Undo2, X } from "lucide-react";
+import { createElement, useId, useMemo, useState } from "react";
+import { Activity, ArrowUpRight, Ban, Check, ChevronDown, CircleDot, CircleHelp, CircleSlash, Clock3, Gauge, Info, Pin, PinOff, Undo2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useIsDesktop } from "@/hooks/use-mobile";
@@ -15,7 +15,6 @@ import {
 import { useJevStore } from "@/stores/jev-store";
 
 const TONE_CLASS: Record<ReturnType<typeof cardTone>, string> = {
-  shadow: "bg-muted text-muted-foreground",
   applied: "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]",
   unavailable: "bg-muted text-muted-foreground",
   deny: "bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300",
@@ -25,7 +24,6 @@ const FOCUS = "focus-visible:outline-none focus-visible:ring-2 focus-visible:rin
 const TONE_ICON = { applied: Check, unavailable: Undo2, deny: Ban, ask: CircleHelp } as const;
 function statusIcon(trace: JevTrace, tone: ReturnType<typeof cardTone>) {
   if (trace.gate === "off" || trace.reason === "disabled") return CircleSlash;
-  if (tone === "shadow") return trace.gate === "enforce" && !trace.applied ? CircleMinus : Eye;
   return TONE_ICON[tone];
 }
 
@@ -41,7 +39,7 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
         <span className="tabular-nums text-muted-foreground/70">{String(index + 1).padStart(2, "0")}</span>
         <h3 className="font-medium text-muted-foreground">{packTitle(trace.pack)}</h3>
         <span className={cn("ml-auto inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium", TONE_CLASS[tone])}>
-          <StatusIcon className="size-3" />
+          {createElement(StatusIcon, { className: "size-3" })}
           {status.label}
         </span>
       </div>
@@ -124,7 +122,7 @@ export function JevTimelinePanel() {
           ))}
         </dl>
       </div>
-      <p className="flex items-start gap-2 text-[11px] leading-5 text-muted-foreground"><Info className="mt-1 size-3 shrink-0" />Jev 为任务提供判断建议。是否应用以每条记录为准；仅展示当前回合。</p>
+      <p className="flex items-start gap-2 text-[11px] leading-5 text-muted-foreground"><Info className="mt-1 size-3 shrink-0" />Jev 为任务提供判断建议；开启的环节会直接接入当前回合。</p>
       {traces.length ? (
         <>
           <StageRail traces={traces} selected={selected} onSelect={(value) => { setPack(value); setLimit(40); }} />

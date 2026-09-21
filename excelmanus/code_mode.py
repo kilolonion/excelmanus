@@ -25,7 +25,7 @@ logger = get_logger("code_mode")
 
 LOCAL_SANDBOX_DISCLAIMER = "本机受限子进程：禁网络、禁起进程、禁出工作区。"
 FULL_ACCESS_SANDBOX_DISCLAIMER = (
-    "已开启跳过审批：允许网络、子进程和本机命令执行；"
+    "已开启完全访问：允许工作区外文件、网络、子进程和本机命令执行；"
     "仅在信任当前任务时使用。"
 )
 

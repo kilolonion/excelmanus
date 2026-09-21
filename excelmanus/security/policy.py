@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ExecutionMode = Literal["read-only", "workspace-write"]
+ExecutionMode = Literal["read-only", "workspace-write", "full-access"]
 ApprovalPolicy = Literal["ask", "never"]
 PermissionPreset = Literal["observe", "edit", "auto-edit"]
 
@@ -39,7 +39,9 @@ def resolve_execution_policy(engine: Any) -> ExecutionPolicy:
     chat = str(getattr(engine, "_current_chat_mode", "write") or "write")
     if chat == "read":
         return ExecutionPolicy(mode="read-only")
-    # write / plan / full_access → workspace-write. full_access does not escape.
+    if bool(getattr(engine, "_full_access_enabled", False)):
+        return ExecutionPolicy(mode="full-access")
+    # write / plan / auto_approve → workspace-write.
     return ExecutionPolicy(mode="workspace-write")
 
 
@@ -48,6 +50,8 @@ def resolve_approval_policy(engine: Any) -> ApprovalPolicy:
     if getattr(engine, "_subagent_config", None) is not None:
         return "never"
     if bool(getattr(engine, "_full_access_enabled", False)):
+        return "never"
+    if bool(getattr(engine, "_auto_approve_enabled", False)):
         return "never"
     return "ask"
 

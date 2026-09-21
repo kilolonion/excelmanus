@@ -16,36 +16,50 @@ import {
 } from "@/components/ui/tooltip";
 import { useUIStore } from "@/stores/ui-store";
 import { useSessionStore } from "@/stores/session-store";
-import { toggleFullAccess } from "@/lib/api";
+import { toggleAutoApprove, toggleFullAccess } from "@/lib/api";
 
 const POLICIES = [
   { key: "ask", label: "询问", desc: "写入前确认" },
-  { key: "skip", label: "跳过", desc: "自动批准所有命令（含联网）" },
+  { key: "auto", label: "自动审批", desc: "自动批准，但禁止网络和越界文件" },
+  { key: "full", label: "完全访问", desc: "允许网络、子进程和工作区外文件" },
 ] as const;
 
 export function ModeBadges() {
   const fullAccess = useUIStore((s) => s.fullAccessEnabled);
+  const autoApprove = useUIStore((s) => s.autoApproveEnabled);
   const setFullAccessEnabled = useUIStore((s) => s.setFullAccessEnabled);
+  const setAutoApproveEnabled = useUIStore((s) => s.setAutoApproveEnabled);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const [toggling, setToggling] = useState(false);
-  const active = fullAccess ? "skip" : "ask";
-  const currentLabel = fullAccess ? "跳过" : "询问";
+  const active = fullAccess ? "full" : autoApprove ? "auto" : "ask";
+  const currentLabel = fullAccess ? "完全访问" : autoApprove ? "自动审批" : "询问";
 
   const handleSelect = useCallback(
-    async (key: "ask" | "skip") => {
-      const wantSkip = key === "skip";
-      if (wantSkip === fullAccess || !activeSessionId || toggling) return;
+    async (key: "ask" | "auto" | "full") => {
+      if (!activeSessionId || toggling || key === active) return;
       setToggling(true);
-      setFullAccessEnabled(wantSkip);
+      const nextFull = key === "full";
+      const nextAuto = key === "auto";
+      setFullAccessEnabled(nextFull);
+      setAutoApproveEnabled(nextAuto);
       try {
-        await toggleFullAccess(activeSessionId, wantSkip);
+        if (nextFull) {
+          await toggleFullAccess(activeSessionId, true);
+        } else if (nextAuto) {
+          await toggleAutoApprove(activeSessionId, true);
+        } else {
+          // 关闭当前档位；顺序保证互斥状态在后端也被清理。
+          if (fullAccess) await toggleFullAccess(activeSessionId, false);
+          if (autoApprove) await toggleAutoApprove(activeSessionId, false);
+        }
       } catch {
-        setFullAccessEnabled(!wantSkip);
+        setFullAccessEnabled(fullAccess);
+        setAutoApproveEnabled(autoApprove);
       } finally {
         setToggling(false);
       }
     },
-    [activeSessionId, fullAccess, toggling, setFullAccessEnabled],
+    [activeSessionId, active, autoApprove, fullAccess, toggling, setAutoApproveEnabled, setFullAccessEnabled],
   );
 
   return (
@@ -59,11 +73,11 @@ export function ModeBadges() {
                 disabled={!activeSessionId || toggling}
                 data-coach-id="coach-mode-badges"
                 className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors outline-none disabled:cursor-default disabled:opacity-50 ${
-                  fullAccess
+                  fullAccess || autoApprove
                     ? "hover:bg-accent/40"
                     : "text-muted-foreground hover:text-foreground hover:bg-accent/40"
                 }`}
-                style={fullAccess ? { color: "var(--em-gold)" } : undefined}
+                style={fullAccess ? { color: "var(--em-gold)" } : autoApprove ? { color: "var(--em-primary)" } : undefined}
               >
                 {toggling ? (
                   <Loader2 className="h-3 w-3 animate-spin" />
@@ -75,7 +89,7 @@ export function ModeBadges() {
             </DropdownMenuTrigger>
           </TooltipTrigger>
           <TooltipContent side="top" className="text-xs">
-            审批策略: {currentLabel}
+            权限模式: {currentLabel}
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

@@ -459,7 +459,7 @@ def _gemini_response_to_openai(
         total_tokens=prompt_tokens + completion_tokens,
     )
     # 附加 Gemini 缓存统计到 usage 对象（供上层 _extract_cached_tokens 提取）
-    if cached_content_tokens:
+    if "cachedContentTokenCount" in usage_meta:
         # 兼容 OpenAI 格式：模拟 prompt_tokens_details.cached_tokens
         usage.prompt_tokens_details = {"cached_tokens": cached_content_tokens}  # type: ignore[attr-defined]
 
@@ -559,7 +559,7 @@ async def iter_gemini_sse_deltas(
                     total_tokens=usage_meta.get("totalTokenCount", 0),
                 )
                 _cached = usage_meta.get("cachedContentTokenCount", 0)
-                if _cached:
+                if "cachedContentTokenCount" in usage_meta:
                     u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
                 yield StreamDelta(usage=u)
             continue
@@ -600,7 +600,7 @@ async def iter_gemini_sse_deltas(
                     total_tokens=usage_meta.get("totalTokenCount", 0),
                 )
                 _cached = usage_meta.get("cachedContentTokenCount", 0)
-                if _cached:
+                if "cachedContentTokenCount" in usage_meta:
                     u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
             yield StreamDelta(finish_reason=mapped_finish, usage=u)
 

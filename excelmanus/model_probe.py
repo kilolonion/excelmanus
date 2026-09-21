@@ -35,6 +35,9 @@ _TINY_PNG_B64 = (
 
 
 def _cap_key(model: str, base_url: str) -> str:
+    from excelmanus.auth.providers.registry import strip_managed_prefix
+
+    model = strip_managed_prefix(model)
     raw = f"{model.strip().lower()}|{base_url.strip().rstrip('/')}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
@@ -83,6 +86,35 @@ def _mark_freshness(
     caps.source = source
 
 
+def capabilities_cache_is_fresh(
+    caps: ModelCapabilities,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """手动覆盖长期有效；自动探测的未知结果和过期结果需要重试。"""
+    if caps.manual_override:
+        return True
+    if caps.healthy is None or (caps.healthy and any(value is None for value in (
+        caps.supports_tool_calling, caps.supports_vision, caps.supports_thinking,
+    ))):
+        return False
+    raw = str(caps.fresh_until or "").strip()
+    if not raw:
+        if not caps.detected_at:
+            return caps.healthy is True
+        raw = caps.detected_at
+    try:
+        expires = datetime.fromisoformat(raw)
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if not caps.fresh_until:
+            expires += timedelta(hours=1)
+        current = now or datetime.now(tz=timezone.utc)
+        return current < expires
+    except (TypeError, ValueError):
+        return False
+
+
 async def _emit_stage_callback(
     stage_callback: Any,
     stage: str,
@@ -122,7 +154,7 @@ async def probe_health(
     """
     messages = [{"role": "user", "content": "Hi"}]
     try:
-        if isinstance(client, (GeminiClient, ClaudeClient)):
+        if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
             await asyncio.wait_for(
                 client.chat.completions.create(model=model, messages=messages),
                 timeout=timeout,
@@ -167,7 +199,7 @@ async def probe_tool_calling(
     messages = [{"role": "user", "content": "What is 2+3? Use the tool."}]
 
     try:
-        if isinstance(client, (GeminiClient, ClaudeClient)):
+        if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
             resp = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=model,
@@ -226,7 +258,7 @@ async def probe_vision(
                 client.chat.completions.create(model=model, messages=messages),
                 timeout=timeout,
             )
-        elif isinstance(client, ClaudeClient):
+        elif isinstance(client, (ClaudeClient, OpenAIResponsesClient)):
             resp = await asyncio.wait_for(
                 client.chat.completions.create(model=model, messages=messages),
                 timeout=timeout,
@@ -396,7 +428,7 @@ async def _probe_openai_thinking(
     strategies = _get_thinking_strategies(provider, model)
 
     last_err = ""
-    hit_fatal = False
+    inconclusive = False
     t_start = time.monotonic()
     for strategy_name, extra_kwargs, thinking_type in strategies:
         elapsed = time.monotonic() - t_start
@@ -414,13 +446,13 @@ async def _probe_openai_thinking(
             last_err = err
             if _is_param_unsupported_error(err):
                 continue
+            inconclusive = True
             if _is_fatal_probe_error(err):
-                hit_fatal = True
                 break
 
     if last_err:
         logger.debug("所有思考探测策略均失败 (provider=%s): %s", provider, last_err)
-    if hit_fatal:
+    if inconclusive:
         return None, last_err, ""
     return False, last_err, ""
 
@@ -449,7 +481,7 @@ async def run_full_probe(
 
     if skip_if_cached and db is not None:
         cached = load_capabilities(db, model, base_url)
-        if cached is not None:
+        if cached is not None and capabilities_cache_is_fresh(cached):
             logger.info(
                 "模型 %s 能力探测已缓存（tool=%s, vision=%s, thinking=%s）",
                 model,
@@ -459,7 +491,10 @@ async def run_full_probe(
             )
             if not cached.source:
                 _mark_freshness(cached, source="cache")
+                save_capabilities(db, cached)
             return cached
+        if cached is not None:
+            logger.info("模型 %s 能力缓存已过期，重新探测", model)
 
     logger.info("开始探测模型 %s 的能力...", model)
     caps = ModelCapabilities(
@@ -502,9 +537,16 @@ async def run_full_probe(
         thinking_mode=thinking_mode,
     ))
 
-    tool_ok, tool_err = await tool_task
-    vision_ok, vision_err = await vision_task
-    thinking_ok, thinking_err, thinking_type = await thinking_task
+    tasks = (tool_task, vision_task, thinking_task)
+    try:
+        (tool_ok, tool_err), (vision_ok, vision_err), (
+            thinking_ok, thinking_err, thinking_type,
+        ) = await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     caps.supports_tool_calling = tool_ok
     caps.supports_vision = vision_ok
@@ -820,53 +862,50 @@ async def _try_thinking_stream(
 ) -> tuple[bool, str]:
     """尝试一种 thinking 策略：发起流式请求，检查 delta 是否含推理字段。"""
     try:
+        request_kwargs = {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            **extra_kwargs,
+        }
+        if not isinstance(client, OpenAIResponsesClient):
+            request_kwargs["max_tokens"] = 300
         stream = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True,
-                max_tokens=300,
-                **extra_kwargs,
-            ),
+            client.chat.completions.create(**request_kwargs),
             timeout=timeout,
         )
 
-        found = False
-        deadline = time.monotonic() + timeout
-        async for chunk in stream:
-            if time.monotonic() > deadline:
-                break
+        async def _consume() -> bool:
+            async for chunk in stream:
+                # ── 路径 A：StreamDelta（OpenAIResponsesClient / 自定义适配器）──
+                _thinking_d = getattr(chunk, "thinking_delta", None)
+                if _thinking_d:
+                    return True
+                _content_d = getattr(chunk, "content_delta", None)
+                if _content_d:
+                    return False  # 有内容输出但无思考 → 不支持 thinking
 
-            # ── 路径 A：StreamDelta（OpenAIResponsesClient / 自定义适配器）──
-            _thinking_d = getattr(chunk, "thinking_delta", None)
-            if _thinking_d:
-                found = True
-                break
-            _content_d = getattr(chunk, "content_delta", None)
-            if _content_d:
-                break  # 有内容输出但无思考 → 不支持 thinking
+                # ── 路径 B：标准 OpenAI SDK chunk ──
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                if delta is None:
+                    continue
 
-            # ── 路径 B：标准 OpenAI SDK chunk ──
-            choices = getattr(chunk, "choices", None)
-            if not choices:
-                continue
-            delta = getattr(choices[0], "delta", None)
-            if delta is None:
-                continue
+                for key in ("reasoning_content", "reasoning", "thinking"):
+                    val = getattr(delta, key, None)
+                    if val:
+                        return True
 
-            for key in ("reasoning_content", "reasoning", "thinking"):
-                val = getattr(delta, key, None)
-                if val:
-                    found = True
-                    break
+                if getattr(delta, "content", None):
+                    return False
+            return False
 
-            if found:
-                break
-
-            content = getattr(delta, "content", None)
-            if content:
-                break
-
+        try:
+            found = await asyncio.wait_for(_consume(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False, f"thinking probe timeout after {timeout:.1f}s"
         return found, ""
     except Exception as exc:
         return False, str(exc)[:200]
@@ -967,7 +1006,7 @@ async def probe_context_window(
         mid = (lo + hi) // 2
         messages = _make_messages(mid)
         try:
-            if isinstance(client, (GeminiClient, ClaudeClient)):
+            if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
                 await asyncio.wait_for(
                     client.chat.completions.create(model=model, messages=messages),
                     timeout=timeout,

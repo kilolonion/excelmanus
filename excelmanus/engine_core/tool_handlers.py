@@ -537,9 +537,9 @@ class HighRiskApprovalHandler(BaseToolHandler):
 
         approval = resolve_approval_policy(e)
         if approval == "ask" and not skip_high_risk_approval_by_hook:
-            from excelmanus.system_one.host import approval_gate_action, maybe_shadow_approval
+            from excelmanus.system_one.host import approval_gate_action, maybe_jev_approval
 
-            decision = await maybe_shadow_approval(e, tool_name=tool_name, arguments=arguments)
+            decision = await maybe_jev_approval(e, tool_name=tool_name, arguments=arguments)
             action = approval_gate_action(decision)
             if action == "deny":
                 return _jev_denied_outcome(
@@ -693,9 +693,9 @@ class CodePolicyHandler(BaseToolHandler):
 
         # 无法降级 → /accept 审批流程；sandbox_tier 落进 pending 参数，
         # 保证获批后的重放与非审批路径用同一沙箱档。
-        from excelmanus.system_one.host import approval_gate_action, maybe_shadow_approval
+        from excelmanus.system_one.host import approval_gate_action, maybe_jev_approval
 
-        decision = await maybe_shadow_approval(
+        decision = await maybe_jev_approval(
             e,
             tool_name=tool_name,
             arguments=arguments,

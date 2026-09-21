@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { memo, useMemo, useState, useCallback, useRef, useEffect, type DragEvent } from "react";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import {
   MessageSquare,
@@ -25,7 +25,16 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { deleteSession, abortChat, updateSessionTitle, exportSession, type ExportFormat, fetchWorkspaces, deleteWorkspaceFolder } from "@/lib/api";
+import {
+  deleteSession,
+  abortChat,
+  updateSessionTitle,
+  exportSession,
+  type ExportFormat,
+  fetchWorkspaces,
+  reorderWorkspaces,
+  deleteWorkspaceFolder,
+} from "@/lib/api";
 import { createOrReuseSession } from "@/lib/session-actions";
 import type { WorkspaceFolder } from "@/lib/types";
 import { stopGeneration } from "@/lib/chat-actions";
@@ -93,6 +102,10 @@ export const SessionList = memo(function SessionList() {
   const [editingWorkspace, setEditingWorkspace] = useState<WorkspaceFolder | null>(null);
   const [workspaceMenuKey, setWorkspaceMenuKey] = useState<string | null>(null);
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null);
+  const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(null);
+  const [dragOverWorkspaceId, setDragOverWorkspaceId] = useState<string | null>(null);
+  const [reorderingWorkspace, setReorderingWorkspace] = useState(false);
+  const workspaceOrderBeforeDrag = useRef<WorkspaceFolder[] | null>(null);
 
   useEffect(() => {
     if (editingSessionId && editInputRef.current) {
@@ -153,6 +166,64 @@ export const SessionList = memo(function SessionList() {
       setWorkspaces([]);
     }
   }, []);
+
+  const handleWorkspaceDragStart = useCallback((event: DragEvent<HTMLDivElement>, workspaceId?: string | null) => {
+    if (!workspaceId || reorderingWorkspace) {
+      event.preventDefault();
+      return;
+    }
+    workspaceOrderBeforeDrag.current = workspaces;
+    setDraggedWorkspaceId(workspaceId);
+    setDragOverWorkspaceId(null);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", workspaceId);
+  }, [reorderingWorkspace, workspaces]);
+
+  const clearWorkspaceDrag = useCallback(() => {
+    setDraggedWorkspaceId(null);
+    setDragOverWorkspaceId(null);
+    workspaceOrderBeforeDrag.current = null;
+  }, []);
+
+  const handleWorkspaceDragOver = useCallback((event: DragEvent<HTMLDivElement>, workspaceId?: string | null) => {
+    if (!draggedWorkspaceId || !workspaceId || draggedWorkspaceId === workspaceId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDragOverWorkspaceId(workspaceId);
+  }, [draggedWorkspaceId]);
+
+  const handleWorkspaceDrop = useCallback(async (event: DragEvent<HTMLDivElement>, targetWorkspaceId?: string | null) => {
+    event.preventDefault();
+    const sourceWorkspaceId = draggedWorkspaceId;
+    const previous = workspaceOrderBeforeDrag.current ?? workspaces;
+    if (!sourceWorkspaceId || !targetWorkspaceId || sourceWorkspaceId === targetWorkspaceId) {
+      clearWorkspaceDrag();
+      return;
+    }
+    const sourceIndex = previous.findIndex((workspace) => workspace.id === sourceWorkspaceId);
+    const targetIndex = previous.findIndex((workspace) => workspace.id === targetWorkspaceId);
+    if (sourceIndex < 0 || targetIndex < 0) {
+      clearWorkspaceDrag();
+      return;
+    }
+
+    const next = [...previous];
+    const [moved] = next.splice(sourceIndex, 1);
+    next.splice(sourceIndex < targetIndex ? targetIndex - 1 : targetIndex, 0, moved);
+    setWorkspaces(next);
+    setReorderingWorkspace(true);
+    clearWorkspaceDrag();
+    try {
+      const persisted = await reorderWorkspaces(next.map((workspace) => workspace.id));
+      if (persisted.length > 0) setWorkspaces(persisted);
+    } catch (err) {
+      console.error("保存工作区顺序失败:", err);
+      setWorkspaces(previous);
+      await reloadWorkspaces();
+    } finally {
+      setReorderingWorkspace(false);
+    }
+  }, [clearWorkspaceDrag, draggedWorkspaceId, reloadWorkspaces, workspaces]);
 
   useEffect(() => {
     void reloadWorkspaces();
@@ -374,7 +445,15 @@ export const SessionList = memo(function SessionList() {
                             "hover:bg-[var(--em-primary-alpha-06)] hover:text-[var(--em-primary)]",
                             "focus-within:bg-[var(--em-primary-alpha-06)] focus-within:text-[var(--em-primary)]",
                             workspaceMenuKey === group.key && "bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]",
+                            group.workspaceId && "cursor-grab active:cursor-grabbing",
+                            draggedWorkspaceId === group.workspaceId && "opacity-50",
+                            dragOverWorkspaceId === group.workspaceId && "bg-[var(--em-primary-alpha-10)] ring-1 ring-[var(--em-primary)]",
                           )}
+                          draggable={Boolean(group.workspaceId) && !reorderingWorkspace}
+                          onDragStart={(event) => handleWorkspaceDragStart(event, group.workspaceId)}
+                          onDragOver={(event) => handleWorkspaceDragOver(event, group.workspaceId)}
+                          onDrop={(event) => void handleWorkspaceDrop(event, group.workspaceId)}
+                          onDragEnd={clearWorkspaceDrag}
                         >
                           <button
                             type="button"
@@ -392,6 +471,14 @@ export const SessionList = memo(function SessionList() {
                             <span className="min-w-0 truncate text-[12px] font-medium tracking-wide text-current" title={group.path || group.title}>
                               {group.title}
                             </span>
+                            {group.isDefault ? (
+                              <span
+                                className="inline-flex shrink-0 items-center rounded-full bg-[var(--em-primary-alpha-12)] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[var(--em-primary)]"
+                                title="默认文件夹，不能删除"
+                              >
+                                默认文件夹
+                              </span>
+                            ) : null}
                           </button>
                           {group.canManage ? (
                             <DropdownMenu
@@ -446,7 +533,7 @@ export const SessionList = memo(function SessionList() {
                                   }}
                                 >
                                   <Trash2 className="h-4 w-4" />
-                                  删除
+                                  {group.isDefault ? "删除（默认文件夹不可删除）" : "删除"}
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
                             </DropdownMenu>

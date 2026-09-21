@@ -513,9 +513,8 @@ def _responses_output_to_openai(
     # 提取 Responses API 的缓存统计（input_tokens_details.cached_tokens）
     input_details = usage_data.get("input_tokens_details", {})
     if isinstance(input_details, dict):
-        cached = input_details.get("cached_tokens", 0)
-        if cached:
-            usage.prompt_tokens_details = {"cached_tokens": cached}  # type: ignore[attr-defined]
+        if input_details:
+            usage.prompt_tokens_details = dict(input_details)  # type: ignore[attr-defined]
 
     return _ChatCompletion(
         id=resp_id,
@@ -945,9 +944,8 @@ class OpenAIResponsesClient:
                             # 提取缓存统计
                             _input_details = usage_data.get("input_tokens_details", {})
                             if isinstance(_input_details, dict):
-                                _cached = _input_details.get("cached_tokens", 0)
-                                if _cached:
-                                    u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
+                                if _input_details:
+                                    u.prompt_tokens_details = dict(_input_details)  # type: ignore[attr-defined]
                         output = response_obj.get("output", [])
                         # Some async/background providers omit both argument
                         # delta and output_item.done; the terminal response is

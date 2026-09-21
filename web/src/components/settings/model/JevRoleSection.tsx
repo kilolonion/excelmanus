@@ -27,8 +27,7 @@ const PICKER_TRIGGER_CLASS =
 
 const MODES: { value: JevGate; title: string; description: string }[] = [
   { value: "off", title: "关闭", description: "暂停全部评估，保留各项设置" },
-  { value: "shadow", title: "仅观察", description: "开启全部评估，只记录建议" },
-  { value: "enforce", title: "辅助执行", description: "开启全部功能，符合条件时应用建议" },
+  { value: "enforce", title: "全面启用", description: "开启全部环节，评估建议直接接入任务" },
 ];
 
 export function JevRoleSection() {
@@ -52,7 +51,6 @@ export function JevRoleSection() {
   const status = jevEntryStatus({
     configured,
     enabled: draft.jev_enabled,
-    enforceReady: runtime?.jev_enforce_ready,
   });
   const current = resolveJevCatalogModel(draft.jev_model, providers);
   const options = providers.flatMap((provider) => {
@@ -167,23 +165,23 @@ export function JevRoleSection() {
             <div className="mt-3 rounded-lg border border-border/70 overflow-hidden">
               <div className="p-3">
                 <p className="text-sm font-medium">介入方式</p>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">初次使用可选「仅观察」，先了解 Jev 的判断。切换后可在下方逐项调整。</p>
-                <div role="group" aria-label="Jev 介入方式" className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">关闭总开关会停用所有 Jev 环节；启用后默认全面接入，也可以在下方单独关闭某个环节。</p>
+                <div role="group" aria-label="Jev 介入方式" className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {MODES.map((mode) => <button key={mode.value} type="button" aria-pressed={draft.jev_enabled === mode.value} onClick={() => handleMasterGateChange(mode.value)} className={cn("rounded-xl border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", draft.jev_enabled === mode.value ? "border-[var(--em-primary)] bg-[var(--em-primary-alpha-06)]" : "border-border hover:bg-muted/40")}><span className="flex items-center justify-between gap-2 text-xs font-semibold">{mode.title}{draft.jev_enabled === mode.value && <Check className="size-3.5 text-[var(--em-primary)]" />}</span><span className="mt-1.5 block text-[11px] leading-5 text-muted-foreground">{mode.description}</span></button>)}
                 </div>
-                {draft.jev_enabled === "enforce" && <p className="mt-3 flex items-start gap-2 rounded-lg bg-muted/50 p-2.5 text-xs leading-5 text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" />{runtime.jev_enforce_ready ? "上下文建议会直接提供给主模型；工具、审批与界面调整按下方各项设置应用。" : "上下文建议会直接提供给主模型；其余介入仍在验证中，暂只记录建议、不改变任务。"}</p>}
+                {draft.jev_enabled === "enforce" && <p className="mt-3 flex items-start gap-2 rounded-lg bg-muted/50 p-2.5 text-xs leading-5 text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" />上下文、工具、审批、结果整理、恢复和界面建议都会按下方环节开关直接接入。</p>}
                 {draft.jev_enabled === "off" && <p className="mt-3 text-xs text-muted-foreground">总开关已关闭，下方配置将在重新开启后使用。</p>}
               </div>
 
               <div className="px-3 pt-3 pb-1">
                 <p className="text-[11px] font-medium text-muted-foreground">功能开关</p>
                 <p className="text-[11px] text-muted-foreground mt-0.5">
-                  总开关为「仅观察」时，各项都只记录建议。实际影响以对话中的 Jev 时间线为准。
+                  总开关关闭或某个环节关闭后，该环节不会评估；开启的环节会直接接入任务。
                 </p>
               </div>
 
               <div className="divide-y divide-border/70">
-                <JevFieldRow label="本轮工具与上下文" desc={runtime.jev_enforce_ready ? "向主模型建议工作区、表格位置和需澄清的信息；工具预加载和技能置顶一并应用。" : "向主模型建议工作区、表格位置和需澄清的信息；工具预加载和技能置顶仍在验证中，暂只记录。"}>
+                <JevFieldRow label="本轮工具与上下文" desc="向主模型建议工作区、表格位置和需澄清的信息；工具预加载和技能置顶一并应用。">
                   <JevGateSelect
                     label="本轮工具与上下文的模式"
                     value={draft.jev_exposure}
@@ -197,14 +195,14 @@ export function JevRoleSection() {
                     onChange={(value) => setDraft((prev) => ({ ...prev, jev_observation: value }))}
                   />
                 </JevFieldRow>
-                <JevFieldRow label="写入验证" desc="写入回合结束后，观察 Jev 是否认为用户要求已完成；当前只记录，不改变执行。">
+                <JevFieldRow label="写入验证" desc="写入回合结束后检查用户要求是否覆盖，并提供必要的后续动作。">
                   <JevGateSelect
                     label="写入验证的模式"
                     value={draft.jev_verification}
                     onChange={(value) => setDraft((prev) => ({ ...prev, jev_verification: value }))}
                   />
                 </JevFieldRow>
-                <JevFieldRow label="失败恢复" desc="熔断后记录恢复建议；当前不会自动重试或停止循环。">
+                <JevFieldRow label="失败恢复" desc="熔断后提供检查、询问或停止建议。">
                   <JevGateSelect
                     label="失败恢复的模式"
                     value={draft.jev_recovery}

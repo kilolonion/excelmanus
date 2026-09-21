@@ -59,7 +59,7 @@ def responses_body(model: str, messages: list, tools: Any = None, *, tool_choice
                    extra_kwargs: dict | None = None) -> dict:
     from excelmanus.providers.openai_responses import (_chat_messages_to_responses_input,
         _chat_tools_to_responses_tools, _map_chat_tool_choice_to_responses, _apply_chat_kwargs_to_responses_body)
-    extras = extra_kwargs or {}
+    extras = dict(extra_kwargs or {})
     previous_response_id = (
         extras.get("_responses_previous_response_id")
         or extras.get("previous_response_id")
@@ -81,6 +81,11 @@ def responses_body(model: str, messages: list, tools: Any = None, *, tool_choice
                 if isinstance(item, dict) and item.get("role") == "system"
             ]
             source_messages = [*system_messages, *messages[cut_at:]]
+        else:
+            # Never combine a stored response with its complete replay: it
+            # duplicates history on the server. Direct steer uses another path.
+            extras.pop("_responses_previous_response_id", None)
+            extras.pop("previous_response_id", None)
     instructions, contents = _chat_messages_to_responses_input(source_messages)
     body: dict[str, Any] = {
         "model": model,

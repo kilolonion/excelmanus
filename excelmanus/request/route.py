@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from urllib.parse import urlparse
 from typing import Any
 
 from excelmanus.prompt.envelope import (
@@ -46,6 +47,8 @@ def resolve_route(engine: Any) -> ResolvedRoute:
         api_key = str(getattr(config, "api_key", "") or "")
     label = normalize_protocol(protocol=proto, base_url=endpoint, model=model)
     protocol = _protocol_name(label)
+    host = (urlparse(endpoint).hostname or "").lower()
+    stateless_responses = host == "api.deepseek.com" or host.endswith(".deepseek.com")
     files_ok = protocol in {"openai", "openai_responses"}
     purpose = None
     if files_ok:
@@ -80,6 +83,7 @@ def resolve_route(engine: Any) -> ResolvedRoute:
             if config is not None
             else True,
             "mid_history_system": protocol in {"openai"},
+            "stored_responses": protocol == "openai_responses" and not stateless_responses,
         },
         files_purpose=purpose,
         call_config=call_config_from_engine(engine),

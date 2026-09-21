@@ -1,4 +1,4 @@
-"""Jev 决策对前端的瞬态投影。shadow / enforce / unavailable 都发；不进消息块。"""
+"""Jev 决策对前端的瞬态投影；不进消息块。"""
 
 from __future__ import annotations
 
@@ -181,7 +181,7 @@ def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
     if reason == "provider_cooldown":
         return "Jev provider 处于冷却期，执行面保持接线前行为"
     if not decision.applied or gate != "enforce":
-        return "仅观察，未改 wire/审批/UI"
+        return "本次未应用建议，任务继续按原流程处理"
     extras = decision.extras or {}
     if pack_id == "context.resolve":
         routed = str(extras.get("routed_workspace") or "")
@@ -234,7 +234,7 @@ def build_jev_trace_payload(
         transport = "unavailable"
     payload: dict[str, Any] = {
         "pack": pack_id,
-        "gate": gate if gate in {"off", "shadow", "enforce"} else "off",
+        "gate": gate if gate in {"off", "enforce"} else "off",
         "applied": bool(decision.applied),
         "transport": transport,
         "latency_ms": round(latency, 1),

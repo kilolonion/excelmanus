@@ -8,6 +8,7 @@ run_full_probe 不持久化瞬时错误的 unhealthy 结果。
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from excelmanus.model_probe import (
     probe_health,
     run_full_probe,
 )
+from excelmanus.providers import OpenAIResponsesClient
 
 
 # ── _is_permanent_health_failure 单元测试 ──────────────────
@@ -74,6 +76,20 @@ class TestProbeHealthReturnValues:
         ok, err = await probe_health(client, "test-model", timeout=5.0)
         assert ok is True
         assert err == ""
+
+    @pytest.mark.asyncio
+    async def test_responses_health_probe_omits_output_limit(self):
+        client = OpenAIResponsesClient.__new__(OpenAIResponsesClient)
+        create = AsyncMock(return_value=MagicMock())
+        client.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=create),
+        )
+
+        ok, err = await probe_health(client, "gpt-6-astra", timeout=5.0)
+
+        assert ok is True
+        assert err == ""
+        assert "max_tokens" not in create.await_args.kwargs
 
     @pytest.mark.asyncio
     async def test_auth_error_returns_false(self):

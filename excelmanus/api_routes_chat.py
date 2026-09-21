@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 logger = get_logger("api.chat")
 
 router = APIRouter()
+_CHAT_HEARTBEAT_SECONDS = 15.0
 
 
 def _fire_and_forget(coro: Any, *, name: str = "bridge_notify") -> None:
@@ -445,6 +446,28 @@ def _failure_guidance_text(guidance: FailureGuidance) -> str:
     return "\n".join(lines).strip() or "服务处理出现异常，请稍后重试。"
 
 
+def _mark_session_attempted(session_id: str | None) -> None:
+    """A send attempt consumes a blank-session slot, even if setup later fails.
+
+    Blank sessions are intentionally reused by ``create_or_reuse_session``.
+    Keeping a session blank after a failed first send therefore makes the UI
+    appear stuck on a "new conversation" and prevents creating a fresh one.
+    Marking it used here preserves the distinction between an untouched draft
+    and a conversation whose first turn already failed.
+    """
+    if not session_id:
+        return
+    manager = get_session_manager()
+    history = getattr(manager, "chat_history", None) if manager is not None else None
+    if history is None:
+        return
+    try:
+        if history.session_exists(session_id):
+            history.set_session_blank(session_id, False)
+    except Exception:
+        logger.debug("会话 %s 首次发送状态标记失败", session_id, exc_info=True)
+
+
 def _persist_failure_guidance_message(
     *,
     session_id: str | None,
@@ -538,6 +561,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
     if get_session_manager() is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
+    _mark_session_attempted(request.session_id)
     if get_config_incomplete():
         raise HTTPException(
             status_code=503,
@@ -577,6 +601,8 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 route_mode="queued_interrupt",
             )
         raise
+
+    _mark_session_attempted(session_id)
 
     if route_decision is not None:
         try:
@@ -725,6 +751,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     """
     if get_session_manager() is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
+    _mark_session_attempted(request.session_id)
     if get_config_incomplete():
         raise HTTPException(
             status_code=503,
@@ -801,6 +828,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     return
                 raise
             except Exception as exc:
+                _mark_session_attempted(request.session_id)
                 _sid = request.session_id or "unknown"
                 logger.error(
                     "会话获取失败 [session=%s]: %s",
@@ -812,6 +840,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 return
 
             assert session_id is not None and engine is not None
+            _mark_session_attempted(session_id)
             yield _sse_format("session_init", {
                 "session_id": session_id,
                 **_session_workspace_fields(session_id, route_decision),
@@ -977,7 +1006,13 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 done, _ = await asyncio.wait(
                     [queue_get_task, chat_task],
                     return_when=asyncio.FIRST_COMPLETED,
+                    timeout=_CHAT_HEARTBEAT_SECONDS,
                 )
+                if not done:
+                    # A named event reaches the browser's stall timer. It is not
+                    # a model message, a progress claim, or a sequenced replay item.
+                    yield _sse_format("heartbeat", {})
+                    continue
 
                 if queue_get_task in done:
                     seq_item = queue_get_task.result()
@@ -1452,7 +1487,13 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 done_set, _ = await asyncio.wait(
                     wait_set,
                     return_when=asyncio.FIRST_COMPLETED,
+                    timeout=_CHAT_HEARTBEAT_SECONDS,
                 )
+                if not done_set:
+                    if chat_task.done():
+                        break
+                    yield _sse_format("heartbeat", {})
+                    continue
 
                 if queue_get_task in done_set:
                     seq_item = queue_get_task.result()

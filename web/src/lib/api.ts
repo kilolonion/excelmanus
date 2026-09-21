@@ -1,6 +1,5 @@
 import type { SessionDetail, SessionTaskList, SubagentRun, WorkspaceFolder } from "@/lib/types";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
-import { getRuntimeConfig } from "@/lib/runtime-config";
 import { saveBlob } from "@/lib/save-blob";
 import { formatApiErrorMessage } from "@/lib/api-error";
 import { displayFileName } from "@/lib/file-identity";
@@ -17,14 +16,28 @@ const _UPLOAD_TIMEOUT_MS = 120_000;
  * 创建一个带超时的 AbortSignal。如果调用方已提供 signal，则合并两者（任一触发即中止）。
  */
 function _withTimeout(timeoutMs: number, existingSignal?: AbortSignal | null): AbortSignal {
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (existingSignal?.aborted) return existingSignal;
+  const timeoutSignal = typeof AbortSignal.timeout === "function"
+    ? AbortSignal.timeout(timeoutMs)
+    : (() => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("请求超时", "TimeoutError")), timeoutMs);
+      return controller.signal;
+    })();
   if (!existingSignal) return timeoutSignal;
-  // AbortSignal.any 合并多个 signal（任一触发即中止）
   if (typeof AbortSignal.any === "function") {
     return AbortSignal.any([existingSignal, timeoutSignal]);
   }
-  // Fallback for older browsers: prefer caller's signal, timeout won't apply
-  return existingSignal;
+  // Older WebViews must retain both cancellation AND the deadline.
+  const controller = new AbortController();
+  const abort = (event: Event) => {
+    existingSignal.removeEventListener("abort", abort);
+    timeoutSignal.removeEventListener("abort", abort);
+    controller.abort((event.target as AbortSignal).reason);
+  };
+  existingSignal.addEventListener("abort", abort, { once: true });
+  timeoutSignal.addEventListener("abort", abort, { once: true });
+  return controller.signal;
 }
 
 export function getManageToken(): string {
@@ -52,30 +65,11 @@ export function getAuthHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
-/**
- * 解析 API 基础路径。
- *
- * - 配置了运行时后端地址时：直连后端。桌面版后端使用启动时分配的
- *   随机端口，构建时固化的 Next.js rewrite 无法转发到这个端口。
- * - 未配置运行时地址时：默认走 Next.js rewrite 代理（同源，避免 CORS）
- * - direct: true：在没有运行时地址时也尝试直连（用于 SSE 流）
- *
- * 没有运行时后端地址时，普通 REST 请求走代理；SSE/abort 等实时性要求高的
- * 请求传入 direct=true。
- */
-function resolveApiBase(opts?: { direct?: boolean }): string {
-  // Only an explicit runtime origin opts ordinary REST calls out of the Web
-  // proxy. The local :8000 fallback belongs to direct/streaming requests.
-  const runtimeOrigin = getRuntimeConfig("backendOrigin");
-  if (opts?.direct || runtimeOrigin) {
-    return `${resolveDirectBackendOrigin()}${API_BASE_PATH}`;
-  }
-  return API_BASE_PATH;
-}
-
+/** `direct` is retained for callers; probes, REST and SSE share one origin. */
 export function buildApiUrl(path: string, opts?: { direct?: boolean }): string {
+  void opts;
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${resolveApiBase(opts)}${normalizedPath}`;
+  return `${resolveDirectBackendOrigin()}${API_BASE_PATH}${normalizedPath}`;
 }
 
 /**
@@ -131,6 +125,13 @@ function _isTransientError(err: unknown, res?: Response | null): boolean {
   return false;
 }
 
+type ApiGetOptions = {
+  direct?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  cache?: RequestCache;
+};
+
 /**
  * 直连后端的 fetch 包装。
  * - 跨域时携带 credentials；Authorization 由调用方通过 getAuthHeaders 注入。
@@ -176,11 +177,12 @@ async function handleAuthError(res: Response): Promise<never> {
 
 export async function apiGet<T = unknown>(
   path: string,
-  opts?: { direct?: boolean; signal?: AbortSignal; timeoutMs?: number },
+  opts?: ApiGetOptions,
 ): Promise<T> {
   const url = buildApiUrl(path, opts);
   const res = await apiFetch(url, _withCredentials(url, {
-    headers: { ...getAuthHeaders() },
+    headers: getAuthHeaders(),
+    cache: opts?.cache,
     signal: _withTimeout(opts?.timeoutMs ?? _DEFAULT_TIMEOUT_MS, opts?.signal),
   }));
   if (!res.ok) return handleAuthError(res);
@@ -317,6 +319,13 @@ export async function fetchWorkspaces(): Promise<WorkspaceFolder[]> {
   return res.workspaces ?? [];
 }
 
+export async function reorderWorkspaces(workspaceIds: string[]): Promise<WorkspaceFolder[]> {
+  const res: { workspaces?: WorkspaceFolder[] } = await apiPut("/workspaces/order", {
+    workspace_ids: workspaceIds,
+  });
+  return res.workspaces ?? [];
+}
+
 export async function createWorkspaceFolder(path: string, title?: string): Promise<{
   workspace: WorkspaceFolder;
   created: boolean;
@@ -388,6 +397,7 @@ export async function fetchSessionDetail(
     activeStreamId: (data.active_stream_id as string | null) ?? null,
     latestSeq: (data.latest_seq as number) ?? 0,
     fullAccessEnabled: (data.full_access_enabled as boolean) ?? false,
+    autoApproveEnabled: (data.auto_approve_enabled as boolean) ?? false,
     chatMode: (data.chat_mode as "write" | "read" | "plan") ?? "write",
     currentModel: (data.current_model as string | null) ?? null,
     currentModelName: (data.current_model_name as string | null) ?? null,
@@ -610,8 +620,26 @@ export async function submitApproval(
 export async function toggleFullAccess(
   sessionId: string,
   enabled: boolean,
-): Promise<{ session_id: string; full_access_enabled: boolean }> {
+): Promise<{ session_id: string; full_access_enabled: boolean; auto_approve_enabled: boolean }> {
   const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/full-access`, { direct: true });
+  const res = await apiFetch(url, _withCredentials(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ enabled }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+  }));
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(formatApiErrorMessage(data, res.status));
+  }
+  return res.json();
+}
+
+export async function toggleAutoApprove(
+  sessionId: string,
+  enabled: boolean,
+): Promise<{ session_id: string; full_access_enabled: boolean; auto_approve_enabled: boolean }> {
+  const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/auto-approve`, { direct: true });
   const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },

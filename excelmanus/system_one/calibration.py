@@ -1,7 +1,7 @@
-"""片 D 中文标定骨架。live 对照未签字 = 禁止 enforce 副作用。
+"""Legacy Jev calibration helpers.
 
-签字条件：把 pack_id 写入 ``SIGNED_ENFORCE_PACKS`` **且**
-主库设置 ``EXCELMANUS_JEV_CALIBRATED=1``。本仓库默认两者皆否。
+The reports and fingerprints remain available for evaluation tooling, but
+runtime application is controlled solely by the master and pack gates.
 """
 
 from __future__ import annotations
@@ -36,21 +36,17 @@ _APPROVAL_TOOLS = frozenset({"run_shell", "delete_file", "run_code"})
 
 
 def calibration_allows_enforce(pack_id: str, settings: JevSettings | None = None) -> bool:
-    """未签字不得 wire_narrow / 改 HookDecision / 改 model_text / 发 ui_hint。
+    """Legacy report predicate retained for offline calibration tooling.
 
-    shadow 不走本函数（gate != enforce）。双闸：配置 calibrated **且**
-    pack/family 已写入签字集合。
+    Production host code no longer calls this function as a runtime gate.
     """
     cfg = settings if settings is not None else settings_from(None)
     if not cfg.calibrated:
         return False
     if pack_id in SIGNED_ENFORCE_PACKS:
         signed = SIGNED_ENFORCE_PROVENANCE.get(pack_id)
-        if signed and signed != calibration_fingerprint(pack_id):
-            return False
-        return True
-    spec = get_pack(pack_id)
-    return spec.family in SIGNED_ENFORCE_FAMILIES
+        return not signed or signed == calibration_fingerprint(pack_id)
+    return get_pack(pack_id).family in SIGNED_ENFORCE_FAMILIES
 
 
 def calibration_fingerprint(pack_id: str) -> str:

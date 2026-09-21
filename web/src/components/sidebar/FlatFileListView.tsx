@@ -101,6 +101,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
         const isFileActive = openPaths.has(file.path);
         const isDragging = draggingPath === file.path;
         const isSelected = selectedPaths.has(file.path);
+        const isWorkbook = isSpreadsheetFile(file.filename || file.path);
         const normalized = normalizePath(file.path);
         const dirPart = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : "";
 
@@ -174,53 +175,57 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                       <Download className="h-4 w-4" />
                       下载
                     </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={(e) => {
-                      e.stopPropagation();
-                      useExcelStore.getState().setPendingTemplateMessage(
-                        `请将 ${formatFileMention({ path: file.path })} 与 进行合并`
-                      );
-                    }}>
-                      <Combine className="h-4 w-4" />
-                      与其他文件合并
-                    </DropdownMenuItem>
-                    {(() => {
-                      const otherExcels = comparisonFiles.filter((f) => f.path !== file.path);
-                      if (otherExcels.length > 0) {
-                        return (
-                          <DropdownMenuSub>
-                            <DropdownMenuSubTrigger>
-                              <ArrowLeftRight className="h-4 w-4" />
-                              与其他文件对比
-                            </DropdownMenuSubTrigger>
-                            <DropdownMenuSubContent className="w-44">
-                              {otherExcels.slice(0, 10).map((other) => (
-                                <DropdownMenuItem
-                                  key={other.path}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    useExcelStore.getState().openCompare(file.path, other.path);
-                                  }}
-                                >
-                                  {other.filename}
-                                </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuSubContent>
-                          </DropdownMenuSub>
-                        );
-                      }
-                      return (
+                    {isWorkbook && (
+                      <>
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={(e) => {
                           e.stopPropagation();
                           useExcelStore.getState().setPendingTemplateMessage(
-                            `请对比 ${formatFileMention({ path: file.path })} 和 的差异`
+                            `请将 ${formatFileMention({ path: file.path })} 与 进行合并`
                           );
                         }}>
-                          <ArrowLeftRight className="h-4 w-4" />
-                          与其他文件对比
+                          <Combine className="h-4 w-4" />
+                          与其他文件合并
                         </DropdownMenuItem>
-                      );
-                    })()}
+                        {(() => {
+                          const otherExcels = comparisonFiles.filter((f) => f.path !== file.path);
+                          if (otherExcels.length > 0) {
+                            return (
+                              <DropdownMenuSub>
+                                <DropdownMenuSubTrigger>
+                                  <ArrowLeftRight className="h-4 w-4" />
+                                  与其他文件对比
+                                </DropdownMenuSubTrigger>
+                                <DropdownMenuSubContent className="w-44">
+                                  {otherExcels.slice(0, 10).map((other) => (
+                                    <DropdownMenuItem
+                                      key={other.path}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        useExcelStore.getState().openCompare(file.path, other.path);
+                                      }}
+                                    >
+                                      {other.filename}
+                                    </DropdownMenuItem>
+                                  ))}
+                                </DropdownMenuSubContent>
+                              </DropdownMenuSub>
+                            );
+                          }
+                          return (
+                            <DropdownMenuItem onClick={(e) => {
+                              e.stopPropagation();
+                              useExcelStore.getState().setPendingTemplateMessage(
+                                `请对比 ${formatFileMention({ path: file.path })} 和 的差异`
+                              );
+                            }}>
+                              <ArrowLeftRight className="h-4 w-4" />
+                              与其他文件对比
+                            </DropdownMenuItem>
+                          );
+                        })()}
+                      </>
+                    )}
                     {(() => {
                       const groups = useExcelStore.getState().fileGroups;
                       if (groups.length > 0) {

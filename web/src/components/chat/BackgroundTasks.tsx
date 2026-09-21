@@ -170,7 +170,6 @@ function SessionBackgroundTasks({ sessionId }: { sessionId: string }) {
           title={waitingCount ? `${waitingCount} 个后台任务等待回答` : "后台任务"}
           aria-label={waitingCount ? `后台任务，${waitingCount} 个等待回答` : `后台任务${activeCount ? `，${activeCount} 个未结束` : ""}`}>
           <ListTodo className="h-4 w-4" />
-          <span className="hidden lg:inline text-xs">任务</span>
           {activeCount > 0 && <span className={cn("rounded-full min-w-4 px-1 text-[10px] bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]", waitingCount > 0 && "bg-amber-500/15 text-amber-700 dark:text-amber-400")}>{activeCount}</span>}
         </Button>
       </DialogTrigger>

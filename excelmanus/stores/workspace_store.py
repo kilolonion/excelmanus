@@ -102,6 +102,36 @@ class WorkspaceStore:
         self._persist_unique_titles(items)
         return items
 
+    def reorder(self, workspace_ids: list[str]) -> list[dict[str, Any]]:
+        """Persist the user-visible workspace order.
+
+        Callers may omit registrations that are intentionally hidden from the
+        workspace picker (for example, an old package-root registration).  The
+        requested ids are therefore moved to the front in the supplied order,
+        while omitted registrations retain their relative order afterwards.
+        """
+        current = self._rows()
+        known_ids = {str(item["id"]) for item in current if item.get("id")}
+        requested = [str(item).strip() for item in workspace_ids if str(item).strip()]
+        if len(requested) != len(set(requested)):
+            raise WorkspacePathError("工作区顺序包含重复项目")
+        unknown = [workspace_id for workspace_id in requested if workspace_id not in known_ids]
+        if unknown:
+            raise WorkspacePathError("工作区顺序包含未知项目")
+
+        requested_set = set(requested)
+        ordered = [
+            *(next(item for item in current if str(item["id"]) == workspace_id) for workspace_id in requested),
+            *(item for item in current if str(item["id"]) not in requested_set),
+        ]
+        now = _now_iso()
+        self._conn.executemany(
+            "UPDATE workspaces SET sort_index = ?, updated_at = ? WHERE id = ?",
+            ((index, now, str(item["id"])) for index, item in enumerate(ordered)),
+        )
+        self._conn.commit()
+        return self._rows()
+
     def get(self, workspace_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
             "SELECT id, path, title, created_at, updated_at, sort_index, source_access "

@@ -14,7 +14,6 @@ from excelmanus.prompt.envelope import (
     canonical_wire_payload,
     digest_text,
     digest_tools,
-    reset_system_projection,
     seal_envelope,
 )
 from excelmanus.request.route import resolve_route
@@ -55,6 +54,8 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
                     response_id = state.get("response_id") if isinstance(state, dict) else None
                     source = message.get("replay_source") or {} if isinstance(message, dict) else {}
                     if (isinstance(response_id, str) and response_id.strip()
+                            and source.get("protocol") == "openai_responses"
+                            and source.get("model") == api_model
                             and source.get("compaction_generation", 0) == generation):
                         previous = {
                             "id": response_id.strip(),
@@ -214,6 +215,9 @@ def content_payload(messages: list[dict[str, Any]]) -> str:
 
 def _prompt_cache_key(route: ResolvedRoute, header_material: dict[str, Any]) -> str:
     sid = (route.session_id or "").strip() or "session"
+    # Child session IDs can exceed the provider's 64-character key limit.
+    if len(sid) > 44:
+        sid = digest_text(sid)
     digest = digest_text(canonical_json(header_material))
     return f"em_{sid}-{digest[:16]}"
 
@@ -225,7 +229,10 @@ def _build_header(
     *,
     transport: str,
 ) -> RequestHeader:
-    payload = content_payload(wire)
+    # Files may replace an inline image with a remote ID. Compare its original
+    # attachment/variant projection, not the replaceable transport reference.
+    projected = getattr(envelope, "messages", None)
+    payload = content_payload(projected if isinstance(projected, list) and projected else wire)
     tools = list(getattr(envelope, "tools", None) or [])
     identity = getattr(envelope, "identity", None)
     catalog = str(getattr(identity, "catalog_digest", "") or "") if identity is not None else ""
@@ -273,6 +280,35 @@ def _provider_body(
     header: RequestHeader,
     extra: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    extra = dict(extra or {})
+    if route.protocol == "openai_responses":
+        previous = extra.get("_responses_previous_response_id") or extra.get("previous_response_id")
+        nested = dict(extra.get("extra_body") or {})
+        # Only a response associated with this exact history and credential may
+        # omit the preceding messages. Old/unscoped snapshots fall back to full replay.
+        valid = False
+        projected = envelope.messages
+        for index, message in enumerate(projected):
+            state = message.get("replay_state") or {}
+            source = message.get("replay_source") or {}
+            if previous and isinstance(state, dict) and state.get("response_id") == previous:
+                valid = (
+                    source.get("protocol") == route.protocol and source.get("model") == route.model
+                    and source.get("credential_scope") == route.credential_scope
+                    and source.get("request_content_identity") == digest_text(content_payload(projected[:index]))
+                    and source.get("output_identity") == digest_text(content_payload([message]))
+                )
+        if not valid or not route.capabilities.get("stored_responses"):
+            extra.pop("_responses_previous_response_id", None)
+            extra.pop("previous_response_id", None)
+            nested.pop("previous_response_id", None)
+        if not route.capabilities.get("stored_responses"):
+            extra.pop("_responses_background", None)
+            extra["_responses_store"] = False
+            nested.pop("background", None)
+            nested.pop("store", None)
+        if nested or "extra_body" in extra:
+            extra["extra_body"] = nested
     body: dict[str, Any] = {
         "model": route.model,
         "messages": list(wire),
@@ -288,7 +324,119 @@ def _provider_body(
                 body[key] = value
     from excelmanus.providers.request_body import compile_provider_body
 
-    return compile_provider_body(route.protocol, _omit_degraded_keys(body, route))
+    native = compile_provider_body(route.protocol, _omit_degraded_keys(body, route))
+    from excelmanus.engine_core.llm_caller import degraded_params
+
+    if not route.capabilities.get("prompt_cache_key") or "prompt_cache_key" in (
+        degraded_params(route.protocol_label(), route.model) | degraded_params(route.protocol, route.model)
+    ):
+        native.pop("prompt_cache_key", None)
+        if isinstance(native.get("extra_body"), dict):
+            native["extra_body"].pop("prompt_cache_key", None)
+    return native
+
+
+def _without_cache_markers(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _without_cache_markers(item) for key, item in value.items() if key != "cache_control"}
+    if isinstance(value, list):
+        return [_without_cache_markers(item) for item in value]
+    return value
+
+
+def _cache_marker_policies(value: Any) -> set[str]:
+    """Marker positions grow with history; TTL/mode changes are policy changes."""
+    policies: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "cache_control":
+                policies.add(canonical_json(item))
+            else:
+                policies.update(_cache_marker_policies(item))
+    elif isinstance(value, list):
+        for item in value:
+            policies.update(_cache_marker_policies(item))
+    return policies
+
+
+def _native_header(
+    route: ResolvedRoute, header: RequestHeader, body: dict[str, Any], wire: list[dict[str, Any]],
+) -> RequestHeader:
+    """Measure the compiled provider request, without hashing growing history into its key."""
+    from excelmanus.attachments.files_api import collect_wire_file_ids
+
+    message_key = {"openai_responses": "input", "gemini": "contents", "antigravity": "contents"}.get(
+        route.protocol, "messages",
+    )
+    # These fields govern delivery/accounting/sampling, not the rendered prefix.
+    non_prefix = {
+        message_key, "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention", "cache_control",
+        "previous_response_id", "stream", "stream_options", "store", "background", "metadata",
+        "max_tokens", "max_output_tokens", "temperature", "top_p", "seed", "service_tier",
+        "safety_identifier", "user", "extra_headers",
+    }
+    effective = dict(body)
+    extra_body = effective.pop("extra_body", None)
+    if isinstance(extra_body, dict):
+        effective.update(extra_body)
+    settings = {key: _without_cache_markers(value) for key, value in effective.items() if key not in non_prefix}
+    config_digest = digest_text(canonical_json(settings))
+    cache_options = {
+        key: effective[key] for key in ("cache_control", "prompt_cache_options", "prompt_cache_retention")
+        if key in effective
+    }
+    options = cache_options.get("prompt_cache_options")
+    if isinstance(options, dict):
+        cache_options["prompt_cache_options"] = {key: value for key, value in options.items()
+                                                  if key != "comparison_response_id"}
+    policy_digest = digest_text(canonical_json({
+        "transport": header.transport,
+        **cache_options,
+        "marker_policies": sorted(_cache_marker_policies(effective)),
+        "key_enabled": "prompt_cache_key" in effective,
+    }))
+    hashes = []
+    for message in effective.get(message_key) or []:
+        # Claude/Gemini merge adjacent messages with the same role. Hash their
+        # blocks so appending a new block does not rewrite the previous one.
+        block_key = "parts" if message_key == "contents" else "content"
+        blocks = message.get(block_key) if isinstance(message, dict) else None
+        if route.protocol in {"anthropic", "gemini", "antigravity"} and isinstance(blocks, (list, str)):
+            if isinstance(blocks, str):
+                blocks = [{"type": "text", "text": blocks}]
+            for block in blocks:
+                item = {key: value for key, value in message.items() if key != block_key}
+                item[block_key] = block
+                hashes.append(digest_text(canonical_json(_without_cache_markers(item))))
+        else:
+            hashes.append(digest_text(canonical_json(message)))
+    return replace(
+        header, provider_config_digest=config_digest, provider_prefix=tuple(hashes),
+        cache_policy_digest=policy_digest,
+        continuation_id=str(effective.get("previous_response_id") or ""),
+        file_ids=tuple(collect_wire_file_ids(wire)),
+    )
+
+
+def _finalize_cache_key(route: ResolvedRoute, header: RequestHeader, body: dict[str, Any]) -> RequestHeader:
+    """The final body owns the sent key, including explicit overrides and degradation."""
+    nested = body.get("extra_body")
+    key = body.get("prompt_cache_key")
+    if isinstance(nested, dict) and "prompt_cache_key" in nested:
+        key = nested["prompt_cache_key"]
+    # A custom key is preserved; auto-generated keys depend on native settings.
+    if key == header.prompt_cache_key and key:
+        key = _prompt_cache_key(route, {
+            "route": header.route_fingerprint, "config": header.provider_config_digest,
+            "cache_policy": header.cache_policy_digest,
+        })
+        if isinstance(nested, dict) and "prompt_cache_key" in nested:
+            nested["prompt_cache_key"] = key
+        else:
+            body["prompt_cache_key"] = key
+    if key is not None and (not isinstance(key, str) or not key.strip() or len(key) > 64):
+        raise ValueError("prompt_cache_key 必须是 1–64 字符的非空字符串")
+    return replace(header, prompt_cache_key=key or "", provider_digest=digest_text(canonical_json(body)))
 
 
 async def compile_request(
@@ -297,7 +445,52 @@ async def compile_request(
     tool_access: str = "may_write",
     vision_capable: bool | None = None,
     extra: dict[str, Any] | None = None,
-    persist_surface: bool = True,
+    event: str | None = None,
+    envelope: RequestEnvelope | None = None,
+) -> tuple[PreparedRequest | None, str | None]:
+    """Compile atomically with respect to request state. The session actor owns this call."""
+    fields = (
+        "_last_envelope", "_prepared_request", "_resolved_route", "_compile_extra",
+        "_envelope_system_head", "_envelope_system_effective", "_last_system_msgs",
+        "_prompt_tool_snapshot", "_envelope_prefix_snapshot", "_restored_envelope_prefix",
+        "_last_vision_capable", "_projection_generation", "_last_image_report",
+        "_image_wire_pin_seq", "_files_wire_mode", "_files_inline_until", "_last_wire_messages",
+    )
+    missing = object()
+    before = {key: getattr(engine, key, missing) for key in fields}
+    series = series_of(engine)
+    series_before = (series.series_id, series.last_accepted, list(series.events), list(series._pending))
+    memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
+    memory_before = {key: getattr(memory, key, missing) for key in (
+        "_projection_dirty", "_pending_anchor", "_wire_sent_tool_ids",
+    )} if memory is not None else {}
+    prepared = None
+    try:
+        prepared, error = await _compile_request(
+            engine, tool_access=tool_access, vision_capable=vision_capable,
+            extra=extra, event=event, envelope=envelope,
+        )
+        return prepared, error
+    finally:
+        if prepared is None:
+            from excelmanus.prompt.assemble import rollback_prompt_dynamic
+
+            rollback_prompt_dynamic(engine, getattr(engine, "_prompt_dynamic_appended_messages", None))
+            for target, values in ((engine, before), (memory, memory_before)):
+                for key, value in values.items():
+                    if value is missing:
+                        vars(target).pop(key, None)
+                    else:
+                        setattr(target, key, value)
+            series.series_id, series.last_accepted, series.events, series._pending = series_before
+
+
+async def _compile_request(
+    engine: Any,
+    *,
+    tool_access: str = "may_write",
+    vision_capable: bool | None = None,
+    extra: dict[str, Any] | None = None,
     event: str | None = None,
     envelope: RequestEnvelope | None = None,
 ) -> tuple[PreparedRequest | None, str | None]:
@@ -330,14 +523,13 @@ async def compile_request(
             engine,
             tool_access=tool_access,
             vision_capable=vision_capable,
-            persist=persist_surface,
             commit_dynamic=False,
         )
         if error is not None or envelope is None:
             return None, error or "系统上下文组装失败"
 
     report = getattr(engine, "_last_image_report", None) or {}
-    if persist_surface and report.get("required_omitted") and "attachment_quota" not in {
+    if report.get("required_omitted") and "attachment_quota" not in {
         ev.get("type") for ev in series.events[-8:] if isinstance(ev, dict)
     }:
         from excelmanus.prompt.assemble import rollback_prompt_dynamic
@@ -358,7 +550,6 @@ async def compile_request(
             engine,
             tool_access=tool_access,
             vision_capable=vision_capable,
-            persist=persist_surface,
             commit_dynamic=False,
         )
         if error is not None or envelope is None:
@@ -367,7 +558,6 @@ async def compile_request(
     sealed, seal_error = await seal_envelope(
         engine,
         envelope,
-        persist=persist_surface,
         model=route.model,
         protocol=route.protocol_label(),
         call_config=dict(route.call_config),
@@ -385,16 +575,6 @@ async def compile_request(
     wire = list(getattr(sealed, "wire_messages", None) or [])
     transport = str(getattr(sealed, "transport", None) or "inline")
     header = _build_header(route, sealed, wire, transport=transport)
-    prefix_error = series.check_prefix(header)
-    if prefix_error:
-        from excelmanus.prompt.assemble import rollback_prompt_dynamic
-
-        rollback_prompt_dynamic(
-            engine,
-            getattr(engine, "_prompt_dynamic_appended_messages", None),
-        )
-        return None, prefix_error
-
     from excelmanus.attachments.files_api import collect_wire_file_ids
 
     try:
@@ -408,6 +588,8 @@ async def compile_request(
             )
             return None, "自定义请求体不能覆盖消息、工具、模型或系统策略"
         native_body = _provider_body(route, sealed, wire, header, extra)
+        header = _native_header(route, header, native_body, wire)
+        header = _finalize_cache_key(route, header, native_body)
     except (TypeError, ValueError) as exc:
         from excelmanus.prompt.assemble import rollback_prompt_dynamic
 
@@ -416,7 +598,13 @@ async def compile_request(
             getattr(engine, "_prompt_dynamic_appended_messages", None),
         )
         return None, f"协议请求编译失败：{exc}"
-    header = replace(header, provider_digest=digest_text(canonical_json(native_body)))
+    prefix_error = series.check_prefix(header)
+    if prefix_error:
+        from excelmanus.prompt.assemble import rollback_prompt_dynamic
+
+        rollback_prompt_dynamic(engine, getattr(engine, "_prompt_dynamic_appended_messages", None))
+        return None, prefix_error
+    sealed = replace(sealed, prompt_cache_key=header.prompt_cache_key)
     prepared = PreparedRequest(
         request_id=uuid4().hex,
         series_id=series.series_id,
@@ -430,6 +618,9 @@ async def compile_request(
     )
     engine._prepared_request = prepared
     engine._last_envelope = sealed
+    from excelmanus.prompt.cache_restore import remember_prefix_snapshot
+
+    remember_prefix_snapshot(engine, sealed)
     from excelmanus.prompt.assemble import commit_prompt_dynamic
 
     commit_prompt_dynamic(engine)

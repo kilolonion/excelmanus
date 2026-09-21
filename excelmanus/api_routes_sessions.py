@@ -890,7 +890,7 @@ async def scan_session_registry(session_id: str, request: Request) -> JSONRespon
 
 @router.post("/api/v1/sessions/{session_id}/full-access")
 async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
-    """切换指定会话的 full_access 开关（供前端快捷按钮使用）。"""
+    """切换完全访问：跳过审批并放开 run_code 的网络/进程/文件围栏。"""
     session_manager = get_session_manager()
     if session_manager is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
@@ -904,6 +904,8 @@ async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
     if engine is not None:
         engine._full_access_enabled = enabled
         engine._persist_full_access(enabled)
+        engine._auto_approve_enabled = False
+        engine._persist_auto_approve(False)
         if not enabled:
             # 关闭时驱逐受限 skill，与 command_handler 保持一致
             blocked = set(engine._restricted_code_skillpacks)
@@ -925,10 +927,50 @@ async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
                 uc.set_full_access(enabled)
             except Exception:
                 logger.debug("持久化 full_access 失败（无会话）", exc_info=True)
+            try:
+                uc.set_auto_approve(False)
+            except Exception:
+                logger.debug("持久化 auto_approve 失败（无会话）", exc_info=True)
 
     return JSONResponse(content={
         "session_id": session_id,
         "full_access_enabled": enabled,
+        "auto_approve_enabled": bool(getattr(engine, "_auto_approve_enabled", False)) if engine is not None else False,
+    })
+
+
+@router.post("/api/v1/sessions/{session_id}/auto-approve")
+async def toggle_auto_approve(session_id: str, request: Request) -> JSONResponse:
+    """切换仅自动审批：不授予网络、子进程或越界文件能力。"""
+    session_manager = get_session_manager()
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
+
+    body = await request.json()
+    enabled = bool(body.get("enabled", True))
+    engine = await session_manager.get_or_restore_engine(session_id)
+    if engine is not None:
+        engine._auto_approve_enabled = enabled
+        engine._persist_auto_approve(enabled)
+        if enabled:
+            engine._full_access_enabled = False
+            engine._persist_full_access(False)
+    else:
+        database = get_database()
+        if database is not None:
+            try:
+                from excelmanus.stores.config_store import UserConfigStore
+                uc = UserConfigStore(database.conn)
+                uc.set_auto_approve(enabled)
+                if enabled:
+                    uc.set_full_access(False)
+            except Exception:
+                logger.debug("持久化 auto_approve 失败（无会话）", exc_info=True)
+
+    return JSONResponse(content={
+        "session_id": session_id,
+        "full_access_enabled": bool(getattr(engine, "_full_access_enabled", False)) if engine is not None else False,
+        "auto_approve_enabled": enabled,
     })
 
 
@@ -950,6 +992,7 @@ async def get_session(session_id: str, request: Request) -> JSONResponse:
             "in_flight": False,
             "messages": [],
             "full_access_enabled": False,
+            "auto_approve_enabled": False,
             "chat_mode": "write",
             "current_model": None,
             "current_model_name": None,

@@ -22,9 +22,12 @@ def _optional_positive(usage: Any, *keys: str) -> int | None:
             value = getattr(usage, key, None) if present else None
         if not present or value is None:
             continue
-        seen = True
         try:
-            best = max(best, int(value or 0))
+            parsed = int(value)
+            if parsed < 0:
+                continue
+            best = max(best, parsed)
+            seen = True
         except (TypeError, ValueError):
             continue
     return best if seen else None
@@ -58,11 +61,13 @@ def extract_cache_usage(usage: Any) -> CacheUsage:
     if anthropic_present:
         hits.append(read)
     hit = max(hits) if hits else None
-    write = creation if anthropic_present else None
+    write = _optional_positive(details, "cache_write_tokens")
+    if write is None and anthropic_present:
+        write = creation
     if hit is None:
         reason = "unknown"
     elif hit <= 0:
-        reason = "none" if prompt <= 0 else "first_turn"
+        reason = "unknown"  # Usage alone cannot distinguish cold start, TTL or prefix drift.
     else:
         reason = "none"
     return CacheUsage(

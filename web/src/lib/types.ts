@@ -52,6 +52,7 @@ export interface SessionDetail {
   activeStreamId: string | null;
   latestSeq: number;
   fullAccessEnabled: boolean;
+  autoApproveEnabled: boolean;
   chatMode: "write" | "read" | "plan";
   currentModel: string | null;
   currentModelName: string | null;

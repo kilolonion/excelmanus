@@ -1773,17 +1773,13 @@ def _jev_provider_payload() -> dict[str, object]:
 
 
 def _jev_enforce_ready() -> bool:
-    """Expose the calibration gate so the settings UI cannot claim inert
-    ``enforce`` configuration is already changing execution.
-    """
-    from excelmanus.system_one.calibration import SIGNED_ENFORCE_FAMILIES, SIGNED_ENFORCE_PACKS
+    """Compatibility field retained for older clients.
 
-    cfg = get_config()
-    return bool(
-        cfg
-        and getattr(cfg, "jev_calibrated", False)
-        and (SIGNED_ENFORCE_PACKS or SIGNED_ENFORCE_FAMILIES)
-    )
+    JEV no longer has a shadow or calibration-only runtime.  Once a gate is
+    enabled, the corresponding decision is live, so the readiness indicator is
+    always true while the service is initialized.
+    """
+    return get_config() is not None
 
 
 _RUNTIME_SETTING_KEYS: dict[str, str] = {
@@ -2058,12 +2054,12 @@ class RuntimeConfigUpdate(BaseModel):
     tavily_api_key: str | None = None
     brave_api_key: str | None = None
     # ── System One / Jev ──
-    jev_enabled: Literal["off", "shadow", "enforce"] | None = None
-    jev_exposure: Literal["off", "shadow", "enforce"] | None = None
+    jev_enabled: Literal["off", "enforce"] | None = None
+    jev_exposure: Literal["off", "enforce"] | None = None
     jev_mode_hint: bool | None = None
-    jev_observation: Literal["off", "shadow", "enforce"] | None = None
-    jev_verification: Literal["off", "shadow", "enforce"] | None = None
-    jev_recovery: Literal["off", "shadow", "enforce"] | None = None
+    jev_observation: Literal["off", "enforce"] | None = None
+    jev_verification: Literal["off", "enforce"] | None = None
+    jev_recovery: Literal["off", "enforce"] | None = None
     jev_ui_hint: bool | None = None
     jev_model: str | None = None
     ai_gateway_api_key: str | None = None
@@ -2084,6 +2080,14 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
     updates: dict[str, str] = {}
 
     payload = request.model_dump(exclude_none=True)
+    # Enabling the master gate is an explicit request for the full JEV
+    # integration.  Fill omitted child switches with their enabled state while
+    # preserving an explicitly disabled child switch.
+    if payload.get("jev_enabled") == "enforce":
+        for field in ("jev_exposure", "jev_observation", "jev_verification", "jev_recovery"):
+            payload.setdefault(field, "enforce")
+        payload.setdefault("jev_mode_hint", True)
+        payload.setdefault("jev_ui_hint", True)
     updated_fields: list[str] = []
     # 过滤掉前端回传的掩码 API Key（含 * 号），避免覆盖真实密钥
     _API_KEY_FIELDS = {"exa_api_key", "tavily_api_key", "brave_api_key", "ai_gateway_api_key", "typesafe_api_key"}

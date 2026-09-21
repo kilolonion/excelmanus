@@ -28,7 +28,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
-import { workspaceFileOpenHint } from "@/lib/file-kind";
+import { isSpreadsheetFile, workspaceFileOpenHint } from "@/lib/file-kind";
 import { displayFilePath } from "@/lib/file-identity";
 import { useWorkspaceFileActive } from "@/lib/open-workspace-file";
 import { useExcelStore } from "@/stores/excel-store";
@@ -302,6 +302,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
   const file = node.file!;
   const isDragging = draggingPath === file.path;
   const isSelected = selectedPaths.has(file.path);
+  const isWorkbook = isSpreadsheetFile(file.filename || file.path);
 
   const handleFileClick = () => {
     onClick(file.path);
@@ -419,25 +420,29 @@ export function TreeNodeItem(props: TreeNodeProps) {
                 <Download className="h-4 w-4" />
                 下载
               </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={(e) => {
-                e.stopPropagation();
-                useExcelStore.getState().setPendingTemplateMessage(
-                  `请将 ${formatFileMention({ path: file.path })} 与 进行合并`
-                );
-              }}>
-                <Combine className="h-4 w-4" />
-                与其他文件合并
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={(e) => {
-                e.stopPropagation();
-                useExcelStore.getState().setPendingTemplateMessage(
-                  `请对比 ${formatFileMention({ path: file.path })} 和 的差异`
-                );
-              }}>
-                <ArrowLeftRight className="h-4 w-4" />
-                与其他文件对比
-              </DropdownMenuItem>
+              {isWorkbook && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={(e) => {
+                    e.stopPropagation();
+                    useExcelStore.getState().setPendingTemplateMessage(
+                      `请将 ${formatFileMention({ path: file.path })} 与 进行合并`
+                    );
+                  }}>
+                    <Combine className="h-4 w-4" />
+                    与其他文件合并
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={(e) => {
+                    e.stopPropagation();
+                    useExcelStore.getState().setPendingTemplateMessage(
+                      `请对比 ${formatFileMention({ path: file.path })} 和 的差异`
+                    );
+                  }}>
+                    <ArrowLeftRight className="h-4 w-4" />
+                    与其他文件对比
+                  </DropdownMenuItem>
+                </>
+              )}
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setRenaming(true); }}>
                 <Pencil className="h-4 w-4" />

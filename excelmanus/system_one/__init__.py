@@ -1,9 +1,7 @@
 """Jev / TypeSafe System One 对外薄 API。
 
-片 I / C 入口与审批 shadow。片 J/K/L/N/O/F/M/P/E 已接线；G 保留为显式
-calibration hook，但主循环不再自动调用，因为当前没有消费者。片 D 未签字：
-即使 ENABLED=enforce 也不得 applied，不改 wire / UI / 偏好 / model_text / 目录 / 循环 / 冷修剪 / 审批结果。
-context.resolve 是独立的纯建议题包；enforce 可向主模型补充上下文建议，不调用执行器。
+各题包使用二态闸门：关闭时跳过，开启时直接进入确定性宿主守卫。
+context.resolve 是独立的纯建议题包；开启后可向主模型补充上下文建议，不调用执行器。
 """
 
 from __future__ import annotations
@@ -13,7 +11,7 @@ from typing import Any
 
 from excelmanus.system_one.adapter import bound_state
 from excelmanus.system_one.client import SystemOneUnavailable, client_ready, system_one
-from excelmanus.system_one.log import record_shadow
+from excelmanus.system_one.log import record_jev_decision
 from excelmanus.system_one.packs import get_pack
 from excelmanus.system_one.policy import gate_for_pack, settings_from, stamp_application, synthesize
 from excelmanus.system_one.trace import public_transport
@@ -76,11 +74,7 @@ async def evaluate(
     *,
     config: Any | None = None,
 ) -> Decision:
-    """评估一个题包。没装 SDK / 没密钥 / 总闸 off 时 fail-open（安全家族 fail-closed=ASK）。
-
-    片 I 在 apply_claimed_followup 入口评估；片 C 在 create_pending 前 shadow。
-    L4 wire 收窄只在 ``decision.applied``（总闸+子闸 enforce 且标定已签字）。
-    """
+    """评估一个题包。没装 SDK / 没密钥 / 总闸 off 时 fail-open（安全家族 fail-closed=ASK）。"""
     settings = settings_from(config)
     gate = gate_for_pack(pack_id, settings)
     from excelmanus.system_one.breaker import allow, provider_key, record_failure, record_success
@@ -93,11 +87,11 @@ async def evaluate(
     api_key = settings.api_key
     if not client_ready(api_key, settings.protocol):
         decision = _unavailable_decision(pack_id, "unavailable")
-        record_shadow(pack_id=pack_id, gate=gate, decision=decision)
+        record_jev_decision(pack_id=pack_id, gate=gate, decision=decision)
         return decision
     if not allow(connection_key):
         decision = _with_provenance(_unavailable_decision(pack_id, "provider_cooldown"), settings)
-        record_shadow(pack_id=pack_id, gate=gate, decision=decision)
+        record_jev_decision(pack_id=pack_id, gate=gate, decision=decision)
         return decision
     assert api_key
     bounded = bound_state(pack_id, state)
@@ -119,7 +113,7 @@ async def evaluate(
             decision = Decision.ask(f"error:{exc}")
             decision = _with_transport(decision, "unavailable")
         decision = _with_provenance(decision, settings)
-        record_shadow(pack_id=pack_id, gate=gate, decision=decision)
+        record_jev_decision(pack_id=pack_id, gate=gate, decision=decision)
         return decision
     except Exception as exc:
         record_failure(connection_key, type(exc).__name__)
@@ -128,7 +122,7 @@ async def evaluate(
             decision = Decision.ask(f"error:{type(exc).__name__}")
             decision = _with_transport(decision, "unavailable")
         decision = _with_provenance(decision, settings)
-        record_shadow(pack_id=pack_id, gate=gate, decision=decision)
+        record_jev_decision(pack_id=pack_id, gate=gate, decision=decision)
         return decision
 
     decision = synthesize(pack_id, evaluation, bounded)
@@ -153,5 +147,5 @@ async def evaluate(
     )
     decision = stamp_application(pack_id, decision, settings)
     decision = _with_provenance(_with_transport(decision, transport), settings)
-    record_shadow(pack_id=pack_id, gate=gate, decision=decision, evaluation=evaluation)
+    record_jev_decision(pack_id=pack_id, gate=gate, decision=decision, evaluation=evaluation)
     return decision

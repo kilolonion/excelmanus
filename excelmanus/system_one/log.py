@@ -1,4 +1,4 @@
-"""影子记录：pack、model、usage、answers、合成动作。不打网。"""
+"""Jev 决策记录：pack、model、usage、answers、合成动作。不打网。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from excelmanus.system_one.types import ChoiceAnswer, Decision, Evaluation, Noul
 logger = get_logger("system_one")
 
 
-def record_shadow(
+def record_jev_decision(
     *,
     pack_id: str,
     gate: str,
@@ -31,7 +31,7 @@ def record_shadow(
             elif isinstance(answer, ScoreAnswer):
                 answers[key] = {"score": answer.score, "confidence": answer.confidence}
     logger.info(
-        "jev shadow pack=%s gate=%s kind=%s reason=%s applied=%s extras=%s provider=%s protocol=%s model=%s latency_ms=%s answers=%s usage=%s",
+        "jev decision pack=%s gate=%s kind=%s reason=%s applied=%s extras=%s provider=%s protocol=%s model=%s latency_ms=%s answers=%s usage=%s",
         pack_id,
         gate,
         decision.kind,
@@ -45,3 +45,9 @@ def record_shadow(
         answers,
         dict(getattr(evaluation, "usage", {}) or {}) if evaluation else {},
     )
+
+
+# Import compatibility for integrations that used the old recorder name; the
+# emitted event is now a normal decision record and never denotes a shadow
+# runtime mode.
+record_shadow = record_jev_decision

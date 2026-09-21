@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import { Circle, Settings, QrCode } from "lucide-react";
+import { useEffect, useState, useRef, useSyncExternalStore } from "react";
+import { Circle, Settings, QrCode, Link2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useUIStore } from "@/stores/ui-store";
@@ -23,6 +23,11 @@ export function StatusFooter() {
   const isMobile = useIsMobile();
   const [openTooltipId, setOpenTooltipId] = useState<string | null>(null);
   const [pairingOpen, setPairingOpen] = useState(false);
+  const androidClient = useSyncExternalStore(
+    () => () => {},
+    () => Boolean(window.excelManusAndroid?.version === 1),
+    () => false,
+  );
 
   useEffect(() => {
     if (!isMobile || !openTooltipId) return;
@@ -123,6 +128,13 @@ export function StatusFooter() {
             className="h-8 w-8 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
             title="扫码连接" aria-label="扫码连接"
           ><QrCode className="h-4 w-4" /></button>
+          {androidClient && (
+            <button
+              onClick={() => window.excelManusAndroid?.openConnectionSettings?.()}
+              className="h-8 w-8 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+              title="连接设置" aria-label="连接设置"
+            ><Link2 className="h-4 w-4" /></button>
+          )}
           <button
             onClick={() => useUIStore.getState().openSettings("model")}
             className="h-7 w-7 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"

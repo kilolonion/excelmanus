@@ -11,6 +11,7 @@ interface UIState {
   sidebarOpen: boolean;
   currentModel: string;
   fullAccessEnabled: boolean;
+  autoApproveEnabled: boolean;
   visionCapable: boolean | null;
   chatMode: "write" | "read" | "plan";
   chatModeOwned: boolean;
@@ -28,6 +29,7 @@ interface UIState {
   setSidebarOpen: (open: boolean) => void;
   setCurrentModel: (model: string) => void;
   setFullAccessEnabled: (enabled: boolean) => void;
+  setAutoApproveEnabled: (enabled: boolean) => void;
   setVisionCapable: (capable: boolean | null) => void;
   setChatMode: (mode: "write" | "read" | "plan") => void;
   hydrateChatMode: (mode: "write" | "read" | "plan") => void;
@@ -60,6 +62,7 @@ export const useUIStore = create<UIState>()(
   sidebarOpen: !getIsMobile() && getIsDesktop(),
   currentModel: "",
   fullAccessEnabled: false,
+  autoApproveEnabled: false,
   visionCapable: null,
   chatMode: "write" as const,
   chatModeOwned: false,
@@ -77,6 +80,7 @@ export const useUIStore = create<UIState>()(
   setSidebarOpen: (open) => set({ sidebarOpen: open }),
   setCurrentModel: (model) => set({ currentModel: model }),
   setFullAccessEnabled: (enabled) => set({ fullAccessEnabled: enabled }),
+  setAutoApproveEnabled: (enabled) => set({ autoApproveEnabled: enabled }),
   setVisionCapable: (capable) => set({ visionCapable: capable }),
   setChatMode: (mode) => set({ chatMode: mode, chatModeOwned: true }),
   hydrateChatMode: (mode) =>
@@ -103,14 +107,18 @@ export const useUIStore = create<UIState>()(
       name: "excelmanus-ui",
       partialize: (state) => ({
         fullAccessEnabled: state.fullAccessEnabled,
+        autoApproveEnabled: state.autoApproveEnabled,
       }),
       // 只恢复白名单中的可持久化偏好，其他 UI 状态始终使用当前默认值。
       merge: (persisted, current) => {
-        const saved = persisted as { fullAccessEnabled?: unknown } | null;
+        const saved = persisted as { fullAccessEnabled?: unknown; autoApproveEnabled?: unknown } | null;
         return {
           ...current,
           ...(typeof saved?.fullAccessEnabled === "boolean"
             ? { fullAccessEnabled: saved.fullAccessEnabled }
+            : {}),
+          ...(typeof saved?.autoApproveEnabled === "boolean"
+            ? { autoApproveEnabled: saved.autoApproveEnabled }
             : {}),
         };
       },

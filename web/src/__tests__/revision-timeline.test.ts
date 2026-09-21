@@ -114,6 +114,12 @@ describe("resolveWorkbookPanelPath", () => {
     expect(resolveWorkbookPanelPath(null, [{ path: "./legacy.xlsx" }], "id:ws")).toBeUndefined();
   });
 
+  it("does not use an image as the active workbook", () => {
+    expect(
+      resolveWorkbookPanelPath("./receipt.jpg", [{ path: "./sales.xlsx", workspaceKey: "id:ws" }], "id:ws"),
+    ).toBe("./sales.xlsx");
+  });
+
   it("returns undefined when nothing is available", () => {
     expect(resolveWorkbookPanelPath(null, [])).toBeUndefined();
   });

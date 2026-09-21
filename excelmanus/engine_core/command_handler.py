@@ -88,10 +88,12 @@ class CommandHandler:
             if (action in {"on", ""}) and not too_many_args:
                 e._full_access_enabled = True
                 e._persist_full_access(True)
+                e._auto_approve_enabled = False
+                e._persist_auto_approve(False)
                 self._emit_mode_changed(on_event, "full_access", True)
                 msg = (
-                    "已开启跳过审批（full_access）。模型请求的工具、联网代码与本机 Shell "
-                    "命令将自动执行。"
+                    "已开启完全访问（full_access）。run_code 可访问工作区外文件、联网并启动子进程；"
+                    "模型请求的工具与本机 Shell 命令将自动执行。"
                 )
                 # 若当前有 pending approval，自动执行并续上对话
                 pending = e.approval.pending
@@ -115,12 +117,41 @@ class CommandHandler:
 
                     series_of(e).note("catalog/change")
                 self._emit_mode_changed(on_event, "full_access", False)
-                return "已关闭跳过审批（restricted）。联网代码与非白名单 Shell 命令已恢复限制。"
+                return "已关闭完全访问。当前恢复为受限审批模式。"
             if action == "status" and not too_many_args:
-                status = "跳过（含联网与本机命令）" if e._full_access_enabled else "询问（受限）"
-                code_access = "full_access" if e._full_access_enabled else "restricted"
-                return f"当前审批策略：{status}；代码技能权限：{code_access}。"
+                if e._full_access_enabled:
+                    return "当前权限：完全访问（含工作区外文件、联网、子进程和本机命令）。"
+                if getattr(e, "_auto_approve_enabled", False):
+                    return "当前权限：仅自动审批（不含网络、子进程和工作区外文件）。"
+                return "当前权限：询问（受限）。"
             return "无效参数。用法：/fullaccess [on|off|status]。"
+
+        if command == "/autoapprove":
+            if (action in {"on", ""}) and not too_many_args:
+                e._auto_approve_enabled = True
+                e._persist_auto_approve(True)
+                e._full_access_enabled = False
+                e._persist_full_access(False)
+                self._emit_mode_changed(on_event, "auto_approve", True)
+                msg = "已开启仅自动审批。代码仍禁止网络、子进程和工作区外文件。"
+                pending = e.approval.pending
+                if pending is not None:
+                    accept_result = await self._handle_accept_command(
+                        ["/accept", pending.approval_id], on_event=on_event,
+                    )
+                    return f"{msg}\n\n{accept_result}"
+                return msg
+            if action == "off" and not too_many_args:
+                e._auto_approve_enabled = False
+                e._persist_auto_approve(False)
+                self._emit_mode_changed(on_event, "auto_approve", False)
+                return "已关闭仅自动审批，当前恢复为询问模式。"
+            if action == "status" and not too_many_args:
+                if e._full_access_enabled:
+                    return "当前权限：完全访问（请用 /fullaccess off 关闭）。"
+                status = "开启" if getattr(e, "_auto_approve_enabled", False) else "关闭"
+                return f"仅自动审批：**{status}**（不含网络、子进程和工作区外文件）。"
+            return "无效参数。用法：/autoapprove [on|off|status]。"
 
         if command == "/subagent":
             # /subagent 默认行为为查询状态，避免误触启停

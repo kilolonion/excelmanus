@@ -25,7 +25,7 @@ class RequestSeries:
     def note(self, kind: str, **extra: Any) -> None:
         event = {"type": kind, **extra}
         self.events.append(event)
-        if kind in REWRITE_EVENTS or kind == "transport/renew" or kind == "cache/policy":
+        if kind in REWRITE_EVENTS or kind in {"transport/renew", "cache/policy", "cache/config"}:
             self._pending.append(kind)
 
     def start_new(self, reason: str) -> None:
@@ -58,21 +58,43 @@ class RequestSeries:
             return None
         if self.allows_content_rewrite():
             return None
-        if "transport/renew" in self._pending or "cache/policy" in self._pending:
-            if header.content_identity == prev.content_identity:
-                return None
-            if header.content_payload.startswith(prev.content_payload):
-                return None
+        if not header.content_payload.startswith(prev.content_payload):
             return (
-                "请求内容前缀不变量破坏：transport/cache 事件不得改写内容身份"
+                "请求内容前缀不变量破坏：当前载荷不是上一成功请求的前缀延伸；"
+                "配置/传输变化不得改写内容身份"
                 f"（series={self.series_id}）。"
             )
-        if header.content_payload.startswith(prev.content_payload):
-            return None
-        return (
-            "请求内容前缀不变量破坏：当前载荷不是上一成功请求的前缀延伸"
-            f"（series={self.series_id}）。"
+
+        config_changed = bool(
+            prev.provider_config_digest and header.provider_config_digest
+            and prev.provider_config_digest != header.provider_config_digest
         )
+        transport_changed = (
+            header.transport != prev.transport
+            or header.file_ids[:len(prev.file_ids)] != prev.file_ids
+        )
+        policy_changed = (
+            header.cache_policy_digest != prev.cache_policy_digest
+            or header.prompt_cache_key != prev.prompt_cache_key
+        )
+        # These are observable changes, never permissions to rewrite history.
+        for changed, kind in ((config_changed, "cache/config"), (transport_changed, "transport/renew"),
+                              (policy_changed, "cache/policy")):
+            if changed and kind not in self._pending:
+                self.note(kind)
+        if transport_changed or "transport/renew" in self._pending:
+            return None
+        # Continuations send only a suffix. Their durable prefix is checked above;
+        # comparing two different suffixes as complete prompts would be invalid.
+        if header.continuation_id or prev.continuation_id:
+            return None
+        if (prev.provider_prefix and header.provider_config_digest
+                and header.provider_prefix[:len(prev.provider_prefix)] != prev.provider_prefix):
+            return (
+                "Provider 请求前缀不变量破坏：内容历史未变，但原生协议投影改写了已发送消息"
+                f"（series={self.series_id}）。"
+            )
+        return None
 
     def accept(self, header: RequestHeader) -> None:
         self.last_accepted = header
@@ -112,6 +134,10 @@ class RequestSeries:
         if header is None:
             series.note("restore/migrate")
             series.series_id = uuid4().hex
+        elif not header.provider_config_digest:
+            # Old snapshots used file IDs rather than attachment projections for
+            # content_payload. Rebase once when upgrading the evidence format.
+            series.note("restore/migrate")
         return series
 
 

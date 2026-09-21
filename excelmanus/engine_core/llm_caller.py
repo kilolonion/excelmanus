@@ -391,6 +391,8 @@ class LLMCaller:
             e._sent_prepared_request = prepared
         from excelmanus.trace import traced_request
 
+        previous = getattr(e, "_last_model_response_at", None)
+        e._model_idle_seconds = max(0.0, time.monotonic() - previous) if isinstance(previous, (int, float)) else None
         return await traced_request(e, e._client.chat.completions.create, kwargs)
 
     # ── 流式消费 ──────────────────────────────────────────
@@ -661,6 +663,25 @@ class LLMCaller:
         try:
             return await self._send_attempt(**kwargs)
         except Exception as exc:
+
+            native = kwargs.get("_prepared_body") or {}
+            if (isinstance(native, dict) and native.get("previous_response_id")
+                    and "previous_response_id" in str(exc).lower()
+                    and any(word in str(exc).lower() for word in ("not found", "expired", "invalid", "unsupported"))):
+                from excelmanus.request.compiler import compile_request
+
+                extra = dict(getattr(e, "_compile_extra", None) or {})
+                extra.pop("_responses_previous_response_id", None)
+                extra.pop("previous_response_id", None)
+                if isinstance(extra.get("extra_body"), dict):
+                    extra["extra_body"] = {k: v for k, v in extra["extra_body"].items() if k != "previous_response_id"}
+                prepared, error = await compile_request(e, extra=extra)
+                if error is not None or prepared is None:
+                    raise
+                retry = prepared.create_kwargs()
+                if kwargs.get("stream"):
+                    retry["stream"] = True
+                return await self._send_attempt(**retry)
 
             # 404 路由错误诊断：最常见原因是 base_url 路径不正确
             _exc_text_lower = str(exc).lower()

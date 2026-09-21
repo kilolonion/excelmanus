@@ -196,6 +196,30 @@ class TestRunCodeInline:
         assert result["sandbox_tier"] == "RED"
         assert "network-socket-enabled" in result["stdout_tail"]
 
+    def test_full_access_allows_external_file_io(self, workspace: Path, tmp_path: Path) -> None:
+        """完全访问放开普通外部文件；受限模式仍由 wrapper 拦截。"""
+        external = tmp_path / "outside.txt"
+        external.write_text("outside-ok", encoding="utf-8")
+        from excelmanus.tools.context import reset_call
+
+        token = _bind_full_access(workspace)
+        try:
+            result = _payload(code_tools.run_code(
+                code=(
+                    f"from pathlib import Path\n"
+                    f"p = Path({str(external)!r})\n"
+                    "print(p.read_text(encoding='utf-8'))\n"
+                    "p.write_text('updated-ok', encoding='utf-8')\n"
+                ),
+                python_command=sys.executable,
+                require_excel_deps=False,
+            ))
+        finally:
+            reset_call(token)
+        assert result["status"] == "success"
+        assert "outside-ok" in result["stdout_tail"]
+        assert external.read_text(encoding="utf-8") == "updated-ok"
+
     def test_inline_stdout_utf8_chinese(self, workspace: Path) -> None:
         result = _payload(
             code_tools.run_code(

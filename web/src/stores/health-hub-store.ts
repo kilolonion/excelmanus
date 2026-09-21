@@ -1,7 +1,6 @@
 import { create } from "zustand";
-import { buildDirectHealthUrl } from "@/lib/backend-origin";
 import { useConnectionStore } from "@/stores/connection-store";
-import { apiFetch, getAuthHeaders } from "@/lib/api";
+import { apiGet } from "@/lib/api";
 
 export interface HealthData {
   status: string;
@@ -132,16 +131,11 @@ async function pollHealth(): Promise<void> {
 
   pollCount += 1;
   try {
-    const resp = await apiFetch(buildDirectHealthUrl(), {
-      method: "GET",
-      headers: getAuthHeaders(),
-      signal: AbortSignal.timeout(10_000),
+    const data = await apiGet<HealthPayload>("/health", {
+      direct: true,
+      timeoutMs: 10_000,
+      cache: "no-store",
     });
-    if (!resp.ok) {
-      throw new Error(`health_http_${resp.status}`);
-    }
-
-    const data = (await resp.json()) as HealthPayload;
     useHealthHubStore.setState({
       health: normalizeHealthData(data),
       connected: true,

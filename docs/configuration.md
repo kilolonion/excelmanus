@@ -364,22 +364,22 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
-| `EXCELMANUS_JEV_ENABLED` | 全局模式：`off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_EXPOSURE` | 工具披露与工作区/表格上下文建议：`off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_OBSERVATION` | 观察结果策略：`off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_VERIFICATION` | 修改后检查建议：`off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_RECOVERY` | 错误恢复建议：`off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_MODE_HINT` | 模式建议卡 | `false` |
-| `EXCELMANUS_JEV_UI_HINT` | 回合末 UI 面建议 | `false` |
+| `EXCELMANUS_JEV_ENABLED` | 总开关：`off` 关闭全部环节，`enforce` 全面接入 | `enforce` |
+| `EXCELMANUS_JEV_EXPOSURE` | 工具披露与工作区/表格上下文建议：`off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_OBSERVATION` | 观察结果策略：`off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_VERIFICATION` | 修改后检查建议：`off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_RECOVERY` | 错误恢复建议：`off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_MODE_HINT` | 模式建议卡；关闭后不运行该环节 | `true` |
+| `EXCELMANUS_JEV_UI_HINT` | 回合末 UI 面建议；关闭后不运行该环节 | `true` |
 | `EXCELMANUS_JEV_MODEL` | 当前决策模型 | `jev-1.13.0` |
 | `EXCELMANUS_JEV_ACTIVE_PROVIDER` | 当前决策提供商 id（`typesafe` / `vercel` / `custom-*`） | — |
 | `EXCELMANUS_JEV_PROVIDERS` | 决策提供商列表（含密钥，Fernet 加密） | `[]` |
 | `EXCELMANUS_JEV_TIMEOUT_SECONDS` | 单次评估超时 | `1.5` |
-| `EXCELMANUS_JEV_CALIBRATED` | 中文对照已签字后才允许 enforce 副作用 | `false` |
+| `EXCELMANUS_JEV_CALIBRATED` | 旧版标定字段，保留用于兼容，运行时不再作为生效门槛 | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe 直连密钥（与提供商列表同步） | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway 密钥（与提供商列表同步） | — |
 
-这是可选的实验性功能，需要 `system-one` extra。`off` 不启用；`shadow` 记录建议而不应用。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。详见[上下文建议说明](design/jev-context-advice-20260920.md)。其他执行侧影响仍要求有效标定与对应题包或策略族的签字。目前仓库签字集合为空，仅打开开关或把 `EXCELMANUS_JEV_CALIBRATED` 设为 `true` 不足以启用执行侧影响。标定器 `bench/jev_live_calibrate.py` 从主库读取密钥，真实标定会访问外部服务，且不会自动签字。
+这是可选的决策模型功能，需要 `system-one` extra。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。详见[上下文建议说明](design/jev-context-advice-20260920.md)。旧配置中的 `shadow` 会在读取时迁移为 `enforce`，`EXCELMANUS_JEV_CALIBRATED` 不再阻止已开启环节生效。
 
 ## 加密配置
 

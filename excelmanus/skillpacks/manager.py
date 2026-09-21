@@ -152,6 +152,7 @@ class SkillpackManager:
             skill_file = skill_dir / "SKILL.md"
             skill_dir.mkdir(parents=True, exist_ok=True)
             self._atomic_write_text(skill_file, content)
+            SkillpackLoader.invalidate_caches()
             self._loader.load_all()
         return self.get_skillpack(normalized_name)
 
@@ -188,6 +189,7 @@ class SkillpackManager:
                     f"Skillpack 文件不存在：`{skill_file}`。"
                 )
             self._atomic_write_text(skill_file, content)
+            SkillpackLoader.invalidate_caches()
             self._loader.load_all()
         return self.get_skillpack(skill.name)
 
@@ -239,6 +241,7 @@ class SkillpackManager:
                 json.dumps(meta, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            SkillpackLoader.invalidate_caches()
             self._loader.load_all()
 
         return {
@@ -277,6 +280,7 @@ class SkillpackManager:
                 project_skills_dir=str(self._project_dir),
                 overwrite=overwrite,
             )
+            SkillpackLoader.invalidate_caches()
             self._loader.load_all()
         return result.to_dict()
 
@@ -309,6 +313,7 @@ class SkillpackManager:
                 project_skills_dir=str(self._project_dir),
                 overwrite=overwrite,
             )
+            SkillpackLoader.invalidate_caches()
             self._loader.load_all()
             return result.to_dict()
         raise SkillpackInputError(

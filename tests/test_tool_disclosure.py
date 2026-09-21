@@ -207,7 +207,7 @@ def test_unknown_or_failed_detail_does_not_load_and_batch_uses_exact_ids(engine:
     assert engine._loaded_tool_names == {"mcp_docs_search", "mcp_private_search"}
 
 
-def test_loaded_survives_profile_changes_but_not_new_turn(engine: SimpleNamespace, monkeypatch) -> None:
+def test_loaded_survives_profile_changes_and_new_turn(engine: SimpleNamespace, monkeypatch) -> None:
     from excelmanus.system_one.host import clear_turn_exposure
 
     builder = MetaToolBuilder(engine)
@@ -216,8 +216,8 @@ def test_loaded_survives_profile_changes_but_not_new_turn(engine: SimpleNamespac
     monkeypatch.setattr("excelmanus.system_one.host.turn_wire_profile", lambda _: "minimal")
     assert {"mcp_docs_search", "run_code"} <= _names(builder.build_v5_tools())
     clear_turn_exposure(engine)
-    assert not engine._loaded_tool_names
-    assert "mcp_docs_search" not in _names(builder.build_v5_tools())
+    assert "mcp_docs_search" in engine._loaded_tool_names
+    assert "mcp_docs_search" in _names(builder.build_v5_tools())
 
 
 def test_web_initial_profile_can_include_mcp(engine: SimpleNamespace, monkeypatch) -> None:

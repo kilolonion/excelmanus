@@ -433,10 +433,11 @@ async def execute_command(request: Request) -> JSONResponse:
 
     # /fullaccess status
     if command == "/fullaccess status":
-        # fullaccess 已改为跨会话持久化设置
+        # 完全访问与仅自动审批是两个独立档位；旧客户端仍只认识 full_access。
         hint = (
-            "跳过审批: **关闭**\n\n使用 `/fullaccess on` 开启；开启后工具、"
-            "联网代码和本机 Shell 命令将自动执行（跨会话生效）。"
+            "完全访问: **关闭**\n仅自动审批: **关闭**\n\n"
+            "`/autoapprove on` 只跳过确认并保留代码沙盒；"
+            "`/fullaccess on` 才允许工作区外文件、联网和本机命令。"
         )
         if _database is not None:
             try:
@@ -444,8 +445,13 @@ async def execute_command(request: Request) -> JSONResponse:
                 _uc = UserConfigStore(_database.conn)
                 if _uc.get_full_access():
                     hint = (
-                        "跳过审批: **开启**（含联网与本机命令，跨会话生效）"
-                        "\n\n使用 `/fullaccess off` 关闭"
+                        "完全访问: **开启**（含工作区外文件、联网与本机命令，跨会话生效）"
+                        "\n仅自动审批: **关闭**\n\n使用 `/fullaccess off` 关闭"
+                    )
+                elif hasattr(_uc, "get_auto_approve") and _uc.get_auto_approve():
+                    hint = (
+                        "完全访问: **关闭**\n仅自动审批: **开启**（不含网络、子进程和工作区外文件）"
+                        "\n\n使用 `/autoapprove off` 关闭"
                     )
             except Exception:
                 pass
@@ -456,13 +462,36 @@ async def execute_command(request: Request) -> JSONResponse:
                     detail = await _session_manager.get_session_detail(s["id"])
                     if detail.get("full_access_enabled"):
                         hint = (
-                            "跳过审批: **开启**（含联网与本机命令）"
+                            "完全访问: **开启**（含工作区外文件、联网与本机命令）"
                             "\n\n使用 `/fullaccess off` 关闭"
                         )
                         break
+                    if detail.get("auto_approve_enabled"):
+                        hint = (
+                            "完全访问: **关闭**\n仅自动审批: **开启**（不含网络、子进程和工作区外文件）"
+                            "\n\n使用 `/autoapprove off` 关闭"
+                        )
             except Exception:
                 pass
         return JSONResponse(content={"result": hint, "format": "markdown"})
+
+    # /autoapprove status
+    if command == "/autoapprove status":
+        enabled = False
+        if _database is not None:
+            try:
+                from excelmanus.stores.config_store import UserConfigStore
+                enabled = UserConfigStore(_database.conn).get_auto_approve()
+            except Exception:
+                pass
+        return JSONResponse(content={
+            "result": (
+                "仅自动审批: **开启**（不含网络、子进程和工作区外文件）"
+                if enabled else
+                "仅自动审批: **关闭**。使用 `/autoapprove on` 开启。"
+            ),
+            "format": "markdown",
+        })
 
     # /plan status
     if command == "/plan status":

@@ -62,6 +62,32 @@ describe("excel-store recent files", () => {
     expect(useExcelStore.getState().recentFiles).toEqual([]);
   });
 
+  it("keeps non-spreadsheet mutation files out of the workbook recent list", () => {
+    bindSession("ws-a");
+
+    useExcelStore.getState().addRecentFile({ path: "./receipt_src.jpg", filename: "receipt_src.jpg" });
+    useExcelStore.getState().addRecentFileIfNotDismissed(
+      { path: "./notes.md", filename: "notes.md" },
+      "id:ws-a",
+    );
+    useExcelStore.getState().mergeRecentFiles([
+      { path: "./_work_receipt.jpg", filename: "_work_receipt.jpg", modifiedAt: 3 },
+      { path: "./sales.xlsx", filename: "sales.xlsx", modifiedAt: 2 },
+    ], "id:ws-a");
+
+    expect(useExcelStore.getState().recentFiles.map((file) => file.path)).toEqual(["./sales.xlsx"]);
+  });
+
+  it("removes legacy image entries when sanitizing persisted workbook recents", () => {
+    const raw = [
+      { path: "./receipt_src.jpg", filename: "receipt_src.jpg", lastUsedAt: 3, workspaceKey: "id:ws-a" },
+      { path: "./sales.xlsx", filename: "sales.xlsx", lastUsedAt: 2, workspaceKey: "id:ws-a" },
+    ] as ExcelFileRef[];
+
+    expect(sanitizeRecentFiles(raw).map((file) => file.path)).toEqual(["./sales.xlsx"]);
+    expect(recentFilesForWorkspace(raw, "id:ws-a").map((file) => file.path)).toEqual(["./sales.xlsx"]);
+  });
+
   it("only displays the current workspace bucket", () => {
     const files: ExcelFileRef[] = [
       { path: "./a.xlsx", filename: "a.xlsx", lastUsedAt: 2, workspaceKey: "id:ws-a" },

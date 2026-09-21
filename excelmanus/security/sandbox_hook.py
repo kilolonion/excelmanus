@@ -40,7 +40,12 @@ _YELLOW_BLOCKED: tuple[str, ...] = (
 )
 
 
-def generate_wrapper_script(tier: str, workspace_root: str) -> str:
+def generate_wrapper_script(
+    tier: str,
+    workspace_root: str,
+    *,
+    allow_external_files: bool = False,
+) -> str:
     """生成对应风险等级的沙盒 wrapper Python 脚本源码。
 
     Args:
@@ -53,6 +58,7 @@ def generate_wrapper_script(tier: str, workspace_root: str) -> str:
     if tier == "RED":
         return _RED_FS_GUARD_TEMPLATE.format(
             workspace_root=repr(workspace_root),
+            allow_external_files=repr(bool(allow_external_files)),
             code_mode_inject=_CODE_MODE_INJECT,
             utf8_stdio=_UTF8_STDIO,
             product_source_paths=source_paths,
@@ -68,6 +74,7 @@ def generate_wrapper_script(tier: str, workspace_root: str) -> str:
     return _SANDBOX_WRAPPER_TEMPLATE.format(
         blocked_modules=blocked_repr,
         workspace_root=workspace_repr,
+        allow_external_files=repr(False),
         tier=repr(tier),
         socket_constructor_names=socket_ctor_repr,
         socket_module_blocked_calls=socket_blocked_calls_repr,
@@ -581,7 +588,11 @@ def _deny_protected_target(resolved):
 
 def _deny_forbidden_read(resolved):
     _deny_protected_target(resolved)
-    if not _path_is_inside(_WORKSPACE_ROOT, resolved) and not _env_read_allowed(resolved):
+    if (
+        not _FULL_ACCESS_FILES
+        and not _path_is_inside(_WORKSPACE_ROOT, resolved)
+        and not _env_read_allowed(resolved)
+    ):
         raise PermissionError(
             "PATH_OUTSIDE_WORKSPACE: 数据文件必须在工作区内；"
             "工作区外仅放行解释器与依赖库文件 [等级: %s]" % _TIER
@@ -590,6 +601,8 @@ def _deny_forbidden_read(resolved):
 
 def _metadata_hidden(resolved):
     """元数据探查视角的不可见判定：被拒路径表现为不存在。"""
+    if _FULL_ACCESS_FILES:
+        return False
     if _is_under_pending(resolved) or resolved == _PENDING_TREE_ROOT:
         return False
     if _is_under_foreign_pending(resolved):
@@ -610,6 +623,8 @@ def _metadata_hidden(resolved):
 
 def _guard_write_target(path):
     resolved = _safe_realpath(str(path))
+    if _FULL_ACCESS_FILES:
+        return resolved
     _deny_protected_target(resolved)
     if _is_excelmanus_write_forbidden(resolved):
         raise PermissionError(
@@ -1047,6 +1062,7 @@ import builtins
 
 _WORKSPACE_ROOT = os.path.realpath({workspace_root})
 _TIER = "RED"
+_FULL_ACCESS_FILES = {allow_external_files}
 _SYSTEM_TMPDIR = os.path.realpath(_tmpmod.gettempdir())
 
 _original_open = builtins.open
@@ -1076,18 +1092,18 @@ def _guarded_open(file, mode="r", *args, **kwargs):
         _deny_forbidden_read(resolved)
     # ── 敏感路径读取保护 ──
     for _sd in _SENSITIVE_DIRS:
-        if _path_is_inside(_sd, resolved):
+        if _path_is_inside(_sd, resolved) and not _path_is_inside(_WORKSPACE_ROOT, resolved):
             raise PermissionError(
                 f"文件访问被安全策略禁止：路径位于敏感目录内 [等级: {{_TIER}}]"
             )
     _basename = os.path.basename(resolved)
     if _basename == ".env":
-        if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+        if not _FULL_ACCESS_FILES and not _path_is_inside(_WORKSPACE_ROOT, resolved):
             raise PermissionError(
                 f"文件访问被安全策略禁止：禁止访问工作区外的 .env 文件 [等级: {{_TIER}}]"
             )
     if any(c in str(mode) for c in "wax+"):
-        if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+        if not _FULL_ACCESS_FILES and not _path_is_inside(_WORKSPACE_ROOT, resolved):
             if _path_is_inside(_SYSTEM_TMPDIR, resolved):
                 return _original_open(file, mode, *args, **kwargs)
             raise PermissionError(
@@ -1138,6 +1154,7 @@ import builtins
 _BLOCKED_MODULES = {blocked_modules}
 _WORKSPACE_ROOT = os.path.realpath({workspace_root})
 _TIER = {tier}
+_FULL_ACCESS_FILES = {allow_external_files}
 _SYSTEM_TMPDIR = os.path.realpath(_tmpmod.gettempdir())
 
 # ── monkey-patch 前保存原始引用 ──

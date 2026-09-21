@@ -45,7 +45,7 @@ def capture_prefix_snapshot(envelope: Any, engine: Any) -> dict[str, Any]:
     epoch = getattr(envelope, "epoch", None)
     if epoch is not None:
         key_fn = getattr(epoch, "key", None)
-        snapshot["epoch_key"] = str(key_fn() if callable(key_fn) else "")
+        snapshot["epoch_key"] = str(getattr(envelope, "prompt_cache_key", key_fn() if callable(key_fn) else "") or "")
         snapshot["model"] = str(getattr(epoch, "model", "") or "")
         snapshot["protocol"] = str(getattr(epoch, "protocol", "") or "")
         snapshot["call_config_digest"] = str(getattr(epoch, "call_config_digest", "") or "")

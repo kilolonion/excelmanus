@@ -33,6 +33,19 @@ function workspaceIdForSession(sessionId?: string | null): string | undefined {
   return useSessionStore.getState().sessions.find((item) => item.id === sessionId)?.workspaceId ?? undefined;
 }
 
+/**
+ * A failed first request may never have reached the engine, so there is no
+ * server-side user turn for rollback to remove.  The rollback endpoint then
+ * returns 400/404 even though the session itself is still usable.  Treat only
+ * these structural "target is missing" errors as a safe direct-resend case;
+ * a transient/network rollback failure must keep the failed turn visible so we
+ * do not risk duplicating a turn whose durable state is unknown.
+ */
+function isMissingRollbackTargetError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /(?:API error:\s*)?(?:400|404)\b|不存在|超出范围|用户轮次索引/i.test(message);
+}
+
 async function _admitChatImage(
   data: string,
   media_type: string,
@@ -960,8 +973,6 @@ export async function retryAssistantMessage(
     }
   }
 
-  store.setMessages(messages.slice(0, assistantIdx));
-
   // 璋冪敤鍚庣 rollback API
   try {
     const { rollbackChat } = await import("./api");
@@ -971,12 +982,18 @@ export async function retryAssistantMessage(
       resendMode: true,
     });
   } catch (err) {
-    console.warn("Rollback failed, attempting to resync session:", err);
-    try {
-      const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
-      await refreshSessionMessagesFromBackend(effectiveSessionId);
-    } catch { /* SessionSync 杞鏈€缁堜細鎭㈠ */ }
-    return;
+    if (!isMissingRollbackTargetError(err)) {
+      console.warn("Rollback failed, attempting to resync session:", err);
+      try {
+        const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
+        await refreshSessionMessagesFromBackend(effectiveSessionId);
+      } catch { /* SessionSync 杞鏈€缁堜細鎭㈠ */ }
+      return;
+    }
+    // The first request can fail before the backend records its user turn.
+    // There is nothing to roll back in that case; remove the optimistic failed
+    // turn locally and let sendMessage submit the original content again.
+    console.info("Rollback target is absent; retrying the original turn directly", err);
   }
 
   // 鍓嶇鎴柇鍒?user 娑堟伅涔嬪墠

@@ -4,7 +4,7 @@
 - system prompt 拆分为稳定前缀 + 动态后缀
 - 稳定前缀在同一 session 内保持一致
 - Claude cache_control breakpoint 放在第一个 system block
-- cache 预热仅对 ClaudeClient 触发
+- 会话缓存只由正式模型请求建立
 """
 
 from __future__ import annotations
@@ -212,149 +212,12 @@ def test_claude_single_block_has_cache_control():
     assert system[0]["cache_control"] == {"type": "ephemeral"}
 
 
-def test_warmup_skips_non_claude_client():
-    """非 ClaudeClient 时 warmup_prompt_cache 应静默跳过。"""
-    import asyncio
-    from unittest.mock import MagicMock
-
-    engine = MagicMock()
-    engine._client = MagicMock()  # 非 ClaudeClient
-
-    from excelmanus.engine import AgentEngine
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(AgentEngine.warmup_prompt_cache(engine))
-    finally:
-        loop.close()
-    engine._build_stable_system_prompt.assert_not_called()
-
-
-def test_warmup_skips_without_real_user():
-    """无真实 user 时不得发送假 hi。"""
-    import asyncio
-    from unittest.mock import AsyncMock
-
-    from excelmanus.engine import AgentEngine
-    from excelmanus.providers.claude import ClaudeClient
-
-    engine = AgentEngine.__new__(AgentEngine)
-    real_client = ClaudeClient(api_key="test", base_url="http://localhost")
-    mock_create = AsyncMock()
-    real_client.chat.completions.create = mock_create
-    engine._client = real_client
-    engine._memory = type("M", (), {"messages": []})()
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(AgentEngine.warmup_prompt_cache(engine))
-    finally:
-        loop.close()
-    mock_create.assert_not_called()
-
-
-def test_warmup_sends_compiled_body_not_fake_hi():
-    import asyncio
-    from unittest.mock import AsyncMock, patch
-
-    from excelmanus.engine import AgentEngine
-    from excelmanus.providers.claude import ClaudeClient
-    from excelmanus.request.types import PreparedRequest, RequestHeader, ResolvedRoute
-
-    engine = AgentEngine.__new__(AgentEngine)
-    real_client = ClaudeClient(api_key="test", base_url="http://localhost")
-    mock_create = AsyncMock()
-    real_client.chat.completions.create = mock_create
-    engine._client = real_client
-    engine._memory = type("M", (), {"messages": [{"role": "user", "content": "real"}]})()
-    header = RequestHeader(
-        route_fingerprint="r",
-        tools_digest="t",
-        catalog_digest="c",
-        system_head_digest="s",
-        content_identity="id",
-        content_payload="p",
-        cache_policy_digest="cp",
-        transport="inline",
-        prompt_cache_key="em_key",
-    )
-    route = ResolvedRoute(
-        session_id="s",
-        model="claude-sonnet-4-6",
-        protocol="anthropic",
-        endpoint="https://api.anthropic.com",
-        credential_scope="scope",
-        api_key="k",
-    )
-    prepared = PreparedRequest(
-        request_id="rid",
-        series_id="sid",
-        attempt=1,
-        header=header,
-        route=route,
-        provider_body={
-            "model": "claude-sonnet-4-6",
-            "messages": [
-                {"role": "system", "content": "A" * 200},
-                {"role": "user", "content": "real"},
-            ],
-            "tools": [{"type": "function", "function": {"name": "run_code"}}],
-            "prompt_cache_key": "em_key",
-        },
-        file_leases=(),
-        compiled_at=0.0,
-    )
-
-    async def _fake_compile(*_a, **_k):
-        return prepared, None
-
-    loop = asyncio.new_event_loop()
-    try:
-        with patch("excelmanus.request.compiler.compile_request", _fake_compile):
-            loop.run_until_complete(AgentEngine.warmup_prompt_cache(engine))
-    finally:
-        loop.close()
-    mock_create.assert_called_once()
-    sent = mock_create.call_args.kwargs or mock_create.call_args[1]
-    # anthropic 等 native 协议下编译体经 _prepared_body 传输，messages 顶层为空。
-    body = sent.get("_prepared_body") or sent
-    sent_messages = body.get("messages") or sent.get("messages") or []
-    assert all(m.get("content") != "hi" for m in sent_messages if isinstance(m, dict))
-    assert any(m.get("content") == "real" for m in sent_messages if isinstance(m, dict))
-
-
-def test_claude_first_user_breakpoint_stays_put() -> None:
-    """第一条 user 钉 cache_control；后续轮次不得改历史 user 的结构。"""
+def test_claude_breakpoints_advance_with_history() -> None:
     from excelmanus.providers.claude import _openai_messages_to_claude
-
-    first_turn = [
-        {"role": "system", "content": "Stable"},
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "ok"},
-        {"role": "user", "content": "next"},
-    ]
-    _, first_msgs = _openai_messages_to_claude(first_turn)
-    second_turn = [
-        *first_turn,
-        {"role": "assistant", "content": "still"},
-        {"role": "user", "content": "again"},
-    ]
-    _, second_msgs = _openai_messages_to_claude(second_turn)
-
-    def _user_texts(msgs: list) -> list:
-        out = []
-        for msg in msgs:
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content")
-            out.append(content)
-        return out
-
-    first_users = _user_texts(first_msgs)
-    second_users = _user_texts(second_msgs)
-    assert first_users[0] == second_users[0]
-    assert isinstance(first_users[0], list)
-    assert first_users[0][-1].get("cache_control") == {"type": "ephemeral"}
-    later = second_users[1]
-    if isinstance(later, list):
-        assert "cache_control" not in later[-1]
-    else:
-        assert later == "next"
+    rows = [{"role": "system", "content": "Stable"}]
+    for i in range(30):
+        rows.extend([{"role": "user", "content": str(i)}, {"role": "assistant", "content": "ok"}])
+    _, messages = _openai_messages_to_claude(rows)
+    marked = [i for i, row in enumerate(messages) if isinstance(row["content"], list)
+              and any("cache_control" in b for b in row["content"])]
+    assert marked == [56, 58]

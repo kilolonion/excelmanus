@@ -35,7 +35,10 @@ async function run() {
           if (!window.fixture.serviceUp) throw Error('offline');
           return true;
         };
-        export const useAuthConfigStore = Object.assign(selector => selector({ checkBackendHealth }), { setState() {} });
+        export const useAuthConfigStore = Object.assign(selector => selector({ checkBackendHealth }), {
+          getState: () => ({ authRequired: false, checkBackendHealth }),
+          setState() {},
+        });
       `,
       "@/lib/access-api": `
         export function fetchAccessStatus(options = {}) {

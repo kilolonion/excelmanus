@@ -1,4 +1,6 @@
 import { normalizeExcelPath } from "@/lib/api";
+import { isSpreadsheetFile } from "@/lib/file-kind";
+import { displayFileName } from "@/lib/file-identity";
 import type { Session } from "@/lib/types";
 import { useSessionStore } from "@/stores/session-store";
 
@@ -63,11 +65,18 @@ export function recentFilesForWorkspace<T extends { workspaceKey?: string }>(
   workspaceKey?: string | null,
 ): T[] {
   if (!isScopedWorkspaceKey(workspaceKey)) return [];
-  return files.filter((item) => item.workspaceKey === workspaceKey);
+  return files.filter((item) => item.workspaceKey === workspaceKey && isRecentWorkbook(item));
 }
 
 export function sanitizeRecentFiles<T extends { workspaceKey?: string }>(files: T[]): T[] {
-  return files.filter((item) => isScopedWorkspaceKey(item.workspaceKey));
+  return files.filter((item) => isScopedWorkspaceKey(item.workspaceKey) && isRecentWorkbook(item));
+}
+
+/** Recent-file buckets are workbook-only; mutation/recovery events may mention any workspace file. */
+function isRecentWorkbook(item: { workspaceKey?: string; path?: unknown; filename?: unknown }): boolean {
+  const path = typeof item.path === "string" ? item.path : "";
+  const filename = typeof item.filename === "string" ? item.filename : "";
+  return isSpreadsheetFile(displayFileName(path) || filename);
 }
 
 export function activeSession(): Session | undefined {

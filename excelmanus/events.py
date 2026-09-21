@@ -61,7 +61,7 @@ class EventType(Enum):
     STEP_END = "step_end"
     INBOX_CLAIMED = "inbox_claimed"
     UI_HINT = "ui_hint"  # 瞬态建议：不进消息块、不回放
-    JEV_TRACE = "jev_trace"  # System One 决策：shadow/enforce 都发；不进消息块、默认不回放
+    JEV_TRACE = "jev_trace"  # System One 决策：开启环节发出；不进消息块、默认不回放
 
 
 @dataclass

@@ -16,7 +16,7 @@ export interface AccessSettings {
 }
 
 export function fetchAccessStatus(options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<AccessStatus> {
-  return apiGet("/auth/status", { ...options, direct: true });
+  return apiGet("/auth/status", { ...options, direct: true, cache: "no-store" });
 }
 
 export async function loginToInstance(username: string, password: string): Promise<AccessStatus> {

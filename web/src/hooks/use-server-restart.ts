@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { buildDirectHealthUrl } from "@/lib/backend-origin";
+import { apiGet } from "@/lib/api";
 
 /**
  * 后端重启健康探测 hook。
@@ -19,9 +19,6 @@ export function useServerRestart() {
     setRestarting(true);
     setRestartTimeout(false);
 
-    // 直连后端健康检查 URL（绕过 Next.js 代理和 auth 拦截）
-    const healthUrl = buildDirectHealthUrl();
-
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
     interface ProbeResult {
@@ -32,21 +29,19 @@ export function useServerRestart() {
 
     const probe = async (): Promise<ProbeResult> => {
       try {
-        const r = await fetch(healthUrl, {
-          method: "GET",
-          signal: AbortSignal.timeout(2000),
+        const data = await apiGet<{
+          version_fingerprint?: string;
+          git_commit?: string;
+        }>("/health", {
+          direct: true,
+          timeoutMs: 2_000,
+          cache: "no-store",
         });
-        if (!r.ok) return { ok: false };
-        try {
-          const data = await r.json();
-          return {
-            ok: true,
-            fingerprint: data.version_fingerprint ?? undefined,
-            gitCommit: data.git_commit ?? undefined,
-          };
-        } catch {
-          return { ok: true };
-        }
+        return {
+          ok: true,
+          fingerprint: data.version_fingerprint ?? undefined,
+          gitCommit: data.git_commit ?? undefined,
+        };
       } catch {
         return { ok: false };
       }

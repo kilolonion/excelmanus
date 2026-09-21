@@ -14,38 +14,13 @@ function canonicalHost(hostname: string): string {
   return h === "[::1]" ? "::1" : h;
 }
 
-function formatHostForUrl(hostname: string): string {
-  return hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
-}
-
-function isPrivateIpv4(hostname: string): boolean {
-  const m = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!m) return false;
-  const a = Number(m[1]);
-  const b = Number(m[2]);
-  if (a === 10) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  return false;
-}
-
-function shouldUseLocalPortFallback(hostname: string, protocol: string): boolean {
-  if (protocol !== "http:") return false;
-  const h = hostname.toLowerCase();
-  if (isLoopback(h)) return true;
-  if (isPrivateIpv4(h)) return true;
-  if (h.endsWith(".local")) return true;
-  return false;
-}
-
 /**
- * 解析后端直连地址（用于 SSE/健康探测等直连场景）。
+ * 所有 API（含 health、登录和 SSE）共用同一个后端地址。
  *
  * 优先级：
  * 1) EXCELMANUS_RUNTIME_BACKEND_ORIGIN（运行时）
  * 2) NEXT_PUBLIC_BACKEND_ORIGIN（构建时）
- * 3) 本地开发回退（仅 http 且 localhost/局域网主机时）→ http://{hostname}:8000
- * 4) 其他场景默认同源（返回空字符串）
+ * 3) 默认同源（返回空字符串），由前端代理决定后端端口。
  */
 export function resolveDirectBackendOrigin(): string {
   const configured = getRuntimeConfig("backendOrigin", process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim());
@@ -65,8 +40,8 @@ export function resolveDirectBackendOrigin(): string {
           isLoopback(cfgUrl.hostname)
           && canonicalHost(cfgUrl.hostname) !== canonicalHost(window.location.hostname)
         ) {
-          const port = cfgUrl.port || "8000";
-          return `${cfgUrl.protocol}//${formatHostForUrl(window.location.hostname)}:${port}`;
+          cfgUrl.hostname = window.location.hostname;
+          return trimTrailingSlash(cfgUrl.href);
         }
       } catch {
         // 非 URL 字符串（如裸主机名）按原值使用
@@ -76,11 +51,6 @@ export function resolveDirectBackendOrigin(): string {
     return trimTrailingSlash(configured);
   }
 
-  if (typeof window !== "undefined") {
-    if (shouldUseLocalPortFallback(window.location.hostname, window.location.protocol)) {
-      return `http://${formatHostForUrl(window.location.hostname)}:8000`;
-    }
-  }
   return "";
 }
 

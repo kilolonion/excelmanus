@@ -43,6 +43,7 @@ export const SLASH_COMMANDS: { command: string; description: string; icon: React
   { command: "/model", description: "查看/切换模型", icon: React.createElement(Sparkles, { className: "h-3.5 w-3.5" }), args: ["list"] },
   { command: "/subagent", description: "子代理控制", icon: React.createElement(Bot, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off", "list", "run"] },
   { command: "/fullaccess", description: "权限控制", icon: React.createElement(ShieldCheck, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off"] },
+  { command: "/autoapprove", description: "仅自动审批（保留代码沙盒）", icon: React.createElement(ShieldCheck, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off"] },
   { command: "/compact", description: "上下文压缩", icon: React.createElement(RotateCcw, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off"] },
   { command: "/plan", description: "计划模式", icon: React.createElement(ClipboardList, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off", "approve", "reject"] },
   { command: "/registry", description: "文件注册表", icon: React.createElement(FolderOpen, { className: "h-3.5 w-3.5" }), args: ["status", "scan"] },
@@ -79,6 +80,7 @@ export const DISPLAY_COMMANDS = new Set([
   // 控制命令 — status / list 查询
   "/subagent", "/subagent list", "/subagent status",
   "/fullaccess", "/fullaccess status",
+  "/autoapprove", "/autoapprove status",
   "/compact", "/compact status",
   "/plan", "/plan status",
   "/registry", "/registry status",

@@ -11,7 +11,7 @@
  * 优先级（以 backendOrigin 为例）：
  *   1. window.__EXCELMANUS_RUNTIME__.backendOrigin  （运行时注入，最高优先）
  *   2. process.env.NEXT_PUBLIC_BACKEND_ORIGIN       （构建时内联，向后兼容）
- *   3. 动态回退                                     （本地开发优先 :8000，其他场景同源）
+ *   3. 同源代理                                     （不猜测浏览器所在主机的端口）
  */
 
 export interface ExcelManusRuntimeConfig {

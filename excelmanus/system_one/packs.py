@@ -27,7 +27,6 @@ class PackSpec:
     family: PackFamily
     gate: Literal["master", "exposure", "observation", "verification", "recovery", "ui_hint"]
     questions: tuple[QuestionSpec, ...]
-    shadow_only: bool = False
     # Advisory packs may append suggestions, never operate an actuator.
     advisory_only: bool = False
 
@@ -558,7 +557,6 @@ PACKS: dict[str, PackSpec] = {
         pack_id="mutation.verify",
         family="optimize",
         gate="verification",
-        shadow_only=True,
         questions=(
             QuestionSpec(
                 qid="satisfied",
@@ -603,7 +601,6 @@ PACKS: dict[str, PackSpec] = {
         pack_id="recovery.next_step",
         family="optimize",
         gate="recovery",
-        shadow_only=True,
         questions=(
             QuestionSpec(
                 qid="next",

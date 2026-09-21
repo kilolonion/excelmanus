@@ -556,20 +556,23 @@ class ExcelManusConfig:
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
     # Jev / TypeSafe System One（可选 extra；走运行时设置 / config_kv，不进 model_profiles）
-    jev_enabled: str = "off"  # off | shadow | enforce
-    jev_exposure: str = "off"
-    jev_mode_hint: bool = False
-    jev_observation: str = "off"
-    jev_verification: str = "off"
-    jev_recovery: str = "off"
-    jev_ui_hint: bool = False
+    # JEV is binary: off disables a gate, enforce enables it fully.  The
+    # loader migrates the removed legacy ``shadow`` value to ``enforce``.
+    jev_enabled: str = "enforce"
+    jev_exposure: str = "enforce"
+    jev_mode_hint: bool = True
+    jev_observation: str = "enforce"
+    jev_verification: str = "enforce"
+    jev_recovery: str = "enforce"
+    jev_ui_hint: bool = True
     jev_model: str = "jev-1.13.0"
     typesafe_api_key: str | None = None
     ai_gateway_api_key: str | None = None
     jev_active_provider: str = ""
     jev_providers: tuple = ()  # EXCELMANUS_JEV_PROVIDERS 解析出的 JevProviderRecord
     jev_timeout_seconds: float = 1.5
-    jev_calibrated: bool = False  # 中文对照未签字时即使 enforce 也不得 applied
+    # Legacy compatibility flag; runtime application no longer depends on it.
+    jev_calibrated: bool = False
 
     @property
     def is_standalone(self) -> bool:
@@ -840,17 +843,23 @@ def _parse_bool(value: str | None, name: str, default: bool) -> bool:
     raise ConfigError(f"配置项 {name} 必须为布尔值，当前值: {value!r}")
 
 
-_ALLOWED_JEV_GATES = frozenset({"off", "shadow", "enforce"})
+_ALLOWED_JEV_GATES = frozenset({"off", "enforce"})
 
 
 def _parse_jev_gate(value: str | None, name: str, default: str = "off") -> str:
     if value is None or not str(value).strip():
         return default
     normalized = value.strip().lower()
+    # Migrate settings written by the removed observation-only mode.  This is
+    # deliberately done at the boundary so runtime code only handles two
+    # states and an upgrade cannot silently turn JEV off.
+    if normalized == "shadow":
+        logger.warning("%s=shadow 已废弃，按 enforce 读取", name)
+        return "enforce"
     if normalized in _ALLOWED_JEV_GATES:
         return normalized
     raise ConfigError(
-        f"配置项 {name} 必须是 ['off', 'shadow', 'enforce'] 之一，当前值: {value!r}"
+        f"配置项 {name} 必须是 ['off', 'enforce'] 之一，当前值: {value!r}"
     )
 
 
@@ -1471,25 +1480,25 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
     models = models_from_store()
 
     jev_enabled = _parse_jev_gate(
-        _s("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "off"
+        _s("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "enforce"
     )
     jev_exposure = _parse_jev_gate(
-        _s("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "off"
+        _s("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "enforce"
     )
     jev_mode_hint = _parse_bool(
-        _s("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", False
+        _s("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", True
     )
     jev_observation = _parse_jev_gate(
-        _s("EXCELMANUS_JEV_OBSERVATION"), "EXCELMANUS_JEV_OBSERVATION", "off"
+        _s("EXCELMANUS_JEV_OBSERVATION"), "EXCELMANUS_JEV_OBSERVATION", "enforce"
     )
     jev_verification = _parse_jev_gate(
-        _s("EXCELMANUS_JEV_VERIFICATION"), "EXCELMANUS_JEV_VERIFICATION", "off"
+        _s("EXCELMANUS_JEV_VERIFICATION"), "EXCELMANUS_JEV_VERIFICATION", "enforce"
     )
     jev_recovery = _parse_jev_gate(
-        _s("EXCELMANUS_JEV_RECOVERY"), "EXCELMANUS_JEV_RECOVERY", "off"
+        _s("EXCELMANUS_JEV_RECOVERY"), "EXCELMANUS_JEV_RECOVERY", "enforce"
     )
     jev_ui_hint = _parse_bool(
-        _s("EXCELMANUS_JEV_UI_HINT"), "EXCELMANUS_JEV_UI_HINT", False
+        _s("EXCELMANUS_JEV_UI_HINT"), "EXCELMANUS_JEV_UI_HINT", True
     )
     jev_model = (_s("EXCELMANUS_JEV_MODEL") or "jev-1.13.0").strip() or "jev-1.13.0"
     typesafe_api_key = (_s("EXCELMANUS_TYPESAFE_API_KEY") or "").strip() or None

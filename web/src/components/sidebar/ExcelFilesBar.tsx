@@ -42,7 +42,7 @@ import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import {
   recentFilesForWorkspace,
 } from "@/lib/workspace-file-ref";
-import { WORKSPACE_FILE_INPUT_ACCEPT } from "@/lib/file-kind";
+import { isSpreadsheetFile, WORKSPACE_FILE_INPUT_ACCEPT } from "@/lib/file-kind";
 import { displayFilePath } from "@/lib/file-identity";
 import { formatFileMention } from "@/components/chat/chat-input-insert";
 import {
@@ -155,6 +155,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
   const wsFilePaths = visibleFiles.filter((f) => !f.is_dir).map((f) => f.path);
   const allVisibleFilePaths = workspaceVisibleFiles.filter((f) => !f.is_dir).map((f) => f.path);
+  const selectedWorkbookFiles = visibleFiles.filter(
+    (file) => !file.is_dir && selectedPaths.has(file.path) && isSpreadsheetFile(file.filename || file.path),
+  );
   const totalFileCount = workspaceFiles.filter((f) => !f.is_dir).length;
   const hiddenCount = totalFileCount - allVisibleFilePaths.length;
   const hasQuery = fileQuery.trim().length > 0;
@@ -703,10 +706,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                   引用到聊天
                 </span>
               </button>
-              {selectedPaths.size === 2 && (() => {
-                const pair = visibleFiles
-                  .filter((f) => !f.is_dir && selectedPaths.has(f.path))
-                  .map((f) => f.path);
+              {selectedPaths.size === 2 && selectedWorkbookFiles.length === 2 && (() => {
+                const pair = selectedWorkbookFiles.map((f) => f.path);
                 return pair.length === 2 ? (
                   <>
                     <button
@@ -727,12 +728,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                     </button>
                     <button
                       onClick={() => {
-                        const paths = visibleFiles
-                          .filter((f) => !f.is_dir && selectedPaths.has(f.path))
-                          .map((f) => f.path);
-                        if (paths.length === 2) {
-                          useExcelStore.getState().openCompare(paths[0], paths[1]);
-                        }
+                        useExcelStore.getState().openCompare(pair[0], pair[1]);
                         exitSelectMode();
                       }}
                       className="text-[10px] transition-colors"

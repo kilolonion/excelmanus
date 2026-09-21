@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { buildDirectHealthUrl } from "@/lib/backend-origin";
+import { apiGet } from "@/lib/api";
 
 type ConnectionStatus = "connected" | "restarting" | "disconnected";
 
@@ -16,11 +16,6 @@ interface ConnectionState {
   setDisconnected: () => void;
   setConnected: () => void;
   reset: () => void;
-}
-
-/** 解析后端直连健康检查 URL（绕过 Next.js 代理） */
-function resolveHealthUrl(): string {
-  return buildDirectHealthUrl();
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -55,21 +50,20 @@ export function restartShouldReload(opts: {
 
 async function probeHealth(): Promise<ProbeResult> {
   try {
-    const r = await fetch(resolveHealthUrl(), {
-      method: "GET",
-      signal: AbortSignal.timeout(2000),
+    const data = await apiGet<{
+      status?: string;
+      version_fingerprint?: string;
+      git_commit?: string;
+    }>("/health", {
+      direct: true,
+      timeoutMs: 2_000,
+      cache: "no-store",
     });
-    if (!r.ok) return { ok: false };
-    try {
-      const data = await r.json();
-      return {
-        ok: healthResponseIsUp(true, data.status),
-        fingerprint: data.version_fingerprint ?? undefined,
-        gitCommit: data.git_commit ?? undefined,
-      };
-    } catch {
-      return { ok: true };
-    }
+    return {
+      ok: healthResponseIsUp(true, data.status),
+      fingerprint: data.version_fingerprint ?? undefined,
+      gitCommit: data.git_commit ?? undefined,
+    };
   } catch {
     return { ok: false };
   }

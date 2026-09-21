@@ -12,6 +12,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
 import { useSessionStore } from "@/stores/session-store";
+import { isSpreadsheetFile } from "@/lib/file-kind";
 import {
   Tooltip,
   TooltipContent,
@@ -25,7 +26,8 @@ export function resolveWorkbookPanelPath(
   workspaceKey?: string | null,
 ): string | undefined {
   const scoped = recentFilesForWorkspace(recentFiles, workspaceKey);
-  return activeFilePath || scoped[0]?.path || undefined;
+  const active = activeFilePath && isSpreadsheetFile(activeFilePath) ? activeFilePath : undefined;
+  return active || scoped[0]?.path || undefined;
 }
 
 function closeWordSurfaces() {

@@ -72,6 +72,7 @@ export function AddWorkspaceDialog({
       : undefined;
     if (!picker) {
       setPathOpen(true);
+      setError("当前运行环境不支持系统文件夹选择器，请输入本机文件夹的绝对路径");
       window.requestAnimationFrame(() => pathRef.current?.focus());
       return;
     }

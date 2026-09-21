@@ -53,6 +53,7 @@ export function SessionSync() {
   const switchSession = useChatStore((s) => s.switchSession);
   const setStreaming = useChatStore((s) => s.setStreaming);
   const setFullAccessEnabled = useUIStore((s) => s.setFullAccessEnabled);
+  const setAutoApproveEnabled = useUIStore((s) => s.setAutoApproveEnabled);
   const setVisionCapable = useUIStore((s) => s.setVisionCapable);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
   const setThinkingEffort = useUIStore((s) => s.setThinkingEffort);
@@ -199,6 +200,7 @@ export function SessionSync() {
   useEffect(() => {
     if (!activeSessionId) {
       setFullAccessEnabled(false);
+      setAutoApproveEnabled(false);
       // 不重置 chatMode：它是用户点选（ChatModeTabs）。轮询覆盖会把 read/plan 弹回 write。
       // 后端主动切换（/plan、批准退出）走 SSE mode_changed（mode_name=chat_mode, value）。
       // 不重置 currentModel：TopModelSelector 通过 /models API 独立管理全局模型名。
@@ -274,6 +276,7 @@ export function SessionSync() {
         consecutiveErrors = 0;
 
         setFullAccessEnabled(detail.fullAccessEnabled);
+        setAutoApproveEnabled(detail.autoApproveEnabled);
         // 占位会话（engine 尚未创建）会返回 vision_capable=null；不要把未知当成不支持。
         const modelSnapshotIsCurrent = modelProfileVersion === useUIStore.getState().modelProfileVersion;
         if (modelSnapshotIsCurrent && detail.currentModel != null && typeof detail.visionCapable === "boolean") {
@@ -416,6 +419,7 @@ export function SessionSync() {
     setStreaming,
     setCurrentModel,
     setFullAccessEnabled,
+    setAutoApproveEnabled,
     setVisionCapable,
   ]);
 

@@ -96,6 +96,7 @@
       copyText,
       handleBack,
       scanPairing: () => { void send("scanPairing", {}).catch(report); },
+      openConnectionSettings: () => { void send("connectionSettings", {}).catch(report); },
       saveBlob: (blob, filename) => { void save(blob, filename).catch(report); },
     }),
   });

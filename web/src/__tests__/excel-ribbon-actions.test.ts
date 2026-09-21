@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRibbonAskPrompt,
+  buildSelectionAgentPrompt,
   nativeRibbonTabFromLabel,
   readNativeRibbonTab,
   ribbonAskActions,
+  SELECTION_AGENT_ACTIONS,
   setHistoryRibbonMode,
   setRibbonToolbarHidden,
 } from "@/lib/excel-ribbon-actions";
@@ -102,6 +104,25 @@ describe("buildRibbonAskPrompt", () => {
     const prompt = buildRibbonAskPrompt("filter-analyze", { path: "a.xlsx", sheet: "S", range: "A1:D10" });
     expect(prompt).toContain("@file:a.xlsx[S!A1:D10]");
     expect(prompt).toContain("不是表格上的自动筛选");
+  });
+});
+
+describe("selection Agent actions", () => {
+  it("offers grid actions and preserves the exact selection mention", () => {
+    expect(SELECTION_AGENT_ACTIONS.map((action) => action.kind)).toEqual([
+      "analyze-selection",
+      "explain-selection",
+      "data-quality-selection",
+      "clean-selection",
+    ]);
+    const prompt = buildSelectionAgentPrompt("data-quality-selection", {
+      path: "uploads/订单.xlsx",
+      sheet: "明细",
+      range: "B2:F20",
+      version: "sha256:1234",
+    });
+    expect(prompt).toContain("@file:uploads/订单.xlsx[明细!B2:F20]@sha256:1234");
+    expect(prompt).toContain("不要修改表格");
   });
 });
 

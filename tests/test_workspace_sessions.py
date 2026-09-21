@@ -333,6 +333,17 @@ async def test_sessions_and_workspaces_http(tmp_path: Path) -> None:
             assert sess_b["id"] != sess_a["id"]
             assert sess_b["workspace_path"] == str(extra.resolve())
 
+            default_id = state["manager"].ensure_default_workspace()["id"]
+            reordered = await client.put(
+                "/api/v1/workspaces/order",
+                json={"workspace_ids": [workspace_b["id"], default_id]},
+            )
+            assert reordered.status_code == 200
+            assert [item["id"] for item in reordered.json()["workspaces"][:2]] == [
+                workspace_b["id"],
+                default_id,
+            ]
+
             files_a = await client.get(
                 f"/api/v1/files/workspace/list?session_id={sess_a['id']}"
             )
@@ -346,7 +357,6 @@ async def test_sessions_and_workspaces_http(tmp_path: Path) -> None:
             assert "only-in-b.txt" in names_b
             assert "only-in-a.txt" not in names_b
 
-            default_id = state["manager"].ensure_default_workspace()["id"]
             denied = await client.delete(f"/api/v1/workspaces/{default_id}")
             assert denied.status_code == 400
 

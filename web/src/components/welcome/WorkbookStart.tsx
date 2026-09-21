@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
-import { workspaceKeyFromSession } from "@/lib/workspace-file-ref";
+import { recentFilesForWorkspace, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import { displayFilePath } from "@/lib/file-identity";
 import { openWorkbookForConversation } from "@/lib/open-workbook";
 
@@ -21,7 +21,7 @@ export function WorkbookStart() {
     if (session) void useExcelStore.getState().refreshWorkspaceFiles(session.id, { cached: true });
   }, [session, version]);
   useEffect(() => () => { request.current?.abort(); }, [session?.id]);
-  const files = recent.filter((f) => f.workspaceKey === workspaceKeyFromSession(session)).slice(0, 3);
+  const files = recentFilesForWorkspace(recent, workspaceKeyFromSession(session)).slice(0, 3);
   return <div className="flex flex-col gap-2 mt-2">
     <div><Button onClick={() => useWorkbookConversationStore.getState().openPicker()} className="gap-2" data-coach-id="coach-open-workbook"><FolderOpen className="h-4 w-4" />打开表格</Button></div>
     {files.length > 0 && <div className="flex items-center gap-1.5 flex-wrap text-xs">

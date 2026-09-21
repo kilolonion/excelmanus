@@ -251,7 +251,7 @@ def _session_skill_names(engine: Any) -> list[str]:
     except Exception:
         return []
     if isinstance(names, Iterable) and not isinstance(names, (str, bytes)):
-        return [str(n) for n in names]
+        return sorted({str(n) for n in names})
     return []
 
 
@@ -267,7 +267,7 @@ def _session_subagent_names(engine: Any) -> list[str]:
     except Exception:
         return []
     if isinstance(names, Iterable) and not isinstance(names, (str, bytes)):
-        return [str(n) for n in names]
+        return sorted({str(n) for n in names})
     return []
 
 

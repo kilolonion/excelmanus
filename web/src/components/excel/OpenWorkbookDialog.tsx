@@ -8,7 +8,7 @@ import { type ExcelFileListItem } from "@/lib/api";
 import { isSpreadsheetFile } from "@/lib/file-kind";
 import { displayFilePath, displayFileName } from "@/lib/file-identity";
 import { ensureWorkbookSession, importWorkspaceFile, openWorkbookForConversation } from "@/lib/open-workbook";
-import { workspaceKeyFromSession } from "@/lib/workspace-file-ref";
+import { recentFilesForWorkspace, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -76,7 +76,7 @@ export function OpenWorkbookDialog() {
 
   const candidates = useMemo(() => {
     const workspaceKey = workspaceKeyFromSession(scope);
-    const scopedRecent = recent.filter((f) => f.workspaceKey === workspaceKey);
+    const scopedRecent = recentFilesForWorkspace(recent, workspaceKey);
     const map = new Map(files.map((f) => [f.path, f]));
     for (const f of scopedRecent) if (!map.has(f.path)) map.set(f.path, { ...f, modified_at: 0 });
     const rows = source === "recent" ? scopedRecent : Array.from(map.values());

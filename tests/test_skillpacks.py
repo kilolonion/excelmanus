@@ -84,6 +84,39 @@ def _tool_registry() -> ToolRegistry:
 
 
 class TestSkillpackLoader:
+    def test_relative_project_dir_uses_workspace_root(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        outside = tmp_path / "outside"
+        system_dir = tmp_path / "system"
+        user_dir = tmp_path / "user"
+        for directory in (workspace, outside, system_dir, user_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        _write_skillpack(
+            workspace / ".excelmanus" / "skillpacks",
+            "workspace_skill",
+            description="workspace-local",
+        )
+        monkeypatch.chdir(outside)
+        config = ExcelManusConfig(
+            api_key="test-key",
+            base_url="https://test.example.com/v1",
+            model="test-model",
+            workspace_root=str(workspace),
+            skills_system_dir=str(system_dir),
+            skills_user_dir=str(user_dir),
+            skills_project_dir=".excelmanus/skillpacks",
+            skills_discovery_include_agents=False,
+            skills_discovery_scan_external_tool_dirs=False,
+        )
+
+        loaded = SkillpackLoader(config, _tool_registry()).load_all()
+
+        assert loaded["workspace_skill"].description == "workspace-local"
+
     def test_project_overrides_user_and_system(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"

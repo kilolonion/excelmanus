@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { Check, Loader2, MonitorSmartphone, RefreshCw, ShieldCheck, Smartphone, Wifi } from "lucide-react";
+import { Check, ClipboardPaste, Eye, EyeOff, KeyRound, Loader2, MonitorSmartphone, RefreshCw, ShieldCheck, Smartphone, Wifi } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { setManageToken } from "@/lib/api";
+import { getManageToken, setManageToken } from "@/lib/api";
 import { mobilePairing, type MobilePairingAction, type MobilePairingStatus } from "@/lib/mobile-pairing";
 
 export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -21,6 +21,9 @@ export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onO
   const [desktop, setDesktop] = useState(false);
   const [platform, setPlatform] = useState("");
   const [adminToken, setAdminToken] = useState("");
+  const [tokenSaved, setTokenSaved] = useState(false);
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [tokenVisible, setTokenVisible] = useState(false);
   const generation = useRef(0);
   const busyRef = useRef(false);
   const remaining = status?.qr ? Math.max(0, Math.ceil((status.qr.expiresAt - now) / 1000)) : 0;
@@ -34,6 +37,7 @@ export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onO
       if (current !== generation.current) return;
       setStatus(next);
       setPollError("");
+      setTokenSaved(Boolean(getManageToken()));
       if (action === "allow-firewall") setNotice("已允许专用网络中的手机连接，请保持电脑网络类型为“专用”，再用手机重试。");
       if (action === "approve") setNotice("已确认绑定，手机正在自动打开工作区。");
     } catch (e) { if (current === generation.current) setError(e instanceof Error ? e.message : "连接暂不可用，请重试"); }
@@ -44,6 +48,7 @@ export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onO
     if (!open) return;
     let alive = true; let polling = false;
     setDesktop(Boolean(window.excelManusDesktop?.mobilePairing));
+    setTokenSaved(Boolean(getManageToken()));
     const poll = async () => {
       if (polling || busyRef.current) return;
       polling = true;
@@ -64,6 +69,28 @@ export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onO
 
   const issue = () => run("issue", { address: address || undefined });
   const step = status?.pending.length ? 3 : status?.qr ? 2 : status?.enabled && status.devices.length ? 4 : status?.enabled ? 2 : 1;
+  const needsToken = !desktop && (error || pollError).includes("本引导");
+
+  useEffect(() => { if (needsToken) setTokenOpen(true); }, [needsToken]);
+
+  const submitToken = (event: FormEvent) => {
+    event.preventDefault();
+    const value = adminToken.trim();
+    if (value.length < 16) return;
+    setManageToken(value);
+    setAdminToken("");
+    setTokenSaved(true);
+    setTokenOpen(false);
+    setTokenVisible(false);
+    void run("status");
+  };
+
+  const pasteToken = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text?.trim()) setAdminToken(text.trim());
+    } catch { /* 剪贴板被浏览器拒绝时，仍可手动粘贴 */ }
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -75,6 +102,29 @@ export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onO
         <div className="grid grid-cols-3 gap-2 text-xs" aria-label="绑定进度">
           {["连接同一网络", "手机扫码", "确认绑定"].map((label, index) => <div key={label} className={`flex items-center gap-2 rounded-lg px-2 py-3 ${step >= index + 1 ? "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]" : "bg-muted text-muted-foreground"}`}><span className="font-semibold">{step > index + 1 ? <Check className="h-3.5 w-3.5" /> : index + 1}</span>{label}</div>)}
         </div>
+        {!desktop && <section className={`space-y-3 rounded-xl border p-4 transition-colors ${needsToken ? "border-[var(--em-primary)]" : ""}`}>
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-4 w-4 shrink-0 text-[var(--em-primary)]" />
+            <p className="min-w-0 flex-1 text-sm font-medium">管理令牌</p>
+            {tokenSaved && !tokenOpen && <>
+              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--em-primary-alpha-10)] px-2 py-0.5 text-xs font-medium text-[var(--em-primary)]"><Check className="h-3 w-3" />已填写</span>
+              <Button type="button" variant="ghost" size="xs" className="text-muted-foreground" onClick={() => setTokenOpen(true)}>更换</Button>
+            </>}
+          </div>
+          {tokenOpen || !tokenSaved ? <>
+            <form className="flex gap-2" onSubmit={submitToken}>
+              <div className="relative min-w-0 flex-1">
+                <Input type={tokenVisible ? "text" : "password"} aria-label="电脑服务管理令牌" placeholder="EXCELMANUS_MANAGE_TOKEN（至少 16 字符）" autoComplete="off" spellCheck={false} minLength={16} required value={adminToken} onChange={event => setAdminToken(event.target.value)} className="pr-16 font-mono text-xs" />
+                <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                  <button type="button" onClick={() => void pasteToken()} aria-label="粘贴令牌" title="粘贴" className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"><ClipboardPaste className="h-3.5 w-3.5" /></button>
+                  <button type="button" onClick={() => setTokenVisible(v => !v)} aria-label={tokenVisible ? "隐藏令牌" : "显示令牌"} className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">{tokenVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}</button>
+                </div>
+              </div>
+              <Button type="submit" disabled={busy || adminToken.trim().length < 16}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : "验证并继续"}</Button>
+            </form>
+            <p className="text-xs leading-relaxed text-muted-foreground">启动电脑服务时为前后端设置的同一个管理令牌，仅保存在当前标签页。验证通过后即可生成二维码。</p>
+          </> : <p className="text-xs leading-relaxed text-muted-foreground">令牌已保存在当前标签页，配对请求会自动携带。</p>}
+        </section>}
         <section className="space-y-3 rounded-xl border p-4">
           <p className="flex items-center gap-2 text-sm font-medium"><Wifi className="h-4 w-4" />手机和电脑连接同一个路由器</p>
           <p className="text-xs leading-relaxed text-muted-foreground">电脑可以使用网线，手机使用该路由器的 Wi-Fi。请避开访客 Wi-Fi，并暂时关闭影响局域网访问的 VPN。</p>
@@ -84,9 +134,6 @@ export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onO
           {!status?.enabled && <Button disabled={busy || !sameNetwork || !status} onClick={() => void issue()} className="w-full">{busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}检查服务并生成二维码</Button>}
         </section>
         {(error || pollError) && <p role="alert" className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{error || pollError}</p>}
-        {!desktop && (error || pollError).includes("本引导") && <form className="flex flex-wrap gap-2" onSubmit={event => {
-          event.preventDefault(); setManageToken(adminToken.trim()); setAdminToken(""); void run("status");
-        }}><Input type="password" aria-label="电脑服务管理令牌" placeholder="启动电脑服务时设置的管理令牌" autoComplete="off" minLength={16} required value={adminToken} onChange={event => setAdminToken(event.target.value)} className="min-w-0 flex-1" /><Button disabled={busy} type="submit">验证并继续</Button></form>}
         {notice && <p role="status" className="rounded-lg bg-[var(--em-primary-alpha-10)] p-3 text-sm text-[var(--em-primary)]">{notice}</p>}
         {status?.enabled && <>
           <section className="space-y-3 text-center">

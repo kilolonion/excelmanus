@@ -57,11 +57,23 @@ _CANONICAL_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 class SkillpackLoader:
     """Skillpack 扫描与加载。"""
 
+    _generation = 0
+
     def __init__(self, config: ExcelManusConfig, tool_registry: ToolRegistry) -> None:
         self._config = config
         self._tool_registry = tool_registry
         self._skillpacks: dict[str, Skillpack] = {}
         self._warnings: list[str] = []
+        self._loaded_generation = self._generation
+
+    @classmethod
+    def invalidate_caches(cls) -> None:
+        """管理器写入后让各会话在下次读取时按自己的工作区重载。"""
+        cls._generation += 1
+
+    def _refresh_if_invalidated(self) -> None:
+        if self._loaded_generation != self._generation:
+            self.load_all()
 
     @property
     def warnings(self) -> list[str]:
@@ -70,10 +82,12 @@ class SkillpackLoader:
 
     def list_skillpacks(self) -> list[Skillpack]:
         """返回已加载 Skillpack 列表。"""
+        self._refresh_if_invalidated()
         return list(self._skillpacks.values())
 
     def get_skillpack(self, name: str) -> Skillpack | None:
         """按名称获取 Skillpack。"""
+        self._refresh_if_invalidated()
         return self._skillpacks.get(name)
 
     def get_skillpacks(self) -> dict[str, Skillpack]:
@@ -94,6 +108,7 @@ class SkillpackLoader:
             merged.update(source_skillpacks)
 
         self._skillpacks = merged
+        self._loaded_generation = self._generation
         logger.info("已加载 %d 个 Skillpack（全量发现后）", len(self._skillpacks))
         return dict(self._skillpacks)
 
@@ -143,16 +158,19 @@ class SkillpackLoader:
         # 兼容旧 system 目录（最低优先级）
         _append("system", Path(self._config.skills_system_dir))
 
-        if not self._config.skills_discovery_enabled:
-            _append("user", Path(self._config.skills_user_dir))
-            _append("project", Path(self._config.skills_project_dir))
-            return roots
-
         workspace_root = Path(self._config.workspace_root).expanduser()
         if not workspace_root.is_absolute():
             workspace_root = (Path.cwd() / workspace_root).resolve()
         else:
             workspace_root = workspace_root.resolve()
+
+        if not self._config.skills_discovery_enabled:
+            _append("user", Path(self._config.skills_user_dir))
+            project_dir = Path(self._config.skills_project_dir).expanduser()
+            if not project_dir.is_absolute():
+                project_dir = workspace_root / project_dir
+            _append("project", project_dir)
+            return roots
 
         # user 级目录：低于任意 project 目录
         _append("user", Path(self._config.skills_user_dir))
@@ -189,8 +207,12 @@ class SkillpackLoader:
                 for parent in chain:
                     _append("project", parent / ".agents" / "skills")
 
-        # project 显式目录（workspace 下），优先级最高
-        _append("project", Path(self._config.skills_project_dir))
+        # project 显式目录（workspace 下），优先级最高。相对路径的
+        # 基准必须与 SkillpackManager 一致，否则加载和写入会落到不同目录。
+        project_dir = Path(self._config.skills_project_dir).expanduser()
+        if not project_dir.is_absolute():
+            project_dir = workspace_root / project_dir
+        _append("project", project_dir)
         if self._config.skills_discovery_include_agents:
             _append("project", workspace_root / ".agents" / "skills")
         if self._config.skills_discovery_scan_external_tool_dirs:
@@ -619,4 +641,3 @@ class SkillpackLoader:
         raise SkillpackValidationError(
             f"frontmatter 字段 '{key}' 仅支持 normal"
         )
-

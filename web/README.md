@@ -26,7 +26,7 @@ npm run dev
 | `BACKEND_INTERNAL_URL` | Next.js 配置与构建 | `/api/v1/*` rewrite 的代理目标，默认 `http://127.0.0.1:8000` |
 | `PORT` | 服务启动时 | 前端监听端口 |
 
-浏览器地址解析优先级：运行时地址 → 构建时地址 → 本地 HTTP 页面使用当前主机的 8000 端口 → 其他场景默认同源。HTTPS 页面不会直接连接 HTTP 后端。解析逻辑位于 `src/lib/backend-origin.ts`；API 调用共用 `src/lib/api.ts`。
+浏览器地址解析优先级：运行时地址 → 构建时地址 → 同源代理。未配置后端地址时不会根据浏览器主机猜测 `:8000`，避免把请求发到错误实例；HTTPS 页面也不会直连 HTTP 后端。解析逻辑位于 `src/lib/backend-origin.ts`；API 调用共用 `src/lib/api.ts`。
 
 有可用直连地址时，当前浏览器 API 请求使用该地址；同源模式下使用相对 `/api/v1` 路径。因此更换后端端口时，应同时检查运行时地址与 rewrite 配置。
 

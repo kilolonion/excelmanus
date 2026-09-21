@@ -40,7 +40,7 @@ class LLMCallStore:
         model: str,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-        cached_tokens: int = 0,
+        cached_tokens: int | None = None,
         total_tokens: int = 0,
         has_tool_calls: bool = False,
         thinking_chars: int = 0,

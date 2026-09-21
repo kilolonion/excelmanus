@@ -31,9 +31,9 @@ describe("resolveDirectBackendOrigin", () => {
     vi.unstubAllGlobals();
   });
 
-  it("falls back to the current loopback hostname on port 8000", () => {
+  it("does not guess a backend port when no runtime origin is configured", () => {
     mockLocation("127.0.0.1");
-    expect(resolveDirectBackendOrigin()).toBe("http://127.0.0.1:8000");
+    expect(resolveDirectBackendOrigin()).toBe("");
   });
 
   it("remaps configured localhost onto 127.0.0.1 when the page uses 127", () => {
@@ -68,8 +68,8 @@ describe("resolveDirectBackendOrigin", () => {
     expect(buildApiUrl("/sessions")).toBe("/api/v1/sessions");
   });
 
-  it("brackets IPv6 loopback in the fallback URL", () => {
+  it("keeps same-origin mode for IPv6 loopback without configuration", () => {
     mockLocation("::1");
-    expect(resolveDirectBackendOrigin()).toBe("http://[::1]:8000");
+    expect(resolveDirectBackendOrigin()).toBe("");
   });
 });

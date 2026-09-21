@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { isSpreadsheetFile } from "@/lib/file-kind";
 import { fileRefKey, type WorkspaceFileRef } from "@/lib/workspace-file-ref";
 import type { WorkbookViewLayout } from "@/lib/workspace-surface";
 
@@ -38,6 +39,18 @@ export function workbookViewKey(sessionId: string, file: WorkspaceFileRef): stri
   return `${sessionId}|${fileRefKey(file)}`;
 }
 
+function isWorkbookTarget(value: unknown): value is WorkbookConversationTarget {
+  if (!value || typeof value !== "object") return false;
+  const target = value as Partial<WorkbookConversationTarget>;
+  const file = target.file;
+  return Boolean(
+    file
+    && typeof file === "object"
+    && typeof file.relative === "string"
+    && isSpreadsheetFile(file.relative),
+  );
+}
+
 /** A discussion target survives hiding the grid; readiness never survives a reload. */
 export const useWorkbookConversationStore = create<WorkbookConversationState>()(persist((set) => ({
   pickerOpen: false,
@@ -53,11 +66,14 @@ export const useWorkbookConversationStore = create<WorkbookConversationState>()(
     return { pickerOpen: true, pickerMode: "switch", pickerLayout: target.layout ?? "embedded", pickerShowSheet: target.showSheet };
   }),
   closePicker: () => set({ pickerOpen: false }),
-  bind: (sessionId, file, sheet, layout = "embedded") => set((state) => ({
-    targets: { ...state.targets, [sessionId]: { file, sheet, showSheet: true, layout } },
-    views: { ...state.views, [workbookViewKey(sessionId, file)]:
-      state.views[workbookViewKey(sessionId, file)] ?? { status: "loading" } },
-  })),
+  bind: (sessionId, file, sheet, layout = "embedded") => set((state) => {
+    if (!isSpreadsheetFile(file.relative)) return state;
+    return {
+      targets: { ...state.targets, [sessionId]: { file, sheet, showSheet: true, layout } },
+      views: { ...state.views, [workbookViewKey(sessionId, file)]:
+        state.views[workbookViewKey(sessionId, file)] ?? { status: "loading" } },
+    };
+  }),
   setShowSheet: (sessionId, showSheet) => set((state) => {
     const target = state.targets[sessionId];
     if (!target || target.showSheet === showSheet) return state;
@@ -92,4 +108,15 @@ export const useWorkbookConversationStore = create<WorkbookConversationState>()(
 }), {
   name: "excelmanus-workbook-conversations",
   partialize: (state) => ({ targets: Object.fromEntries(Object.entries(state.targets).slice(-100)) }),
+  merge: (persisted, current) => {
+    const raw = persisted as { targets?: unknown } | undefined;
+    const hasPersistedTargets = Boolean(raw?.targets && typeof raw.targets === "object");
+    const rawTargets = hasPersistedTargets ? raw?.targets as Record<string, unknown> : null;
+    const targets = rawTargets
+      ? Object.fromEntries(
+        Object.entries(rawTargets).filter(([, target]) => isWorkbookTarget(target)),
+      ) as Record<string, WorkbookConversationTarget>
+      : current.targets;
+    return { ...current, targets };
+  },
 }));

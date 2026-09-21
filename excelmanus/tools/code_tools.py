@@ -880,6 +880,7 @@ def run_code(
             inline_mode=inline_mode,
             sandbox_tier=sandbox_tier,
             allow_network=full_access,
+            allow_external_files=full_access,
         )
     finally:
         if temp_script is not None and temp_script.exists():
@@ -929,6 +930,7 @@ def _execute_script(
     inline_mode: bool,
     sandbox_tier: str = "RED",
     allow_network: bool = False,
+    allow_external_files: bool = False,
 ) -> ToolResult:
     """内部执行脚本核心逻辑（供 run_code 调用）。始终走本机子进程围栏。"""
     python_cmd, probes, mode = _resolve_python_command(
@@ -975,7 +977,11 @@ def _execute_script(
     # ── 沙盒 wrapper 注入（所有安全等级均注入） ──
     temp_wrapper: Path | None = None
     from excelmanus.security.sandbox_hook import generate_wrapper_script
-    wrapper_src = generate_wrapper_script(sandbox_tier, str(guard.workspace_root))
+    wrapper_src = generate_wrapper_script(
+        sandbox_tier,
+        str(guard.workspace_root),
+        allow_external_files=allow_external_files,
+    )
     temp_dir = guard.workspace_root / "scripts" / "temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     temp_wrapper = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
@@ -1145,22 +1151,36 @@ def _execute_script(
     if status == "failed":
         stderr_text = stderr or ""
         hints: list[str] = []
-        if "安全策略禁止" in stderr_text:
-            if "路径不在工作区内" in stderr_text:
+        if "安全策略禁止" in stderr_text or "PATH_OUTSIDE_WORKSPACE" in stderr_text:
+            if "路径不在工作区内" in stderr_text or "PATH_OUTSIDE_WORKSPACE" in stderr_text:
                 hints.append(
-                    "库内部临时文件写入被拦截。"
-                    "尝试使用 mcp_excel 工具写入，或通过 delegate 完成。"
+                    "文件路径不在当前工作区。受限模式只能访问工作区内文件；"
+                    "需要访问外部文件时请开启完全访问，或先把文件放入当前工作区。"
                 )
-            if "敏感目录" in stderr_text or "禁止访问工作区外的 .env" in stderr_text:
+            if (
+                "敏感目录" in stderr_text
+                or "SENSITIVE_FILE" in stderr_text
+                or "禁止访问工作区外的 .env" in stderr_text
+            ):
                 hints.append(
-                    "安全沙盒拦截：禁止访问系统敏感目录或配置文件。请仅操作工作区内的文件。"
+                    "目标命中了受保护的敏感目录或配置文件；请改用工作区副本，"
+                    "不要直接读取 ExcelManus 的凭证、数据库或内部状态。"
                 )
 
-        if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:
-            if any(m in stderr_text for m in ["requests", "urllib", "http", "socket", "os", "sys", "subprocess", "No module named"]):
-                hints.append(
-                    "安全沙盒拦截：系统禁止在 run_code 中使用网络或系统级模块。请放弃尝试网络请求，改用预装的数据处理库（pandas/numpy/sklearn/matplotlib/seaborn/plotly/scipy/openpyxl）。"
-                )
+        _blocked_import = (
+            "模块 " in stderr_text and "被安全策略禁止" in stderr_text
+        )
+        if _blocked_import and any(
+            m in stderr_text for m in ["requests", "urllib", "http", "socket", "ssl", "websocket"]
+        ):
+            hints.append(
+                "受限模式禁止网络模块；请开启完全访问后重试，或改用不联网的数据处理库。"
+            )
+        elif "ModuleNotFoundError" in stderr_text and "No module named" in stderr_text:
+            hints.append(
+                "当前 Python 环境缺少代码依赖；这不是权限错误。请换用已安装的解释器，"
+                "或在应用运行时环境中补齐该依赖。"
+            )
 
         if hints:
             result["recovery_hint"] = " ".join(hints)

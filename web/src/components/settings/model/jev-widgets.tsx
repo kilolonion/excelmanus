@@ -36,7 +36,6 @@ export function JevStatusChip({ tone, chip }: { tone: JevEntryTone; chip: string
   const className = {
     idle: "bg-muted text-muted-foreground",
     ready: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400",
-    shadow: "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
     enforce: "bg-[var(--em-primary-alpha-12)] text-[var(--em-primary)]",
   }[tone];
   return (
@@ -69,7 +68,6 @@ export function JevGateSelect({
             className={cn(
               "h-2 w-2 shrink-0 rounded-full ring-2 ring-background",
               value === "off" && "bg-muted-foreground/45",
-              value === "shadow" && "bg-amber-500",
               value === "enforce" && "bg-[var(--em-primary)]",
             )}
           />

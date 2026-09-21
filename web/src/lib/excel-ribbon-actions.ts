@@ -63,6 +63,48 @@ export function buildRibbonAskPrompt(kind: RibbonAskKind, ctx: RibbonAskContext)
   }
 }
 
+/**
+ * Actions exposed from the grid itself.  These intentionally use the same
+ * mention/version contract as the ribbon actions so a right-click never
+ * creates a second, UI-only way of talking about a workbook.
+ */
+export type SelectionAgentKind =
+  | "analyze-selection"
+  | "explain-selection"
+  | "data-quality-selection"
+  | "clean-selection";
+
+export const SELECTION_AGENT_ACTIONS: {
+  kind: SelectionAgentKind;
+  label: string;
+  title: string;
+}[] = [
+  { kind: "analyze-selection", label: "分析此选区", title: "把当前选区交给 Agent 分析" },
+  { kind: "explain-selection", label: "解释公式/内容", title: "解释当前选区的公式、字段和内容" },
+  { kind: "data-quality-selection", label: "检查数据质量", title: "检查当前选区的空值、重复和类型异常" },
+  { kind: "clean-selection", label: "提出清洗方案", title: "先提出清洗方案，确认后再修改表格" },
+];
+
+export function buildSelectionAgentPrompt(kind: SelectionAgentKind, ctx: RibbonAskContext): string {
+  const mention = formatFileMention({
+    path: ctx.path,
+    sheet: ctx.sheet,
+    range: ctx.range,
+    version: ctx.version,
+  });
+
+  switch (kind) {
+    case "analyze-selection":
+      return `请分析 ${mention}：概括数据结构、关键模式、异常和可以继续追问的问题。先分析，不要修改表格。`;
+    case "explain-selection":
+      return `请解释 ${mention} 的字段含义、公式逻辑和可疑内容。对公式说明引用关系；只说明，不要修改表格。`;
+    case "data-quality-selection":
+      return `请检查 ${mention} 的数据质量：空值、重复、类型不一致、格式异常和可疑离群。给出具体位置和数量，先报告，不要修改表格。`;
+    case "clean-selection":
+      return `请为 ${mention} 制定清洗方案，明确每类问题、拟采用的规则和预计影响。先提出方案，等我确认后再修改表格。`;
+  }
+}
+
 /** 与 Univer classic 页签同一套 class，避免「历史」看起来像外挂。 */
 export const NATIVE_RIBBON_TAB_CLASS =
   "univer-focus:outline-none univer-focus:ring-2 univer-focus:ring-primary-500 dark:!univer-focus:ring-primary-300 univer-flex univer-cursor-pointer univer-appearance-none univer-items-center univer-gap-1 univer-rounded-sm univer-border-none univer-px-2 univer-py-1 univer-text-sm univer-transition-colors";

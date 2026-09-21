@@ -92,6 +92,7 @@ _PACK_FIELDS: dict[str, tuple[str, ...]] = {
         "tools_used",
         "files_written",
         "verification_facts",
+        "write_evidence",
         "write_operations",
     ),
     "recovery.next_step": (
@@ -101,6 +102,8 @@ _PACK_FIELDS: dict[str, tuple[str, ...]] = {
         "last_error",
         "last_tools",
         "error_facts",
+        "breaker_triggered",
+        "safe_to_retry",
     ),
 }
 
@@ -286,9 +289,14 @@ def last_user_text(engine: Any) -> str:
     memory = getattr(engine, "memory", None) or getattr(engine, "_memory", None)
     if memory is None:
         return ""
+    # get_messages strips internal markers for the provider. Use the durable
+    # messages first so an injected Jev suggestion cannot become user intent.
+    durable = getattr(memory, "messages", None)
     getter = getattr(memory, "get_messages", None)
     rows: list[Any] = []
-    if callable(getter):
+    if isinstance(durable, (list, tuple)):
+        rows = list(durable)
+    elif callable(getter):
         try:
             candidate = getter() or []
             rows = list(candidate) if isinstance(candidate, (list, tuple)) else []
@@ -297,7 +305,10 @@ def last_user_text(engine: Any) -> str:
     else:
         rows = list(getattr(memory, "messages", None) or [])
     for item in reversed(rows):
-        if not isinstance(item, Mapping) or item.get("role") != "user":
+        if (
+            not isinstance(item, Mapping) or item.get("role") != "user"
+            or item.get("_ui_hidden") or item.get("_prompt_kind")
+        ):
             continue
         content = item.get("content")
         if isinstance(content, str) and content.strip():
@@ -378,17 +389,62 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
         for item in (getattr(state, "affected_files", None) or [])
         if item
     ][:10]
-    operations = list(getattr(state, "write_operations_log", None) or [])[:10] if state else []
+    all_operations = list(getattr(state, "write_operations_log", None) or []) if state else []
+    operations = all_operations[-10:]
     tools: list[str] = []
+    write_evidence: list[dict[str, Any]] = []
+    failed_tools = 0
     for item in getattr(chat_result, "tool_calls", None) or ():
         name = str(getattr(item, "tool_name", "") or getattr(item, "name", "") or "")
         if name:
             tools.append(name)
+        # ToolResult.value.meta.write_verification is the deterministic
+        # post-commit read-back produced by the write path.  Project only
+        # bounded counts/status, never cell contents or workbook bytes.
+        structured = getattr(item, "structured", None)
+        value = getattr(structured, "value", None) if structured is not None else None
+        meta = value.get("meta") if isinstance(value, Mapping) else None
+        verification = meta.get("write_verification") if isinstance(meta, Mapping) else None
+        if not isinstance(verification, Mapping) and isinstance(value, Mapping):
+            verification = value.get("write_verification")
+        if isinstance(verification, Mapping):
+            mismatches = verification.get("mismatches") or []
+            write_evidence.append({
+                "tool": name,
+                "file_path": str((getattr(item, "arguments", None) or {}).get("file_path") or ""),
+                "sheet": str(verification.get("sheet") or ""),
+                "status": str(verification.get("status") or "unknown"),
+                "skipped": bool(verification.get("skipped")),
+                "reason": str(verification.get("reason") or "")[:160],
+                "error_code": str(verification.get("error_code") or ""),
+                "verification_kind": str(verification.get("verification_kind") or ""),
+                "total_changes": max(0, int(verification.get("total_changes") or 0)),
+                "value_changes": len(verification.get("value_changes") or []),
+                "formula_changes": len(verification.get("formula_changes") or []),
+                "mismatch_count": max(int(verification.get("mismatch_count") or 0), len(mismatches) if isinstance(mismatches, list) else 0),
+                "truncated": bool(verification.get("truncated")),
+                "sampled": bool(verification.get("sampled")),
+                "content_version": str(verification.get("content_version") or "")[:120],
+            })
+        if not bool(getattr(item, "success", True)):
+            failed_tools += 1
     verification_facts = {
         "success": bool(getattr(chat_result, "success", True)) if chat_result is not None else True,
         "truncated": bool(getattr(chat_result, "truncated", False)) if chat_result is not None else False,
         "affected_file_count": len(affected),
-        "write_operation_count": len(operations),
+        "write_operation_count": len(all_operations),
+        "failed_tool_count": failed_tools,
+        "write_evidence_count": len(write_evidence),
+        "verified_write_count": sum(
+            1 for item in write_evidence if item.get("status") in {"success", "ok"} and not item.get("skipped")
+        ),
+        "mismatch_count": sum(int(item.get("mismatch_count") or 0) for item in write_evidence),
+        "evidence_truncated": len(write_evidence) > 10 or len(all_operations) > 10,
+        "has_incomplete_evidence": bool(
+            not write_evidence or len(write_evidence) < len(all_operations)
+            or any(item.get("truncated") or item.get("skipped") for item in write_evidence)
+            or any(item.get("status") not in {"success", "ok"} for item in write_evidence)
+        ),
         "has_version_conflict": any("conflict" in str(item).lower() for item in operations),
     }
     return bound_state(
@@ -400,6 +456,7 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
             "tools_used": tools[:10],
             "files_written": affected,
             "verification_facts": verification_facts,
+            "write_evidence": write_evidence[-10:],
             "write_operations": operations,
         },
     )
@@ -410,13 +467,19 @@ def recovery_state_from_engine(
     tool_results: list[Any],
     *,
     reason: str = "breaker",
+    breaker_triggered: bool = True,
 ) -> dict[str, Any]:
+    from excelmanus.engine_core.error_payload import failure_class_for_error_code
+    from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS
     # Only the trailing failure streak caused this breaker. Earlier failures
     # separated by a successful tool must not bias the recovery suggestion.
     failures: list[Any] = []
     for item in reversed(tool_results):
         if bool(getattr(item, "success", False)):
             break
+        error_text = str(getattr(item, "error", "") or "")
+        if error_text.startswith("工具未执行：连续 ") and "已触发熔断" in error_text:
+            continue
         failures.append(item)
     failures.reverse()
     errors: list[dict[str, Any]] = []
@@ -433,23 +496,24 @@ def recovery_state_from_engine(
             or "TOOL_ERROR"
         )
         kind = str(
-            getattr(item, "error_kind", "")
-            or fields.get("failure_class")
-            or ""
+            fields.get("failure_class") or failure_class_for_error_code(code)
         )
-        retryable = kind in {"retryable", "transient"}
+        retryable = getattr(item, "error_kind", "") in {"retryable", "transient"} or fields.get("retryable") is True
+        tool_name = str(getattr(item, "tool_name", "") or "")
+        committed = fields.get("committed", fields.get("write_committed"))
         errors.append({
-            "tool": str(getattr(item, "tool_name", "") or ""),
+            "tool": tool_name,
             "error_code": code[:80],
             "failure_class": kind[:60],
             "error": str(fields.get("message") or getattr(item, "error", "") or "")[:160],
             "remediation": str(fields.get("remediation") or "")[:160],
             "rejected": kind in {"permission_denied", "approval_denied", "approval_timeout", "blocked"},
-            "committed": bool(fields.get("committed") or fields.get("write_committed")),
+            "committed": committed is True,
+            "commit_unknown": tool_name not in READ_ONLY_SAFE_TOOLS and committed is not False,
             "retryable": retryable,
         })
     safe_to_retry = bool(errors) and all(
-        item.get("retryable") and not item.get("rejected") and not item.get("committed")
+        item.get("retryable") and not item.get("rejected") and not item.get("committed") and not item.get("commit_unknown")
         for item in errors
     )
     return bound_state(
@@ -458,7 +522,7 @@ def recovery_state_from_engine(
             "user_text": last_user_text(engine),
             "iteration": int(getattr(engine, "_last_iteration_count", 0) or 0),
             "consecutive_failures": len(failures),
-            "breaker_triggered": True,
+            "breaker_triggered": breaker_triggered,
             "safe_to_retry": safe_to_retry,
             "last_error": str(reason or "breaker"),
             "last_tools": [str(getattr(item, "tool_name", "") or "") for item in tool_results[-10:]],

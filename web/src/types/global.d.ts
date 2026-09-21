@@ -22,5 +22,6 @@ interface Window {
     version: 1;
     saveBlob: (blob: Blob, filename: string) => void;
     scanPairing?: () => void;
+    openConnectionSettings?: () => void;
   };
 }

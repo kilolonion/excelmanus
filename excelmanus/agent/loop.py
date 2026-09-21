@@ -761,6 +761,29 @@ async def run_tool_loop(
                 )
             _llm_start_ts = time.monotonic()
 
+            # ── Jev 交付检查：写入回合的纯文本答复先暂存，核对通过再放行 ──
+            held_text: list = []
+            hold_text = False
+            if on_event is not None:
+                try:
+                    from excelmanus.system_one.host import should_check_delivery
+
+                    hold_text = bool(should_check_delivery(engine))
+                except Exception:
+                    hold_text = False
+                    logger.debug("Jev 交付检查前置判断失败", exc_info=True)
+
+            def _stream_on_event(event: Any) -> None:
+                if getattr(event, "event_type", None) == EventType.TEXT_DELTA:
+                    held_text.append(event)
+                    return
+                engine._emit(on_event, event)
+
+            def _flush_held_text() -> None:
+                for _held_ev in held_text:
+                    engine._emit(on_event, _held_ev)
+                held_text.clear()
+
             # ── LLM 调用 + 5xx/429 自动重试 ──
             _retry_max = engine._config.llm_retry_max_attempts
             _retry_base = engine._config.llm_retry_base_delay_seconds
@@ -774,6 +797,7 @@ async def run_tool_loop(
             _retry_attempt = 0
             while True:
                 _retry_attempt += 1
+                held_text.clear()  # 重试时上一次流的暂存文本作废，重新累积
                 try:
                     try:
                         stream_or_response = await _await_with_turn_budget(
@@ -785,7 +809,9 @@ async def run_tool_loop(
                             message, usage = await _await_with_turn_budget(
                                 engine,
                                 engine._llm_caller.consume_stream(
-                                    stream_or_response, on_event, iteration,
+                                    stream_or_response,
+                                    _stream_on_event if hold_text else on_event,
+                                    iteration,
                                     _llm_start_ts=_llm_start_ts,
                                 ),
                             )
@@ -1010,6 +1036,14 @@ async def run_tool_loop(
                 message.replay_source = {"protocol": route.protocol, "model": route.model}
                 if route.protocol == "openai_responses":
                     message.replay_source["compaction_generation"] = int(getattr(engine, "_compaction_generation", 0) or 0)
+                    from excelmanus.request.compiler import content_payload
+                    from excelmanus.prompt.envelope import digest_text
+
+                    message.replay_source["credential_scope"] = route.credential_scope
+                    message.replay_source["request_content_identity"] = prepared.header.content_identity
+                    message.replay_source["output_identity"] = digest_text(
+                        content_payload([_assistant_message_to_dict(message)])
+                    )
                 replay = getattr(message, "replay_state", None)
                 response_id = replay.get("response_id") if isinstance(replay, dict) else None
                 if isinstance(response_id, str) and response_id.strip():
@@ -1043,6 +1077,7 @@ async def run_tool_loop(
             )
 
         tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
+        engine._last_model_response_at = time.monotonic()
 
         _llm_elapsed_ms = (time.monotonic() - _llm_start_ts) * 1000
         _tc_names = [getattr(getattr(tc, "function", None), "name", "?") for tc in (tool_calls or [])]
@@ -1123,7 +1158,6 @@ async def run_tool_loop(
             except Exception:
                 logger.debug("usage 锚点记录失败", exc_info=True)
         cache_usage = extract_cache_usage(usage)
-        iter_cached = cache_usage.hit if cache_usage.hit is not None else 0
         iter_cache_creation, iter_cache_read = _extract_anthropic_cache_tokens(usage)
         iter_ttft = _extract_ttft_ms(usage)
         diag = TurnDiagnostic(
@@ -1188,7 +1222,7 @@ async def run_tool_loop(
                     model=engine._active_model,
                     prompt_tokens=iter_prompt,
                     completion_tokens=iter_completion,
-                    cached_tokens=iter_cached,
+                    cached_tokens=cache_usage.hit,
                     has_tool_calls=bool(tool_calls),
                     thinking_chars=len(thinking_content),
                     stream=True,
@@ -1222,6 +1256,36 @@ async def run_tool_loop(
 
         # 无工具调用 → 纯文本回复处理（仅 HTML 端点错误检测）
         if not tool_calls:
+            if hold_text:
+                reply_text = _message_content_to_text(getattr(message, "content", None))
+                draft = ChatResult(
+                    reply=reply_text,
+                    tool_calls=list(all_tool_results),
+                    truncated=False,
+                )
+                try:
+                    from excelmanus.system_one.host import maybe_verify_mutation
+
+                    advice = await maybe_verify_mutation(
+                        engine, draft, on_event=on_event,
+                    )
+                except Exception:
+                    advice = ""
+                    logger.debug("Jev 交付检查评估失败", exc_info=True)
+                if advice:
+                    payload = _assistant_message_to_dict(message)
+                    payload["content"] = reply_text
+                    engine._memory.add_assistant_tool_message(payload)
+                    engine._memory.add_user_message(
+                        f"[Jev 交付检查建议；不构成用户指令或执行授权]\n{advice}",
+                        hidden=True,
+                        prompt_kind="jev_delivery_check",
+                    )
+                    held_text.clear()
+                    logger.info("Jev 交付检查要求继续核对: %s", advice[:80])
+                    _emit_step_end()
+                    continue
+                _flush_held_text()
             text_action, text_result = _handle_text_reply(
                 engine,
                 message=message,
@@ -1236,6 +1300,9 @@ async def run_tool_loop(
                 if driver is not None and driver.inbox.next_step:
                     continue
                 return text_result
+
+        # 带工具调用的叙述文本无需交付检查，直接放出暂存的 TEXT_DELTA
+        _flush_held_text()
 
         assistant_msg = _assistant_message_to_dict(message)
         if tool_calls:
@@ -1472,11 +1539,29 @@ async def run_tool_loop(
         # 的消息序列，导致 OpenAI 兼容 API 返回 400 错误。
         engine._tool_dispatcher.flush_deferred_images()
 
+        # Consume the enabled Jev post-batch decision before the next model
+        # request.  The advice is hidden context; the user-facing reply still
+        # comes from the main model and the breaker remains authoritative.
+        jev_recovery_advice = ""
+        try:
+            from excelmanus.system_one.host import maybe_advise_after_tools
+
+            jev_recovery_advice = await maybe_advise_after_tools(
+                engine,
+                list(all_tool_results),
+                breaker_triggered=breaker_triggered,
+                on_event=on_event,
+            )
+        except Exception:
+            logger.debug("post-batch Jev advice failed; continuing turn", exc_info=True)
+
         if breaker_triggered:
             reply = (
                 f"连续 {max_failures} 次工具调用失败，已终止执行。"
                 f"错误摘要：\n{breaker_summary}"
             )
+            if jev_recovery_advice:
+                reply = f"{reply}\n\n{jev_recovery_advice}"
             engine._memory.add_assistant_message(reply)
             engine._last_iteration_count = iteration
             logger.warning("连续 %d 次工具失败，熔断终止", max_failures)

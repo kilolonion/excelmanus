@@ -626,6 +626,7 @@ class ConversationMemory:
         vision_capable: bool = True,
         image_pins: list[str] | tuple[str, ...] | None = None,
         image_report: dict | None = None,
+        exclude_system_updates: bool = False,
     ) -> list[dict]:
         """投影 leading system + durable 历史。不插段、不改写已发出前缀。
 
@@ -635,6 +636,8 @@ class ConversationMemory:
         """
         projected: list[dict] = []
         for msg in self._messages:
+            if exclude_system_updates and msg.get("_prompt_kind") == "system_update":
+                continue
             clean = {k: v for k, v in msg.items() if not str(k).startswith("_")}
             projection_content = msg.get("_projection_content")
             if msg.get("role") == "tool" and isinstance(projection_content, str):

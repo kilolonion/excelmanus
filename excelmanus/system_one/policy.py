@@ -30,7 +30,7 @@ T_CHAT = 0.85
 T_VERBATIM = 0.7
 T_BIG = 8000
 T_TIGHT_CHARS = 2000
-T_ALLOW = 0.99  # 未签字标定：几乎不会 auto；uncertain → ASK
+T_ALLOW = 0.99  # 高置信才自动放行；uncertain → ASK
 T_DENY = 0.6
 T_DESTRUCTIVE = 0.75
 T_EXFIL = 0.7
@@ -70,8 +70,8 @@ class JevSettings:
     calibrated: bool = False
     protocol: str = ""
     base_url: str = ""
-    verification: GateLevel = "off"
-    recovery: GateLevel = "off"
+    verification: GateLevel = "enforce"
+    recovery: GateLevel = "enforce"
     provider_id: str = ""
 
 
@@ -121,18 +121,18 @@ def _legacy_key_and_protocol(config: Any) -> tuple[str | None, str, str, str, st
 def settings_from(config: Any | None = None) -> JevSettings:
     if config is not None:
         key, protocol, model, base_url, provider_id = _legacy_key_and_protocol(config)
-        enabled = str(getattr(config, "jev_enabled", "off") or "off")
-        exposure = str(getattr(config, "jev_exposure", "off") or "off")
-        observation = str(getattr(config, "jev_observation", "off") or "off")
-        verification = str(getattr(config, "jev_verification", "off") or "off")
+        enabled = str(getattr(config, "jev_enabled", "enforce") or "enforce")
+        exposure = str(getattr(config, "jev_exposure", "enforce") or "enforce")
+        observation = str(getattr(config, "jev_observation", "enforce") or "enforce")
+        verification = str(getattr(config, "jev_verification", "enforce") or "enforce")
         return JevSettings(
             enabled=_as_gate(enabled),
             exposure=_as_gate(exposure),
-            mode_hint=bool(getattr(config, "jev_mode_hint", False)),
+            mode_hint=bool(getattr(config, "jev_mode_hint", True)),
             observation=_as_gate(observation),
             verification=_as_gate(verification),
-            recovery=_as_gate(str(getattr(config, "jev_recovery", "off") or "off")),
-            ui_hint=bool(getattr(config, "jev_ui_hint", False)),
+            recovery=_as_gate(str(getattr(config, "jev_recovery", "enforce") or "enforce")),
+            ui_hint=bool(getattr(config, "jev_ui_hint", True)),
             model=model,
             api_key=key,
             timeout_seconds=float(getattr(config, "jev_timeout_seconds", 1.5) or 1.5),
@@ -160,19 +160,19 @@ def settings_from(config: Any | None = None) -> JevSettings:
         model_override=get_setting("EXCELMANUS_JEV_MODEL"),
     )
     return JevSettings(
-        enabled=_parse_jev_gate(get_setting("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "off"),  # type: ignore[arg-type]
-        exposure=_parse_jev_gate(get_setting("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "off"),  # type: ignore[arg-type]
-        mode_hint=_parse_bool(get_setting("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", False),
+        enabled=_parse_jev_gate(get_setting("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "enforce"),  # type: ignore[arg-type]
+        exposure=_parse_jev_gate(get_setting("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "enforce"),  # type: ignore[arg-type]
+        mode_hint=_parse_bool(get_setting("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", True),
         observation=_parse_jev_gate(
-            get_setting("EXCELMANUS_JEV_OBSERVATION"), "EXCELMANUS_JEV_OBSERVATION", "off"
+            get_setting("EXCELMANUS_JEV_OBSERVATION"), "EXCELMANUS_JEV_OBSERVATION", "enforce"
         ),  # type: ignore[arg-type]
         verification=_parse_jev_gate(
-            get_setting("EXCELMANUS_JEV_VERIFICATION"), "EXCELMANUS_JEV_VERIFICATION", "off"
+            get_setting("EXCELMANUS_JEV_VERIFICATION"), "EXCELMANUS_JEV_VERIFICATION", "enforce"
         ),  # type: ignore[arg-type]
         recovery=_parse_jev_gate(
-            get_setting("EXCELMANUS_JEV_RECOVERY"), "EXCELMANUS_JEV_RECOVERY", "off"
+            get_setting("EXCELMANUS_JEV_RECOVERY"), "EXCELMANUS_JEV_RECOVERY", "enforce"
         ),  # type: ignore[arg-type]
-        ui_hint=_parse_bool(get_setting("EXCELMANUS_JEV_UI_HINT"), "EXCELMANUS_JEV_UI_HINT", False),
+        ui_hint=_parse_bool(get_setting("EXCELMANUS_JEV_UI_HINT"), "EXCELMANUS_JEV_UI_HINT", True),
         model=connection.model,
         api_key=connection.api_key,
         timeout_seconds=min(
@@ -196,7 +196,12 @@ def settings_from(config: Any | None = None) -> JevSettings:
 
 def _as_gate(value: str) -> GateLevel:
     raw = str(value or "off").strip().lower()
-    if raw in {"off", "shadow", "enforce"}:
+    # ``shadow`` was the pre-rollout observation mode.  Treat persisted legacy
+    # values as the only enabled state so an upgrade cannot silently disable
+    # an already configured JEV integration.
+    if raw == "shadow":
+        return "enforce"
+    if raw in {"off", "enforce"}:
         return raw  # type: ignore[return-value]
     return "off"
 
@@ -226,29 +231,16 @@ def live_jev_settings(config: Any | None = None) -> JevSettings:
 
 
 def effective_gate(master: GateLevel, child: GateLevel) -> GateLevel:
-    """总闸 off → 全关。总闸 shadow 时子闸 enforce 降为 shadow。禁止 shadow 总闸下收窄 wire。"""
-    if master == "off":
-        return "off"
-    if child == "off":
-        return "off"
-    if master == "shadow":
-        return "shadow"
-    return child
+    """只有总闸和对应子闸都开启时，该题包才参与并直接生效。"""
+    return "enforce" if master == "enforce" and child == "enforce" else "off"
 
 
 def effective_flag(master: GateLevel, enabled: bool) -> GateLevel:
-    if master == "off" or not enabled:
-        return "off"
-    if master == "shadow":
-        return "shadow"
-    return "enforce"
+    return "enforce" if master == "enforce" and enabled else "off"
 
 
 def gate_for_pack(pack_id: str, settings: JevSettings) -> GateLevel:
     spec = get_pack(pack_id)
-    if spec.shadow_only:
-        child = _as_gate(str(getattr(settings, spec.gate, "off") or "off"))
-        return "shadow" if effective_gate(settings.enabled, child) != "off" else "off"
     if spec.gate == "master":
         return settings.enabled
     if spec.gate == "exposure":
@@ -257,22 +249,16 @@ def gate_for_pack(pack_id: str, settings: JevSettings) -> GateLevel:
         return effective_gate(settings.enabled, settings.observation)
     if spec.gate == "verification":
         return effective_gate(settings.enabled, settings.verification)
+    if spec.gate == "recovery":
+        return effective_gate(settings.enabled, settings.recovery)
     if spec.gate == "ui_hint":
         return effective_flag(settings.enabled, settings.ui_hint)
     return "off"
 
 
 def decision_is_applied(pack_id: str, settings: JevSettings) -> bool:
-    """enforce 可提供纯建议；执行侧题包还必须通过中文标定签字。"""
-    if gate_for_pack(pack_id, settings) != "enforce":
-        return False
-    # A context suggestion cannot authorize a workspace switch or a mutation.
-    # Actuator packs retain the existing calibration requirement.
-    if get_pack(pack_id).advisory_only:
-        return True
-    from excelmanus.system_one.calibration import calibration_allows_enforce
-
-    return calibration_allows_enforce(pack_id, settings)
+    """An enabled pack is live immediately; its deterministic host guard still applies."""
+    return gate_for_pack(pack_id, settings) == "enforce"
 
 
 def decision_can_apply(pack_id: str, decision: Decision, settings: JevSettings) -> bool:
@@ -281,16 +267,12 @@ def decision_can_apply(pack_id: str, decision: Decision, settings: JevSettings) 
 
 
 def flag_is_applied(enabled: bool, settings: JevSettings, *, pack_id: str) -> bool:
-    """bool 子闸（MODE_HINT）：总闸 shadow 降级，未签字不得 applied。"""
-    if effective_flag(settings.enabled, enabled) != "enforce":
-        return False
-    from excelmanus.system_one.calibration import calibration_allows_enforce
-
-    return calibration_allows_enforce(pack_id, settings)
+    """Boolean child switches follow the same master/enabled contract."""
+    return effective_flag(settings.enabled, enabled) == "enforce"
 
 
 def stamp_application(pack_id: str, decision: Decision, settings: JevSettings) -> Decision:
-    """未签字 / 非 enforce：applied=False 且禁止 wire_narrow。shadow 日志仍可写。"""
+    """Disabled packs cannot affect the host; enabled packs apply immediately."""
     extras = dict(decision.extras)
     if not decision_is_applied(pack_id, settings):
         extras["wire_narrow"] = False
@@ -637,6 +619,21 @@ def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]
     next_action = next_answer.choice if next_answer is not None else "none"
     if next_action not in {"none", "inspect_more", "ask_user"}:
         next_action = "none"
+    facts = state.get("verification_facts")
+    facts = facts if isinstance(facts, Mapping) else {}
+    # Deterministic evidence outranks the evaluator's optimistic answer.  A
+    # failed write, a sampled/truncated read-back, a mismatch, or a version
+    # conflict always needs a bounded read-only follow-up before completion.
+    evidence_incomplete = bool(
+        facts.get("has_incomplete_evidence")
+        or facts.get("mismatch_count")
+        or facts.get("evidence_truncated")
+        or facts.get("has_version_conflict")
+        or (
+            int(facts.get("write_operation_count") or 0) > 0
+            and int(facts.get("write_evidence_count") or 0) == 0
+        )
+    )
     if satisfied < T_SUGGEST or scope_ok < T_SUGGEST:
         return Decision(
             kind="noop",
@@ -645,7 +642,19 @@ def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]
             extras={
                 "satisfied": satisfied,
                 "scope_ok": scope_ok,
-                "next": "inspect_more" if scope_ok < T_SUGGEST else "ask_user",
+                "next": "inspect_more",
+            },
+        )
+    if evidence_incomplete:
+        return Decision(
+            kind="noop",
+            reason="deterministic_evidence_requires_followup",
+            evaluation=evaluation,
+            extras={
+                "satisfied": satisfied,
+                "scope_ok": scope_ok,
+                "next": "inspect_more",
+                "next_confidence": float(next_answer.confidence) if next_answer is not None else 0.0,
             },
         )
     if next_answer is None or next_answer.confidence < T_SUGGEST:
@@ -727,7 +736,7 @@ def is_known_dangerous_call(
     arguments: Mapping[str, Any] | None,
     workspace_root: str | None = None,
 ) -> bool:
-    """确定性危险形：不叫 Jev。未签字仍 ASK；签字+enforce 才真 DENY。"""
+    """确定性危险形：不叫 Jev，始终由确定性规则拒绝。"""
     args = arguments or {}
     name = str(tool_name or "")
     if name == "run_shell":

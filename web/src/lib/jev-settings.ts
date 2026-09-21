@@ -1,9 +1,8 @@
-export type JevGate = "off" | "shadow" | "enforce";
+export type JevGate = "off" | "enforce";
 export type JevProtocol = "typesafe" | "gateway";
 
 export const JEV_GATE_OPTIONS: { value: JevGate; label: string }[] = [
   { value: "off", label: "关闭" },
-  { value: "shadow", label: "仅观察" },
   { value: "enforce", label: "生效" },
 ];
 
@@ -173,14 +172,16 @@ export function jevCatalogOptions(current: string, providers: JevProviderPublic[
 }
 
 export function jevGateLabel(value: string): string {
-  return JEV_GATE_OPTIONS.find((option) => option.value === value)?.label ?? "关闭";
+  const normalized = value === "shadow" ? "enforce" : value;
+  return JEV_GATE_OPTIONS.find((option) => option.value === normalized)?.label ?? "关闭";
 }
 
 export function jevChatEnabled(input: {
   configured: boolean;
   enabled: string;
 }): boolean {
-  return Boolean(input.configured) && (input.enabled === "shadow" || input.enabled === "enforce");
+  const enabled = input.enabled === "shadow" ? "enforce" : input.enabled;
+  return Boolean(input.configured) && enabled === "enforce";
 }
 
 export function jevConfiguredFromRuntime(data: {
@@ -220,7 +221,7 @@ export function jevChatEnabledFromRuntime(data: {
   });
 }
 
-export type JevEntryTone = "idle" | "ready" | "shadow" | "enforce";
+export type JevEntryTone = "idle" | "ready" | "enforce";
 
 export function jevEntryStatus(input: {
   configured: boolean;
@@ -230,13 +231,7 @@ export function jevEntryStatus(input: {
   if (!input.configured) {
     return { tone: "idle", chip: "未配置" };
   }
-  if (input.enabled === "shadow") {
-    return { tone: "shadow", chip: "仅观察" };
-  }
-  if (input.enabled === "enforce") {
-    if (input.enforceReady === false) {
-      return { tone: "ready", chip: "部分功能可用" };
-    }
+  if (input.enabled === "enforce" || input.enabled === "shadow") {
     return { tone: "enforce", chip: "生效" };
   }
   return { tone: "ready", chip: "已连接 · 关闭" };
@@ -289,13 +284,13 @@ export type JevDraft = {
 };
 
 export const EMPTY_JEV_DRAFT: JevDraft = {
-  jev_enabled: "off",
-  jev_exposure: "off",
-  jev_observation: "off",
-  jev_verification: "off",
-  jev_recovery: "off",
-  jev_mode_hint: false,
-  jev_ui_hint: false,
+  jev_enabled: "enforce",
+  jev_exposure: "enforce",
+  jev_observation: "enforce",
+  jev_verification: "enforce",
+  jev_recovery: "enforce",
+  jev_mode_hint: true,
+  jev_ui_hint: true,
   jev_model: JEV_DEFAULT_MODEL,
   jev_timeout_seconds: 1.5,
   jev_active_provider: "",
@@ -320,7 +315,9 @@ export const JEV_ROLE_KEYS: (keyof JevDraft)[] = [
 ];
 
 export function parseJevGate(value: string | undefined): JevGate {
-  if (value === "shadow" || value === "enforce") return value;
+  // Upgrade legacy persisted/runtime snapshots without exposing the removed
+  // observation-only state in the UI.
+  if (value === "shadow" || value === "enforce") return "enforce";
   return "off";
 }
 

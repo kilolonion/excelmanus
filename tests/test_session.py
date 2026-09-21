@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,11 +12,13 @@ import pytest_asyncio
 
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.engine import AgentEngine
+from excelmanus.skillpacks import SkillpackLoader, SkillRouter
 from excelmanus.session import (
     SessionBusyError,
     SessionLimitExceededError,
     SessionNotFoundError,
     SessionManager,
+    _project_skills_dir_for_workspace,
 )
 from excelmanus.tools import ToolRegistry
 
@@ -100,6 +103,73 @@ class TestGetOrCreate:
         assert len(sid) == 36  # UUID4 格式
         assert engine is not None
         assert await manager.get_active_count() == 1
+
+    def test_project_skill_dir_rebases_with_session_workspace(self, tmp_path) -> None:
+        process_workspace = tmp_path / "default"
+        session_workspace = tmp_path / "new"
+        config = ExcelManusConfig(
+            api_key="test-key",
+            base_url="https://test.example.com/v1",
+            model="test-model",
+            workspace_root=str(process_workspace),
+            skills_project_dir=str(process_workspace / "skillpacks"),
+        )
+
+        resolved = _project_skills_dir_for_workspace(config, session_workspace)
+
+        assert resolved == (session_workspace / "skillpacks").resolve()
+
+    def test_relative_project_skill_dir_is_workspace_relative(self, tmp_path) -> None:
+        config = ExcelManusConfig(
+            api_key="test-key",
+            base_url="https://test.example.com/v1",
+            model="test-model",
+            workspace_root=str(tmp_path / "default"),
+            skills_project_dir=".excelmanus/skillpacks",
+        )
+
+        resolved = _project_skills_dir_for_workspace(config, tmp_path / "new")
+
+        assert resolved == (tmp_path / "new/.excelmanus/skillpacks").resolve()
+
+    def test_engine_rebinds_skill_loader_to_session_workspace(
+        self,
+        tmp_path,
+        registry: ToolRegistry,
+    ) -> None:
+        process_workspace = tmp_path / "default"
+        session_workspace = tmp_path / "new"
+        process_workspace.mkdir()
+        session_workspace.mkdir()
+        config = ExcelManusConfig(
+            api_key="test-key",
+            base_url="https://test.example.com/v1",
+            model="test-model",
+            memory_enabled=False,
+            workspace_root=str(process_workspace),
+            skills_system_dir=str(tmp_path / "system-skills"),
+            skills_user_dir=str(tmp_path / "user-skills"),
+            skills_project_dir=str(process_workspace / "skillpacks"),
+        )
+        loader = SkillpackLoader(config, registry)
+        manager = SessionManager(
+            max_sessions=5,
+            ttl_seconds=60,
+            config=config,
+            registry=registry,
+            skill_router=SkillRouter(config, loader),
+        )
+        manager.remember_session_workspace(
+            "workspace-session",
+            str(session_workspace),
+            None,
+        )
+
+        engine = manager._create_engine_with_history("workspace-session")
+
+        expected = (session_workspace / "skillpacks").resolve()
+        assert Path(engine.config.skills_project_dir).resolve() == expected
+        assert Path(engine._skill_router._loader._config.skills_project_dir).resolve() == expected
 
     @pytest.mark.asyncio
     async def test_create_new_session_starts_registry_scan(

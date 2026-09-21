@@ -43,7 +43,9 @@
       {
         "from": "../web/server",
         "to": "mobile-server",
-        "filter": ["*.cjs"]
+        "filter": [
+          "*.cjs"
+        ]
       },
       {
         "from": ".build/frontend",

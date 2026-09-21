@@ -78,6 +78,8 @@ if TYPE_CHECKING:
 
 logger = get_logger("engine")
 
+_background_probes: dict[tuple[int, int, str, str], asyncio.Task[Any]] = {}
+
 
 def _tool_access_from_chat_mode(chat_mode: str) -> str:
     """tool_access 轴不再随 plan/read 缩短（恒为 may_write）。
@@ -132,15 +134,6 @@ class AgentEngine:
             "视觉模式: vision=%s",
             self._is_vision_capable,
         )
-        # ── 首次使用关键词推断时，自动触发后台 probe 以获取 ground truth ──
-        if self._is_host_session and config.main_model_vision == "auto" and database is not None:
-            try:
-                from excelmanus.model_probe import load_capabilities
-                _cached = load_capabilities(database, config.model, config.base_url)
-                if _cached is None or _cached.supports_vision is None:
-                    self._schedule_background_probe(config, database)
-            except Exception:
-                pass
         # fork 出 per-session registry，避免多会话共享同一实例时
         # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError
         self._registry = registry.fork() if hasattr(registry, "fork") else registry
@@ -204,6 +197,12 @@ class AgentEngine:
         # 会话级权限控制：从持久化配置读取，继承上次设置
         self._full_access_enabled: bool = (
             self._load_persisted_full_access(database) if self._is_host_session else False
+        )
+        # 仅跳过审批，代码仍运行在受限沙盒中；与 full_access 互斥。
+        self._auto_approve_enabled: bool = (
+            self._load_persisted_auto_approve(database)
+            if self._is_host_session and not self._full_access_enabled
+            else False
         )
         # 会话级子代理开关：初始化继承配置，可通过 /subagent 动态切换
         self._subagent_enabled: bool = config.subagent_enabled
@@ -436,42 +435,65 @@ class AgentEngine:
         from excelmanus.agent.seams import attach_wave_d
         self._driver = Driver(self)
         attach_wave_d(self)
+        # 构造成功后再调度，避免路径/技能校验失败仍不断发出探测请求。
+        self._schedule_background_probe(config, database)
 
     def _schedule_background_probe(self, config: "ExcelManusConfig", db: "Database | None") -> None:
         """后台触发 probe 检测当前模型视觉能力，结果缓存到 DB 供下次使用。"""
-        async def _do_probe() -> None:
+        if not self._is_host_session or config.main_model_vision != "auto" or db is None:
+            return
+        from excelmanus.auth.providers.registry import strip_managed_prefix
+        from excelmanus.model_probe import capabilities_cache_is_fresh, load_capabilities, run_full_probe
+
+        # 固定调度时的客户端与模型坐标，避免协程实际执行前切换模型，
+        # 把旧模型的探测发给新客户端并写入错误缓存键。
+        probe_client = self._client
+        probe_model = strip_managed_prefix(config.model)
+        probe_base_url = config.base_url
+        cached = load_capabilities(db, probe_model, probe_base_url)
+        if cached is not None and capabilities_cache_is_fresh(cached):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        key = (id(loop), id(db), probe_model, probe_base_url.rstrip("/"))
+
+        async def _do_probe() -> Any:
+            return await run_full_probe(
+                client=probe_client,
+                model=probe_model,
+                base_url=probe_base_url,
+                skip_if_cached=True,
+                db=db,
+                health_timeout=config.cap_probe_health_timeout,
+                tool_timeout=config.cap_probe_tool_timeout,
+                vision_timeout=config.cap_probe_vision_timeout,
+                thinking_total_timeout=config.cap_probe_thinking_total_timeout,
+                thinking_strategy_timeout=config.cap_probe_thinking_strategy_timeout,
+            )
+
+        def _finished(task: asyncio.Task[Any]) -> None:
+            if task.cancelled():
+                return
             try:
-                from excelmanus.model_probe import run_full_probe
-                caps = await run_full_probe(
-                    client=self._client,
-                    model=config.model,
-                    base_url=config.base_url,
-                    skip_if_cached=True,
-                    db=db,
-                )
-                if caps.supports_vision is not None and caps.supports_vision != self._is_vision_capable:
-                    logger.warning(
-                        "probe 检测视觉能力与关键词推断不一致: probe=%s, keyword=%s, model=%s。"
-                        "已缓存 probe 结果，下次创建 engine 时将使用 probe 结果。",
-                        caps.supports_vision, self._is_vision_capable, config.model,
-                    )
-                else:
-                    logger.info("probe 视觉检测完成: model=%s, vision=%s", config.model, caps.supports_vision)
+                caps = task.result()
+                if (self._client is probe_client
+                    and strip_managed_prefix(self.current_model) == probe_model
+                    and self.active_base_url.rstrip("/") == probe_base_url.rstrip("/")):
+                    self.set_model_capabilities(caps)
+                logger.info("probe 视觉检测完成: model=%s, vision=%s", probe_model, caps.supports_vision)
             except Exception:
                 logger.debug("后台 probe 检测失败", exc_info=True)
 
-        try:
-            loop = asyncio.get_running_loop()
-            _probe_task = loop.create_task(_do_probe())
-            _probe_task.add_done_callback(
-                lambda t: (
-                    logger.debug("后台 probe 任务异常: %s", t.exception())
-                    if not t.cancelled() and t.exception() else None
-                )
-            )
-            logger.info("已调度后台 probe 检测: model=%s", config.model)
-        except RuntimeError:
-            logger.debug("无事件循环，跳过后台 probe")
+        task = _background_probes.get(key)
+        if task is None or task.done():
+            task = loop.create_task(_do_probe())
+            _background_probes[key] = task
+            task.add_done_callback(lambda done: _background_probes.pop(key, None)
+                                   if _background_probes.get(key) is done else None)
+            logger.info("已调度后台 probe 检测: model=%s", probe_model)
+        task.add_done_callback(_finished)
 
     @staticmethod
     def _infer_vision_capable(config: "ExcelManusConfig", db: "Database | None" = None) -> bool:
@@ -588,6 +610,14 @@ class AgentEngine:
     @_session_diagnostics.setter
     def _session_diagnostics(self, value: list) -> None:
         self._state.session_diagnostics = value
+
+    @property
+    def _loaded_tool_names(self) -> set[str]:
+        return self._state.loaded_tool_names
+
+    @_loaded_tool_names.setter
+    def _loaded_tool_names(self, value: set[str]) -> None:
+        self._state.loaded_tool_names = set(value)
 
     @property
     def _image_wire_pin_seq(self) -> tuple[str, ...]:
@@ -1048,32 +1078,6 @@ class AgentEngine:
         if auto_approved:
             self._approval.register_mcp_auto_approve(auto_approved)
 
-    async def warmup_prompt_cache(self) -> None:
-        """预热真实前缀。无真实 user 则跳过，禁止假 user: hi。不更新 last_accepted。"""
-        from excelmanus.providers.claude import ClaudeClient
-        from excelmanus.request.compiler import compile_request
-
-        if not isinstance(self._client, ClaudeClient):
-            return
-        memory = getattr(self, "_memory", None)
-        messages = getattr(memory, "messages", None) or []
-        if not any(isinstance(item, dict) and item.get("role") == "user" for item in messages):
-            return
-        try:
-            prepared, error = await compile_request(self, persist_surface=False)
-            if error is not None or prepared is None:
-                return
-            kwargs = prepared.create_kwargs()
-            kwargs["max_tokens"] = 1
-            await self._client.chat.completions.create(**kwargs)
-            logger.info(
-                "prompt cache 预热完成: series=%s messages=%d",
-                prepared.series_id,
-                len(kwargs.get("messages") or []),
-            )
-        except Exception:
-            logger.debug("prompt cache 预热失败，跳过", exc_info=True)
-
     def _responses_client(self) -> Any:
         from excelmanus.providers.openai_responses import OpenAIResponsesClient
 
@@ -1473,8 +1477,13 @@ class AgentEngine:
 
     @property
     def full_access_enabled(self) -> bool:
-        """当前会话是否启用 fullaccess。"""
+        """当前会话是否启用完全访问。"""
         return self._full_access_enabled
+
+    @property
+    def auto_approve_enabled(self) -> bool:
+        """当前会话是否启用仅自动审批模式。"""
+        return self._auto_approve_enabled
 
     @property
     def execution_policy(self):
@@ -1508,6 +1517,27 @@ class AgentEngine:
             store.set_full_access(enabled)
         except Exception:
             logger.debug("持久化 full_access 失败", exc_info=True)
+
+    def _load_persisted_auto_approve(self, database: "Database | None") -> bool:
+        """从用户级配置读取仅自动审批开关。"""
+        if database is None:
+            return False
+        try:
+            from excelmanus.stores.config_store import UserConfigStore
+            return UserConfigStore(database.conn).get_auto_approve()
+        except Exception:
+            logger.debug("读取持久化 auto_approve 失败", exc_info=True)
+            return False
+
+    def _persist_auto_approve(self, enabled: bool) -> None:
+        """持久化仅自动审批开关。"""
+        if self._database is None:
+            return
+        try:
+            from excelmanus.stores.config_store import UserConfigStore
+            UserConfigStore(self._database.conn).set_auto_approve(enabled)
+        except Exception:
+            logger.debug("持久化 auto_approve 失败", exc_info=True)
 
     @property
     def subagent_enabled(self) -> bool:
@@ -3185,6 +3215,9 @@ class AgentEngine:
         self._sync_context_window_consumers()
         self._refresh_vision_capability()
         desc = f"（{matched.description}）" if matched.description else ""
+        self._schedule_background_probe(
+            replace(self._config, model=matched.model, base_url=matched.base_url), self._database,
+        )
         return f"已切换到模型：{matched.name} → {matched.model}{desc}"
 
     def _sync_from_llm_clients(self) -> None:

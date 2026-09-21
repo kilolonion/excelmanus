@@ -181,11 +181,13 @@ def _pin_cache_control(message: dict[str, Any]) -> None:
 def _inject_messages_cache_breakpoints(
     claude_messages: list[dict[str, Any]],
 ) -> None:
-    """只钉第一条 user。移动倒数第二条会每步改已缓存前缀的结构。"""
-    for message in claude_messages:
-        if message.get("role") == "user":
-            _pin_cache_control(message)
-            return
+    """Cache growing history and the previous user boundary (four markers total
+    with tools/system). The previous boundary protects long tool-result batches
+    that jump beyond the provider's lookback window. Markers are not content.
+    """
+    users = [message for message in claude_messages if message.get("role") == "user"]
+    for message in users[-2:]:
+        _pin_cache_control(message)
 
 
 def _openai_messages_to_claude(
@@ -307,7 +309,7 @@ def _openai_messages_to_claude(
     # Claude 要求 user/assistant 严格交替，合并连续同角色消息
     claude_messages = _merge_consecutive_claude_messages(claude_messages)
 
-    # Prompt Caching：只钉第一条 user，避免每步改历史前缀结构。
+    # Prompt Caching：随历史增长移动断点，保留上一 user 边界。
     _inject_messages_cache_breakpoints(claude_messages)
 
     # Prompt Caching：将 system 构建为带 cache_control breakpoint 的结构化格式。
@@ -425,6 +427,19 @@ def _map_openai_tool_choice_to_claude(tool_choice: Any) -> dict[str, Any] | None
 # ── 格式转换：Claude → OpenAI ─────────────────────────────────
 
 
+def _claude_usage(data: dict[str, Any]) -> _Usage:
+    """Anthropic input_tokens excludes cache reads/writes; OpenAI prompt_tokens includes them."""
+    prompt = sum(int(data.get(key, 0) or 0) for key in (
+        "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+    ))
+    completion = int(data.get("output_tokens", 0) or 0)
+    usage = _Usage(prompt_tokens=prompt, completion_tokens=completion, total_tokens=prompt + completion)
+    for key in ("cache_creation_input_tokens", "cache_read_input_tokens"):
+        if key in data:
+            setattr(usage, key, data[key])
+    return usage
+
+
 def _claude_response_to_openai(
     data: dict[str, Any], model: str,
 ) -> _ChatCompletion:
@@ -484,20 +499,7 @@ def _claude_response_to_openai(
     finish_reason = finish_reason_map.get(stop_reason, "stop")
 
     # usage 统计（含 prompt caching 字段）
-    usage_data = data.get("usage", {})
-    prompt_tokens = usage_data.get("input_tokens", 0)
-    completion_tokens = usage_data.get("output_tokens", 0)
-    cache_creation_tokens = usage_data.get("cache_creation_input_tokens", 0)
-    cache_read_tokens = usage_data.get("cache_read_input_tokens", 0)
-
-    usage = _Usage(
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-    )
-    # 附加 cache 统计到 usage 对象（供上层提取）
-    usage.cache_creation_input_tokens = cache_creation_tokens  # type: ignore[attr-defined]
-    usage.cache_read_input_tokens = cache_read_tokens  # type: ignore[attr-defined]
+    usage = _claude_usage(data.get("usage", {}))
 
     return _ChatCompletion(
         id=msg_id,
@@ -703,6 +705,7 @@ class ClaudeClient:
                 tool_call_index: int = -1
                 replay_blocks: dict[int, dict[str, Any]] = {}
                 # 提示词缓存统计（从 message_start 事件提取）
+                start_usage: dict[str, Any] = {}
                 _cache_creation_tokens: int = 0
                 _cache_read_tokens: int = 0
                 # 内联 <thinking> 标签状态机（部分中转站将 thinking 混入 text）
@@ -798,16 +801,8 @@ class ClaudeClient:
                         elif stop_reason == "tool_use":
                             finish = "tool_calls"
                         u = None
-                        if usage_data:
-                            u = _Usage(
-                                prompt_tokens=usage_data.get("input_tokens", 0),
-                                completion_tokens=usage_data.get("output_tokens", 0),
-                                total_tokens=usage_data.get("input_tokens", 0)
-                                + usage_data.get("output_tokens", 0),
-                            )
-                            # 附加 prompt caching 统计
-                            u.cache_creation_input_tokens = _cache_creation_tokens  # type: ignore[attr-defined]
-                            u.cache_read_input_tokens = _cache_read_tokens  # type: ignore[attr-defined]
+                        if start_usage or usage_data:
+                            u = _claude_usage({**start_usage, **usage_data})
                         yield StreamDelta(finish_reason=finish, usage=u)
 
         return _stream_generator()
@@ -815,4 +810,3 @@ class ClaudeClient:
     async def close(self) -> None:
         """关闭 HTTP 客户端。"""
         await self._http.aclose()
-

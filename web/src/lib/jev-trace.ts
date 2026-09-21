@@ -12,7 +12,7 @@ export const JEV_PACKS = [
 ] as const;
 
 export type JevPackId = (typeof JEV_PACKS)[number]["id"];
-export type JevGate = "off" | "shadow" | "enforce";
+export type JevGate = "off" | "enforce";
 export type JevTransport = "gateway" | "typesafe" | "unavailable";
 
 export interface JevTrace {
@@ -33,7 +33,9 @@ export interface JevTrace {
 const PACK_IDS = new Set<string>(JEV_PACKS.map((item) => item.id));
 
 function asGate(value: unknown): JevGate {
-  if (value === "shadow" || value === "enforce" || value === "off") return value;
+  // Older buffered events may still carry the removed observation value.
+  if (value === "shadow" || value === "enforce") return "enforce";
+  if (value === "off") return "off";
   return "off";
 }
 
@@ -98,14 +100,14 @@ export function jevEmptyCopy(opts: {
   return "";
 }
 
-export function cardTone(trace: JevTrace): "shadow" | "applied" | "unavailable" | "deny" | "ask" {
+export function cardTone(trace: JevTrace): "applied" | "unavailable" | "deny" | "ask" {
   if (traceUnavailable(trace) || trace.gate === "off" || trace.reason === "disabled") return "unavailable";
   if (trace.applied && trace.gate === "enforce") {
     if (trace.kind === "deny" || trace.action === "deny") return "deny";
     if (trace.kind === "ask" || trace.action === "ask") return "ask";
     return "applied";
   }
-  return "shadow";
+  return "unavailable";
 }
 
 export function formatLatency(ms: number): string {
@@ -181,7 +183,6 @@ export function traceStatus(trace: JevTrace): { label: string; description: stri
     const why = trace.reason === "budget_exhausted" ? "本轮评估额度已用完" : trace.reason === "provider_cooldown" ? "评估服务暂时冷却" : "本次评估未能完成";
     return { label: "已回退", description: `${why}，任务继续按原流程处理。` };
   }
-  if (trace.gate === "shadow") return { label: "仅观察", description: "已记录建议，本次没有改变任务行为。" };
   if (!trace.applied) return { label: "未采纳", description: "已评估，本次未应用建议；任务按原流程处理。" };
   if (trace.pack === "context.resolve") {
     const routed = trace.answers.routed_workspace;

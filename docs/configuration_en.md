@@ -378,22 +378,22 @@ Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Verce
 
 | Setting key | Description | Default |
 |---|---|---|
-| `EXCELMANUS_JEV_ENABLED` | Master gate: `off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_EXPOSURE` | Tool exposure and workspace/spreadsheet context suggestions | `off` |
-| `EXCELMANUS_JEV_OBSERVATION` | Observation policy: `off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_VERIFICATION` | Post-mutation check suggestions: `off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_RECOVERY` | Error-recovery suggestions: `off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_MODE_HINT` | Mode-suggestion card | `false` |
-| `EXCELMANUS_JEV_UI_HINT` | End-of-turn UI hint | `false` |
+| `EXCELMANUS_JEV_ENABLED` | Master gate: `off` disables all packs, `enforce` fully enables them | `enforce` |
+| `EXCELMANUS_JEV_EXPOSURE` | Tool exposure and workspace/spreadsheet context suggestions: `off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_OBSERVATION` | Observation policy: `off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_VERIFICATION` | Post-mutation check suggestions: `off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_RECOVERY` | Error-recovery suggestions: `off` / `enforce` | `enforce` |
+| `EXCELMANUS_JEV_MODE_HINT` | Mode-suggestion card; false disables this pack | `true` |
+| `EXCELMANUS_JEV_UI_HINT` | End-of-turn UI hint; false disables this pack | `true` |
 | `EXCELMANUS_JEV_MODEL` | Active decision model | `jev-1.13.0` |
 | `EXCELMANUS_JEV_ACTIVE_PROVIDER` | Active decision provider id (`typesafe` / `vercel` / `custom-*`) | — |
 | `EXCELMANUS_JEV_PROVIDERS` | Decision provider list (keys included, Fernet-encrypted) | `[]` |
 | `EXCELMANUS_JEV_TIMEOUT_SECONDS` | Per-evaluation timeout | `1.5` |
-| `EXCELMANUS_JEV_CALIBRATED` | Enforce side effects only after Chinese live sign-off | `false` |
+| `EXCELMANUS_JEV_CALIBRATED` | Legacy calibration field retained for compatibility; it no longer gates runtime application | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe direct key (synced with the provider list) | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway key (synced with the provider list) | — |
 
-This optional, experimental feature requires the `system-one` extra. `off` disables it; `shadow` records suggestions without applying them. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. Other execution effects still require valid calibration and sign-off for the relevant pack or policy family. The repository currently has no signed entries; setting `EXCELMANUS_JEV_CALIBRATED=true` alone is insufficient for those effects. `bench/jev_live_calibrate.py` reads keys from the database, contacts external services for live calibration, and never signs results automatically.
+This optional feature requires the `system-one` extra. `off` disables the master gate or the selected pack; `enforce` applies enabled packs directly, with no observation-only runtime. Enabling the master gate fills omitted pack switches as enabled, while an explicitly disabled child switch still stops that pack. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. Legacy `shadow` values are migrated to `enforce` when read, and `EXCELMANUS_JEV_CALIBRATED` no longer blocks enabled packs.
 
 ## Encryption Configuration
 

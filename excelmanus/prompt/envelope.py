@@ -31,7 +31,10 @@ def digest_text(text: str) -> str:
 
 
 def sort_tool_schemas(schemas: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    return sorted(list(schemas or []), key=schema_tool_name)
+    # Normalize the transmitted schema too, not only its digest. JSON strings in
+    # assistant tool arguments are outside this function and stay byte-for-byte.
+    ordered = json.loads(json.dumps(schemas or [], ensure_ascii=False, sort_keys=True))
+    return sorted(ordered, key=schema_tool_name)
 
 
 def digest_tools(tools: list[dict[str, Any]] | None) -> str:
@@ -301,6 +304,8 @@ def catalog_fingerprint(engine: Any) -> str:
 
 def session_prompt_cache_key(engine: Any) -> str:
     last = getattr(engine, "_last_envelope", None)
+    if isinstance(last, RequestEnvelope):
+        return last.prompt_cache_key
     epoch = getattr(last, "epoch", None) if last is not None else None
     if isinstance(epoch, EpochIdentity):
         return epoch.key()
@@ -572,7 +577,12 @@ def assemble_envelope(
         adder = getattr(memory, "add_system_message", None)
         if callable(adder):
             adder(projection.trailing, hidden=True, prompt_kind="system_update")
-    if persist and starts_series and memory is not None:
+            if not commit_dynamic:
+                engine._prompt_dynamic_appended_messages.append(memory.messages[-1])
+    defer_system_drop = persist and starts_series and memory is not None and not commit_dynamic
+    if defer_system_drop:
+        engine._prompt_drop_system_updates = True
+    if persist and starts_series and memory is not None and commit_dynamic:
         # 系列边界 = 缓存前缀已 miss 的安全重写点（与 compaction 同一特权）：
         # 清掉历史尾部的旧 in-history system_update，否则新 head 与旧尾部
         # system 叠加，模型会同时读到多份模式指令。
@@ -599,6 +609,7 @@ def assemble_envelope(
                 vision_capable=vision_capable,
                 image_pins=pin_seq if isinstance(pin_seq, (list, tuple)) else None,
                 image_report=image_report,
+                exclude_system_updates=defer_system_drop,
             )
         except Exception as exc:
             logger.error("envelope projection failed: %s", exc, exc_info=True)

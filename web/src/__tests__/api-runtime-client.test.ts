@@ -43,10 +43,35 @@ describe("runtime API client", () => {
     );
   });
 
-  it("keeps ordinary Web REST requests on the configured proxy, even on localhost", () => {
+  it("keeps startup probes on the configured runtime origin", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ status: "ok" }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(apiGet("/health", { direct: true, timeoutMs: 100 })).resolves.toEqual({ status: "ok" });
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["http://127.0.0.1:54321/api/v1/health"]);
+  });
+
+  it("uses the same-origin API path when no runtime backend is configured", async () => {
     delete window.__EXCELMANUS_RUNTIME__;
+    resolveDirectBackendOrigin.mockReturnValue("");
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ status: "ok" }),
+    } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(apiGet("/health", { direct: true })).resolves.toEqual({ status: "ok" });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/health");
+  });
+
+  it("keeps ordinary Web REST requests on the same origin when runtime config is absent", () => {
+    delete window.__EXCELMANUS_RUNTIME__;
+    resolveDirectBackendOrigin.mockReturnValue("");
     expect(buildApiUrl("/sessions")).toBe("/api/v1/sessions");
-    expect(buildApiUrl("/chat/stream", { direct: true })).toBe("http://127.0.0.1:54321/api/v1/chat/stream");
+    expect(buildApiUrl("/chat/stream", { direct: true })).toBe("/api/v1/chat/stream");
   });
 
   it("honors explicit same-origin runtime configuration", () => {

@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
+import { isSpreadsheetFile } from "@/lib/file-kind";
 import { useExcelStore } from "@/stores/excel-store";
 import { updateFileGroup, type FileGroup } from "@/lib/api";
 import { formatFileMention } from "../chat/chat-input-insert";
@@ -115,6 +116,9 @@ export function FileGroupListView({ onClickFile, query = "" }: FileGroupListView
         const isExpanded = expandedIds.has(group.id);
         const memberCount = group.members?.length ?? 0;
         const memberLimit = visibleMembers[group.id] ?? 100;
+        const comparableMembers = (group.members ?? []).filter((member) =>
+          isSpreadsheetFile(member.original_name || member.canonical_path),
+        );
 
         return (
           <div key={group.id} className="rounded-lg overflow-hidden">
@@ -189,12 +193,12 @@ export function FileGroupListView({ onClickFile, query = "" }: FileGroupListView
                     <AtSign className="h-4 w-4" />
                     引用到聊天
                   </DropdownMenuItem>
-                  {memberCount >= 2 && (
+                  {comparableMembers.length >= 2 && (
                     <DropdownMenuItem
                       onClick={(e) => {
                         e.stopPropagation();
-                        const a = group.members[0]?.canonical_path;
-                        const b = group.members[1]?.canonical_path;
+                        const a = comparableMembers[0]?.canonical_path;
+                        const b = comparableMembers[1]?.canonical_path;
                         if (a && b) {
                           useExcelStore.getState().openCompare(a, b);
                         }

@@ -46,8 +46,14 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
     ),
     ControlCommandSpec(
         command="/fullaccess",
-        description="权限控制",
+        description="完全访问权限控制",
         aliases=("/full_access",),
+        arguments=("status", "on", "off"),
+    ),
+    ControlCommandSpec(
+        command="/autoapprove",
+        description="仅自动审批（保留代码沙盒）",
+        aliases=("/auto_approve",),
         arguments=("status", "on", "off"),
     ),
     ControlCommandSpec(

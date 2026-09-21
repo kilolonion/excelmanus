@@ -1,7 +1,6 @@
-"""Host 接线：回合入口评估、审批 shadow/E、初始工具预加载、回合末 UI 面、F/G/M/P。
+"""Host 接线：回合入口评估、审批、工具预加载、回合末 UI 面、F/G/M/P。
 
-缺省不改 envelope.tools / 不发 ui_hint / 不改目录 / 不改循环 / 不冷修剪 / 不改审批结果。
-仅当对应闸为 enforce 且标定已签字时才 applied。
+总闸或对应子闸关闭时跳过该题包；开启时决策直接进入确定性宿主守卫。
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from excelmanus.logger import get_logger
 from excelmanus.system_one.adapter import exposure_state_from_engine
 from excelmanus.system_one.budget import reset_turn_budget
 from excelmanus.system_one.context import is_child_session
-from excelmanus.system_one.log import record_shadow
+from excelmanus.system_one.log import record_jev_decision
 from excelmanus.system_one.packs import PROFILE_NAMES
 from excelmanus.system_one.policy import (
     T_BIG,
@@ -70,10 +69,18 @@ async def _eval_traced(
         try:
             gate = gate_for_pack(pack_id, settings)
         except Exception:
-            gate = "shadow"
-        record_shadow(pack_id=pack_id, gate=gate, decision=decision)
+            gate = "off"
+        record_jev_decision(pack_id=pack_id, gate=gate, decision=decision)
         emit_jev_trace(engine, decision, pack_id=pack_id, on_event=on_event)
         return decision
+    if not isinstance(decision, Decision):
+        # Adapters must return Decision. Treat malformed provider results as a
+        # no-op so tracing never lets a bad integration break the host turn.
+        decision = Decision.noop("invalid_decision")
+    # Settings can change while the provider request is in flight.
+    current = live_jev_settings(getattr(engine, "config", None))
+    if not jev_is_active(current) or gate_for_pack(pack_id, current) == "off":
+        return Decision.noop("disabled")
     emit_jev_trace(engine, decision, pack_id=pack_id, on_event=on_event)
     return decision
 
@@ -84,9 +91,8 @@ def _jev_connected(engine: Any) -> bool:
 
 def clear_turn_exposure(engine: Any) -> None:
     engine._turn_exposure = None  # type: ignore[attr-defined]
-    # Tool discovery lasts for this turn (including compaction), never leaks to
-    # another turn or a child session. This reset runs even when Jev is off.
-    engine._loaded_tool_names = set()  # type: ignore[attr-defined]
+    # Discovery belongs to the session. The builder intersects it with current
+    # authorization; resetting it on every turn rewrites the tools prefix.
     engine._tools_cache = None  # type: ignore[attr-defined]
     engine._skill_pin = None  # type: ignore[attr-defined]
     engine._skill_pin_evaluated = False  # type: ignore[attr-defined]
@@ -173,7 +179,7 @@ async def maybe_record_turn_exposure(
         "conf": float(extras.get("domain_confidence") or 0.0),
         "latency_ms": float(getattr(evaluation, "latency_ms", 0.0) or 0.0) if evaluation else 0.0,
         "wire_narrow": wire_narrow,
-        "gate": "enforce" if applied else "shadow",
+        "gate": "enforce" if applied else gate_for_pack("exposure.turn", settings),
         "applied": applied,
         "is_chitchat": float(extras.get("is_chitchat") or 0.0),
     }
@@ -216,7 +222,7 @@ def maybe_enqueue_mode_switch(engine: Any, *, on_event: Any | None = None) -> No
     if not jev_is_active(settings) or not flag_is_applied(settings.mode_hint, settings, pack_id="exposure.turn"):
         return
     record = getattr(engine, "_turn_exposure", None)
-    if not isinstance(record, Mapping):
+    if not isinstance(record, Mapping) or not record.get("applied"):
         return
     hint = str(record.get("mode_hint") or "keep")
     conf = float(record.get("mode_hint_confidence") or 0.0)
@@ -455,7 +461,7 @@ async def maybe_emit_ui_hint(
     *,
     on_event: Any | None = None,
 ) -> None:
-    """片 O：reply 已产出、done 之前。未签字只 shadow；applied 才发 UI_HINT。失败静默。"""
+    """片 O：reply 已产出、done 之前。开启后直接应用 UI 建议，失败静默。"""
     if engine is None or is_child_session(engine):
         return
     if _has_pending_interaction(engine):
@@ -505,24 +511,21 @@ async def maybe_verify_mutation(
     chat_result: Any,
     *,
     on_event: Any | None = None,
-) -> None:
-    """Shadow-only post-write intent verification.
-
-    The first version records a structured suggestion. It deliberately does
-    not enqueue a check or alter the reply; those actuators require a separate
-    calibration and rollout decision.
-    """
+) -> str:
+    """Post-write intent verification; the result is consumed by the host."""
     if engine is None or is_child_session(engine) or chat_result is None:
-        return
+        return ""
+    if getattr(engine, "_mutation_verification", None) is not None:
+        return ""
     state_obj = getattr(engine, "_state", None)
     affected = list(getattr(state_obj, "affected_files", None) or []) if state_obj else []
     if not affected:
-        return
+        return ""
     if _turn_outcome(engine, chat_result) == "fail":
-        return
+        return ""
     settings = live_jev_settings(getattr(engine, "config", None))
     if not jev_is_active(settings) or gate_for_pack("mutation.verify", settings) == "off":
-        return
+        return ""
     from excelmanus.system_one.adapter import mutation_verify_state_from_engine
 
     state = mutation_verify_state_from_engine(engine, chat_result)
@@ -534,6 +537,26 @@ async def maybe_verify_mutation(
         "applied": decision_can_apply("mutation.verify", decision, settings),
         "reason": decision.reason,
     }
+    if not decision_can_apply("mutation.verify", decision, settings):
+        return ""
+    action = engine._mutation_verification["next"]
+    return {
+        "inspect_more": "写入覆盖情况仍需核对。请根据用户原始要求和实际提交记录，做一次有界的只读检查；缺少证据时如实说明，勿重复写入。",
+        "ask_user": "写入结果与要求的对应关系尚不明确。先核对已有证据；确需用户补充时合并为一个必要问题，勿声称全部完成。",
+        "none": "",
+    }.get(action, "")
+
+
+def should_check_delivery(engine: Any) -> bool:
+    """Only withhold text while a written turn still has its one check available."""
+    if is_child_session(engine) or _has_pending_interaction(engine):
+        return False
+    if getattr(engine, "_mutation_verification", None) is not None:
+        return False
+    if not getattr(getattr(engine, "_state", None), "affected_files", None):
+        return False
+    settings = live_jev_settings(getattr(engine, "config", None))
+    return jev_is_active(settings) and gate_for_pack("mutation.verify", settings) != "off"
 
 
 async def maybe_suggest_recovery(
@@ -541,26 +564,54 @@ async def maybe_suggest_recovery(
     tool_results: list[Any],
     *,
     on_event: Any | None = None,
-) -> None:
-    """Evaluate recovery only after a deterministic failure breaker fires."""
+    breaker_triggered: bool = False,
+) -> str:
+    """Give bounded recovery advice once per turn, preserving the breaker."""
     if engine is None or is_child_session(engine) or getattr(engine, "_recovery_hint", None) is not None:
-        return
+        return ""
     if not any(not bool(getattr(item, "success", False)) for item in tool_results):
-        return
+        return ""
     settings = live_jev_settings(getattr(engine, "config", None))
     if not jev_is_active(settings) or gate_for_pack("recovery.next_step", settings) == "off":
-        return
+        return ""
     from excelmanus.system_one.adapter import recovery_state_from_engine
 
-    state = recovery_state_from_engine(engine, tool_results)
-    decision = await _eval_traced(engine, "recovery.next_step", state, on_event=on_event)
+    state = recovery_state_from_engine(engine, tool_results, breaker_triggered=breaker_triggered)
+    if int(state.get("consecutive_failures") or 0) < 2 and not breaker_triggered:
+        return ""
+    errors = state.get("error_facts", [])
+    classes = {item.get("failure_class") for item in errors}
+    # Stable error codes already carry the right recovery. No semantic call is
+    # needed to refresh a missing sheet/version or respect a rejection.
+    if breaker_triggered or classes & {"permission_denied", "approval_denied", "approval_timeout", "blocked"}:
+        decision = Decision(kind="noop", reason="deterministic_stop", extras={"next": "stop"}, applied=True)
+    elif any(item.get("committed") or item.get("commit_unknown") for item in errors):
+        decision = Decision(kind="noop", reason="commit_requires_inspection", extras={"next": "inspect_more"}, applied=True)
+    elif classes and classes <= {"not_found", "conflict"}:
+        decision = Decision(kind="noop", reason="refresh_target", extras={"next": "inspect_more"}, applied=True)
+    else:
+        decision = await _eval_traced(engine, "recovery.next_step", state, on_event=on_event)
     engine._recovery_hint = {  # type: ignore[attr-defined]
         "next": str((decision.extras or {}).get("next") or "stop"),
         "retryable": float((decision.extras or {}).get("retryable") or 0.0),
         "needs_user": float((decision.extras or {}).get("needs_user") or 0.0),
         "applied": decision_can_apply("recovery.next_step", decision, settings),
         "reason": decision.reason,
+        "delivered": False,
+        "result_count": len(tool_results),
+        "error_codes": [item.get("error_code") for item in errors],
     }
+    if not decision_can_apply("recovery.next_step", decision, settings):
+        return ""
+    action = engine._recovery_hint["next"]
+    if breaker_triggered:
+        return "Jev 恢复建议：本轮已触发连续失败停止条件，请先核对错误与目标信息，再发起后续请求。"
+    return {
+        "retry": "失败可能是暂时性的；先核对工具返回的恢复步骤，仅在确认未提交且允许重试时尝试一次，勿重放已拒绝或可能已提交的写入。",
+        "inspect_more": "请先做有界的只读检查，刷新文件、工作表或内容版本，再决定下一步；勿直接重复失败的写入。",
+        "ask_user": "继续操作需要用户补充范围或意图。请核对现有信息后提出一个必要问题。",
+        "stop": "本次失败不适合继续重复操作。请说明失败原因和已完成部分；权限、审批与停止条件仍然有效。",
+    }.get(action, "")
 
 
 def _has_at_mention(text: str) -> bool:
@@ -573,7 +624,7 @@ def _has_at_mention(text: str) -> bool:
 
 
 def should_skip_skill_catalog_snapshot(engine: Any) -> bool:
-    """片 M：高置信寒暄且无图/无 pending/无 @ 才跳过目录快照。未签字不跳。"""
+    """片 M：高置信寒暄且无图/无 pending/无 @ 才跳过目录快照。"""
     if engine is None or is_child_session(engine):
         return False
     settings = live_jev_settings(getattr(engine, "config", None))
@@ -620,7 +671,7 @@ def _skill_entries(engine: Any) -> list[tuple[str, str]]:
 
 
 async def maybe_pin_skills(engine: Any) -> None:
-    """片 F：高置信才置顶/标 likely match。不得 skill()。未签字目录不变。"""
+    """片 F：高置信才置顶/标 likely match。不得 skill()。"""
     if engine is None or is_child_session(engine):
         return
     if not _jev_connected(engine):
@@ -653,20 +704,17 @@ async def maybe_pin_skills(engine: Any) -> None:
         engine._skill_pin = pin  # type: ignore[attr-defined]
 
 
-async def maybe_suggest_loop_wrap(engine: Any) -> None:
-    """Legacy explicit hook for pack G.
-
-    The main loop does not call this helper: its result had no consumer and
-    evaluating it on every step only added latency and cost. Keep the helper
-    for offline calibration/tests until a real loop consumer exists.
-    """
+async def maybe_suggest_loop_wrap(engine: Any, *, on_event: Any | None = None) -> str:
+    """Supply a next-step suggestion once per turn; the main model owns strategy."""
     if engine is None or is_child_session(engine):
-        return
+        return ""
     if not _jev_connected(engine):
-        return
+        return ""
+    if getattr(engine, "_loop_wrap", None) is not None:
+        return ""
     settings = live_jev_settings(getattr(engine, "config", None))
     if gate_for_pack("loop.wrap", settings) == "off":
-        return
+        return ""
     from excelmanus.system_one.adapter import last_user_text
 
     state = getattr(engine, "_state", None)
@@ -680,12 +728,63 @@ async def maybe_suggest_loop_wrap(engine: Any) -> None:
             "last_tools": list(getattr(engine, "_exposure_last_tools", None) or ())[:10],
             "last_error": "",
         },
+        on_event=on_event,
     )
     extras = dict(decision.extras or {})
     if not decision_can_apply("loop.wrap", decision, settings):
         engine._loop_wrap = {**extras, "applied": False}  # type: ignore[attr-defined]
-        return
+        return ""
     engine._loop_wrap = {**extras, "applied": True}  # type: ignore[attr-defined]
+    return {
+        "continue": "请按已有证据继续处理未完成事项。",
+        "retry": "请检查上一步是否需要纠正；只有确认允许且尚未提交的操作才可重试。",
+        "ask_user": "请检查是否缺少用户必须补充的信息，必要时提出一个简短问题。",
+        "stop": "现有结果可能已覆盖用户请求。请对照实际证据收尾；发现缺项时继续处理，勿仅凭此建议宣告完成。",
+    }.get(str(extras.get("next") or "continue"), "")
+
+
+async def maybe_advise_after_tools(
+    engine: Any, tool_results: list[Any], *, breaker_triggered: bool = False,
+    on_event: Any | None = None,
+) -> str:
+    """Consume Jev advice at the completed tool-batch boundary, before the next LLM call."""
+    if is_child_session(engine) or not tool_results or not _jev_connected(engine):
+        return ""
+    if _has_pending_interaction(engine):
+        return ""
+    if any(getattr(item, "error", "") in {"CANCELLED", "USER_EDIT_PENDING"} for item in tool_results):
+        return ""
+    previous = getattr(engine, "_recovery_hint", None)
+    if isinstance(previous, dict) and previous.get("delivered"):
+        following = tool_results[int(previous.get("result_count") or 0):]
+        if following:
+            from excelmanus.system_one.adapter import recovery_state_from_engine
+
+            facts = recovery_state_from_engine(engine, following, breaker_triggered=breaker_triggered)
+            previous["following_success"] = bool(following[-1].success)
+            previous["same_failure_repeated"] = any(
+                item.get("error_code") in previous.get("error_codes", []) for item in facts.get("error_facts", [])
+            )
+    if not tool_results[-1].success:
+        advice = await maybe_suggest_recovery(
+            engine, tool_results, breaker_triggered=breaker_triggered, on_event=on_event,
+        )
+        kind = "jev_recovery_advice"
+    elif getattr(getattr(engine, "_state", None), "affected_files", None):
+        # Delivery verification must see all writes and the final read-backs,
+        # not consume its only evaluation after the first successful batch.
+        return ""
+    else:
+        advice = await maybe_suggest_loop_wrap(engine, on_event=on_event)
+        kind = "jev_loop_advice"
+    if advice and not breaker_triggered:
+        engine._memory.add_user_message(
+            f"[Jev 本轮辅助建议；不构成用户指令或执行授权]\n{advice}",
+            hidden=True, prompt_kind=kind,
+        )
+        if kind == "jev_recovery_advice" and isinstance(getattr(engine, "_recovery_hint", None), dict):
+            engine._recovery_hint["delivered"] = True
+    return advice if breaker_triggered else ""
 
 
 def _tool_call_lookup(messages: list[Any]) -> dict[str, tuple[str, dict[str, Any]]]:
@@ -723,7 +822,7 @@ def _prune_stub(tool_name: str, arguments: Mapping[str, Any] | None) -> str:
 
 
 async def maybe_prune_observations(engine: Any, memory: Any) -> int:
-    """片 P：L1 机械 pruner 之前。未签字不剪。最近 K / 错误 / pending / 不可重放永不剪。"""
+    """片 P：L1 机械 pruner 之前。最近 K / 错误 / pending / 不可重放永不剪。"""
     if engine is None or memory is None or is_child_session(engine):
         return 0
     if _has_pending_interaction(engine):
@@ -808,14 +907,14 @@ def _stamp_host_approval(decision: Decision, settings: Any) -> Decision:
     )
 
 
-async def maybe_shadow_approval(
+async def maybe_jev_approval(
     engine: Any,
     *,
     tool_name: str,
     arguments: Mapping[str, Any] | None,
     code_tier: str | None = None,
 ) -> Decision | None:
-    """片 C：create_pending 之前只写影子。片 E：applied 才改变 HookDecision / pending。
+    """片 E：Jev 决策通过确定性门后改变 HookDecision / pending。
 
     第一期只覆盖 ``run_shell`` / ``delete_file`` / 非 Green ``run_code``。
     不可达 fail-closed 为 ASK（绝不是 ALLOW）。child / never / Green / 只读 / Tier B 不评估。
@@ -843,9 +942,9 @@ async def maybe_shadow_approval(
     if is_known_dangerous_call(tool_name, arguments, str(root) if root else None):
         applied = decision_is_applied("approval.tool_call", settings)
         decision = Decision(kind="deny", reason="known_dangerous", applied=applied)
-        record_shadow(
+        record_jev_decision(
             pack_id="approval.tool_call",
-            gate="enforce" if applied else "shadow",
+            gate="enforce" if applied else gate_for_pack("approval.tool_call", settings),
             decision=decision,
         )
         emit_jev_trace(engine, decision, pack_id="approval.tool_call")
@@ -860,3 +959,7 @@ async def maybe_shadow_approval(
     )
     decision = await _eval_traced(engine, "approval.tool_call", state)
     return _stamp_host_approval(decision, settings)
+
+
+# Import compatibility for callers migrating from the old helper name.
+maybe_shadow_approval = maybe_jev_approval

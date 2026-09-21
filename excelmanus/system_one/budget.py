@@ -8,6 +8,7 @@ fail closed when the optimization budget is exhausted.
 from __future__ import annotations
 
 import time
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,9 +24,16 @@ class JevTurnBudget:
     started_at: float = field(default_factory=time.monotonic)
     evaluations: int = 0
     spent_latency_ms: float = 0.0
+    reserved_latency_ms: float = 0.0
     exhausted_reason: str = ""
 
-    def reserve(self, *, security: bool = False) -> bool:
+    def available_latency_ms(self, *, keep_latency_ms: float = 0.0) -> float:
+        return max(0.0, self.max_latency_ms - self.spent_latency_ms - self.reserved_latency_ms - keep_latency_ms)
+
+    def reserve(
+        self, *, security: bool = False, latency_ms: float = 0.0,
+        keep_evaluations: int = 0, keep_latency_ms: float = 0.0,
+    ) -> bool:
         """Reserve one evaluation.
 
         Security packs bypass the optimization budget so a busy turn cannot
@@ -34,21 +42,25 @@ class JevTurnBudget:
         if security:
             self.evaluations += 1
             return True
-        if self.exhausted_reason:
-            return False
-        if self.evaluations >= max(1, int(self.max_evaluations)):
+        if self.evaluations >= max(0, int(self.max_evaluations) - keep_evaluations):
             self.exhausted_reason = "evaluation_limit"
             return False
-        elapsed_ms = (time.monotonic() - self.started_at) * 1000.0
-        if elapsed_ms >= max(1.0, float(self.max_latency_ms)):
+        # Main-model and tool latency must not consume Jev's own allowance.
+        available = self.available_latency_ms(keep_latency_ms=keep_latency_ms)
+        if available <= 0 or latency_ms > available:
             self.exhausted_reason = "latency_limit"
             return False
         self.evaluations += 1
+        self.reserved_latency_ms += max(0.0, latency_ms)
+        self.exhausted_reason = ""
         return True
 
-    def record(self, latency_ms: float) -> None:
+    def record(self, latency_ms: float, *, reserved_ms: float = 0.0) -> None:
+        self.reserved_latency_ms = max(0.0, self.reserved_latency_ms - reserved_ms)
         try:
-            self.spent_latency_ms += max(0.0, float(latency_ms or 0.0))
+            elapsed = float(latency_ms or 0.0)
+            if math.isfinite(elapsed):
+                self.spent_latency_ms += max(0.0, elapsed)
         except (TypeError, ValueError):
             return
 
@@ -58,6 +70,7 @@ class JevTurnBudget:
             "max_latency_ms": self.max_latency_ms,
             "evaluations": self.evaluations,
             "spent_latency_ms": round(self.spent_latency_ms, 1),
+            "reserved_latency_ms": round(self.reserved_latency_ms, 1),
             "exhausted_reason": self.exhausted_reason,
         }
 

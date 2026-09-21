@@ -27,14 +27,17 @@ export function resolveSheetFullViewTarget(input: {
   fullViewPath: string | null;
   fullViewSheet: string | null;
 }): { path: string; sheet?: string } | null {
-  if (input.fullViewPath) {
+  if (input.fullViewPath && isSpreadsheetFile(input.fullViewPath)) {
     return {
       path: input.fullViewPath,
       sheet: input.fullViewSheet ?? undefined,
     };
   }
+  const activeFilePath = input.activeFilePath && isSpreadsheetFile(input.activeFilePath)
+    ? input.activeFilePath
+    : null;
   const path = resolveWorkbookPanelPath(
-    input.activeFilePath,
+    activeFilePath,
     input.recentFiles,
     input.workspaceKey,
   );
@@ -45,7 +48,7 @@ export function resolveSheetFullViewTarget(input: {
   if (!targetPath) return null;
   return {
     path: targetPath,
-    sheet: targetPath === input.activeFilePath ? input.activeSheet ?? undefined : undefined,
+    sheet: targetPath === activeFilePath ? input.activeSheet ?? undefined : undefined,
   };
 }
 

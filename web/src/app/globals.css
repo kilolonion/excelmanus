@@ -338,36 +338,88 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
   justify-content: flex-start !important;
 }
 
-/* 移动端 Univer.js 按钮尺寸修正 */
+/* 移动端 Univer.js：保持功能区横向可滚动，避免标签被压成竖排。
+   Univer 的 classic ribbon 使用运行时生成的类名，故这里以稳定的
+   data-univer-container / ARIA 结构为边界，而不是依赖具体版本的类名。 */
 @media (pointer: coarse) {
-
-  /* 针对折叠「开始」按钮的简化选择器（classic 功能区不走这套） */
-  a.univer-h-7.univer-rounded-full {
-    height: 20px !important;
-    min-height: 20px !important;
-    padding-left: 6px !important;
-    padding-right: 4px !important;
-    font-size: 10px !important;
-    min-width: auto !important;
-    line-height: 1.2 !important;
+  [data-univer-container] {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
   }
 
-  /* 父容器预留足够空间 */
-  .univer-h-10 {
+  [data-univer-container] [role="tablist"] {
+    display: flex !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    justify-content: flex-start !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    scrollbar-width: none;
+    white-space: nowrap !important;
+  }
+
+  [data-univer-container] [role="tablist"]::-webkit-scrollbar {
+    display: none;
+  }
+
+  [data-univer-container] [role="tablist"] > [role="tab"] {
+    flex: 0 0 auto !important;
+    min-width: max-content !important;
+    width: auto !important;
+    white-space: nowrap !important;
+    word-break: keep-all !important;
+    writing-mode: horizontal-tb !important;
+  }
+
+  /* The compact tab and toolbar controls still need a stable hit area, but
+     must not inherit the app-wide 44px button rule and stretch the ribbon. */
+  a.univer-h-7.univer-rounded-full {
     height: 32px !important;
     min-height: 32px !important;
+    min-width: max-content !important;
+    padding: 4px 8px !important;
+    font-size: 12px !important;
+    line-height: 1.2 !important;
+    white-space: nowrap !important;
   }
 
-  /* Univer.js 通用按钮与工具栏元素 */
+  .univer-h-10 {
+    height: 40px !important;
+    min-height: 40px !important;
+  }
+
   [data-u-comp] button,
   [class*="univer"] button,
   [class*="univerjs"] button,
   .univer-toolbar button,
   .univer-menu button {
     min-height: 32px !important;
-    min-width: auto !important;
-    padding: 4px 8px !important;
+    min-width: 32px !important;
+    width: auto !important;
+    height: 32px !important;
+    padding: 4px !important;
     font-size: 12px !important;
+    flex: 0 0 auto !important;
+  }
+
+  [data-univer-container] header {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+  }
+
+  [data-univer-container] header > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  [data-univer-container] svg {
+    max-width: 18px;
+    max-height: 18px;
   }
 }
 
@@ -377,31 +429,31 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
    隐藏"添加工作表"和"工作表列表"按钮，压缩整体尺寸 */
 @media (max-width: 1279px) {
 
-  /* Footer 整体：降低高度、缩小内边距和字号 */
+  /* Footer 整体：保持紧凑，但不要把工作表标签压到不可读 */
   footer section[data-range-selector="true"] {
-    height: 28px !important;
-    min-height: 28px !important;
-    max-height: 28px !important;
+    height: 36px !important;
+    min-height: 36px !important;
+    max-height: 36px !important;
     padding: 0 6px !important;
-    font-size: 11px !important;
+    font-size: 12px !important;
     gap: 2px !important;
   }
 
-  /* Footer 内所有按钮：覆盖全局 44px 触摸目标规则 */
+  /* Footer 内按钮使用统一的 32px 控件高度，避免上下错位 */
   footer section[data-range-selector="true"] button,
   footer section[data-range-selector="true"] [role="button"] {
-    min-height: 22px !important;
-    min-width: 22px !important;
-    height: 22px !important;
+    min-height: 32px !important;
+    min-width: 32px !important;
+    height: 32px !important;
     width: auto !important;
-    padding: 2px 4px !important;
-    font-size: 11px !important;
+    padding: 2px 5px !important;
+    font-size: 12px !important;
   }
 
   /* Footer 内 SVG 图标缩小 */
   footer section[data-range-selector="true"] svg {
-    width: 12px !important;
-    height: 12px !important;
+    width: 14px !important;
+    height: 14px !important;
   }
 
   /* 隐藏"添加工作表" + 按钮（左侧区域第1个按钮） */
@@ -416,7 +468,7 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
 
   /* 缩放百分比文字缩小 */
   footer section[data-range-selector="true"]> :last-child {
-    font-size: 10px !important;
+    font-size: 11px !important;
     padding: 0 2px !important;
   }
 }

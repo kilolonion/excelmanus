@@ -118,6 +118,15 @@ class MetaToolBuilder:
             tool_access=tool_access,
             catalog=catalog,
         ))
+        from excelmanus.tools.policy import DEFAULT_DISCLOSURE_CORE_TOOLS
+        from excelmanus.tools.runtime import schema_tool_name
+
+        loaded = getattr(e, "_loaded_tool_names", None)
+        if not isinstance(loaded, set):
+            loaded = e._loaded_tool_names = set()
+        loaded.update(schema_tool_name(item) for item in tools
+                      if schema_tool_name(item) not in DEFAULT_DISCLOSURE_CORE_TOOLS)
+        cache_key = (*cache_key[:-1], frozenset(loaded))
         e._tools_cache = tools
         e._tools_cache_key = cache_key
         return tools
@@ -132,7 +141,7 @@ class MetaToolBuilder:
 
         可见集来自 EffectiveToolCatalog：read/plan 不把写效应工具交给模型。
         ``tool_access == "read_only"`` 把 write 会话压成 read 投影。
-        默认核心 + 初始 profile + 本轮成功查询的工具，与有效目录求交。
+        默认核心 + 初始 profile + 本会话已披露的工具，与有效目录求交。
         SDK 和实际执行仍使用完整有效目录，不使用这里的展示投影。
         """
         from excelmanus.system_one.host import turn_wire_profile

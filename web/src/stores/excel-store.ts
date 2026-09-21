@@ -404,6 +404,7 @@ export const useExcelStore = create<ExcelState>()(
 
   openPanel: (filePath, sheet) =>
     set(() => {
+      if (filePath && !isSpreadsheetFile(filePath)) return {};
       const workspaceKey = workspaceKeyFromSession(activeSession());
       if (!filePath) {
         return { panelOpen: true, panelTab: "sheet", activeWorkspaceKey: workspaceKey };
@@ -418,12 +419,15 @@ export const useExcelStore = create<ExcelState>()(
     }),
 
   openHistory: (filePath, view = "revisions") =>
-    set((s) => ({
-      panelOpen: true,
-      panelTab: "history",
-      historySubview: view ?? s.historySubview,
-      ...(filePath ? { activeFilePath: filePath } : {}),
-    })),
+    set((s) => {
+      if (filePath && !isSpreadsheetFile(filePath)) return {};
+      return {
+        panelOpen: true,
+        panelTab: "history",
+        historySubview: view ?? s.historySubview,
+        ...(filePath ? { activeFilePath: filePath } : {}),
+      };
+    }),
 
   setPanelTab: (tab) => set({ panelTab: tab }),
 
@@ -433,7 +437,8 @@ export const useExcelStore = create<ExcelState>()(
 
   setActiveSheet: (sheet) => set({ activeSheet: sheet }),
 
-  setContentVersion: (path, version, workspaceKey) =>
+  setContentVersion: (path, version, workspaceKey) => {
+    if (!isSpreadsheetFile(path)) return;
     set((state) => {
       const ws = workspaceKey ?? state.activeWorkspaceKey ?? "_";
       const key = versionStoreKey(path, ws);
@@ -445,7 +450,8 @@ export const useExcelStore = create<ExcelState>()(
         next[key] = version;
       }
       return { contentVersions: next };
-    }),
+    });
+  },
 
   getContentVersion: (path, workspaceKey) => {
     const ws = workspaceKey ?? get().activeWorkspaceKey ?? "_";
@@ -453,6 +459,7 @@ export const useExcelStore = create<ExcelState>()(
   },
 
   notifyWorkbookChanged: (path, workspaceKey, version, source = "remote") => {
+    if (!isSpreadsheetFile(path)) return;
     const key = versionStoreKey(path, workspaceKey);
     const previous = get().workbookChanges[key];
     if (source !== "refresh" && version && previous?.version === version) return;
@@ -516,6 +523,10 @@ export const useExcelStore = create<ExcelState>()(
 
   addDiff: (diff) =>
     set((state) => {
+      if (
+        !isSpreadsheetFile(diff.filePath)
+        || (diff.filePathB && !isSpreadsheetFile(diff.filePathB))
+      ) return state;
       // 按 toolCallId + filePath + sheet 去重，避免重放/多路径发射导致重复
       const dupKey = `${diff.toolCallId}|${diff.filePath}|${diff.sheet}`;
       const isDup = state.diffs.some(
@@ -560,14 +571,24 @@ export const useExcelStore = create<ExcelState>()(
     }),
 
   addPreview: (preview) =>
-    set((state) => ({
-      previews: { ...state.previews, [preview.toolCallId]: preview },
-    })),
+    set((state) => {
+      if (!isSpreadsheetFile(preview.filePath)) return state;
+      return {
+        previews: { ...state.previews, [preview.toolCallId]: preview },
+      };
+    }),
 
   addRecentFile: (file, explicitWorkspaceKey) =>
     set((state) => {
       const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
-      if (!isScopedWorkspaceKey(workspaceKey) || !toPublicFileIdentity(file.path)) return {};
+      // Mutation/recovery events can contain images, documents, or text files.
+      // This store is the workbook LRU, so reject anything outside the
+      // spreadsheet kind before it can reach persistence or the workbook UI.
+      if (
+        !isScopedWorkspaceKey(workspaceKey)
+        || !toPublicFileIdentity(file.path)
+        || !isSpreadsheetFile(displayFileName(file.path) || file.filename)
+      ) return {};
       const normPath = normalizeExcelPath(file.path);
       const filtered = sanitizeRecentFiles(state.recentFiles).filter(
         (f) => !(normalizeExcelPath(f.path) === normPath && f.workspaceKey === workspaceKey),
@@ -591,7 +612,11 @@ export const useExcelStore = create<ExcelState>()(
     set((state) => {
       if (state.dismissedPaths.has(file.path)) return {};
       const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
-      if (!isScopedWorkspaceKey(workspaceKey) || !toPublicFileIdentity(file.path)) return {};
+      if (
+        !isScopedWorkspaceKey(workspaceKey)
+        || !toPublicFileIdentity(file.path)
+        || !isSpreadsheetFile(displayFileName(file.path) || file.filename)
+      ) return {};
       const normPath = normalizeExcelPath(file.path);
       const filtered = sanitizeRecentFiles(state.recentFiles).filter(
         (f) => !(normalizeExcelPath(f.path) === normPath && f.workspaceKey === workspaceKey),
@@ -659,7 +684,10 @@ export const useExcelStore = create<ExcelState>()(
       }
       if (isScopedWorkspaceKey(workspaceKey)) {
         for (const f of files) {
-          if (!toPublicFileIdentity(f.path)) continue;
+          if (
+            !toPublicFileIdentity(f.path)
+            || !isSpreadsheetFile(displayFileName(f.path) || f.filename)
+          ) continue;
           const key = `${workspaceKey}|${normalizeExcelPath(f.path)}`;
           if (!map.has(key) && !state.dismissedPaths.has(f.path)) {
             map.set(key, {
@@ -678,6 +706,7 @@ export const useExcelStore = create<ExcelState>()(
     }),
 
   openFullView: (path, sheet, layout = "embedded") => {
+    if (!isSpreadsheetFile(path)) return;
     const session = activeSession();
     if (session) useWorkbookConversationStore.getState().bind(session.id, fileRefFromSession(path, session), sheet, layout);
     set({
@@ -900,7 +929,8 @@ export const useExcelStore = create<ExcelState>()(
   toggleGroupViewMode: () =>
     set((state) => ({ groupViewMode: !state.groupViewMode })),
 
-  openCompare: (fileA, fileB, relationship) =>
+  openCompare: (fileA, fileB, relationship) => {
+    if (!isSpreadsheetFile(fileA) || !isSpreadsheetFile(fileB)) return;
     set({
       compareMode: true,
       compareFileA: fileA,
@@ -911,7 +941,8 @@ export const useExcelStore = create<ExcelState>()(
       fullViewPath: null,
       fullViewSheet: null,
       panelOpen: false,
-    }),
+    });
+  },
 
   closeCompare: () =>
     set({

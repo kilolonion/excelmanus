@@ -57,14 +57,21 @@ def test_stale_plan_flag_does_not_override_write_chat_mode() -> None:
     assert not is_plan_active(e)
 
 
-def test_full_access_is_workspace_write_not_escape() -> None:
+def test_full_access_is_a_distinct_execution_mode() -> None:
     e = _eng(_current_chat_mode="write", _full_access_enabled=True)
-    assert resolve_execution_policy(e).mode == "workspace-write"
+    assert resolve_execution_policy(e).mode == "full-access"
     assert resolve_approval_policy(e) == "never"
     assert not writes_denied(e)
     capability = capability_from_engine(e)
     assert capability.approval == "never"
     assert capability.full_access is True
+
+
+def test_auto_approve_skips_confirmation_without_full_access() -> None:
+    e = _eng(_auto_approve_enabled=True)
+    assert resolve_execution_policy(e).mode == "workspace-write"
+    assert resolve_approval_policy(e) == "never"
+    assert capability_from_engine(e).full_access is False
 
 
 def test_child_capability_inherits_host_full_access() -> None:

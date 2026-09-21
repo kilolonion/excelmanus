@@ -82,6 +82,14 @@ describe("open an existing workbook without an agent turn", () => {
 });
 
 describe("workbook discussion context", () => {
+  it("does not bind a non-spreadsheet file as a workbook target", () => {
+    useWorkbookConversationStore.getState().bind(
+      session.id,
+      fileRefFromSession("uploads/receipt.jpg", session),
+    );
+    expect(useWorkbookConversationStore.getState().targets).toEqual({});
+  });
+
   it("changes the primary file from chat without opening the sheet and uses it for the next question", async () => {
     const oldFile = { ...file, relative: "uploads/old.xlsx" };
     useWorkbookConversationStore.getState().bind(session.id, oldFile, "旧表", "split");

@@ -136,6 +136,7 @@ class SessionState:
         self.wire_epoch: dict[str, str] | None = None
         # RequestSeries 快照。无 header 时恢复为 restore/migrate，不作空前缀通行证。
         self.request_series: dict[str, Any] | None = None
+        self.loaded_tool_names: set[str] = set()
         # Driver/InBox 可恢复运行态（callbacks 不进入快照）。
         self.runtime_state: dict[str, Any] = {}
 
@@ -169,6 +170,7 @@ class SessionState:
         self.image_wire_pin_seq = ()
         self.wire_epoch = None
         self.request_series = None
+        self.loaded_tool_names.clear()
         self.runtime_state = {}
         self.compaction_handoff = {}
         self.compaction_generation = 0
@@ -280,6 +282,7 @@ class SessionState:
             "request_series": (
                 dict(self.request_series) if isinstance(self.request_series, dict) else None
             ),
+            "loaded_tool_names": sorted(self.loaded_tool_names),
             "runtime_state": dict(self.runtime_state) if isinstance(self.runtime_state, dict) else {},
         }
 
@@ -310,6 +313,9 @@ class SessionState:
         state.wire_epoch = normalize_wire_epoch_dict(data.get("wire_epoch"))
         raw_series = data.get("request_series")
         state.request_series = dict(raw_series) if isinstance(raw_series, dict) else None
+        loaded = data.get("loaded_tool_names", [])
+        if isinstance(loaded, list):
+            state.loaded_tool_names = {name for name in loaded if isinstance(name, str) and name}
         raw_runtime = data.get("runtime_state")
         state.runtime_state = dict(raw_runtime) if isinstance(raw_runtime, dict) else {}
         handoff = data.get("compaction_handoff")

@@ -278,14 +278,14 @@ def test_loaded_tools_survive_profile_narrowing_without_expanding_permissions(
 
 
 @pytest.mark.asyncio
-async def test_new_turn_resets_loaded_tools_even_when_jev_is_off(tmp_path: Path) -> None:
+async def test_new_turn_preserves_loaded_tools_even_when_jev_is_off(tmp_path: Path) -> None:
     engine = _engine(tmp_path, config=_config())
     old_loaded = {"edit_spreadsheet"}
     engine._loaded_tool_names = old_loaded
     engine._tools_cache = [{"function": {"name": "old"}}]
     await maybe_record_turn_exposure(engine, "next request")
-    assert engine._loaded_tool_names == set()
-    assert engine._loaded_tool_names is not old_loaded
+    assert engine._loaded_tool_names == old_loaded
+    assert engine._loaded_tool_names is old_loaded
     assert engine._tools_cache is None
 
 

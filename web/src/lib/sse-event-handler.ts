@@ -303,6 +303,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       if (typeof data.full_access_enabled === "boolean") {
         ui.setFullAccessEnabled(data.full_access_enabled);
       }
+      if (typeof data.auto_approve_enabled === "boolean") {
+        ui.setAutoApproveEnabled(data.auto_approve_enabled);
+      }
       if (typeof data.chat_mode === "string") {
         ui.setChatMode(data.chat_mode as "write" | "read" | "plan");
       }
@@ -995,11 +998,16 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const enabled = Boolean(data.enabled);
       if (modeName === "full_access") {
         uiMode.setFullAccessEnabled(enabled);
+        if (enabled) uiMode.setAutoApproveEnabled(false);
+      } else if (modeName === "auto_approve") {
+        uiMode.setAutoApproveEnabled(enabled);
+        if (enabled) uiMode.setFullAccessEnabled(false);
       } else if (modeName === "chat_mode") {
         uiMode.setChatMode(data.value as "write" | "read" | "plan");
       }
       const _modeLabelMap: Record<string, string> = {
-        full_access: "跳过审批",
+        full_access: "完全访问",
+        auto_approve: "自动审批",
         chat_mode: "对话模式",
       };
       const modeLabel = _modeLabelMap[modeName] || modeName;
@@ -1037,6 +1045,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const uiReply = useUIStore.getState();
       if (typeof data.full_access_enabled === "boolean") {
         uiReply.setFullAccessEnabled(data.full_access_enabled);
+      }
+      if (typeof data.auto_approve_enabled === "boolean") {
+        uiReply.setAutoApproveEnabled(data.auto_approve_enabled);
       }
       if (typeof data.chat_mode === "string") {
         uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
@@ -1290,6 +1301,7 @@ export function finalizeThinking(ctx: SSEHandlerContext): void {
 
 /** 标准的事件前处理：调用方在 consumeSSE 回调顶部使用。*/
 export function preDispatch(event: SSEEvent, ctx: SSEHandlerContext): void {
+  if (event.event === "heartbeat") return;
   if (event.event !== "thinking_delta" && event.event !== "thinking") {
     finalizeThinking(ctx);
   }

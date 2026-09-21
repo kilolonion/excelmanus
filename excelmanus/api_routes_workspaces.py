@@ -50,6 +50,25 @@ async def create_workspace(request: Request) -> JSONResponse:
     )
 
 
+@router.put("/api/v1/workspaces/order")
+async def reorder_workspaces(request: Request) -> JSONResponse:
+    session_manager = get_session_manager()
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    workspace_ids = (body or {}).get("workspace_ids") if isinstance(body, dict) else None
+    if not isinstance(workspace_ids, list) or not all(isinstance(item, str) for item in workspace_ids):
+        return _error_json_response(400, "缺少有效的 workspace_ids 参数")
+    try:
+        workspaces = session_manager.reorder_workspaces(workspace_ids)
+    except WorkspacePathError as exc:
+        return _error_json_response(400, str(exc))
+    return JSONResponse(content={"workspaces": workspaces})
+
+
 @router.patch("/api/v1/workspaces/{workspace_id}")
 async def update_workspace(workspace_id: str, request: Request) -> JSONResponse:
     session_manager = get_session_manager()

@@ -290,3 +290,11 @@ class UserConfigStore:
     def set_full_access(self, enabled: bool) -> None:
         """持久化 full_access 开关（跨会话）。"""
         self.set("full_access_enabled", "true" if enabled else "false")
+
+    def get_auto_approve(self) -> bool:
+        """读取仅跳过审批、仍保留代码沙盒的开关。"""
+        return self.get("auto_approve_enabled") == "true"
+
+    def set_auto_approve(self, enabled: bool) -> None:
+        """持久化仅跳过审批模式（不授予网络或越界文件能力）。"""
+        self.set("auto_approve_enabled", "true" if enabled else "false")

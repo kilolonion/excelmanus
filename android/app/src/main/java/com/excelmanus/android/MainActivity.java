@@ -13,7 +13,6 @@ import android.net.http.SslError;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
-import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
@@ -187,41 +186,30 @@ public final class MainActivity extends ComponentActivity implements DownloadCon
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(247, 249, 247));
+        // The Android client is a full-screen WebView shell.  The old native
+        // title/address bar duplicated the web app chrome and consumed a
+        // sizeable part of the phone viewport, which also made the responsive
+        // workspace appear vertically compressed.  Keep the edge-to-edge
+        // system-bar insets on the root, but let the web surface occupy the
+        // rest of the window.
         ViewCompat.setOnApplyWindowInsetsListener(root, (view, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
             Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
             view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
             return insets;
         });
-        LinearLayout bar = new LinearLayout(this);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(16), dp(5), dp(8), dp(5));
-        LinearLayout titles = new LinearLayout(this);
-        titles.setOrientation(LinearLayout.VERTICAL);
-        TextView brand = label("ExcelManus", 17, INK);
-        brand.setTypeface(null, android.graphics.Typeface.BOLD);
-        subtitle = label("连接你的工作区", 11, Color.DKGRAY);
-        titles.addView(brand);
-        titles.addView(subtitle);
-        titles.setMinimumHeight(dp(44));
-        subtitle.setSingleLine(true);
-        subtitle.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        bar.addView(titles, new LinearLayout.LayoutParams(0, -2, 1));
-        Button menu = new Button(this);
-        menu.setText("⋮");
-        menu.setTextSize(24);
-        menu.setContentDescription("客户端菜单");
-        menu.setBackgroundColor(Color.TRANSPARENT);
-        menu.setOnClickListener(this::showMenu);
-        bar.addView(menu, new LinearLayout.LayoutParams(dp(48), dp(48)));
-        root.addView(bar);
+        // Keep a status holder for existing connection/download callbacks. It
+        // is intentionally detached from the view tree so it cannot re-create
+        // a visible top strip; the web app owns all user-facing chrome now.
+        subtitle = label("", 1, Color.TRANSPARENT);
+        subtitle.setVisibility(View.GONE);
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
         progress.setVisibility(View.GONE);
-        root.addView(progress, new LinearLayout.LayoutParams(-1, dp(3)));
         content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
+        WindowCompat.getInsetsController(getWindow(), root).setAppearanceLightStatusBars(true);
         WindowCompat.getInsetsController(getWindow(), root).setAppearanceLightNavigationBars(true);
     }
 
@@ -467,6 +455,9 @@ public final class MainActivity extends ComponentActivity implements DownloadCon
                 if ("scanPairing".equals(payload.optString("type"))) {
                     reply.postMessage(new JSONObject().put("requestId", payload.optString("requestId")).put("ok", true).toString());
                     scanPairing();
+                } else if ("connectionSettings".equals(payload.optString("type"))) {
+                    reply.postMessage(new JSONObject().put("requestId", payload.optString("requestId")).put("ok", true).toString());
+                    runOnUiThread(() -> showSettings(""));
                 } else if ("notice".equals(payload.optString("type"))) {
                     String text = payload.optString("message", "文件操作失败。");
                     notice(text.substring(0, Math.min(text.length(), 200)));

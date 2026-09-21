@@ -270,8 +270,15 @@ function attachRendererDiagnostics(window) {
 
 function isFrontendSender(event) {
   if (!mainWindow || event.sender !== mainWindow.webContents || !frontendUrl) return false;
-  return event.senderFrame === mainWindow.webContents.mainFrame
-    && isAppUrl(event.senderFrame?.url, frontendUrl);
+  // Older Electron builds can expose a new WebFrameMain wrapper for the same
+  // main frame, so compare the trusted sender window and origin instead of
+  // relying on object identity for `senderFrame`.
+  const senderUrl = event.senderFrame?.url || event.sender.getURL();
+  return isAppUrl(senderUrl, frontendUrl);
+}
+
+function frontendSenderWindow(event) {
+  return isFrontendSender(event) ? BrowserWindow.fromWebContents(event.sender) : null;
 }
 
 function getMobilePairing() {
@@ -313,10 +320,12 @@ ipcMain.handle("excelmanus:mobile-pairing", async (event, action, input = {}) =>
 });
 
 ipcMain.handle("excelmanus:select-folder", async (event) => {
-  if (!isFrontendSender(event)) {
+  const senderWindow = frontendSenderWindow(event);
+  if (!senderWindow) {
     throw new Error("文件夹选择请求来自无效页面");
   }
-  const result = await dialog.showOpenDialog(mainWindow, {
+  if (!senderWindow.isDestroyed()) senderWindow.focus();
+  const result = await dialog.showOpenDialog(senderWindow, {
     title: "选择源文件夹",
     buttonLabel: "选择文件夹",
     properties: ["openDirectory"],
@@ -325,10 +334,12 @@ ipcMain.handle("excelmanus:select-folder", async (event) => {
 });
 
 ipcMain.handle("excelmanus:pick-chat-files", async (event) => {
-  if (!isFrontendSender(event)) {
+  const senderWindow = frontendSenderWindow(event);
+  if (!senderWindow) {
     throw new Error("文件选择请求来自无效页面");
   }
-  const result = await dialog.showOpenDialog(mainWindow, {
+  if (!senderWindow.isDestroyed()) senderWindow.focus();
+  const result = await dialog.showOpenDialog(senderWindow, {
     title: "上传文件",
     buttonLabel: "上传",
     properties: ["openFile", "multiSelections"],

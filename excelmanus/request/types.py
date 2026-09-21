@@ -31,6 +31,7 @@ SeriesEventKind = Literal[
     "route/change",
     "transport/renew",
     "cache/policy",
+    "cache/config",
     "restore/migrate",
     "rollback/edit",
     "vision/change",
@@ -118,6 +119,12 @@ class RequestHeader:
     transport: Literal["inline", "file"]
     prompt_cache_key: str = ""
     provider_digest: str = ""
+    # Native request evidence. Full digest is diagnostic; message/block hashes
+    # may only grow, while settings changes are recorded separately.
+    provider_config_digest: str = ""
+    provider_prefix: tuple[str, ...] = ()
+    continuation_id: str = ""
+    file_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +138,10 @@ class RequestHeader:
             "transport": self.transport,
             "prompt_cache_key": self.prompt_cache_key,
             "provider_digest": self.provider_digest,
+            "provider_config_digest": self.provider_config_digest,
+            "provider_prefix": list(self.provider_prefix),
+            "continuation_id": self.continuation_id,
+            "file_ids": list(self.file_ids),
         }
 
     @classmethod
@@ -143,6 +154,10 @@ class RequestHeader:
             return None
         if not isinstance(identity, str) or not identity:
             return None
+        for key in ("provider_prefix", "file_ids"):
+            value = raw.get(key, [])
+            if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+                return None
         transport = raw.get("transport") or "inline"
         if transport not in {"inline", "file"}:
             transport = "inline"
@@ -157,6 +172,10 @@ class RequestHeader:
             transport=transport,  # type: ignore[arg-type]
             prompt_cache_key=str(raw.get("prompt_cache_key") or ""),
             provider_digest=str(raw.get("provider_digest") or ""),
+            provider_config_digest=str(raw.get("provider_config_digest") or ""),
+            provider_prefix=tuple(str(item) for item in (raw.get("provider_prefix") or [])),
+            continuation_id=str(raw.get("continuation_id") or ""),
+            file_ids=tuple(str(item) for item in (raw.get("file_ids") or [])),
         )
 
 

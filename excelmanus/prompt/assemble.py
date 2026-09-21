@@ -165,6 +165,8 @@ def prepare_system_prompts_for_request(
     consume_dynamic=False 只返回稳定前缀，不消费 hook / 技能快照。
     """
     skill_contexts = skill_contexts or []
+    if consume_dynamic:
+        engine._prompt_drop_system_updates = False
     try:
         stable_prompt = build_stable_system_prompt(engine)
     except (UnknownPromptVariable, ValueError, OSError, RuntimeError) as exc:
@@ -292,6 +294,11 @@ def prepare_system_prompts_for_request(
 
 def commit_prompt_dynamic(engine: Any) -> None:
     """在请求投影成功后提交动态上下文消费与 fingerprint。"""
+    if getattr(engine, "_prompt_drop_system_updates", False) is True:
+        memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
+        if memory is not None:
+            memory.drop_system_updates()
+        engine._prompt_drop_system_updates = False
     pending = getattr(engine, "_prompt_dynamic_pending", None)
     if not isinstance(pending, dict):
         return
@@ -332,14 +339,6 @@ def commit_prompt_dynamic(engine: Any) -> None:
     engine._mention_pending_digest = None
     engine._mention_contexts_pending_restore = None
     engine._prompt_contexts_pending_restore = None
-    restored_mentions = getattr(engine, "_mention_contexts_pending_restore", None)
-    if isinstance(restored_mentions, list):
-        engine._mention_contexts = restored_mentions
-    engine._mention_contexts_pending_restore = None
-    restored_contexts = getattr(engine, "_prompt_contexts_pending_restore", None)
-    if isinstance(restored_contexts, list):
-        engine._prompt_user_contexts = restored_contexts
-    engine._prompt_contexts_pending_restore = None
 
 
 def rollback_prompt_dynamic(engine: Any, appended: list[Any] | None = None) -> None:
@@ -357,3 +356,6 @@ def rollback_prompt_dynamic(engine: Any, appended: list[Any] | None = None) -> N
             messages[:] = [item for item in messages if id(item) not in ids]
     engine._prompt_user_contexts = []
     engine._mention_pending_digest = None
+    engine._prompt_drop_system_updates = False
+    engine._prompt_dynamic_pending = None
+    engine._prompt_dynamic_appended_messages = []

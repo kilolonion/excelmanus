@@ -78,6 +78,8 @@ logs/
 !docs/images/*.png
 !docs/design/**/*.png
 !assets/*.png
+!android/app/src/main/res/drawable-nodpi/
+!android/app/src/main/res/drawable-nodpi/ic_launcher.png
 image/RELEASE_*/
 *.csv
 *.xlsx

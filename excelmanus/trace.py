@@ -282,6 +282,10 @@ def _usage_attributes(usage: Any) -> dict[str, Any]:
     for name in ("prompt_tokens", "completion_tokens", "total_tokens", "cost_usd"):
         value = get(name)
         result[name] = value if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+    from excelmanus.request.usage import extract_cache_usage
+
+    cache = extract_cache_usage(usage)
+    result.update(cached_tokens=cache.hit, cache_write_tokens=cache.write)
     return result
 
 
@@ -301,6 +305,17 @@ async def traced_request(engine: Any, create: Any, kwargs: dict[str, Any]) -> An
 
         request_id = prepared.request_id if isinstance(prepared, PreparedRequest) else uuid4().hex
         route = prepared.route if isinstance(prepared, PreparedRequest) else None
+        cache_info = {}
+        if isinstance(prepared, PreparedRequest):
+            header = prepared.header
+            cache_info = {
+                "prompt_cache_key": header.prompt_cache_key,
+                "route_fingerprint": header.route_fingerprint,
+                "provider_config_digest": header.provider_config_digest,
+                "tools_digest": header.tools_digest, "system_digest": header.system_head_digest,
+                "transport": header.transport, "continuation": bool(header.continuation_id),
+                "model_idle_seconds": getattr(engine, "_model_idle_seconds", None),
+            }
         key = scope_key(engine, f"request:{uuid4().hex}")
         driver = getattr(engine, "_driver", None)
         trace.start(key, "request", "llm", parent_key=parent, request_id=request_id,
@@ -308,7 +323,7 @@ async def traced_request(engine: Any, create: Any, kwargs: dict[str, Any]) -> An
                     model=route.model if route else str(kwargs.get("model", "")),
                     protocol=route.protocol if route else None, attempt=attempt,
                     stream=bool(kwargs.get("stream")), turn_id=getattr(driver, "turn_id", ""),
-                    step_id=getattr(driver, "step_id", ""), **_usage_attributes(None))
+                    step_id=getattr(driver, "step_id", ""), **_usage_attributes(None), **cache_info)
         engine._trace_last_request_key = key
         engine._trace_active_request_key = key
         persist_trace(engine)

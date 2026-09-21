@@ -217,6 +217,8 @@ async def suggest_context(engine: Any, user_text: str, context_input: Mapping[st
         state = context_state(engine, user_text, context_input)
         decision = await asyncio.wait_for(evaluate_for_host(engine, PACK, state, config=live_jev_config(engine.config)),
                                           timeout=min(MAX_CONTEXT_SECONDS, settings.timeout_seconds))
+        if not isinstance(decision, Decision):
+            return ""
         column = decision.extras.get("column_candidate")
         if isinstance(column, Mapping):
             root = getattr(getattr(engine, "_workspace_ref", None), "root", None) or engine.config.workspace_root
@@ -332,6 +334,8 @@ async def route_session_workspace(
             evaluate_for_host(shim, PACK, state, config=live_jev_config(config)),
             timeout=min(MAX_CONTEXT_SECONDS, settings.timeout_seconds),
         )
+        if not isinstance(decision, Decision):
+            return None, None
     except asyncio.TimeoutError:
         return None, Decision.noop("unavailable:context_timeout")
     except Exception:

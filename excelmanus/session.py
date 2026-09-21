@@ -15,7 +15,7 @@ from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.engine import AgentEngine
 from excelmanus.logger import get_logger
 from excelmanus.mcp.manager import MCPManager
-from excelmanus.skillpacks import SkillRouter
+from excelmanus.skillpacks import SkillpackLoader, SkillRouter
 from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
 from excelmanus.workspace.paths import (
     default_workspace_path,
@@ -44,6 +44,44 @@ def _path_in_workspace(file_path: str, ws_root: str) -> bool:
         return True
     except (SecurityViolationError, OSError, ValueError):
         return False
+
+
+def _project_skills_dir_for_workspace(
+    config: ExcelManusConfig,
+    workspace_root: Path,
+) -> Path:
+    """Map the configured project-skill directory into a session workspace.
+
+    ``load_config`` materializes the default project-skill path as an absolute
+    path under the process workspace. A conversation can later bind to a
+    different registered workspace, so copying only ``workspace_root`` into the
+    per-session config leaves ``skills_project_dir`` pointing at the old tree.
+    Preserve the configured relative suffix when possible and otherwise use the
+    standard workspace-local directory.
+    """
+    target_root = workspace_root.expanduser().resolve()
+    source_root = Path(config.workspace_root).expanduser()
+    if not source_root.is_absolute():
+        source_root = (Path.cwd() / source_root).resolve()
+    else:
+        source_root = source_root.resolve()
+
+    configured = Path(config.skills_project_dir).expanduser()
+    if not configured.is_absolute():
+        return (target_root / configured).resolve()
+
+    configured = configured.resolve()
+    try:
+        configured.relative_to(target_root)
+        return configured
+    except ValueError:
+        pass
+
+    try:
+        suffix = configured.relative_to(source_root)
+    except ValueError:
+        suffix = Path(".excelmanus") / "skillpacks"
+    return (target_root / suffix).resolve()
 
 
 # ── 异常定义 ──────────────────────────────────────────────
@@ -334,6 +372,14 @@ class SessionManager:
         rec, created = self._workspace_store.create(path, title=title)
         self._ensure_workspace_migrated(rec["path"])
         return rec, created
+
+    def reorder_workspaces(self, workspace_ids: list[str]) -> list[dict[str, Any]]:
+        if self._workspace_store is None:
+            raise WorkspacePathError("工作区登记未启用")
+        reordered = self._workspace_store.reorder(workspace_ids)
+        for item in reordered:
+            self._ensure_workspace_migrated(str(item.get("path") or ""))
+        return self.list_workspaces()
 
     def rename_workspace(self, workspace_id: str, title: str) -> dict[str, Any] | None:
         return self.update_workspace(workspace_id, title=title)
@@ -945,7 +991,12 @@ class SessionManager:
         """创建 AgentEngine 并注入历史。文件根取该会话的 workspace_path。"""
         isolated_ws = self._engine_workspace(session_id)
         engine_config = self._config
-        overrides: dict[str, Any] = {"workspace_root": str(isolated_ws.root_dir)}
+        overrides: dict[str, Any] = {
+            "workspace_root": str(isolated_ws.root_dir),
+            "skills_project_dir": str(
+                _project_skills_dir_for_workspace(self._config, isolated_ws.root_dir)
+            ),
+        }
         _target_model = self._config.model
         if self._credential_resolver is not None:
             try:
@@ -985,10 +1036,15 @@ class SessionManager:
                 if isinstance(raw_id, str) and raw_id.strip():
                     ws_id = raw_id.strip()
         workspace_ref = WorkspaceRef.from_root(isolated_ws.root_dir, workspace_id=ws_id)
+        session_skill_router = None
+        if self._skill_router is not None:
+            session_skill_loader = SkillpackLoader(engine_config, self._registry)
+            session_skill_router = SkillRouter(engine_config, session_skill_loader)
+
         engine = AgentEngine(
             config=engine_config,
             registry=self._registry,
-            skill_router=self._skill_router,
+            skill_router=session_skill_router,
             persistent_memory=persistent_memory,
             mcp_manager=self._shared_mcp_manager,
             own_mcp_manager=self._shared_mcp_manager is None,
@@ -1063,6 +1119,10 @@ class SessionManager:
             self._apply_persisted_active_model(engine, _user_config)
             if hasattr(_user_config, "get_full_access"):
                 engine._full_access_enabled = _user_config.get_full_access()
+            if hasattr(_user_config, "get_auto_approve"):
+                engine._auto_approve_enabled = (
+                    _user_config.get_auto_approve() and not engine._full_access_enabled
+                )
         # 从数据库加载模型能力探测缓存
         if self._database is not None:
             try:
@@ -1217,15 +1277,7 @@ class SessionManager:
                 new_id,
                 exc_info=True,
             )
-        # ── Phase 5: 异步预热 prompt cache（fire-and-forget） ──
-        # 仅对 Anthropic ClaudeClient 生效：预热稳定 system prompt 前缀，
-        # 使首条用户消息即可命中 cache，大幅降低首次 TTFT。
-        try:
-            from excelmanus.engine_utils import fire_and_forget
-            fire_and_forget(engine.warmup_prompt_cache(), name="warmup_prompt_cache")
-        except Exception:
-            logger.debug("prompt cache 预热任务创建失败，跳过", exc_info=True)
-
+        # 第一条正常请求负责建立 provider cache；后台预热不得与会话 actor 竞争。
         self.drain_workspace_events()
         return new_id, engine
 
@@ -1699,9 +1751,11 @@ class SessionManager:
             )
         except SessionBusyError:
             engine = self.get_engine(session_id, user_id=user_id)
+            if engine is None:
+                raise
         except Exception:
-            logger.debug("懒恢复会话失败: %s", session_id, exc_info=True)
-            engine = None
+            logger.warning("懒恢复会话失败: %s", session_id, exc_info=True)
+            raise
         finally:
             if acquired_session_id is not None:
                 await self.release_for_chat(acquired_session_id)
@@ -1882,6 +1936,7 @@ class SessionManager:
                 "in_flight": in_flight,
                 "messages": messages,
                 "full_access_enabled": engine.full_access_enabled,
+                "auto_approve_enabled": engine.auto_approve_enabled,
                 "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
                 "current_model": engine.current_model if model_available else None,
                 "current_model_name": engine.current_model_name if model_available else None,
@@ -1906,6 +1961,9 @@ class SessionManager:
                 "in_flight": False,
                 "messages": messages,
                 "full_access_enabled": _fa,
+                "auto_approve_enabled": (
+                    _uc.get_auto_approve() if _uc is not None and hasattr(_uc, "get_auto_approve") else False
+                ),
                 "chat_mode": "write",
                 "current_model": None,
                 "current_model_name": None,
