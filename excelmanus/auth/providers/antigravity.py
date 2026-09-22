@@ -1,6 +1,5 @@
 """Google Antigravity（Cloud Code Assist 订阅）认证提供商。
 
-
 - 标准 Google OAuth2 授权码 + 本机回环回调（http://localhost:<port>/oauth-callback），
   Google 对 loopback redirect 不校验端口。
 - 对话走 Cloud Code 内部 REST 网关（JSON，非 gRPC）：
@@ -14,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -29,12 +29,10 @@ from excelmanus.auth.providers.base import (
 
 logger = logging.getLogger(__name__)
 
-# ── Google OAuth2 客户端（Antigravity IDE 公开客户端，与 CPA 一致） ──
-_CLIENT_ID = (
-    ""
-    ".apps.googleusercontent.com"
-)
-_CLIENT_SECRET = ""
+# ── Google OAuth2 客户端（Antigravity IDE 公开客户端） ──
+# 凭据不入库，运行时从环境变量读取。
+_CLIENT_ID = os.environ.get("EXCELMANUS_ANTIGRAVITY_CLIENT_ID", "").strip()
+_CLIENT_SECRET = os.environ.get("EXCELMANUS_ANTIGRAVITY_CLIENT_SECRET", "").strip()
 _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo?alt=json"
@@ -64,6 +62,15 @@ _GOOG_API_CLIENT_UA = "gl-node/22.21.1"
 _ONBOARD_MAX_ATTEMPTS = 5
 _ONBOARD_POLL_SECONDS = 2.0
 
+
+def _require_oauth_client() -> None:
+    """凭据由环境变量注入，缺失时给出可操作的报错。"""
+    if not _CLIENT_ID or not _CLIENT_SECRET:
+        raise RuntimeError(
+            "Antigravity 登录需要 OAuth 客户端凭据。请设置环境变量 "
+            "EXCELMANUS_ANTIGRAVITY_CLIENT_ID 与 "
+            "EXCELMANUS_ANTIGRAVITY_CLIENT_SECRET 后重试。"
+        )
 
 def _http_client() -> httpx.AsyncClient:
     import os
@@ -151,7 +158,7 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
     callback_port = 51121
     oauth_ttl_seconds = 900
 
-    # 静态模型目录（采用内置静态 registry；上游无稳定公开目录接口）。
+    # 静态模型目录（内置静态 registry；上游无稳定公开目录接口）。
     _SUPPORTED_MODELS: tuple[tuple[str, str], ...] = (
         ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
         ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
@@ -170,6 +177,7 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
     # ── LoopbackOAuthCapable ──────────────────────────────────
 
     def build_authorize_url(self, state: str, redirect_uri: str) -> str:
+        _require_oauth_client()
         params = {
             "access_type": "offline",
             "client_id": _CLIENT_ID,
@@ -185,6 +193,7 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
         self, code: str, redirect_uri: str,
     ) -> ValidatedCredential:
         """授权码 → token → userinfo(email) → loadCodeAssist(project_id)。"""
+        _require_oauth_client()
         async with _http_client() as client:
             resp = await client.post(
                 _TOKEN_ENDPOINT,
@@ -364,6 +373,7 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
     async def refresh_token(self, refresh_token: str) -> RefreshedCredential:
         if not refresh_token:
             raise RuntimeError("无 refresh token，无法刷新。请重新登录 Antigravity。")
+        _require_oauth_client()
         async with _http_client() as client:
             resp = await client.post(
                 _TOKEN_ENDPOINT,

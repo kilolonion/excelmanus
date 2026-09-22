@@ -1,8 +1,7 @@
 """WorkBuddy / CodeBuddy Chat Completions 适配器。
 
 上游（copilot.tencent.com / workbuddy.ai 的 /v2/chat/completions）是
-OpenAI Chat Completions 兼容接口，但存在方言差异，依据上游文档
-workbuddy 插件做如下归一化：
+OpenAI Chat Completions 兼容接口，但存在方言差异，做如下归一化：
 
 - 上游按流式工作：始终用 stream=true 请求；调用方要非流式时在本地聚合。
 - ``tool_choice`` 只接受字符串/单 function 对象；``"none"`` 需连同

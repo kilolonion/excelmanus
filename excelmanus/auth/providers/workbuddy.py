@@ -340,7 +340,7 @@ class WorkBuddyProvider(AuthProvider, BrowserPollCapable):
         ).strip()
         if not access_token:
             raise ValueError(
-                "缺少 access token。请粘贴 workbuddy-*.json 内容，"
+                "缺少 access token。请粘贴 workbuddy-*.json 凭证内容，"
                 "需包含 auth.accessToken 字段。"
             )
         refresh_token = str(

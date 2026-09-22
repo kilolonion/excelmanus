@@ -9,8 +9,7 @@ Cloud Code ``v1internal`` 信封：
            "request": {<gemini generateContent 载荷>}}
     响应: SSE ``data: {"response": {<gemini chunk>}}`` 包裹。
 
-上游接口约定
-（schema 清洗、VALIDATED toolConfig、sessionId/requestId 规则）。
+schema 清洗、toolConfig 校验、sessionId/requestId 规则见各函数文档。
 """
 
 from __future__ import annotations
