@@ -380,7 +380,7 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe 直连密钥（与提供商列表同步） | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway 密钥（与提供商列表同步） | — |
 
-这是可选的决策模型功能，需要 `system-one` extra。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。详见[上下文建议说明](design/jev-context-advice-20260920.md)。旧配置中的 `shadow` 会在读取时迁移为 `enforce`，`EXCELMANUS_JEV_CALIBRATED` 不再阻止已开启环节生效。
+这是可选的决策模型功能，需要 `system-one` extra。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。旧配置中的 `shadow` 会在读取时迁移为 `enforce`，`EXCELMANUS_JEV_CALIBRATED` 不再阻止已开启环节生效。
 
 ## 加密配置
 
