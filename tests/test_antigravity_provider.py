@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+import excelmanus.auth.providers.antigravity as antigravity_mod
 from excelmanus.auth.providers.antigravity import AntigravityProvider
 from excelmanus.auth.providers.base import AuthProfileRecord, LoopbackOAuthCapable
 from excelmanus.providers.antigravity import (
@@ -22,6 +23,13 @@ from excelmanus.providers.antigravity import (
     build_antigravity_envelope,
     clean_schema_for_antigravity,
 )
+
+
+@pytest.fixture(autouse=True)
+def _inject_test_oauth_client(monkeypatch):
+    """测试注入占位凭据，不依赖真实 OAuth 客户端配置。"""
+    monkeypatch.setattr(antigravity_mod, "_CLIENT_ID", "test-client-id")
+    monkeypatch.setattr(antigravity_mod, "_CLIENT_SECRET", "test-client-secret")
 
 
 def _make_record(**over) -> AuthProfileRecord:
