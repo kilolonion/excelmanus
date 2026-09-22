@@ -172,6 +172,58 @@ class TestProbeHealthReturnValues:
         assert ok is None
         assert "connection" in err.lower()
 
+    @pytest.mark.asyncio
+    async def test_timeout_error_uses_class_name(self):
+        """str() 为空的异常（如 TimeoutError）→ err 回退为异常类名，便于诊断。"""
+        client = MagicMock()
+
+        async def _slow(*a, **kw):
+            await asyncio.sleep(100)
+
+        client.chat.completions.create = _slow
+        ok, err = await probe_health(client, "test-model", timeout=0.01)
+        assert ok is None
+        assert "TimeoutError" in err
+
+    @pytest.mark.asyncio
+    async def test_transient_error_retried_then_success(self):
+        """瞬时错误在 retries 内成功 → (True, "")。"""
+        call_count = 0
+
+        async def _flaky(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("Error code: 503 - Service unavailable")
+            return MagicMock()
+
+        client = MagicMock()
+        client.chat.completions.create = _flaky
+        ok, err = await probe_health(
+            client, "test-model", timeout=5.0, retries=1, retry_delay=0,
+        )
+        assert ok is True
+        assert err == ""
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_permanent_error_not_retried(self):
+        """永久性错误立即返回，不消耗重试次数。"""
+        call_count = 0
+
+        async def _deny(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            raise Exception("Error code: 401 - Unauthorized")
+
+        client = MagicMock()
+        client.chat.completions.create = _deny
+        ok, err = await probe_health(
+            client, "test-model", timeout=5.0, retries=1, retry_delay=0,
+        )
+        assert ok is False
+        assert call_count == 1
+
 
 # ── run_full_probe 持久化行为测试 ──────────────────────────
 
@@ -259,7 +311,9 @@ class TestRunFullProbeTransientHealth:
         async def _mock_create(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
+            # run_full_probe 的健康检查会对瞬时错误重试一次：
+            # 前两次失败 → 首轮探测整体判定为瞬时失败
+            if call_count <= 2:
                 raise Exception("Error code: 502 - Bad gateway")
             return MagicMock()
 

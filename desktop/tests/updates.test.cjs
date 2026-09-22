@@ -45,7 +45,7 @@ test('checks share a request, expose missing assets, and invalidate failed downl
   assert.equal((await service.check()).downloadUrl, null);
   await assert.rejects(service.download());
   status = 403;
-  await assert.rejects(service.check(), /HTTP 403/);
+  await assert.rejects(service.check(), /频率超限/);
   await assert.rejects(service.download());
   status = 404;
   await assert.rejects(service.check(), /尚未发布/);

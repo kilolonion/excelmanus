@@ -33,14 +33,15 @@ describe("jev-settings", () => {
     expect(validateJevProvider({ ...draft, base_url: "http://localhost:9000/evaluate" })).toBeNull();
   });
   it("only sends known settings from drafts with extra fields", () => {
-    const draft = { ...EMPTY_JEV_DRAFT, unknown_option: true, jev_mode_hint: true };
-    expect(buildJevPayload(draft, EMPTY_JEV_DRAFT)).toEqual({ jev_mode_hint: true });
-    expect(buildJevPayload(draft, EMPTY_JEV_DRAFT, JEV_ROLE_KEYS)).toEqual({ jev_mode_hint: true });
+    const draft = { ...EMPTY_JEV_DRAFT, unknown_option: true, jev_mode_hint: false };
+    expect(buildJevPayload(draft, EMPTY_JEV_DRAFT)).toEqual({ jev_mode_hint: false });
+    expect(buildJevPayload(draft, EMPTY_JEV_DRAFT, JEV_ROLE_KEYS)).toEqual({ jev_mode_hint: false });
   });
 
   it("labels gates", () => {
     expect(jevGateLabel("off")).toBe("关闭");
-    expect(jevGateLabel("shadow")).toBe("仅观察");
+    // 旧版 shadow 值归一为 enforce（仅观察态已移除）
+    expect(jevGateLabel("shadow")).toBe("生效");
     expect(jevGateLabel("enforce")).toBe("生效");
     expect(jevGateLabel("unknown")).toBe("关闭");
   });
@@ -94,13 +95,14 @@ describe("jev-settings", () => {
       tone: "ready",
       chip: "已连接 · 关闭",
     });
+    // 旧版 shadow 值按 enforce 处理（仅观察态已移除）
     expect(jevEntryStatus({ configured: true, enabled: "shadow" })).toEqual({
-      tone: "shadow",
-      chip: "仅观察",
+      tone: "enforce",
+      chip: "生效",
     });
-    expect(jevEntryStatus({ configured: true, enabled: "enforce", enforceReady: false })).toEqual({
-      tone: "ready",
-      chip: "部分功能可用",
+    expect(jevEntryStatus({ configured: true, enabled: "enforce" })).toEqual({
+      tone: "enforce",
+      chip: "生效",
     });
     expect(jevEntryDetail({ configured: true, last4: "4f2a", model: "jev-1.13.0" })).toBe(
       "jev-1.13.0 · 密钥 ···4f2a",

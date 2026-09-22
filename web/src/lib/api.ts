@@ -181,11 +181,24 @@ export async function apiGet<T = unknown>(
   opts?: ApiGetOptions,
 ): Promise<T> {
   const url = buildApiUrl(path, opts);
-  const res = await apiFetch(url, _withCredentials(url, {
+  const doFetch = () => apiFetch(url, _withCredentials(url, {
     headers: getAuthHeaders(),
     cache: opts?.cache,
     signal: _withTimeout(opts?.timeoutMs ?? _DEFAULT_TIMEOUT_MS, opts?.signal),
   }));
+  // GET 幂等可安全重试：网络错误或 5xx（含开发代理断连返回的 500）延迟 1s 重试一次
+  let res: Response;
+  try {
+    res = await doFetch();
+  } catch (err) {
+    if (!_isTransientError(err)) throw err;
+    await new Promise((r) => setTimeout(r, 1000));
+    res = await doFetch();
+  }
+  if (res.status >= 500) {
+    await new Promise((r) => setTimeout(r, 1000));
+    res = await doFetch();
+  }
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }

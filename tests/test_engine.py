@@ -986,7 +986,8 @@ class TestMetaToolDefinitions:
         assert questions_schema['minItems'] == 1
         assert questions_schema['maxItems'] == 8
         item_schema = questions_schema['items']
-        assert item_schema['required'] == ['text', 'options']
+        assert item_schema['required'] == ['text']
+        assert item_schema['anyOf'] == [{'required': ['options']}, {'required': ['selection']}]
         assert item_schema['properties']['options']['minItems'] == 1
         assert item_schema['properties']['options']['maxItems'] == 4
 

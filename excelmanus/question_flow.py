@@ -381,8 +381,6 @@ class QuestionFlowManager:
             raise ValueError("question.text 不能为空。")
         if not header:
             header = self.DEFAULT_HEADER
-        if len(header) > 12:
-            raise ValueError("question.header 长度不能超过 12。")
         if not isinstance(raw_options, list):
             raise ValueError("question.options 必须是数组。")
         if len(raw_options) < 1 or len(raw_options) > 4:

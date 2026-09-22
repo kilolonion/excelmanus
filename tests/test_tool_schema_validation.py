@@ -239,6 +239,77 @@ class TestSchemaValidationEnforce:
         payload = result.value
         assert any("oneOf" in v for v in payload["violations"])
 
+    def test_any_of_passes_when_one_branch_matches(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "anyOf": [{"required": ["options"]}, {"required": ["selection"]}],
+                },
+            },
+        }
+        registry = _make_registry(mode="enforce")
+        assert registry.validate_arguments_by_schema(
+            tool_name="t",
+            arguments={"item": {"text": "q", "options": [{"label": "A"}]}},
+            schema=schema,
+        ) is None
+
+    def test_any_of_flags_when_no_branch_matches(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "anyOf": [{"required": ["options"]}, {"required": ["selection"]}],
+                },
+            },
+        }
+        registry = _make_registry(mode="enforce")
+        result = registry.validate_arguments_by_schema(
+            tool_name="t", arguments={"item": {"text": "q"}}, schema=schema,
+        )
+        assert result is not None
+        payload = result.value
+        assert any("anyOf" in v for v in payload["violations"])
+        assert any("options" in v for v in payload["violations"])
+
+    def test_error_payload_carries_synthesized_example(self) -> None:
+        registry = _make_registry(mode="enforce")
+        result = registry.validate_arguments_by_schema(
+            tool_name="ask_user",
+            arguments={},
+            schema={
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string"},
+                                "options": {"type": "array", "items": {"type": "object",
+                                    "properties": {"label": {"type": "string"}},
+                                    "required": ["label"]}},
+                            },
+                            "required": ["text"],
+                            "anyOf": [{"required": ["options"]}, {"required": ["selection"]}],
+                        },
+                    },
+                },
+                "required": ["questions"],
+            },
+        )
+        assert result is not None
+        example = result.value["example"]
+        assert example["questions"][0]["text"]
+        assert example["questions"][0]["options"][0]["label"]
+
 
 class TestStrictPath:
     """strict_path 开启时对路径参数做额外校验。"""

@@ -102,14 +102,18 @@ def get_meta_tools() -> list[ToolDef]:
                 "properties": {
                     "questions": {
                         "type": "array",
-                        "description": "问题列表，单问题传 1 个元素，多问题传多个（系统逐个展示）。",
+                        "description": (
+                            "问题列表，单问题传 1 个元素，多问题传多个（系统逐个展示）。每项结构："
+                            '{"text":"问题正文","header":"短标题","options":[{"label":"选项名","description":"说明"}]}'
+                            "；options 与 selection 至少提供一个。"
+                        ),
                         "minItems": 1,
                         "maxItems": 8,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "text": {"type": "string", "description": "问题正文"},
-                                "header": {"type": "string", "description": "短标题（建议 <= 12 字符）"},
+                                "text": {"type": "string", "description": "问题正文（必填）"},
+                                "header": {"type": "string", "description": "短标题（建议 <= 12 字符；过长时界面截断展示，不会报错）"},
                                 "options": {
                                     "type": "array",
                                     "description": "候选项（1-4个），系统会自动追加 Other。",

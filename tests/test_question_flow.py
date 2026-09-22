@@ -34,10 +34,11 @@ class TestQuestionValidation:
         pending = manager.enqueue(_payload(header=""), tool_call_id="call_1")
         assert pending.header == "需要确认"
 
-    def test_header_length_must_be_at_most_12(self) -> None:
+    def test_long_header_is_accepted(self) -> None:
+        # 长标题不再硬报错，由前端卡片截断展示
         manager = QuestionFlowManager()
-        with pytest.raises(ValueError, match="12"):
-            manager.enqueue(_payload(header="X" * 13), tool_call_id="call_1")
+        pending = manager.enqueue(_payload(header="X" * 40), tool_call_id="call_1")
+        assert pending.header == "X" * 40
 
     def test_options_count_must_be_1_to_4(self) -> None:
         manager = QuestionFlowManager()

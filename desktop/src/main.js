@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell, screen } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, screen, net: electronNet } = require("electron");
 const { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const net = require("node:net");
@@ -13,7 +13,12 @@ const { createUpdateService } = require("./updates");
 const LOOPBACK = "127.0.0.1";
 const STARTUP_TIMEOUT_MS = 120_000;
 const REPO_URL = "https://github.com/kilolonion/excelmanus";
-const updates = createUpdateService({ current: app.getVersion(), openExternal: url => shell.openExternal(url) });
+const updates = createUpdateService({
+  current: app.getVersion(),
+  // Chromium 网络栈，自动使用系统代理，避免直连 api.github.com 失败
+  fetchImpl: (url, init) => electronNet.fetch(url, init),
+  openExternal: url => shell.openExternal(url),
+});
 
 let mainWindow = null;
 let backendProcess = null;

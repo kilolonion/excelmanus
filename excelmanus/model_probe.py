@@ -144,8 +144,13 @@ async def probe_health(
     client: Any,
     model: str,
     timeout: float = 15.0,
+    retries: int = 0,
+    retry_delay: float = 2.0,
 ) -> tuple[bool | None, str]:
     """最小化健康检查：发一条 Hi 看模型是否可达、鉴权是否正常。
+
+    瞬时错误（超时/限流/网络抖动）在 retries 次数内自动重试，
+    避免模型冷启动或短暂抖动被直接判定为不可达。
 
     Returns:
         (True, "")  — 模型可达且鉴权正常
@@ -153,26 +158,30 @@ async def probe_health(
         (None, err)  — 瞬时错误（超时、限流、网络抖动），不应持久化为不健康
     """
     messages = [{"role": "user", "content": "Hi"}]
-    try:
-        if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
-            await asyncio.wait_for(
-                client.chat.completions.create(model=model, messages=messages),
-                timeout=timeout,
-            )
-        else:
-            await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model, messages=messages, max_tokens=5,
-                ),
-                timeout=timeout,
-            )
-        return True, ""
-    except Exception as exc:
-        err = str(exc)[:200]
-        if _is_permanent_health_failure(err):
-            return False, err
-        logger.debug("健康检查瞬时异常（不标记为不可用）: %s", err)
-        return None, err
+    err = ""
+    for attempt in range(retries + 1):
+        if attempt:
+            await asyncio.sleep(retry_delay)
+        try:
+            if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
+                await asyncio.wait_for(
+                    client.chat.completions.create(model=model, messages=messages),
+                    timeout=timeout,
+                )
+            else:
+                await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model, messages=messages, max_tokens=5,
+                    ),
+                    timeout=timeout,
+                )
+            return True, ""
+        except Exception as exc:
+            err = _err_text(exc)
+            if _is_permanent_health_failure(err):
+                return False, err
+            logger.debug("健康检查瞬时异常（第 %s 次，不标记为不可用）: %s", attempt + 1, err)
+    return None, err
 
 
 async def probe_tool_calling(
@@ -224,7 +233,7 @@ async def probe_tool_calling(
         tc = getattr(msg, "tool_calls", None)
         return True, ""
     except Exception as exc:
-        err = str(exc)[:200]
+        err = _err_text(exc)
         if _is_param_unsupported_error(err):
             return False, err
         logger.debug("tool_calling 探测异常: %s", err)
@@ -272,7 +281,7 @@ async def probe_vision(
             )
         return True, ""
     except Exception as exc:
-        err = str(exc)[:200]
+        err = _err_text(exc)
         # ── ResponsesAPIError：利用 HTTP 状态码精确分类 ──
         # 避免把 store/max_output_tokens 等无关参数错误误判为"视觉不支持"
         status_code = getattr(exc, "status_code", None)
@@ -373,7 +382,7 @@ async def _probe_claude_thinking(
                 break
         return found_thinking, "", "claude" if found_thinking else ""
     except Exception as exc:
-        err = str(exc)[:200]
+        err = _err_text(exc)
         logger.debug("Claude thinking 探测异常: %s", err)
         if _is_fatal_probe_error(err):
             return None, err, ""
@@ -406,7 +415,7 @@ async def _probe_gemini_thinking(
                 break
         return found_thinking, "", "gemini" if found_thinking else ""
     except Exception as exc:
-        err = str(exc)[:200]
+        err = _err_text(exc)
         logger.debug("Gemini thinking 探测异常: %s", err)
         if _is_fatal_probe_error(err):
             return None, err, ""
@@ -512,7 +521,9 @@ async def run_full_probe(
 
     # ── 先做健康检查：模型不可达则跳过能力探测 ──
     await _emit_stage_callback(stage_callback, "health", "running")
-    health_ok, health_err = await probe_health(client, model, timeout=health_timeout)
+    health_ok, health_err = await probe_health(
+        client, model, timeout=health_timeout, retries=1,
+    )
     caps.healthy = health_ok
     caps.health_error = health_err
 
@@ -680,6 +691,11 @@ def update_capabilities_override(
 
 
 # ── 工具函数 ──────────────────────────────────────────────────
+
+
+def _err_text(exc: BaseException) -> str:
+    """异常转可诊断短文本；TimeoutError 等 str 为空的异常回退为类名。"""
+    return (str(exc) or type(exc).__name__)[:200]
 
 
 def _extract_message(resp: Any) -> Any:
@@ -949,7 +965,7 @@ async def _try_thinking_stream(
                 except Exception:
                     pass
     except Exception as exc:
-        return False, str(exc)[:200]
+        return False, _err_text(exc)
 
 
 # ── 模型元数据查询（上下文窗口自动校正） ─────────────────────────
@@ -1063,7 +1079,7 @@ async def probe_context_window(
             last_ok = mid
             lo = mid
         except Exception as exc:
-            err_str = str(exc).lower()
+            err_str = _err_text(exc).lower()
             # 上下文超限 → 当前长度超出窗口
             ctx_keywords = (
                 "context_length", "too many tokens", "max_tokens",

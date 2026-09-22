@@ -226,7 +226,6 @@ export type JevEntryTone = "idle" | "ready" | "enforce";
 export function jevEntryStatus(input: {
   configured: boolean;
   enabled: string;
-  enforceReady?: boolean;
 }): { tone: JevEntryTone; chip: string } {
   if (!input.configured) {
     return { tone: "idle", chip: "未配置" };

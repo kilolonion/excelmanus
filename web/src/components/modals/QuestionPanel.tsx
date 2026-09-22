@@ -61,11 +61,14 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
             <MessageCircleQuestion className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-[13px] font-semibold text-foreground leading-snug">
+            <p
+              className="text-[13px] font-semibold text-foreground leading-snug truncate"
+              title={question.header || "请回答问题"}
+            >
               {question.header || "请回答问题"}
             </p>
             {question.text && (
-              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed max-h-24 overflow-y-auto">
                 {question.text}
               </p>
             )}
@@ -113,7 +116,8 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
                 <button
                   key={opt.label}
                   onClick={() => onToggle(opt.label)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-150 border ${
+                  title={opt.description ? `${opt.label}：${opt.description}` : opt.label}
+                  className={`inline-flex max-w-full items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-150 border ${
                     isSelected
                       ? "border-[var(--em-primary)] text-[var(--em-primary)] shadow-sm"
                       : "border-border/60 text-muted-foreground hover:border-border hover:text-foreground hover:bg-muted/40"
@@ -123,9 +127,9 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
                   } : undefined}
                 >
                   {isSelected && <Check className="h-3 w-3 shrink-0" />}
-                  <span>{opt.label}</span>
+                  <span className="min-w-0 truncate">{opt.label}</span>
                   {opt.description && (
-                    <span className={`text-[11px] hidden sm:inline ${
+                    <span className={`min-w-0 max-w-40 truncate text-[11px] hidden sm:inline ${
                       isSelected ? "text-[var(--em-primary)]/60" : "text-muted-foreground/60"
                     }`}>
                       {opt.description}

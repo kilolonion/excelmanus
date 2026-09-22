@@ -179,6 +179,9 @@ export const SessionList = memo(function SessionList() {
       event.preventDefault();
       return;
     }
+    // A cancelled native drag may not reach the original (virtualized) row.
+    // Never carry its preview into the next gesture.
+    dragPreview.current?.remove();
     const element = event.currentTarget;
     const rect = element.getBoundingClientRect();
     // Snapshot only the header/card, before dimming the stationary source rows.
@@ -202,6 +205,7 @@ export const SessionList = memo(function SessionList() {
   }, [reorderingWorkspace, sessions]);
 
   const clearDrag = useCallback(() => {
+    dragBlocked.current = false;
     setDrag(null);
     setDragSessions(null);
     setDropTarget(null);
@@ -209,7 +213,24 @@ export const SessionList = memo(function SessionList() {
     dragPreview.current = null;
   }, []);
 
-  useEffect(() => () => { dragPreview.current?.remove(); }, []);
+  useEffect(() => {
+    // Native dragend/drop can target the document or another component after
+    // a reorder. Clean up outside the list too. Drop must bubble so the row
+    // can save its new order before we release the frozen rows.
+    const finishDrag = () => {
+      if (dragPreview.current) clearDrag();
+    };
+    window.addEventListener("dragend", finishDrag, true);
+    window.addEventListener("drop", finishDrag);
+    // Starting another pointer gesture also recovers a missing dragend.
+    window.addEventListener("pointerdown", finishDrag, true);
+    return () => {
+      window.removeEventListener("dragend", finishDrag, true);
+      window.removeEventListener("drop", finishDrag);
+      window.removeEventListener("pointerdown", finishDrag, true);
+      dragPreview.current?.remove();
+    };
+  }, [clearDrag]);
 
   const saveWorkspaceOrder = useCallback(async (sourceId: string, target: SidebarDrop) => {
     const previous = workspaces;
@@ -509,7 +530,7 @@ export const SessionList = memo(function SessionList() {
                         {!session ? (
                         <div
                           className={cn(
-                            "em-workspace-group group/ws flex items-center gap-1 rounded-md px-2 py-1 text-[var(--em-primary-light)] transition-colors",
+                            "em-workspace-group group/ws flex select-none items-center gap-1 rounded-md px-2 py-1 text-[var(--em-primary-light)] transition-colors",
                             "hover:bg-[var(--em-primary-alpha-06)] hover:text-[var(--em-primary)]",
                             "focus-within:bg-[var(--em-primary-alpha-06)] focus-within:text-[var(--em-primary)]",
                             workspaceMenuKey === group.key && "bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]",
@@ -658,7 +679,7 @@ export const SessionList = memo(function SessionList() {
                       <div
                         key={session.id}
                         className={cn(
-                          "em-session-card group relative mx-2 flex min-w-0 cursor-pointer items-center gap-1 rounded-xl py-2 pr-1 pl-[calc(0.875rem+0.375rem)] transition-colors",
+                          "em-session-card group relative mx-2 flex min-w-0 cursor-pointer select-none items-center gap-1 rounded-xl py-2 pr-1 pl-[calc(0.875rem+0.375rem)] transition-colors",
                           awaitingApproval
                             ? isActive
                               ? "bg-[color-mix(in_srgb,var(--em-gold)_18%,transparent)]"

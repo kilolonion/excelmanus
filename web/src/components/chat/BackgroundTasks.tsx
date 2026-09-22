@@ -110,8 +110,8 @@ export function BackgroundTaskCard({ run, onControl, onOpenFile }: {
 
       {question && (
         <fieldset className="rounded-xl bg-[var(--em-fill)] p-3 space-y-2" disabled={!!pending}>
-          <legend className="text-xs font-medium px-1">{question.header || "需要你的回答"}{question.multi_select ? "（可多选）" : ""}</legend>
-          <p className="text-sm whitespace-pre-wrap break-words">{question.text}</p>
+          <legend className="max-w-full truncate text-xs font-medium px-1" title={question.header || "需要你的回答"}>{question.header || "需要你的回答"}{question.multi_select ? "（可多选）" : ""}</legend>
+          <p className="max-h-32 overflow-y-auto whitespace-pre-wrap break-words text-sm">{question.text}</p>
           {question.options.map((option, index) => (
             <label key={index} className="flex items-start gap-2 text-sm cursor-pointer">
               <input type={question.multi_select ? "checkbox" : "radio"} name={`answer-${run.run_id}`}
@@ -119,7 +119,7 @@ export function BackgroundTaskCard({ run, onControl, onOpenFile }: {
                 onChange={() => setSelected((previous) => question.multi_select
                   ? previous.includes(index) ? previous.filter((value) => value !== index) : [...previous, index]
                   : [index])} />
-              <span>{option.is_other ? "其他" : option.label}<span className="block text-xs text-muted-foreground">{option.description}</span></span>
+              <span className="min-w-0 break-words">{option.is_other ? "其他" : option.label}<span className="block text-xs text-muted-foreground">{option.description}</span></span>
             </label>
           ))}
         </fieldset>

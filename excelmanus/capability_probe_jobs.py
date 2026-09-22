@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from excelmanus.logger import get_logger
-from excelmanus.model_probe import ModelCapabilities, run_full_probe
+from excelmanus.model_probe import ModelCapabilities, _err_text, run_full_probe
 from excelmanus.providers import create_client
 
 logger = get_logger("capability_probe_jobs")
@@ -395,7 +395,7 @@ class CapabilityProbeJobManager:
                 snapshot.error = "cancelled"
             except Exception as exc:
                 snapshot.state = "failed"
-                snapshot.error = str(exc)[:200]
+                snapshot.error = _err_text(exc)
             snapshot.finished_at = _utc_now_iso()
             await self._emit(job)
             return
@@ -479,7 +479,7 @@ class CapabilityProbeJobManager:
             await self._emit(job)
         except Exception as exc:
             snapshot.state = "failed"
-            snapshot.error = str(exc)[:200]
+            snapshot.error = _err_text(exc)
             snapshot.finished_at = _utc_now_iso()
             self._mark_skipped_stages(snapshot)
             if not inflight.done():

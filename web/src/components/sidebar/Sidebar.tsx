@@ -57,7 +57,7 @@ export function Sidebar() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
   const isMobile = useIsMobile();
-  
+
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const { shouldReduce } = useMotionSafe();
   const activeTab = useUIStore((s) => s.sidebarTab);
@@ -123,7 +123,7 @@ export function Sidebar() {
         className={`em-sidebar flex flex-col ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}
-        style={{ 
+        style={{
           width: isMobile ? mobileSidebarWidth : desktopSidebarWidth,
           minWidth: isMobile ? mobileSidebarWidth : desktopSidebarWidth,
           transform: isMobile ? `translateX(${sidebarOpen ? "0" : "-100%"})` : undefined,
@@ -159,8 +159,8 @@ export function Sidebar() {
               <Image
                 src="/logo.svg"
                 alt="ExcelManus"
-                width={176}
-                height={28}
+                width={180}
+                height={60}
                 priority
                 unoptimized
                 className="em-brand-logo"

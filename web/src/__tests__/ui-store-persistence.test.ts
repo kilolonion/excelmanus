@@ -20,6 +20,6 @@ describe("persisted UI preference whitelist", () => {
     expect(useUIStore.getState().fullAccessEnabled).toBe(true);
     expect(useUIStore.getState()).not.toHaveProperty("unknownOption");
     useUIStore.getState().setFullAccessEnabled(false);
-    expect(JSON.parse(stored).state).toEqual({ fullAccessEnabled: false });
+    expect(JSON.parse(stored).state).toEqual({ fullAccessEnabled: false, autoApproveEnabled: false });
   });
 });

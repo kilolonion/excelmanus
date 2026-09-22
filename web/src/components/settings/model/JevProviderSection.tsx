@@ -212,7 +212,6 @@ export function JevProviderSection() {
                 const status = jevEntryStatus({
                   configured: provider.configured,
                   enabled: isDefault ? draft.jev_enabled : "off",
-                  enforceReady: runtime?.jev_enforce_ready,
                 });
                 return (
                   <div

@@ -11,8 +11,8 @@ export default function GlobalError({
   reset: () => void;
 }) {
   return (
-    <html lang="zh-CN">
-      <body>
+    <html lang="zh-CN" suppressHydrationWarning>
+      <body suppressHydrationWarning>
         <AppErrorFallback error={error} onReset={reset} />
       </body>
     </html>

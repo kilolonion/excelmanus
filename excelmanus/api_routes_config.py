@@ -1051,7 +1051,7 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
     if get_config() is None:
         return _error_json_response(503, "服务未初始化")
 
-    from excelmanus.model_probe import delete_capabilities, run_full_probe
+    from excelmanus.model_probe import _err_text, delete_capabilities, run_full_probe
     from excelmanus.providers import create_client
 
     db = get_session_manager().database if get_session_manager() else None
@@ -1098,7 +1098,7 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
         except Exception as exc:
             results.append({
                 "name": name, "model": model,
-                "error": str(exc)[:200],
+                "error": _err_text(exc),
             })
 
     return JSONResponse(content={"results": results})
@@ -1376,7 +1376,7 @@ async def test_model_connection(request: Request) -> JSONResponse:
     if get_config() is None:
         return _error_json_response(503, "服务未初始化")
 
-    from excelmanus.model_probe import probe_health
+    from excelmanus.model_probe import _err_text, probe_health
     from excelmanus.providers import create_client
 
     body = {}
@@ -1449,7 +1449,7 @@ async def test_model_connection(request: Request) -> JSONResponse:
     try:
         healthy, health_err = await probe_health(client, model, timeout=15.0)
     except Exception as exc:
-        err_str = str(exc)[:200]
+        err_str = _err_text(exc)
         hint = _diagnose_connection_error(err_str, base_url, model)
         return JSONResponse(content={"ok": False, "error": f"连通测试异常: {err_str}", "hint": hint, "model": model})
 
@@ -1656,6 +1656,8 @@ async def list_remote_models(request: Request) -> JSONResponse:
     if get_config() is None:
         return _error_json_response(503, "服务未初始化")
 
+    from excelmanus.model_probe import _err_text
+
     body: dict = {}
     try:
         body = await request.json()
@@ -1750,7 +1752,7 @@ async def list_remote_models(request: Request) -> JSONResponse:
         error, hint = _list_remote_http_error(exc.response.status_code, base_url, body_text)
         return JSONResponse(content={"models": [], "error": error, "hint": hint})
     except Exception as exc:
-        return JSONResponse(content={"models": [], "error": f"请求失败: {str(exc)[:200]}"})
+        return JSONResponse(content={"models": [], "error": f"请求失败: {_err_text(exc)}"})
 
     # 解析模型列表（兼容 OpenAI / Anthropic / 各类代理格式）
     models_raw: list = []

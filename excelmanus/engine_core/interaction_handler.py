@@ -316,20 +316,13 @@ class InteractionHandler:
         iteration: int,
     ) -> tuple[str, str]:
         e = self._engine
-        # ── 统一 questions 数组模式 ──
-        questions_value = arguments.get("questions")
+        from excelmanus.workbook.interaction import (
+            normalize_ask_user_arguments,
+            prepare_questions,
+        )
 
-        # 向后兼容：旧的 question（单数对象）自动转为 questions 数组
-        if not isinstance(questions_value, list) or len(questions_value) == 0:
-            question_value = arguments.get("question")
-            if isinstance(question_value, dict):
-                questions_value = [question_value]
-            else:
-                raise ValueError("工具参数错误: questions 必须为非空数组。")
-
-        from excelmanus.workbook.interaction import prepare_questions
         pending_list = e._question_flow.enqueue_batch(
-            questions_payload=prepare_questions(e, questions_value),
+            questions_payload=prepare_questions(e, normalize_ask_user_arguments(arguments)),
             tool_call_id=tool_call_id,
         )
         persist_runtime = getattr(getattr(e, "_driver", None), "_persist_runtime_state", None)
@@ -367,21 +360,42 @@ class InteractionHandler:
         超时 DEFAULT_INTERACTION_TIMEOUT 秒后返回超时消息。
         """
         e = self._engine
-        # ── 统一 questions 数组模式 ──
-        questions_value = arguments.get("questions")
-        if not isinstance(questions_value, list) or len(questions_value) == 0:
-            question_value = arguments.get("question")
-            if isinstance(question_value, dict):
-                questions_value = [question_value]
-            else:
-                raise ValueError("工具参数错误: questions 必须为非空数组。")
-
-        from excelmanus.workbook.interaction import prepare_questions
-        prepared = await asyncio.to_thread(prepare_questions, e, questions_value)
-        pending_list = e._question_flow.enqueue_batch(
-            questions_payload=prepared,
-            tool_call_id=tool_call_id,
+        from excelmanus.workbook.interaction import (
+            ASK_USER_ARGUMENT_EXAMPLE,
+            normalize_ask_user_arguments,
+            prepare_questions,
         )
+        from excelmanus.workbook.snapshot import SnapshotError
+
+        try:
+            questions_value = normalize_ask_user_arguments(arguments)
+            prepared = await asyncio.to_thread(prepare_questions, e, questions_value)
+            pending_list = e._question_flow.enqueue_batch(
+                questions_payload=prepared,
+                tool_call_id=tool_call_id,
+            )
+        except ValueError as exc:
+            from excelmanus.engine_core.tool_result import error_result
+
+            return error_result(
+                str(exc),
+                code="TOOL_ARGUMENT_VALIDATION_ERROR",
+                remediation=(
+                    "按 example 的字段名修正后重试；仍不确定可用 "
+                    "introspect_capability 查询 ask_user 的参数细节。"
+                ),
+                fields={
+                    "tool": "ask_user",
+                    "example": ASK_USER_ARGUMENT_EXAMPLE,
+                    "required_fields": ["questions[].text", "questions[].options|selection"],
+                },
+            ).model_text
+        except SnapshotError as exc:
+            from excelmanus.engine_core.tool_result import error_result
+
+            fields = dict(exc.fields or {})
+            fields["tool"] = "ask_user"
+            return error_result(str(exc), code=exc.code, fields=fields).model_text
         self._recovery = {
             "kind": "question", "phase": "waiting", "consumed": False,
             "tool_call_id": tool_call_id, "parent_call_id": self._parent_call_id(),

@@ -61,6 +61,9 @@ function createUpdateService({ current, platform = process.platform, arch = proc
           throw new Error("无法连接更新服务，请检查网络后重试，或打开发布页面下载");
         }
         if (response.status === 404) throw new Error("尚未发布可用的正式版本，请稍后重试或查看下载页面");
+        if (response.status === 403 || response.status === 429) {
+          throw new Error("更新服务请求频率超限，请稍后重试，或打开发布页面下载");
+        }
         if (!response.ok) throw new Error(`无法检查更新（HTTP ${response.status}），请稍后重试`);
         const release = await response.json();
         const releaseUrl = trustedReleaseUrl(release.html_url);

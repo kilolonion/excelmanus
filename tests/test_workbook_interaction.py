@@ -134,6 +134,113 @@ async def test_answer_endpoint_resolves_only_current_question_once(engine, monke
         assert engine._interaction_handler.snapshot()["answers"][q.question_id] == answer
 
 
+class TestAskUserArgumentNormalization:
+    """ask_user 入参自愈：模型常见字段名变体折叠为规范 questions 数组。"""
+
+    def test_question_key_folds_into_text(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"questions": [{"question": "选哪个？", "options": [{"label": "A"}]}]}
+        )
+        assert items[0]["text"] == "选哪个？"
+        assert "question" not in items[0]
+
+    def test_flat_question_string_merges_top_level_options(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"question": "继续吗？", "options": ["继续", "放弃"]}
+        )
+        assert items == [
+            {"text": "继续吗？", "options": [{"label": "继续"}, {"label": "放弃"}]}
+        ]
+
+    def test_title_only_promotes_to_text(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"questions": [{"title": "确认输出格式", "options": [{"label": "A"}]}]}
+        )
+        assert items[0]["text"] == "确认输出格式"
+        assert "title" not in items[0]
+
+    def test_header_truncated_to_12_chars(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"questions": [{"text": "正文", "header": "X" * 20, "options": [{"label": "A"}]}]}
+        )
+        assert items[0]["header"] == "X" * 12
+
+    def test_choices_alias_and_dict_options(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"questions": [{"text": "t", "choices": {"A": "快速", "B": "稳健"}}]}
+        )
+        assert items[0]["options"] == [
+            {"label": "A", "description": "快速"},
+            {"label": "B", "description": "稳健"},
+        ]
+        assert "choices" not in items[0]
+
+    def test_multi_select_string_coercion(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"questions": [{"text": "t", "options": [{"label": "A"}], "multi_select": "true"}]}
+        )
+        assert items[0]["multiSelect"] is True
+        assert "multi_select" not in items[0]
+
+    def test_target_folds_into_selection(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"questions": [{"text": "t", "target": {"file_path": "a.xlsx", "sheet": "S"}}]}
+        )
+        assert items[0]["selection"] == {"file_path": "a.xlsx", "sheet": "S"}
+        assert "target" not in items[0]
+
+    def test_missing_questions_raises_with_example(self):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        with pytest.raises(ValueError, match="示例"):
+            normalize_ask_user_arguments({})
+
+    def test_normalized_items_pass_enqueue(self, engine):
+        from excelmanus.workbook.interaction import normalize_ask_user_arguments
+        items = normalize_ask_user_arguments(
+            {"questions": [{"question": "选哪个", "choices": ["A", "B"]}]}
+        )
+        pending = engine._question_flow.enqueue_batch(items, "call_norm")
+        assert pending[0].text == "选哪个"
+        assert [o.label for o in pending[0].options] == ["A", "B", "Other"]
+
+
+@pytest.mark.asyncio
+async def test_blocking_ask_user_returns_structured_error_on_bad_args(engine):
+    result = await engine._interaction_handler.handle_ask_user_blocking(
+        arguments={"questions": [{"options": [{"label": "A"}]}]},
+        tool_call_id="call_bad",
+        on_event=None,
+        iteration=0,
+    )
+    payload = json.loads(result)
+    assert payload["status"] == "error"
+    assert payload["error_code"] == "TOOL_ARGUMENT_VALIDATION_ERROR"
+    assert payload["example"]["questions"][0]["text"]
+    assert engine._question_flow.queue_size() == 0
+
+
+@pytest.mark.asyncio
+async def test_blocking_ask_user_accepts_aliased_args(engine):
+    async def resolver(question):
+        return "1"
+    engine._question_resolver = resolver
+    result = await engine._interaction_handler.handle_ask_user_blocking(
+        arguments={"question": "选哪个方案？", "choices": ["A", "B"]},
+        tool_call_id="call_alias",
+        on_event=None,
+        iteration=0,
+    )
+    payload = json.loads(result)
+    assert payload["selected_options"] == [{"index": 1, "label": "A"}]
+
+
 @pytest.mark.asyncio
 async def test_presentation_is_read_only_and_changed_requires_write_version(engine):
     handler = ShowWorkbookHandler(engine, None)

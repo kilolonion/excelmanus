@@ -179,6 +179,8 @@
 | `CAP_PROBE_THINKING_TOTAL_TIMEOUT` | 推理探测总预算（秒） | `30` |
 | `CAP_PROBE_THINKING_STRATEGY_TIMEOUT` | 单项推理策略探测超时（秒） | `8` |
 
+健康检查遇到瞬时错误（超时、限流、网络抖动）会自动重试一次再判定，避免模型冷启动或短暂抖动跳过整轮探测；永久性错误（认证失败、模型不存在、额度不足）立即判定不重试。
+
 ## 视觉配置
 
 图片只交给当前激活模型阅读。无视觉时拒绝附件；有视觉时用 `read_image` 或工作台附件注入，再由模型产出 `WorkbookSpec` 并调用 `edit_spreadsheet(workbook_spec=)` 建表。没有独立视觉流水线，也没有附属 VLM 描述。

@@ -104,6 +104,71 @@ def canonical_tool_name(tool_name: str) -> str:
     return _TOOL_NAME_ALIASES.get(tool_name, tool_name)
 
 
+def example_arguments(schema: dict[str, Any] | None, *, _depth: int = 0) -> Any:
+    """从 input_schema 合成最小合法参数示例，附在参数错误上供模型自纠。
+
+    只生成 required 字段；anyOf/oneOf 的 required 分支并入第一项；深度限 6 层。
+    """
+    if not isinstance(schema, dict) or _depth > 6:
+        return {}
+    enum = schema.get("enum")
+    if isinstance(enum, list) and enum:
+        return enum[0]
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        schema_type = next((t for t in schema_type if t != "null"), None)
+    properties = schema.get("properties")
+    if schema_type == "object" or isinstance(properties, dict):
+        props = properties if isinstance(properties, dict) else {}
+        names: list[str] = []
+        required = schema.get("required")
+        if isinstance(required, list):
+            names.extend(name for name in required if isinstance(name, str))
+        for combo in ("anyOf", "oneOf"):
+            branches = schema.get(combo)
+            if not isinstance(branches, list):
+                continue
+            for branch in branches:
+                if isinstance(branch, dict) and isinstance(branch.get("required"), list):
+                    names.extend(
+                        name for name in branch["required"] if isinstance(name, str)
+                    )
+                    break
+        example: dict[str, Any] = {}
+        for name in dict.fromkeys(names):
+            field_schema = props.get(name)
+            example[name] = (
+                example_arguments(field_schema, _depth=_depth + 1)
+                if isinstance(field_schema, dict)
+                else f"<{name}>"
+            )
+        return example
+    if schema_type == "array":
+        items = schema.get("items")
+        item = (
+            example_arguments(items, _depth=_depth + 1)
+            if isinstance(items, dict)
+            else "<item>"
+        )
+        return [item]
+    if schema_type in {"integer", "number"}:
+        minimum = schema.get("minimum")
+        if isinstance(minimum, (int, float)) and not isinstance(minimum, bool):
+            return minimum
+        return 1
+    if schema_type == "boolean":
+        return True
+    if schema_type == "string":
+        return "<string>"
+    for combo in ("oneOf", "anyOf"):
+        options = schema.get(combo)
+        if isinstance(options, list):
+            for option in options:
+                if isinstance(option, dict):
+                    return example_arguments(option, _depth=_depth + 1)
+    return {}
+
+
 def _schema_property_names(schema: dict[str, Any] | None) -> set[str] | None:
     if schema is None:
         return None
@@ -625,6 +690,29 @@ class ToolRegistry:
                 )
                 return
 
+        any_of = schema.get("anyOf")
+        if isinstance(any_of, list) and any_of:
+            matched_count = 0
+            branch_hints: list[str] = []
+            for option in any_of:
+                if not isinstance(option, dict):
+                    continue
+                option_violations: list[str] = []
+                self._collect_schema_violations(
+                    value=value,
+                    schema=option,
+                    path=path,
+                    violations=option_violations,
+                )
+                if not option_violations:
+                    matched_count += 1
+                elif option_violations:
+                    branch_hints.append(option_violations[0])
+            if matched_count == 0:
+                detail = f"（{'；'.join(branch_hints[:3])}）" if branch_hints else ""
+                violations.append(f"{path}: 必须满足 anyOf 至少一个分支{detail}")
+                return
+
         schema_type = schema.get("type")
         if not self._schema_type_matches(value, schema_type):
             violations.append(
@@ -1036,6 +1124,7 @@ class ToolRegistry:
                 "required_fields": required,
                 "accepted_fields": accepted_fields,
                 "provided_fields": sorted(arguments.keys()),
+                "example": example_arguments(schema),
             },
         )
 
@@ -1062,6 +1151,7 @@ class ToolRegistry:
                 "required_fields": required,
                 "accepted_fields": accepted_fields,
                 "provided_fields": sorted(arguments.keys()),
+                "example": example_arguments(schema),
             },
         )
 
