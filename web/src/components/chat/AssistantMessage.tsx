@@ -44,7 +44,7 @@ function splitToolChain(blocks: AssistantBlock[]): {
 }
 
 function isGroupedTool(block: AssistantBlock): block is Extract<AssistantBlock, { type: "tool_call" }> {
-  return block.type === "tool_call" && block.name !== "ask_user" && block.name !== "suggest_mode_switch";
+  return block.type === "tool_call" && block.name !== "ask_user" && block.name !== "suggest_mode_switch" && block.name !== "show_workbook";
 }
 
 type ChainSegment =

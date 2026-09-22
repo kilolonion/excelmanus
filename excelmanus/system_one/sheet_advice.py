@@ -79,10 +79,20 @@ def bounded_range(value: str) -> str | None:
         return None
 
 
+def column_matches_target(target: Mapping[str, Any] | None, column: Mapping[str, Any] | None) -> bool:
+    """Candidate identities must agree before combining their coordinates."""
+    return bool(
+        target and column and target.get("path") == column.get("path")
+        and (not target.get("sheet") or target.get("sheet") == column.get("sheet"))
+    )
+
+
 def read_suggestion(target: Mapping[str, Any] | None, column: Mapping[str, Any] | None,
                     strategy: str) -> dict[str, Any] | None:
     if not target or strategy == "none":
         return None
+    if column and not column_matches_target(target, column):
+        column, strategy = None, "overview"
     args: dict[str, Any] = {"mode": "overview", "file_path": target["path"],
                             "include": ["columns"], "max_results": 10}
     if target.get("sheet"):

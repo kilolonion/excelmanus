@@ -281,6 +281,7 @@ export type JevDraft = {
   jev_timeout_seconds: number;
   jev_active_provider: string;
   ai_gateway_api_key: string;
+  model_canonical_match_enabled: boolean;
 };
 
 export const EMPTY_JEV_DRAFT: JevDraft = {
@@ -295,6 +296,7 @@ export const EMPTY_JEV_DRAFT: JevDraft = {
   jev_timeout_seconds: 1.5,
   jev_active_provider: "",
   ai_gateway_api_key: "",
+  model_canonical_match_enabled: true,
 };
 
 export const JEV_PROVIDER_KEYS: (keyof JevDraft)[] = [
@@ -312,6 +314,7 @@ export const JEV_ROLE_KEYS: (keyof JevDraft)[] = [
   "jev_recovery",
   "jev_mode_hint",
   "jev_ui_hint",
+  "model_canonical_match_enabled",
 ];
 
 export function parseJevGate(value: string | undefined): JevGate {

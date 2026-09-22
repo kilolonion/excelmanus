@@ -1253,7 +1253,7 @@ _restricted_builtins["compile"] = _real_compile
 # 但禁止用户脚本直接调用进程创建函数。
 try:
     import subprocess as _subprocess_mod
-    _SUBPROCESS_BLOCKED_ATTRS = ('Popen', 'run', 'call', 'check_call', 'check_output')
+    _SUBPROCESS_BLOCKED_ATTRS = ('run', 'call', 'check_call', 'check_output')
     def _make_subprocess_blocker(_name):
         def _blocked_fn(*_args, **_kwargs):
             raise RuntimeError(
@@ -1261,6 +1261,12 @@ try:
                 "允许 import subprocess（库内部依赖），但禁止直接调用进程创建函数。"
             )
         return _blocked_fn
+    # asyncio.windows_utils subclasses Popen during import (also reached by
+    # joblib/sklearn). Keep a class-shaped guard without inheriting any actual
+    # process-launching implementation. Subclass construction is still denied.
+    class _BlockedPopen:
+        __init__ = _make_subprocess_blocker('Popen')
+    _subprocess_mod.Popen = _BlockedPopen
     for _attr in _SUBPROCESS_BLOCKED_ATTRS:
         if hasattr(_subprocess_mod, _attr):
             setattr(_subprocess_mod, _attr, _make_subprocess_blocker(_attr))

@@ -157,6 +157,53 @@ QUESTIONS = {"questions": [
 
 
 @pytest.mark.asyncio
+async def test_workbook_selection_survives_restart_and_resumes_original_tool(setup):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.active.title = "明细"
+    wb.active.append(["产品", "金额"])
+    wb.save(setup.path / "sales.xlsx")
+    source = await setup.start(tool_response("ask_user", {"questions": [{"text": "选择金额范围", "selection": {
+        "file_path": "sales.xlsx", "sheet": "明细", "ranges": ["B2:B9"],
+    }}]}))
+    restored = await setup.clone(source)
+    await source.engine._driver.stop()
+    async with setup.client(restored.manager) as client:
+        detail = (await client.get(f"/api/v1/sessions/{source.sid}")).json()
+        q = detail["pending_question"]
+        assert q["selection"]["ranges"] == ["B2:B9"]
+        selected = {**q["selection"], "ranges": ["B2:B5", "D2:D5"]}
+        submit = await client.post(f"/api/v1/chat/{source.sid}/answer", json={"question_id": q["id"], "selection": selected})
+        assert submit.status_code == 200 and submit.json()["resume_required"]
+    await run_engine_followup(restored.engine, "/resume")
+    answers = json.loads(next(m["content"] for m in restored.engine.memory.messages if m.get("tool_call_id") == "original-call"))
+    answer = answers[0] if isinstance(answers, list) else answers
+    assert answer["status"] == "confirmed" and answer["selection"] == selected
+
+
+@pytest.mark.asyncio
+async def test_show_workbook_uses_registered_handler_in_read_mode(setup):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.save(setup.path / "display.xlsx")
+    sm = setup.manager(setup.path / "presentation.db")
+    _sid, engine = await sm.acquire_for_chat(None)
+    engine._client.chat.completions.create = AsyncMock(side_effect=[
+        tool_response("show_workbook", {"target": {"file_path": "display.xlsx", "sheet": "Sheet", "ranges": ["A1:B2"]}, "stage": "planned", "summary": "准备整理这些单元格"}),
+        response("已展示计划范围"),
+    ])
+    events = []
+    result = await engine.followup("展示计划修改范围", chat_mode="read", on_event=events.append)
+    call = result.tool_calls[0]
+    assert call.tool_name == "show_workbook" and call.success
+    payload = json.loads(call.result)
+    assert payload["kind"] == "workbook_presentation" and payload["stage"] == "planned"
+    assert any(event.event_type == EventType.TOOL_CALL_END and event.tool_name == "show_workbook" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_partial_answers_survive_two_restarts_and_resume_through_answer_api(setup):
     source = await setup.start(tool_response("ask_user", QUESTIONS))
     q1 = source.event.question_id

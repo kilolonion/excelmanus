@@ -308,7 +308,7 @@ def synthesize(pack_id: str, evaluation: Evaluation, state: Mapping[str, Any] | 
     if spec.pack_id == "skill.pin":
         return _synthesize_skill_pin(evaluation, state)
     if spec.pack_id == "loop.wrap":
-        return _synthesize_loop_wrap(evaluation)
+        return _synthesize_loop_wrap(evaluation, state)
     if spec.pack_id == "observation.prune":
         return _synthesize_prune(evaluation, state)
     if spec.pack_id == "mutation.verify":
@@ -382,6 +382,11 @@ def _synthesize_context(evaluation: Evaluation, state: Mapping[str, Any]) -> Dec
         # Columns live in the current workspace's files; a different workspace or
         # a request with no spreadsheet target cannot carry a column suggestion.
         column, column_candidate = "none", None
+    if column_candidate:
+        from excelmanus.system_one.sheet_advice import column_matches_target
+
+        if not column_matches_target(target_candidate, column_candidate):
+            column, column_candidate = "ask", None
     read = pick("read", "none")
     if read not in {"overview", "selection", "column_sample", "formulas", "none"}:
         read = "none"
@@ -394,7 +399,7 @@ def _synthesize_context(evaluation: Evaluation, state: Mapping[str, Any]) -> Dec
     for qid in ("workspace", "target", "edit_intent", "column", "read"):
         answer = choice_of(evaluation.answers.get(qid))
         confidence[qid] = round(answer.confidence, 3) if answer and 0 <= answer.confidence <= 1 else 0.0
-    next_step = "clarify" if "ask" in {workspace, target} or edit_intent == "unclear" else (
+    next_step = "clarify" if "ask" in {workspace, target, column} or edit_intent == "unclear" else (
         "inspect_candidate" if suggestion else (
             "inspect_target" if target == "resolved" else "continue"
         )
@@ -498,11 +503,29 @@ def _synthesize_ui(evaluation: Evaluation, state: Mapping[str, Any]) -> Decision
             extras={"surface": "stay", "suppress_heuristic": False},
         )
     suppress = chosen == "stay" and surface.confidence >= T_CODE
+    candidates = list(state.get("candidate_files") or [])
+    index_map = {"first": 0, "second": 1, "third": 2}
+
+    def file_choice(qid: str) -> str:
+        answer = choice_of(evaluation.answers.get(qid))
+        if answer is None or answer.confidence < T_CODE:
+            return ""
+        idx = index_map.get(answer.choice, -1)
+        return str(candidates[idx]) if 0 <= idx < len(candidates) else ""
+
+    file_path = file_choice("file_pick")
+    file_b = file_choice("compare_pick")
+    if not file_path and len(candidates) == 1:
+        file_path = str(candidates[0])
+    if chosen in {"side_panel", "sheet_full", "compare"} and not file_path:
+        chosen, suppress = "stay", False
+    if chosen == "compare" and (not file_b or file_b == file_path):
+        chosen, suppress = "stay", False
     return Decision(
         kind="noop",
         reason=f"surface:{chosen}",
         evaluation=evaluation,
-        extras={"surface": chosen, "suppress_heuristic": suppress},
+        extras={"surface": chosen, "suppress_heuristic": suppress, "file_path": file_path, "file_b": file_b},
         applied=False,
     )
 
@@ -566,9 +589,19 @@ def _synthesize_skill_pin(evaluation: Evaluation, state: Mapping[str, Any]) -> D
     )
 
 
-def _synthesize_loop_wrap(evaluation: Evaluation) -> Decision:
+def _synthesize_loop_wrap(evaluation: Evaluation, state: Mapping[str, Any]) -> Decision:
     nxt = choice_of(evaluation.answers.get("next"))
     chosen = nxt.choice if nxt is not None else "continue"
+    observations = state.get("observations") or []
+    if not observations:
+        return Decision(kind="noop", reason="no_step_evidence", evaluation=evaluation, extras={"next": "continue"})
+    if chosen == "stop" and (
+        state.get("pending_items") or state.get("has_more_results")
+        or any(not row.get("success") or row.get("truncated") for row in observations)
+        or noul_of(evaluation.answers.get("done_enough")) < T_CODE
+        or noul_of(evaluation.answers.get("needs_more_context")) >= T_SUGGEST
+    ):
+        chosen = "continue"
     if nxt is None or nxt.confidence < T_SUGGEST or chosen not in {
         "continue", "retry", "ask_user", "stop",
     }:
@@ -624,16 +657,9 @@ def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]
     # Deterministic evidence outranks the evaluator's optimistic answer.  A
     # failed write, a sampled/truncated read-back, a mismatch, or a version
     # conflict always needs a bounded read-only follow-up before completion.
-    evidence_incomplete = bool(
-        facts.get("has_incomplete_evidence")
-        or facts.get("mismatch_count")
-        or facts.get("evidence_truncated")
-        or facts.get("has_version_conflict")
-        or (
-            int(facts.get("write_operation_count") or 0) > 0
-            and int(facts.get("write_evidence_count") or 0) == 0
-        )
-    )
+    from excelmanus.system_one.evidence import delivery_requires_inspection
+
+    evidence_incomplete = delivery_requires_inspection(state)
     checklist = state.get("checklist")
     checklist = checklist if isinstance(checklist, (list, tuple)) else []
     items: list[dict[str, Any]] = []
@@ -646,6 +672,12 @@ def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]
         else:
             verdict = str(answer.choice)
             confidence = float(answer.confidence or 0.0)
+        if isinstance(entry, Mapping) and entry.get("passed") is False:
+            verdict, confidence = "conflict", 1.0
+        elif isinstance(entry, Mapping) and entry.get("text_truncated"):
+            verdict, confidence = "unknown", 0.0
+        elif verdict == "evidenced" and confidence < T_SUGGEST:
+            verdict = "unknown"
         items.append({
             "id": f"item_{index + 1}",
             "text": str(entry.get("text") if isinstance(entry, Mapping) else entry or "")[:80],

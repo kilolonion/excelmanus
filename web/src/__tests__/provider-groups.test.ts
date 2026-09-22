@@ -24,6 +24,7 @@ function profile(partial: Partial<ProfileEntry> & Pick<ProfileEntry, "name" | "m
     model_family: "",
     custom_extra_body: "",
     custom_extra_headers: "",
+    canonical_model: "",
     ...partial,
   };
 }

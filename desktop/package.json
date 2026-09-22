@@ -10,17 +10,19 @@
     "prepare:runtime": "node scripts/prepare.mjs runtime",
     "prepare:backend": "node scripts/build-backend.mjs",
     "prepare:assets": "npm run build:web && node scripts/prepare.mjs frontend && node scripts/prepare.mjs runtime && npm run prepare:python",
-    "dist": "npm run prepare:assets && npm run prepare:backend && electron-builder",
-    "dist:win": "npm run prepare:assets && npm run prepare:backend && electron-builder --win nsis",
-    "dist:mac": "npm run prepare:assets && npm run prepare:backend && electron-builder --mac dmg",
+    "dist": "npm run prepare:assets && npm run prepare:backend && npm run smoke && electron-builder",
+    "dist:win": "npm run prepare:assets && npm run prepare:backend && npm run smoke && electron-builder --win nsis",
+    "dist:win:compact": "npm run dist:win -- --config.nsis.differentialPackage=false --config.directories.output=dist-compact",
+    "dist:mac": "npm run prepare:assets && npm run prepare:backend && npm run smoke && electron-builder --mac dmg",
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/process-lifecycle.js && node --check src/frontend-runner.cjs && node --check scripts/prepare.mjs && node --check scripts/build-backend.mjs && node --check scripts/prepare-python.mjs && node --check scripts/smoke.mjs && node --check scripts/smoke-app.mjs && node --check ../web/scripts/gen-splash.mjs && node --check src/window-compat.js && node --check src/window-lifecycle.js && node --check src/picked-files.js && node --check src/oauth-preload.js && node --check scripts/smoke-renderer.cjs",
     "build:web": "npm --prefix ../web run build",
     "prepare:python": "node scripts/prepare-python.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "dist:mac:local": "npm run prepare:assets && npm run prepare:backend && electron-builder --mac dmg --config.mac.identity=-",
+    "dist:mac:local": "npm run prepare:assets && npm run prepare:backend && npm run smoke && electron-builder --mac dmg --config.mac.identity=-",
     "smoke:app": "node scripts/smoke-app.mjs",
     "test": "node --test tests/*.test.cjs",
-    "smoke:renderer": "node scripts/smoke-renderer.cjs"
+    "smoke:renderer": "node scripts/smoke-renderer.cjs",
+    "size:report": "node scripts/package-report.mjs"
   },
   "devDependencies": {
     "electron": "44.4.3",
@@ -30,6 +32,7 @@
     "appId": "com.kilolonion.excelmanus",
     "productName": "ExcelManus",
     "asar": true,
+    "afterPack": "scripts/installer-manifest.cjs",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -100,9 +103,10 @@
     },
     "nsis": {
       "include": "installer/progress.nsh",
+      "differentialPackage": true,
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "deleteAppDataOnUninstall": false
     }

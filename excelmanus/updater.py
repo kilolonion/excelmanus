@@ -496,6 +496,10 @@ def backup_user_data(
                 shutil.copy2(str(config_env), str(home_dst / "config.env"))
                 result.files_backed_up.append("config.env")
                 _log("  备份正式仓: config.env")
+            secret_key = home_root / ".secret_key"
+            if secret_key.is_file():
+                shutil.copy2(secret_key, home_dst / ".secret_key")
+                result.files_backed_up.append(".secret_key")
             for sub in ("data", "memory", "skillpacks"):
                 src = home_root / sub
                 if src.is_dir() and any(src.iterdir()):

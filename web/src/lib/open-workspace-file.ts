@@ -10,6 +10,9 @@ import { useFilePreviewStore } from "@/stores/file-preview-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
 import type { WorkbookViewLayout } from "@/lib/workspace-surface";
+import { useWorkbookFocusStore } from "@/stores/workbook-focus-store";
+import { fileRefFromSession, normalizeRelativePath } from "@/lib/workspace-file-ref";
+import { useWorkbookWorkspace } from "@/hooks/use-workbook-workspace";
 
 export type OpenWorkspaceFileIntent = "preview" | "full";
 
@@ -19,6 +22,8 @@ export interface OpenWorkspaceFileOptions {
   sessionId?: string | null;
   workspaceId?: string | null;
   workbookLayout?: WorkbookViewLayout;
+  range?: string;
+  version?: string;
 }
 
 function currentFileScope(opts?: OpenWorkspaceFileOptions): {
@@ -50,10 +55,14 @@ export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions)
     word.closePanel();
     word.closeFullView();
     excel.addRecentFile({ path, filename });
-    if (intent === "full") {
-      excel.openFullView(path, opts?.sheet, opts?.workbookLayout);
+    if (intent === "full" || excel.fullViewPath) {
+      excel.openFullView(path, opts?.sheet, opts?.workbookLayout ?? excel.fullViewLayout);
     } else {
       excel.openPanel(path, opts?.sheet);
+    }
+    if (opts?.range) {
+      const session = useSessionStore.getState().sessions?.find((item) => item.id === scope.sessionId);
+      useWorkbookFocusStore.getState().focus(fileRefFromSession(path, session), opts.sheet, opts.range, opts.version);
     }
     return kind;
   }
@@ -91,11 +100,15 @@ export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions)
 }
 
 export function useOpenWorkspacePathSet(): Set<string> {
+  const { workspace } = useWorkbookWorkspace();
+  const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const excelPath = useExcelStore((s) => (s.panelOpen ? s.activeFilePath : null));
   const wordPath = useWordStore((s) => (s.panelOpen ? s.activeDocPath : null));
   const textPath = useFilePreviewStore((s) => (s.textOpen ? s.textTarget?.path ?? null : null));
   const imagePath = useFilePreviewStore((s) => (s.imageOpen ? s.imageTarget?.path ?? null : null));
-  return new Set([excelPath, wordPath, textPath, imagePath].filter((value): value is string => Boolean(value)));
+  const paths = [excelPath, wordPath, textPath, imagePath, ...(fullViewPath ? workspace.files.map((file) => file.path) : [])];
+  return new Set(paths.filter((value): value is string => Boolean(value))
+    .flatMap((path) => [path, normalizeRelativePath(path), `./${normalizeRelativePath(path)}`]));
 }
 
 export function useWorkspaceFileActive(path: string, _filename?: string): boolean {

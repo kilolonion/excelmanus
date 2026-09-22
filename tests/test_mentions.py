@@ -370,6 +370,88 @@ class TestResolverExcelFile:
 class TestResolverExcelRange:
     """Excel 范围读取测试。"""
 
+    def test_disjoint_ranges_keep_gaps_out_and_reuse_the_named_sheet(self, tmp_path: Path) -> None:
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "O'Brien, Q1"
+        ws["A1"] = "first-selected"
+        ws["B2"] = "gap-must-not-appear"
+        ws["D4"] = "last-selected"
+        wb.create_sheet("Other")["D4"] = "wrong-sheet"
+        wb.save(tmp_path / "multi.xlsx")
+        wb.close()
+        parsed = MentionParser.parse("分析 @file:multi.xlsx['O''Brien, Q1'!A1,D4]")
+        result = _make_resolver(str(tmp_path))._resolve_file(parsed.mentions[0])
+        assert result.error is None
+        assert "[SelectionSet] 2" in result.context_block
+        assert "first-selected" in result.context_block
+        assert "last-selected" in result.context_block
+        assert "gap-must-not-appear" not in result.context_block
+        assert "wrong-sheet" not in result.context_block
+
+    def test_explicit_cross_sheet_union(self, tmp_path: Path) -> None:
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        wb.active.title = "First"
+        wb.active["A1"] = "first-sheet"
+        wb.create_sheet("Second")["C3"] = "second-sheet"
+        wb.save(tmp_path / "multi.xlsx")
+        wb.close()
+        mention = MentionParser.parse("@file:multi.xlsx[First!A1,Second!C3]").mentions[0]
+        result = _make_resolver(str(tmp_path))._resolve_file(mention)
+        assert result.error is None
+        assert "first-sheet" in result.context_block
+        assert "second-sheet" in result.context_block
+
+    def test_whole_axes_preview_used_extent_without_losing_reference(self, tmp_path: Path) -> None:
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        wb.active.title = "Data"
+        wb.active["A2"] = "column-value"
+        wb.active["C4"] = "row-value"
+        wb.active["B3"] = "unselected-gap"
+        wb.save(tmp_path / "axes.xlsx")
+        wb.close()
+        mention = MentionParser.parse("@file:axes.xlsx[Data!A:A,4:4]").mentions[0]
+        result = _make_resolver(str(tmp_path))._resolve_file(mention)
+        assert result.error is None
+        assert "Data!A:A,4:4" in result.context_block
+        assert "column-value" in result.context_block
+        assert "row-value" in result.context_block
+        assert "unselected-gap" not in result.context_block
+        assert "已用范围" in result.context_block
+
+    def test_multi_area_read_budget_is_shared(self, tmp_path: Path, monkeypatch) -> None:
+        from openpyxl import Workbook
+        from openpyxl.worksheet.worksheet import Worksheet
+
+        wb = Workbook()
+        wb.active.title = "Data"
+        wb.active["A1"] = "first"
+        wb.active["D1"] = "second"
+        wb.save(tmp_path / "large.xlsx")
+        wb.close()
+        read_cells = []
+        original = Worksheet.iter_rows
+
+        def bounded_read(ws, **kwargs):
+            read_cells.append((kwargs["max_row"] - kwargs["min_row"] + 1)
+                              * (kwargs["max_col"] - kwargs["min_col"] + 1))
+            return original(ws, **kwargs)
+
+        monkeypatch.setattr(Worksheet, "iter_rows", bounded_read)
+        mention = MentionParser.parse("@file:large.xlsx[Data!A1:A1048576,D1:D1048576]").mentions[0]
+        result = _make_resolver(str(tmp_path))._resolve_file(mention)
+        assert result.error is None
+        assert len(read_cells) == 2
+        assert sum(read_cells) <= 2000
+        assert "已截断" in result.context_block
+        assert "D1:D1048576" in result.context_block
+
     def test_parse_range_spec_with_sheet(self) -> None:
         """_parse_range_spec 解析 Sheet1!A1:C10。"""
         sheet, cell_range = MentionResolver._parse_range_spec("Sheet1!A1:C10")

@@ -90,7 +90,7 @@ def _surface_decision(
     return Decision(
         kind="noop",
         reason=f"surface:{surface}",
-        extras={"surface": surface, "suppress_heuristic": suppress},
+        extras={"surface": surface, "suppress_heuristic": suppress, "file_path": "./a.xlsx", "file_b": "./b.xlsx"},
         applied=applied,
     )
 
@@ -168,7 +168,7 @@ async def test_signed_enforce_emits_hint_on_success(
     event = hints[0]
     assert event.event_type == EventType.UI_HINT
     assert event.ui_hint_surface == "side_panel"
-    assert event.ui_hint_file_path == "a.xlsx"
+    assert event.ui_hint_file_path == "./a.xlsx"
     assert event.ui_hint_suppress_auto_open is False
     assert _traces(captured)
 

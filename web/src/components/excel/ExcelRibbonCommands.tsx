@@ -1,6 +1,8 @@
 "use client";
 
 import { useExcelStore } from "@/stores/excel-store";
+import { activeSession, fileRefFromSession } from "@/lib/workspace-file-ref";
+import { useWorkbookWorkflowStore } from "@/stores/workbook-workflow-store";
 import {
   buildRibbonAskPrompt,
   ribbonAskActions,
@@ -17,7 +19,7 @@ export function ExcelRibbonCommands({
   tab: NativeRibbonTab;
   filePath: string;
   fallbackSheet?: string;
-  getSelection?: () => Pick<RibbonAskContext, "sheet" | "range">;
+  getSelection?: () => Pick<RibbonAskContext, "sheet" | "range" | "version">;
 }) {
   const actions = ribbonAskActions(tab);
   if (actions.length === 0 || !filePath) return null;
@@ -26,7 +28,7 @@ export function ExcelRibbonCommands({
     const live = getSelection?.() ?? {};
     const { draftRange, activeSheet } = useExcelStore.getState();
     const sameDraft = draftRange && (!draftRange.path || draftRange.path === filePath);
-    const version = useExcelStore.getState().getContentVersion(filePath);
+    const version = live.version ?? (sameDraft ? draftRange.contentVersion : undefined);
     const ctx: RibbonAskContext = {
       path: filePath,
       sheet:
@@ -38,7 +40,11 @@ export function ExcelRibbonCommands({
       range: live.range || (sameDraft ? draftRange.range : undefined),
       version,
     };
-    useExcelStore.getState().setPendingTemplateMessage(buildRibbonAskPrompt(kind, ctx));
+    const session = activeSession();
+    if (session && ["filter-analyze", "chart", "pivot", "generate-formula", "dedupe", "sort"].includes(kind)) {
+      useWorkbookWorkflowStore.getState().openHandoff({ file: fileRefFromSession(filePath, session), sessionId: session.id,
+        operation: kind === "filter-analyze" ? "filter" : kind, sheet: ctx.sheet, range: ctx.range, version: ctx.version ?? undefined });
+    } else useExcelStore.getState().setPendingTemplateMessage(buildRibbonAskPrompt(kind, ctx));
   };
 
   return (

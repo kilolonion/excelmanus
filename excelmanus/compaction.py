@@ -758,16 +758,17 @@ async def _apply_tool_result_pruning(engine: Any, memory: Any) -> int:
     ``surface/compact`` series 重写，一次触发至多一次 cache miss。
     """
     jev_edits = 0
+    protected_indices: set[int] = set()
     try:
         from excelmanus.system_one.host import maybe_prune_observations
 
-        jev_edits = await maybe_prune_observations(engine, memory)
+        jev_edits = await maybe_prune_observations(engine, memory, protected_indices=protected_indices)
     except Exception:
         logger.debug("observation.prune skipped", exc_info=True)
     from excelmanus.compaction_pruner import prune_messages
 
     msgs = list(getattr(memory, "messages", None) or [])
-    edits = prune_messages(msgs)
+    edits = prune_messages(msgs, protected_indices=protected_indices)
     for idx, new_content in edits.items():
         msg = msgs[idx]
         msg["content"] = new_content

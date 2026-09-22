@@ -450,6 +450,8 @@ def sse_event_to_sse(
             "options": options,
             "multi_select": bool(event.question_multi_select),
             "queue_size": int(event.question_queue_size or 0),
+            "selection": event.question_selection,
+            "tool_call_id": event.tool_call_id,
         }
     elif event.event_type in {EventType.TASK_LIST_CREATED, EventType.TASK_ITEM_UPDATED}:
         data = {

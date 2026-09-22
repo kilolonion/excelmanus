@@ -38,8 +38,7 @@ export default function Home() {
         return false;
       }
     }
-    sendMessage(text, files, sid);
-    return true;
+    return sendMessage(text, files, sid);
   };
 
   const handleSuggestionClick = useCallback((text: string, files?: File[]) => {

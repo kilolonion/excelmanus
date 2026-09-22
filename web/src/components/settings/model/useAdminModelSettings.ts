@@ -71,6 +71,7 @@ export function useAdminModelSettings() {
     model_family: "",
     custom_extra_body: "",
     custom_extra_headers: "",
+    canonical_model: "",
   });
   // 按 "model|base_url" 或 profile 名索引的每模型能力
   const [capsMap, setCapsMap] = useState<Record<string, ModelCapabilities>>({});
@@ -137,6 +138,7 @@ export function useAdminModelSettings() {
       model_family: preset.model_family,
       custom_extra_body: "",
       custom_extra_headers: "",
+      canonical_model: "",
     });
     setSiblingSourceName(null);
     setRemoteModelError(null);
@@ -527,7 +529,7 @@ export function useAdminModelSettings() {
       || (subPrefix && normalizedModel && !existingNames.includes(normalizedModel)
         ? normalizedModel
         : uniqueSiblingProfileName(normalizedModel, existingNames));
-    const draftSnapshot = {
+    const draftSnapshot: Record<string, unknown> = {
       ...profileDraft,
       name: newName,
       model: normalizedModel,
@@ -535,6 +537,11 @@ export function useAdminModelSettings() {
         ? { clone_from: siblingSourceName }
         : {}),
     };
+    // canonical_model 留空时不下发，交给后端按置信度自动匹配；
+    // 非空则视为显式指定绑定。
+    if (!profileDraft.canonical_model.trim()) {
+      delete draftSnapshot.canonical_model;
+    }
 
     // 乐观插入：先在前端列表添加，避免等待网络请求。
     const sourceKey = siblingSourceName
@@ -542,15 +549,16 @@ export function useAdminModelSettings() {
       : "";
     const optimisticEntry: ProfileEntry = {
       name: newName,
-      model: draftSnapshot.model,
-      api_key: draftSnapshot.api_key || sourceKey,
-      base_url: draftSnapshot.base_url,
-      description: draftSnapshot.description,
-      protocol: draftSnapshot.protocol || "auto",
-      thinking_mode: draftSnapshot.thinking_mode || "auto",
-      model_family: draftSnapshot.model_family || "",
-      custom_extra_body: draftSnapshot.custom_extra_body || "",
-      custom_extra_headers: draftSnapshot.custom_extra_headers || "",
+      model: normalizedModel,
+      api_key: profileDraft.api_key || sourceKey,
+      base_url: profileDraft.base_url,
+      description: profileDraft.description,
+      protocol: profileDraft.protocol || "auto",
+      thinking_mode: profileDraft.thinking_mode || "auto",
+      model_family: profileDraft.model_family || "",
+      custom_extra_body: profileDraft.custom_extra_body || "",
+      custom_extra_headers: profileDraft.custom_extra_headers || "",
+      canonical_model: profileDraft.canonical_model || "",
     };
     const prevProfiles = config?.profiles || [];
     setConfig((prev) => {
@@ -562,7 +570,7 @@ export function useAdminModelSettings() {
     setNewProfile(false);
     setEditingProfile(null);
     setSiblingSourceName(null);
-    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "", canonical_model: "" });
     setTestResult((prev) => ({ ...prev, _profile_form: null }));
     setRemoteModelError(null);
     setRemoteModelHint(null);
@@ -598,22 +606,28 @@ export function useAdminModelSettings() {
   const handleUpdateProfile = async (originalName: string) => {
     setProfileError(null);
     const updatedName = profileDraft.name;
-    const draftSnapshot = { ...profileDraft };
+    const draftSnapshot: Record<string, unknown> = { ...profileDraft };
 
     // 乐观更新：先在前端列表替换，避免等待网络请求。
     const prevProfiles = config?.profiles || [];
     const previous = prevProfiles.find((p) => p.name === originalName);
+    // canonical_model 未变更时不下发，后端按新 Model ID 重新匹配；
+    // 被用户改动（含清空）才显式发送以覆盖/解除绑定。
+    if ((profileDraft.canonical_model || "") === (previous?.canonical_model || "")) {
+      delete draftSnapshot.canonical_model;
+    }
     const optimisticEntry: ProfileEntry = {
-      name: draftSnapshot.name,
-      model: draftSnapshot.model,
-      api_key: draftSnapshot.api_key || previous?.api_key || "",
-      base_url: draftSnapshot.base_url,
-      description: draftSnapshot.description,
-      protocol: draftSnapshot.protocol || "auto",
-      thinking_mode: draftSnapshot.thinking_mode || "auto",
-      model_family: draftSnapshot.model_family || "",
-      custom_extra_body: draftSnapshot.custom_extra_body || "",
-      custom_extra_headers: draftSnapshot.custom_extra_headers || "",
+      name: draftSnapshot.name as string,
+      model: draftSnapshot.model as string,
+      api_key: profileDraft.api_key || previous?.api_key || "",
+      base_url: profileDraft.base_url,
+      description: profileDraft.description,
+      protocol: profileDraft.protocol || "auto",
+      thinking_mode: profileDraft.thinking_mode || "auto",
+      model_family: profileDraft.model_family || "",
+      custom_extra_body: profileDraft.custom_extra_body || "",
+      custom_extra_headers: profileDraft.custom_extra_headers || "",
+      canonical_model: profileDraft.canonical_model || "",
     };
     setConfig((prev) => {
       if (!prev) return prev;
@@ -624,7 +638,7 @@ export function useAdminModelSettings() {
     setEditingProfile(null);
     setNewProfile(false);
     setSiblingSourceName(null);
-    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "", canonical_model: "" });
     setTestResult((prev) => ({ ...prev, _profile_form: null }));
     setRemoteModelError(null);
     setRemoteModelHint(null);
@@ -680,7 +694,7 @@ export function useAdminModelSettings() {
       if (editingProfile === name) {
         setEditingProfile(null);
         setNewProfile(false);
-        setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+        setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "", canonical_model: "" });
       }
       // 同步清理缓存中的能力结果，避免保留无效项。
       setCapsMap((prev) => {

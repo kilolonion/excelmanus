@@ -371,6 +371,106 @@ class TestInterpreterResolveCache:
             code_tools._resolve_python_command("definitely-missing-py", require_excel_deps=False)
         assert len(calls) == 1, "失败条目 60s 内不应重复探测"
 
+    def test_probe_retries_once_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """首轮超时后用更长预算重试一次（Windows 冷启动宽限）。"""
+        import subprocess as sp
+        from types import SimpleNamespace
+        from excelmanus.tools import code_tools
+
+        monkeypatch.setattr(code_tools, "_command_exists", lambda command: True)
+        timeouts: list[float] = []
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> Any:
+            timeouts.append(kwargs["timeout"])
+            if len(timeouts) == 1:
+                raise sp.TimeoutExpired(cmd, kwargs["timeout"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(code_tools.subprocess, "run", fake_run)
+        probe = code_tools._probe_environment(["python"], require_excel_deps=False)
+        assert probe.status == "ok"
+        assert timeouts == [
+            code_tools._PROBE_TIMEOUT_SECONDS,
+            code_tools._PROBE_TIMEOUT_RETRY_SECONDS,
+        ]
+
+    def test_probe_uses_isolated_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """探针与真实执行一致带 -B -I -X utf8，避免宿主机 PYTHON* 污染。"""
+        from types import SimpleNamespace
+        from excelmanus.tools import code_tools
+
+        monkeypatch.setattr(code_tools, "_command_exists", lambda command: True)
+        captured: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> Any:
+            captured.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(code_tools.subprocess, "run", fake_run)
+        probe = code_tools._probe_environment(["python"], require_excel_deps=True)
+        assert probe.status == "ok"
+        flags = captured[0]
+        assert "-B" in flags and "-I" in flags
+        assert flags[flags.index("-X") + 1] == "utf8"
+
+    def test_auto_dedupes_by_resolved_executable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """PATH 上的 python/python3 与既有候选指向同一 exe 时不重复探测。"""
+        import sys
+        from excelmanus.tools import code_tools
+
+        code_tools._RESOLVE_CACHE.clear()
+        monkeypatch.delenv("EXCELMANUS_RUN_PYTHON", raising=False)
+        monkeypatch.setattr(
+            code_tools.shutil,
+            "which",
+            lambda name: sys.executable if name in ("python", "python3") else None,
+        )
+        calls: list[list[str]] = []
+
+        def fake_probe(command: list[str], **_kwargs: Any) -> Any:
+            calls.append(command)
+            return code_tools._InterpreterProbe(command=command, status="error", detail="boom")
+
+        monkeypatch.setattr(code_tools, "_probe_environment", fake_probe)
+        with pytest.raises(RuntimeError):
+            code_tools._resolve_python_command("auto", require_excel_deps=True)
+        assert [sys.executable] in calls
+        assert ["python"] not in calls and ["python3"] not in calls
+
+    def test_warmup_populates_resolve_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """预热成功后，首个真实调用直接命中缓存不再探测。"""
+        from excelmanus.tools import code_tools
+
+        code_tools._RESOLVE_CACHE.clear()
+        calls: list[list[str]] = []
+
+        def fake_probe(command: list[str], **_kwargs: Any) -> Any:
+            calls.append(command)
+            return code_tools._InterpreterProbe(command=command, status="ok", detail="")
+
+        monkeypatch.setattr(code_tools, "_probe_environment", fake_probe)
+        code_tools.warmup_interpreter()
+        assert calls
+        calls.clear()
+        code_tools._resolve_python_command("auto", require_excel_deps=True)
+        assert not calls
+
+    def test_warmup_clears_failure_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """预热失败不留失败缓存，首个真实调用可全新重探。"""
+        from excelmanus.tools import code_tools
+
+        code_tools._RESOLVE_CACHE.clear()
+        monkeypatch.setattr(
+            code_tools,
+            "_probe_environment",
+            lambda command, **_kwargs: code_tools._InterpreterProbe(
+                command=command, status="error", detail="boom"
+            ),
+        )
+        with pytest.raises(RuntimeError):
+            code_tools.warmup_interpreter()
+        assert all(value[0] is not None for value in code_tools._RESOLVE_CACHE.values())
+
     def test_shorten_marker_avoids_overflow_keywords(self) -> None:
         from excelmanus.tools.code_tools import _shorten
 

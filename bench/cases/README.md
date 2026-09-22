@@ -1,6 +1,6 @@
 # 套件 JSON
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-19
+适用版本：1.8.0 源码 · 更新日期：2026-09-21
 
 本目录只放 suite 文件。目录约定和怎么跑见上一级 [README.md](../README.md)。
 `python -m excelmanus.bench --all` 会运行本目录下 `include_in_all` 未设为 `false` 的 `*.json`。
@@ -14,7 +14,7 @@
 | `attachments` / `images` | 第一轮上传的本地文件（等价前端预上传） |
 | `chat_mode` | `write` / `read` / `plan`，默认 `write` |
 | `auto_approve` | `fullaccess`（默认）/ `accept` / `reject`；决定评测如何处理授权和审批 |
-| `auto_replies` | `ask_user` 自动回答队列 |
+| `auto_replies` | `ask_user` 自动回答队列；选区确认问题收到文本回答时按「已澄清」记录并结束该问题，不等于确认具体单元格区域 |
 | `turn_timeout` | 单轮硬超时秒数；优先级 case > suite > CLI `--turn-timeout`，0 = 不限制 |
 | `assertions` | 声明式断言；suite 级会先与 case 级合并。体验套件不要写 |
 | `expected` | 断言套件：`golden_file` + `answer_position`。体验套件：只放 `lens` / `review_focus` |

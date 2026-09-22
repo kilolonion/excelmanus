@@ -65,6 +65,14 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "ask_user": (
         "当实质歧义挡住安全完成时，向用户提一个结构化问题。不要问探查能发现的事实。"
         "无应答通道时按最合理默认推进并在回复里声明口径。"
+        "需要用户指定表格范围时，在问题中提供 selection（file_path、sheet、可选 ranges 建议范围）；"
+        "侧栏会打开让用户选择并确认，返回版本绑定的 selection。文字补充不等于选区确认。"
+    ),
+    "show_workbook": (
+        "打开用户的表格侧栏并临时高亮 target.ranges。stage=inspect 定位查看，planned 展示准备修改的区域，"
+        "changed 展示已修改的区域。changed 必须在写入成功后调用并携带写入回执的 content_version；"
+        "范围是你标记的范围，应依据实际写入结果，不得把计划声称为完成。此工具不修改文件、不代表用户批准。"
+        "需要用户确认范围时使用 ask_user.selection。"
     ),
     "write_plan": "把当前计划写成工作区文档。",
     "exit_plan_mode": (

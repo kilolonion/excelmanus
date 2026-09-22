@@ -36,6 +36,7 @@
 | Word 处理 | 读取、检索、编辑和生成 `.docx` 文档；复杂任务可使用 Python 脚本 |
 | 图片转表格 | 将截图交给支持视觉的当前模型识别，再根据结构化规格生成工作簿 |
 | 文件预览与历史 | 在工作台预览和编辑表格，查看修改记录、比较版本、恢复历史文件 |
+| 选区交互与并发保护 | Agent 可请求确认具体单元格区域，展示准备修改和已修改范围；写入绑定内容版本，避免覆盖其他会话的编辑；保存冲突时可逐单元格核对并合并草稿 |
 | 多工作区与多会话 | 登记已有本机文件夹，每个会话绑定一个工作区；同一工作区中的会话共享文件 |
 | 后台任务与恢复 | 子代理可在后台执行；在「任务」面板查看进度、补充指令、暂停或继续；中断的主任务可用 `/resume` 恢复 |
 | 技能与外部工具 | 用 Skillpack 复用任务方法，通过 MCP 连接搜索及其他外部服务 |
@@ -48,7 +49,8 @@ ExcelManus Desktop 把 Web 工作台、API 后端，以及 `run_code` 所需的 
 
 - **统一工作区**：对话、文件、后台任务和表格视图在同一个窗口中切换。
 - **内置表格工作台**：直接查看和编辑工作簿，通过公式栏、工作表标签和对话输入继续处理数据。
-- **集中管理模型**：在设置中管理模型提供商、模型配置、订阅与 OAuth，以及可选的决策服务。
+- **选区确认与结果定位**：需要范围时可在表格里直接选择并确认；Agent 可把查看、计划和已修改区域定位到当前工作簿。
+- **集中管理模型**：在设置中管理模型提供商、模型配置、订阅账号与授权，以及可选的决策服务。
 - **本地数据目录**：主数据库、凭证和默认工作区保存在 App 的独立 profile 中；登记到其他位置的工作区仍保留在原路径。
 
 <table>
@@ -58,7 +60,7 @@ ExcelManus Desktop 把 Web 工作台、API 后端，以及 `run_code` 所需的 
 </tr>
 <tr>
 <td align="center"><b>表格工作台</b><br />查看、编辑工作簿，并从当前内容继续对话</td>
-<td align="center"><b>模型与连接</b><br />管理提供商、模型、订阅与 OAuth</td>
+<td align="center"><b>模型与连接</b><br />管理提供商、模型、订阅账号与授权</td>
 </tr>
 </table>
 
@@ -145,6 +147,8 @@ Web 工作台基于 Next.js、React 和 Univer，支持流式对话、文件预�
 - **直接工具与代码执行**：同一任务可以交替使用业务工具和 `run_code`，无需切换代码模式。常用工具直接提供，其他能力按需查询和加载。
 - **写入与审批**：普通工作区编辑按当前权限执行并记录变更；删除文件、执行 Shell 等操作可能需要确认。并非每次写入都会弹出审批。
 - **版本冲突**：工作簿写入使用观察到的内容版本。发生冲突时应重新读取文件后决定如何修改，避免覆盖其他会话或手工编辑。
+- **选区确认**：Agent 请求范围时，确认答案会绑定工作区、文件、工作表和用户当前看到的内容版本；旧版本或非法区域会保留问题并要求重新处理。
+- **版本与历史**：历史预览、恢复和操作撤销都按文件版本校验；恢复前会检查待保存编辑和冲突，不能把旧页面的坐标套到新版本。
 - **后台子代理**：由模型显式调用 `delegate` 启动。主聊天结束后，后台任务可以继续；暂停或取消会保留已经提交的改动。
 - **中断恢复**：服务重启后，未完成任务显示为中断。`/resume` 根据已保存的对话与工具结果继续，不会恢复旧进程，也不会自动重放结果不明的写入。
 - **记忆与摘要**：记忆按需读取；会话结束摘要默认关闭。启用相关功能可能产生额外模型调用。
@@ -158,7 +162,7 @@ Web 工作台基于 Next.js、React 和 Univer，支持流式对话、文件预�
 | OpenAI 兼容 | 填写 Base URL、API Key 和模型 ID；适用于支持该协议的云端或本地服务 |
 | OpenAI Responses | 将模型档案协议设为 `openai_responses` |
 | Anthropic / Gemini | 使用对应提供商预设，或显式选择 `anthropic` / `gemini` 协议 |
-| Codex 订阅连接 | 在「设置 → 模型 → 订阅与 OAuth」中使用浏览器授权或设备码；可用模型以连接后的发现结果为准 |
+| Codex 订阅连接 | 在「设置 → 模型 → 订阅账号」中使用浏览器授权或设备码；可用模型以连接后的发现结果为准 |
 
 远程部署使用 Codex 连接时，按设置页提示使用设备码，或粘贴浏览器授权后的完整回调地址。当前集成使用固定的本机回调 `http://localhost:1455/auth/callback`；不要替换为部署站点的回调地址。
 
@@ -184,15 +188,24 @@ ExcelManus 是单用户软件。多个工作区和会话共用进程级模型凭
 | `POST /api/v1/chat` | JSON 对话 |
 | `POST /api/v1/chat/abort` | 停止主任务 |
 | `POST /api/v1/chat/subscribe` | 订阅或重新连接会话事件流 |
+| `POST /api/v1/chat/{session_id}/answer` | 提交问答或选区确认 |
+| `POST /api/v1/chat/{session_id}/approve` | 批准或拒绝待审批操作 |
+| `POST /api/v1/chat/{session_id}/guide` | 向运行中的会话注入引导消息 |
 | `GET /api/v1/sessions/{session_id}/turn` | 查看主任务状态及恢复条件 |
 | `GET /api/v1/sessions/{session_id}/subagents` | 查看后台子代理 |
 | `POST /api/v1/sessions/{session_id}/subagents/{run_id}` | 补充指令、暂停、取消或继续后台任务 |
 | `GET /api/v1/files/excel/view` | 获取工作簿视图 |
 | `POST /api/v1/files/excel/write` | 保存表格编辑 |
+| `POST /api/v1/files/excel/merge` | 预览或按单元格选择合并冲突中的表格草稿 |
 | `GET /api/v1/files/word/snapshot` | 获取 Word 文档快照 |
 | `POST /api/v1/files/word/write` | 保存 Word 编辑 |
 | `GET /api/v1/revisions` | 查询文件修订 |
 | `POST /api/v1/revisions/restore` | 恢复文件历史版本 |
+| `GET /api/v1/version/check` | 检查已发布版本与更新信息 |
+| `GET /api/v1/version/manifest` | 获取前后端版本指纹 |
+| `GET /api/v1/version/upgrade/capability` | 查询网页更新是否可用及原因 |
+| `GET /api/v1/version/upgrade/status` | 查询最近一次网页更新状态 |
+| `POST /api/v1/version/upgrade` | 在满足条件时启动网页停机更新 |
 | `GET /api/v1/health` | 检查服务状态 |
 
 配置了有效管理令牌后，除健康检查和 CORS 预检外，API 请求需携带 `Authorization: Bearer <token>`。健康检查成功只表示服务可响应，不代表模型配置、文件处理或外部工具均已通过验证。
@@ -215,10 +228,13 @@ ExcelManus 是单用户软件。多个工作区和会话共用进程级模型凭
 | `run_code_templates` | 批量读写、分析与格式化模板 |
 | `word_basic` | Word 读取、编辑与生成 |
 | `word_code_runner` | 复杂 Word 文档处理 |
+| `agent_self_management` | 查询自身能力并调整当前会话配置，默认关闭 |
 
 </details>
 
 加载顺序、目录发现、覆盖规则和 Hook 协议见 [Skillpack 文档](docs/skillpack_protocol.md)。
+
+在设置 → 系统 → 能力中开启「Agent 自我管理」后，agent 可加载对应技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话。开关立即生效；配置修改不会保存为全局默认，也不能更改密钥或审批权限。
 
 ## 升级与部署
 
@@ -230,7 +246,7 @@ ExcelManus 是单用户软件。多个工作区和会话共用进程级模型凭
 
 本机 Git 更新采用 fast-forward，遇到分支冲突时停止更新。服务器部署脚本会同步部署目录，更新前应保留数据备份，避免在部署目录存放未提交的开发工作。当前不提供 Docker 安装流程，也不承诺无中断升级。
 
-详见 [升级与部署说明](docs/hot-update-design.md) 和 [运维手册](docs/ops-manual.md)。
+网页更新会先检查未保存的表格编辑和运行中的任务；更新期间有停机窗口，只有前后端都恢复后才提示刷新。服务器默认关闭网页更新，需显式设置 `EXCELMANUS_WEB_UPGRADE_ENABLED=1` 并启用管理员登录保护。详见 [升级与部署说明](docs/hot-update-design.md) 和 [运维手册](docs/ops-manual.md)。
 
 ## 开发与评测
 

@@ -94,7 +94,21 @@ class SheetContext(BaseModel):
     workspace_id: str = Field(max_length=128)
     path: str = Field(max_length=300)
     sheet: str = Field(default="", max_length=100)
-    range: str = Field(default="", max_length=100)
+    range: str = Field(default="", max_length=4096)
+    observed_version: str = Field(default="", max_length=80)
+
+
+class WorkbookAction(SheetContext):
+    operation: str = Field(min_length=1, max_length=128)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    instruction: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def bound_parameters(self):
+        import json
+        if len(json.dumps(self.parameters, ensure_ascii=False)) > 64000:
+            raise ValueError("表格操作参数过大，请分批处理")
+        return self
 
 
 class ChatRequest(BaseModel):
@@ -111,6 +125,16 @@ class ChatRequest(BaseModel):
     chat_mode: Literal["write", "read", "plan"] = "write"
     images: list[ImageAttachment] = Field(default_factory=list)
     sheet_context: SheetContext | None = None
+    # Visible workbook panes captured at send time. The singular field remains
+    # the compatibility/default context for existing clients.
+    sheet_contexts: list[SheetContext] = Field(default_factory=list, max_length=3)
+    workbook_action: WorkbookAction | None = None
+
+    @model_validator(mode="after")
+    def workbook_action_requires_plan(self):
+        if self.workbook_action is not None and self.chat_mode != "plan":
+            raise ValueError("表格操作交接必须先生成可确认的计划")
+        return self
 
 
 def _workspace_activity_index(manager: Any, rows: list[dict[str, Any]]) -> dict[str, list[str]]:
@@ -177,9 +201,12 @@ def _workspace_activity_index(manager: Any, rows: list[dict[str, Any]]) -> dict[
 def _context_input(request: ChatRequest) -> dict[str, Any]:
     from excelmanus.system_one.policy import gate_for_pack, jev_is_active, live_jev_settings
 
+    context = {"sheet_context": request.sheet_context.model_dump() if request.sheet_context else None,
+               "sheet_contexts": [item.model_dump() for item in request.sheet_contexts],
+               "workbook_action": request.workbook_action.model_dump() if request.workbook_action else None}
     settings = live_jev_settings(get_config())
     if not jev_is_active(settings) or gate_for_pack("context.resolve", settings) == "off":
-        return {}
+        return context
     manager = get_session_manager()
     try:
         rows = manager.list_workspaces() if manager is not None else []
@@ -196,8 +223,7 @@ def _context_input(request: ChatRequest) -> dict[str, Any]:
     except Exception:
         logger.debug("Workspace candidates unavailable", exc_info=True)
         workspaces = []
-    return {"sheet_context": request.sheet_context.model_dump() if request.sheet_context else None,
-            "workspaces": workspaces}
+    return {**context, "workspaces": workspaces}
 
 
 def _session_workspace_fields(session_id: str | None, route_decision: Any = None) -> dict[str, Any]:
@@ -569,6 +595,9 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         )
 
     context_input = _context_input(request)
+    from excelmanus.system_one.budget import JevTurnBudget
+
+    jev_budget = JevTurnBudget()
     route_decision = None
     try:
         from excelmanus.system_one.intent_context import route_session_workspace
@@ -579,6 +608,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             request.session_id,
             request.message,
             context_input,
+            budget=jev_budget,
         )
     except Exception:
         routed_session_id = None
@@ -606,9 +636,9 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
 
     if route_decision is not None:
         try:
-            from excelmanus.system_one.trace import emit_jev_trace
+            from excelmanus.system_one.trace import emit_context_route_trace
 
-            emit_jev_trace(engine, route_decision, pack_id="context.resolve")
+            emit_context_route_trace(engine, route_decision)
         except Exception:
             logger.debug("工作区路由 trace 发送失败", exc_info=True)
 
@@ -645,6 +675,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             display_text=display_text,
             mention_contexts=mention_contexts,
             context_input=context_input,
+            jev_budget=jev_budget,
         )
         chat_result = chat_turn.result
     except AttachmentError as _attachment_exc:
@@ -795,6 +826,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             # ── 延迟初始化：会话获取（可能创建 Engine + MCP sync） ──
             context_input = _context_input(request)
+            from excelmanus.system_one.budget import JevTurnBudget
+
+            jev_budget = JevTurnBudget()
             route_decision = None
             try:
                 from excelmanus.system_one.intent_context import route_session_workspace
@@ -805,6 +839,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     request.session_id,
                     request.message,
                     context_input,
+                    budget=jev_budget,
                 )
             except Exception:
                 routed_session_id = None
@@ -962,6 +997,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         display_text=display_text,
                         mention_contexts=mention_contexts,
                         context_input=context_input,
+                        jev_budget=jev_budget,
                     )
                     return outcome.result
                 finally:
@@ -972,10 +1008,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             # ── 启动 chat 任务 ──
             if route_decision is not None:
                 try:
-                    from excelmanus.system_one.trace import emit_jev_trace
+                    from excelmanus.system_one.trace import emit_context_route_trace
 
-                    emit_jev_trace(
-                        engine, route_decision, pack_id="context.resolve", on_event=_on_event,
+                    emit_context_route_trace(
+                        engine, route_decision, on_event=_on_event,
                     )
                 except Exception:
                     logger.debug("工作区路由 trace 发送失败", exc_info=True)
@@ -1214,7 +1250,8 @@ class AnswerQuestionRequest(BaseModel):
     question_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ]
-    answer: str
+    answer: str = ""
+    selection: dict[str, Any] | None = None
 
 
 class ApproveRequest(BaseModel):
@@ -1652,7 +1689,31 @@ async def chat_answer(
     if engine is None:
         return JSONResponse(status_code=404, content={"error": "会话不存在或未激活"})
 
-    ok = submit_question_answer(engine, request.question_id, request.answer)
+    try:
+        if request.selection is not None:
+            from excelmanus.workbook.interaction import validate_selection_answer
+            from excelmanus.workbook.snapshot import SnapshotError
+
+            pending = engine._question_flow.current()
+            # A completed identical submission is safe to acknowledge after a lost response.
+            record = engine._interaction_handler.snapshot() or {}
+            previous = record.get("answers", {}).get(request.question_id)
+            if previous and previous.get("selection") == request.selection:
+                selection = request.selection
+            else:
+                if pending is None or pending.question_id != request.question_id or not pending.selection:
+                    raise ValueError("问题已结束或不是区域选择问题")
+                try:
+                    selection = await asyncio.to_thread(validate_selection_answer, engine, pending.selection, request.selection)
+                except SnapshotError as exc:
+                    return JSONResponse(status_code=409, content={"error": str(exc), "code": exc.code})
+            ok = submit_question_answer(engine, request.question_id, request.answer, selection)
+        else:
+            if not request.answer.strip():
+                raise ValueError("回答不能为空")
+            ok = submit_question_answer(engine, request.question_id, request.answer)
+    except (ValueError, OSError) as exc:
+        return JSONResponse(status_code=422, content={"error": str(exc)})
     if not ok:
         return JSONResponse(
             status_code=404,

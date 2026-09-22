@@ -1,6 +1,6 @@
 # ExcelManus Web
 
-ExcelManus 的 Web 工作台，基于 Next.js 16、React 19、Tailwind CSS 4 和 Univer 构建。适用版本：1.8.0 源码；更新日期：2026-09-19。
+ExcelManus 的 Web 工作台，基于 Next.js 16、React 19、Tailwind CSS 4 和 Univer 构建。适用版本：1.8.0 源码；更新日期：2026-09-21。
 
 [项目首页](../README.md) · [文档导航](../docs/README.md) · [服务器部署](../docs/ops-manual.md)
 
@@ -56,7 +56,7 @@ npm run build
 npm run start
 ```
 
-当前 `build` 和 `build:webpack` 都使用 webpack。构建前会从 `../pyproject.toml` 同步包版本；类型错误不会被构建配置忽略。
+当前 `build` 和 `build:webpack` 都使用 webpack。构建前会从 `../pyproject.toml` 同步包版本；类型错误不会被构建配置忽略。每次构建还会生成指纹（`EXCELMANUS_WEB_BUILD_ID`，缺省随机）：作为 Next.js `buildId`、注入 `NEXT_PUBLIC_WEB_BUILD_ID`，并由 `src/app/api/app-version` 暴露，供网页版本检查识别前端是否已发布新版。
 
 需要独立部署 Next.js standalone 产物时，同时复制静态资源：
 

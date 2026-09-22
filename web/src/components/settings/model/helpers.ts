@@ -13,6 +13,7 @@ export const EMPTY_PROFILE_DRAFT: ProfileEntry = {
   model_family: "",
   custom_extra_body: "",
   custom_extra_headers: "",
+  canonical_model: "",
 };
 
 export interface ProviderGroup {
@@ -248,6 +249,7 @@ export function profileToDraft(profile: ProfileEntry): ProfileEntry {
     model_family: profile.model_family || "",
     custom_extra_body: profile.custom_extra_body || "",
     custom_extra_headers: profile.custom_extra_headers || "",
+    canonical_model: profile.canonical_model || "",
   };
 }
 
@@ -287,6 +289,8 @@ export function siblingDraftFromProfile(profile: ProfileEntry): ProfileEntry {
     model_family: profile.model_family || "",
     custom_extra_body: profile.custom_extra_body || "",
     custom_extra_headers: profile.custom_extra_headers || "",
+    // 新档案不沿用兄弟档案的绑定，交由后端按新 Model ID 重新匹配
+    canonical_model: "",
   };
 }
 

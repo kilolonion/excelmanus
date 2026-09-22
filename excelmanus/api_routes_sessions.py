@@ -14,6 +14,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from excelmanus.api_app_state import (
     error_json_response as _error_json_response,
@@ -313,7 +314,7 @@ async def undo_approval(approval_id: str, request: Request) -> JSONResponse:
     if engine is None:
         return _error_json_response(404, "没有活跃会话。")
 
-    result_msg = engine._approval.undo(approval_id)
+    result_msg = await run_in_threadpool(engine._approval.undo, approval_id)
     success = "已回滚" in result_msg
     return JSONResponse(content={
         "status": "ok" if success else "error",
@@ -477,7 +478,7 @@ async def undo_operation(
     if rec.session_id and rec.session_id != session_id:
         return _error_json_response(404, f"操作 '{approval_id}' 不属于此会话。")
 
-    result_msg = engine._approval.undo(approval_id)
+    result_msg = await run_in_threadpool(engine._approval.undo, approval_id)
     success = "已回滚" in result_msg
     return JSONResponse(content={
         "status": "ok" if success else "error",

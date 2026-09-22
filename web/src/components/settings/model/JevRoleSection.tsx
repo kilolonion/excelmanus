@@ -227,6 +227,15 @@ export function JevRoleSection() {
                     }
                   />
                 </JevFieldRow>
+                <JevFieldRow label="模型名智能匹配" desc="添加或保存模型档案时，自动把 Model ID 匹配到已知模型名（如 gpt-5-6-sol → gpt-5.6-sol），并继承其上下文窗口与能力配置。不会改写发给上游的 Model ID；开启时会为已有档案补绑。">
+                  <Switch
+                    aria-label="模型名智能匹配"
+                    checked={draft.model_canonical_match_enabled}
+                    onCheckedChange={(checked) =>
+                      setDraft((prev) => ({ ...prev, model_canonical_match_enabled: checked }))
+                    }
+                  />
+                </JevFieldRow>
               </div>
             </div>
 

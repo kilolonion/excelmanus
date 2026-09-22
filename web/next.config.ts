@@ -2,6 +2,12 @@ import type { NextConfig } from "next";
 import os from "os";
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "node:crypto";
+
+// Embed the same identity in the loaded browser bundle and the frontend's own
+// version endpoint. Backend-only fingerprints cannot detect split deployments.
+const webBuildId = process.env.EXCELMANUS_WEB_BUILD_ID || randomUUID();
+process.env.EXCELMANUS_WEB_BUILD_ID = webBuildId;
 
 function getDevFrontendPort(): number {
   const raw = process.env.PORT || process.env.EXCELMANUS_FRONTEND_PORT || "3000";
@@ -48,6 +54,7 @@ function getProjectVersion(): string {
 }
 
 const nextConfig: NextConfig = {
+  generateBuildId: async () => webBuildId,
   output: "standalone",
   // 固定 tracing 根目录为 web/，防止上级目录中的残留 lockfile
   // 被误判为 workspace root，导致 standalone 产物嵌套错位。
@@ -56,6 +63,7 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: getLocalNetworkOrigins(getDevFrontendPort()),
   env: {
     NEXT_PUBLIC_APP_VERSION: getProjectVersion(),
+    NEXT_PUBLIC_WEB_BUILD_ID: webBuildId,
   },
   async rewrites() {
     // BACKEND_INTERNAL_URL: Next.js 服务端 rewrite 代理的目标地址。

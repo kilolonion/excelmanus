@@ -138,6 +138,15 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-installed-win.ps1
 
+      - name: Record Windows package size
+        if: matrix.target == 'win'
+        working-directory: source-中文/desktop
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Filter '*Setup*.exe' | Select-Object -First 1
+          node scripts/package-report.mjs dist/win-unpacked --installer $installer.FullName --output dist/package-report.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Upload desktop artifact
         uses: actions/upload-artifact@v4
         with:
@@ -146,4 +155,5 @@ jobs:
             source-中文/desktop/dist/*.exe
             source-中文/desktop/dist/*.dmg
             source-中文/desktop/dist/*.blockmap
+            source-中文/desktop/dist/package-report.json
           if-no-files-found: error

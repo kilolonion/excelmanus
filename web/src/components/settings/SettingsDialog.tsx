@@ -34,7 +34,7 @@ import { checkModelPlaceholder } from "@/lib/api";
 
 const TAB_META = [
   { value: "model", label: "模型", coachId: "coach-settings-tab-model", icon: <Server className="size-4" /> },
-  { value: "plugins", label: "插件", coachId: "coach-settings-tab-plugins", icon: <Package className="size-4" /> },
+  { value: "plugins", label: "扩展", coachId: "coach-settings-tab-plugins", icon: <Package className="size-4" /> },
   { value: "runtime", label: "系统", coachId: "coach-settings-tab-runtime", icon: <SlidersHorizontal className="size-4" /> },
   { value: "access", label: "安全", coachId: "coach-settings-tab-access", icon: <ShieldCheck className="size-4" /> },
   { value: "version", label: "版本", coachId: "coach-settings-tab-version", icon: <ArrowUpCircle className="size-4" /> },

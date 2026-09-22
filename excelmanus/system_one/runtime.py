@@ -71,4 +71,4 @@ async def evaluate_for_host(
         return Decision.ask("timeout") if security else Decision.noop("timeout", transport="unavailable")
     finally:
         # Timeouts, cancellation and failed requests consume real latency too.
-        budget.record((time.monotonic() - started) * 1000.0, reserved_ms=reserved_ms)
+        budget.record((time.monotonic() - started) * 1000.0, reserved_ms=reserved_ms, security=security)

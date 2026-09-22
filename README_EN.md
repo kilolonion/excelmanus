@@ -36,6 +36,7 @@ The project provides a Web UI, a REST API, and packaging for Windows and macOS d
 | Word processing | Read, search, edit, and create `.docx` documents; use Python for more complex work |
 | Images to spreadsheets | Give a screenshot to the active vision-capable model and generate a workbook from its structured specification |
 | Previews and history | Preview and edit spreadsheets, inspect changes, compare revisions, and restore earlier files |
+| Range interaction and concurrency safety | Ask the user to confirm exact cells, show planned or changed ranges, and bind writes to a content version so another session is not overwritten; save conflicts can be reviewed and merged per cell |
 | Workspaces and conversations | Register existing local folders and bind each conversation to one; conversations in a folder share its files |
 | Background tasks and recovery | Run subagents in the background, inspect and steer them from Tasks, and resume an interrupted main task with `/resume` |
 | Skills and external tools | Reuse workflows through Skillpacks and connect search or other services through MCP |
@@ -48,7 +49,8 @@ ExcelManus Desktop packages the Web workspace, API backend, and the Python and N
 
 - **Unified workspace:** switch between conversations, files, background tasks, and spreadsheet views in one window.
 - **Built-in spreadsheet workspace:** inspect and edit workbooks, use the formula bar and sheet tabs, and continue the conversation from the current file.
-- **Central model management:** configure model providers, model profiles, subscriptions and OAuth, plus optional decision services.
+- **Range confirmation and navigation:** let the agent ask for a range in the workbook, then locate inspected, planned, and changed areas in the current sheet.
+- **Central model management:** configure model providers, model profiles, subscription accounts and authorization, plus optional decision services.
 - **Local app profile:** the main database, credentials, and default workspace live in the app profile; registered external workspaces remain at their original paths.
 
 <table>
@@ -58,7 +60,7 @@ ExcelManus Desktop packages the Web workspace, API backend, and the Python and N
 </tr>
 <tr>
 <td align="center"><b>Spreadsheet workspace</b><br />Inspect and edit a workbook, then continue the conversation</td>
-<td align="center"><b>Models and connections</b><br />Manage providers, models, subscriptions, and OAuth</td>
+<td align="center"><b>Models and connections</b><br />Manage providers, models, subscription accounts, and authorization</td>
 </tr>
 </table>
 
@@ -145,6 +147,8 @@ The Web UI uses Next.js, React, and Univer. It provides streaming conversations,
 - **Direct tools and code:** the same task can alternate between business tools and `run_code`. There is no separate code-mode switch. Common tools are available upfront; other capabilities are discovered and loaded on demand.
 - **Writes and approvals:** ordinary workspace edits follow the current permissions and record changes. Deleting files or running shell commands may require confirmation. Not every write opens an approval dialog.
 - **Version conflicts:** workbook writes use the observed content version. Read the latest file before resolving a conflict to avoid overwriting edits from another conversation or application.
+- **Range confirmation:** a confirmed range is bound to its workspace, file, sheet, and the content version visible to the user; stale or invalid selections remain pending for correction.
+- **History and undo:** previews, restores, and operation undo validate file versions; restore checks pending edits and conflicts before replacing a file.
 - **Background subagents:** the model starts them explicitly through `delegate`. They can continue after the main chat ends; pausing or cancelling preserves already committed changes.
 - **Recovery:** unfinished tasks become interrupted after a restart. `/resume` continues from saved messages and tool results; it does not restore an old process or automatically replay writes with unknown outcomes.
 - **Memory and summaries:** memory is read on demand. Session-end summaries are off by default. Enabling these features can generate additional model requests.
@@ -158,7 +162,7 @@ Manage multiple model profiles in Settings and activate one for conversation, su
 | OpenAI-compatible | Enter the Base URL, API key, and model ID for a compatible cloud or local service |
 | OpenAI Responses | Set the profile protocol to `openai_responses` |
 | Anthropic / Gemini | Use the provider preset or explicitly select `anthropic` / `gemini` |
-| Codex subscription | Use browser authorization or a device code under Settings → Model → Subscription & OAuth; model availability comes from the connected account |
+| Codex subscription | Use browser authorization or a device code under Settings → Model → Subscription account; model availability comes from the connected account |
 
 For a remote deployment, follow the UI instructions to use device authorization or paste the complete browser callback URL. This integration uses the fixed local callback `http://localhost:1455/auth/callback`; do not replace it with your deployment domain.
 
@@ -184,15 +188,24 @@ The backend defaults to [http://localhost:8000](http://localhost:8000). Its [int
 | `POST /api/v1/chat` | JSON conversation |
 | `POST /api/v1/chat/abort` | Stop the main task |
 | `POST /api/v1/chat/subscribe` | Subscribe or reconnect to conversation events |
+| `POST /api/v1/chat/{session_id}/answer` | Submit an answer or range confirmation |
+| `POST /api/v1/chat/{session_id}/approve` | Approve or reject a pending action |
+| `POST /api/v1/chat/{session_id}/guide` | Inject a guide message into a running session |
 | `GET /api/v1/sessions/{session_id}/turn` | Inspect main-task state and recovery conditions |
 | `GET /api/v1/sessions/{session_id}/subagents` | List background subagents |
 | `POST /api/v1/sessions/{session_id}/subagents/{run_id}` | Steer, pause, cancel, or continue a background task |
 | `GET /api/v1/files/excel/view` | Read a workbook view |
 | `POST /api/v1/files/excel/write` | Save spreadsheet edits |
+| `POST /api/v1/files/excel/merge` | Preview or merge a conflicting workbook draft with per-cell choices |
 | `GET /api/v1/files/word/snapshot` | Read a Word snapshot |
 | `POST /api/v1/files/word/write` | Save Word edits |
 | `GET /api/v1/revisions` | List file revisions |
 | `POST /api/v1/revisions/restore` | Restore a file revision |
+| `GET /api/v1/version/check` | Check published releases and update info |
+| `GET /api/v1/version/manifest` | Read frontend/backend version fingerprints |
+| `GET /api/v1/version/upgrade/capability` | Check whether web updates are available and why |
+| `GET /api/v1/version/upgrade/status` | Read the latest web update status |
+| `POST /api/v1/version/upgrade` | Start a stop-then-update when supported |
 | `GET /api/v1/health` | Check service status |
 
 When a valid management token is configured, API requests require `Authorization: Bearer <token>`, except health checks and CORS preflight requests. A successful health check confirms that the service responds; it does not validate model configuration, file operations, or external tools.
@@ -215,10 +228,13 @@ A directory with a `SKILL.md` containing `name` and `description` defines a skil
 | `run_code_templates` | Batch writing, analysis, and formatting templates |
 | `word_basic` | Word reading, editing, and generation |
 | `word_code_runner` | Complex Word workflows |
+| `agent_self_management` | Inspect capabilities and adjust session settings; disabled by default |
 
 </details>
 
 See the [Skillpack protocol](docs/skillpack_protocol_en.md) for discovery, overrides, resources, and hooks.
+
+Enable **Agent self-management** under Settings → System → Capabilities to make the skill and its `inspect_agent` / `configure_agent` tools available. The switch applies to live sessions immediately. Agent changes affect the current session only; credentials, approval permissions, and global defaults cannot be changed through these tools.
 
 ## Updates and deployment
 
@@ -230,7 +246,7 @@ See the [Skillpack protocol](docs/skillpack_protocol_en.md) for discovery, overr
 
 Local Git updates use fast-forward and stop on branch conflicts. Server deployment synchronizes the deployment checkout; back up data and keep uncommitted development work elsewhere. The project does not currently provide a Docker installation workflow or promise zero-downtime updates.
 
-See [update behavior](docs/hot-update-design.md) (Chinese) and the [operations guide](docs/ops-manual_en.md).
+Web updates check for unsaved workbook edits and running tasks before stopping services. They have a downtime window and only prompt a refresh after both frontend and backend recover. Server-side web updates are disabled by default; enable `EXCELMANUS_WEB_UPGRADE_ENABLED=1` together with administrator login protection. See [update behavior](docs/hot-update-design.md) (Chinese) and the [operations guide](docs/ops-manual_en.md).
 
 ## Development and evaluation
 

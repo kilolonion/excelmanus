@@ -75,6 +75,8 @@ def public_transport(api_key: str | None, protocol: str | None = None) -> str:
 
 def synthesized_action(pack_id: str, decision: Decision) -> str:
     extras = decision.extras or {}
+    if extras.get("action"):
+        return str(extras["action"])
     if decision.kind == "outcome":
         return f"恢复结果 {extras.get('outcome') or ''}".rstrip()
     if pack_id == "approval.tool_call":
@@ -176,60 +178,29 @@ def curated_answers(pack_id: str, decision: Decision) -> dict[str, str | float |
 
 def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
     reason = str(decision.reason or "")
+    extras = decision.extras or {}
     if gate == "off" or reason == "disabled":
         return "总闸或子闸关闭，未评估"
+    if extras.get("impact") and extras.get("stage") in {"effect", "sent", "outcome"}:
+        return str(extras["impact"])[:200]
+    if decision.kind == "outcome":
+        return {
+            "escaped": "建议后工具执行成功；这不代表任务完成或由建议导致",
+            "different_failure": "建议后出现不同错误，仍未恢复成功",
+            "repeated": "建议后仍重复同一失败",
+            "not_continued": "建议后未再调用工具",
+            "not_delivered": "建议未送入主模型上下文",
+            "stopped": "确定性停止条件已触发",
+        }.get(str(extras.get("outcome") or ""), "恢复结果已记录")
     if reason == "unavailable" or reason.startswith("error:") or reason.startswith("unavailable:"):
         return "评估不可用，执行面与接线前相同"
     if reason == "budget_exhausted":
         return "Jev 回合预算已用尽，执行面保持接线前行为"
     if reason == "provider_cooldown":
         return "Jev provider 处于冷却期，执行面保持接线前行为"
-    if not decision.applied or gate != "enforce":
-        return "本次未应用建议，任务继续按原流程处理"
-    extras = decision.extras or {}
-    if decision.kind == "outcome":
-        return {
-            "escaped": "建议后已摆脱同一失败",
-            "repeated": "建议后仍重复同一失败",
-            "not_continued": "建议后未再调用工具",
-            "not_delivered": "建议未送达主模型",
-            "stopped": "按熔断停止",
-        }.get(str(extras.get("outcome") or ""), "恢复结果已记录")
-    if pack_id == "context.resolve":
-        routed = str(extras.get("routed_workspace") or "")
-        if routed:
-            return f"已将会话绑定到工作区「{routed[:40]}」，可在会话列表中纠正归属"
-        return "已向主模型提供工作区、表格位置和澄清建议；未切换工作区或修改文件"
-    if pack_id == "exposure.turn":
-        profile = extras.get("profile") or "full"
-        if extras.get("wire_narrow"):
-            return f"已按 {profile} 收窄出网工具 schema"
-        return f"已记录暴露面 {profile}，本回合未收窄 wire"
-    if pack_id == "skill.pin":
-        pin = extras.get("pin") or ""
-        return f"已将技能 {pin} 置顶" if pin else "未置顶技能"
-    if pack_id == "approval.tool_call":
-        if decision.kind == "deny":
-            return "已拒绝该高风险调用"
-        if decision.kind == "auto":
-            return "已自动放行该调用"
-        return "仍走审批询问"
-    if pack_id == "observation.shape":
-        return f"已将观察裁成 {extras.get('shape') or 'keep'}"
-    if pack_id == "loop.wrap":
-        return f"步末建议 {extras.get('next') or 'continue'}（不中断循环）"
-    if pack_id == "ui.surface":
-        return f"已建议切换到 {extras.get('surface') or 'stay'}"
-    if pack_id == "observation.prune":
-        return "已将旧观察收成指针" if extras.get("prune") else "保留旧观察"
-    if pack_id == "mutation.verify":
-        missing = extras.get("missing_items")
-        if isinstance(missing, (int, float)) and missing:
-            return f"写入后验证建议 {extras.get('next') or 'none'}；缺证据事项 {int(missing)} 项"
-        return f"写入后验证建议 {extras.get('next') or 'none'}"
-    if pack_id == "recovery.next_step":
-        return f"失败后建议 {extras.get('next') or 'stop'}"
-    return "已应用到执行面"
+    if extras.get("stage", "evaluation") == "evaluation":
+        return "评估已完成，实际影响由后续执行记录确认" if decision.evaluation else "本次未完成评估"
+    return "判断已记录，实际影响尚未确认"
 
 
 def build_jev_trace_payload(
@@ -247,17 +218,27 @@ def build_jev_trace_payload(
         transport = "typesafe"
     if transport not in {"gateway", "typesafe", "unavailable"}:
         transport = "unavailable"
+    stage = str(extras.get("stage") or ("outcome" if decision.kind == "outcome" else "evaluation"))
+    changed = stage == "effect" and bool(extras.get("state_changed"))
+    delivered = stage == "effect" and bool(extras.get("advice_delivered"))
+    evaluated = stage == "evaluation" and evaluation is not None and not evaluation.skipped
     payload: dict[str, Any] = {
         "pack": pack_id,
         "gate": gate if gate in {"off", "enforce"} else "off",
-        "applied": bool(decision.applied),
+        "applied": gate == "enforce" and (changed or delivered),
+        "eligible": bool(decision.applied),
+        "stage": stage,
         "transport": transport,
-        "latency_ms": round(latency, 1),
+        "latency_ms": round(latency, 1) if stage == "evaluation" else 0.0,
         "action": synthesized_action(pack_id, decision),
         "kind": str(decision.kind or "noop"),
         "reason": str(decision.reason or "")[:200],
         "answers": curated_answers(pack_id, decision),
         "impact": impact_sentence(pack_id, decision, gate),
+        "evaluated": evaluated,
+        "advice_delivered": delivered,
+        "state_changed": changed,
+        "source": str(extras.get("source") or "jev")[:40],
         "provider_id": str(extras.get("provider_id") or "")[:80],
         "protocol": str(extras.get("protocol") or "")[:40],
         "model": str(getattr(evaluation, "model", "") or "")[:120] if evaluation else "",
@@ -303,7 +284,7 @@ def emit_jev_trace(
     if not is_host_session(engine):
         return
     settings = live_jev_settings(getattr(engine, "config", None))
-    if not jev_is_active(settings):
+    if settings.enabled == "off":
         return
     try:
         gate = gate_for_pack(pack_id, settings)
@@ -339,3 +320,41 @@ def emit_jev_trace(
             callback(event)
     except Exception:
         logger.debug("jev_trace emit failed; continuing turn", exc_info=True)
+
+
+def record_host_effect(
+    engine: Any, pack_id: str, *, action: str, impact: str,
+    changed: bool = False, delivered: bool = False, source: str = "jev",
+    stage: str = "effect", on_event: Any = None,
+) -> None:
+    """Call only after the host has consumed a decision; never infer success."""
+    from excelmanus.system_one.log import record_jev_decision
+
+    try:
+        if not is_host_session(engine):
+            return
+        settings = live_jev_settings(getattr(engine, "config", None))
+        gate = gate_for_pack(pack_id, settings)
+        if gate == "off":
+            return
+        decision = Decision(
+            kind="noop", reason="host_effect", applied=changed or delivered,
+            extras={
+                "stage": stage, "action": action, "impact": impact,
+                "state_changed": changed, "advice_delivered": delivered, "source": source,
+                "next": action,
+            },
+        )
+        record_jev_decision(pack_id=pack_id, gate=gate, decision=decision)
+        emit_jev_trace(engine, decision, pack_id=pack_id, on_event=on_event)
+    except Exception:
+        logger.debug("Jev effect recording failed; continuing turn", exc_info=True)
+
+
+def emit_context_route_trace(engine: Any, decision: Decision, *, on_event: Any = None) -> None:
+    emit_jev_trace(engine, decision, pack_id="context.resolve", on_event=on_event)
+    if decision.extras.get("routed_workspace"):
+        record_host_effect(
+            engine, "context.resolve", action="workspace_routed", changed=True,
+            impact="会话已绑定到建议工作区", on_event=on_event,
+        )

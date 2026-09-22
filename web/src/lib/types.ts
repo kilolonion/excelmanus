@@ -254,7 +254,7 @@ export interface TaskItem {
 }
 
 export type Message =
-  | { id: string; role: "user"; content: string; files?: FileAttachment[]; timestamp?: number }
+  | { id: string; role: "user"; content: string; files?: FileAttachment[]; timestamp?: number; workbookAction?: import("./workbook-handoff").WorkbookActionContext; workbookContext?: import("./workbook-context").WorkbookMessageContext }
   | { id: string; role: "assistant"; blocks: AssistantBlock[]; affectedFiles?: string[]; timestamp?: number };
 
 export interface Approval {
@@ -273,6 +273,10 @@ export interface Question {
   multiSelect: boolean;
   /** Number of questions remaining in the batch queue (including this one). */
   queueSize?: number;
+  selection?: import("@/lib/workbook-interaction").WorkbookTarget;
+  toolCallId?: string;
+  sessionId?: string;
+  autoOpen?: boolean;
 }
 
 export interface ModelInfo {

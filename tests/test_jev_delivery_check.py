@@ -11,6 +11,7 @@ from excelmanus.agent.loop import run_tool_loop
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
 from excelmanus.engine_types import ToolCallResult
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.events import EventType
 from excelmanus.providers.stream_types import StreamDelta
 from excelmanus.skillpacks import SkillMatchResult
@@ -76,7 +77,8 @@ def _written_engine(**overrides: object) -> AgentEngine:
 
 
 @pytest.mark.asyncio
-async def test_delivery_check_holds_text_and_reasks() -> None:
+@pytest.mark.parametrize("emit_events", [True, False])
+async def test_delivery_check_holds_text_and_reasks(emit_events: bool) -> None:
     """inspect_more：草稿的 TEXT_DELTA 不外发，注入隐藏建议后再跑一迭代。"""
     engine = _written_engine()
     mocked_create = _queue_streams(engine, ["草稿答复", "核对后的最终答复"])
@@ -87,13 +89,13 @@ async def test_delivery_check_holds_text_and_reasks() -> None:
         AsyncMock(return_value=_verify_decision("inspect_more")),
     ) as mocked_eval:
         result = await run_tool_loop(
-            engine, _route(), on_event=events.append,
+            engine, _route(), on_event=events.append if emit_events else None,
             initial_tool_results=initial,
         )
     mocked_eval.assert_awaited_once()
     assert mocked_create.await_count == 2
     # 草稿文本被暂存后丢弃，最终答复正常流式发出
-    assert _text_deltas(events) == ["核对后的最终答复"]
+    assert _text_deltas(events) == (["核对后的最终答复"] if emit_events else [])
     assert result.reply == "核对后的最终答复"
     # 草稿进了记忆但不展示；隐藏建议消息已注入
     hidden = [
@@ -115,6 +117,9 @@ async def test_delivery_check_pass_flushes_held_text() -> None:
         side_effect=lambda **_kw: _multi_chunk_stream(),
     )
     initial = [ToolCallResult("edit_spreadsheet", {"file_path": "a.xlsx"}, "ok", True)]
+    initial[0].structured = ToolResult(success=True, model_text="ok", value={
+        "meta": {"write_verification": {"status": "success", "sheet": "Sheet1"}},
+    })
     with patch(
         "excelmanus.system_one.evaluate",
         AsyncMock(return_value=_verify_decision("none")),

@@ -20,7 +20,6 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { apiFetch, buildApiUrl, apiGet, apiPut, getAuthHeaders } from "@/lib/api";
-import { extractTypedFileMentions, findMissingFileMentions, shouldBlockMissingFileMentions } from "@/lib/mention-existence";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { applyVisionFromModel } from "@/lib/vision-capability";
 import { UndoPanel } from "@/components/modals/UndoPanel";
@@ -54,7 +53,6 @@ import { ChatDropzone, ChatUploadButton } from "./ChatUploadButton";
 import { ChatSelectionChip } from "./ChatSelectionChip";
 import { WorkbookContextChip } from "@/components/excel/WorkbookConversation";
 import { ChatLiveSelectionChip } from "./ChatLiveSelectionChip";
-import { prepareWorkbookMessage } from "@/lib/workbook-conversation";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { useChatUpload } from "./use-chat-upload";
 import { registerChatFileUpload } from "./chat-upload-bridge";
@@ -740,27 +738,11 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     }
     const sessionId = useSessionStore.getState().activeSessionId;
     const draftText = text;
-    let finalText = applyDisplayReplacements(trimmed, tokenMapRef.current);
+    const finalText = applyDisplayReplacements(trimmed, tokenMapRef.current);
     sendPendingRef.current = true;
     try {
       if (files.some((file) => file.workspaceKey && file.workspaceKey !== workspaceKeyForSessionId(sessionId))) {
         throw new Error("附件属于另一个工作区，请移除后在当前工作区重新选择");
-      }
-      finalText = await prepareWorkbookMessage(finalText, sessionId);
-      if (extractTypedFileMentions(finalText).length > 0) {
-        // 复用侧栏的同一份工作区扫描（30s 缓存 + inflight 合并），失败时按截断处理放行。
-        await useExcelStore.getState().refreshWorkspaceFiles(sessionId, { cached: true }).catch(() => {});
-        const store = useExcelStore.getState();
-        const usable = store.workspaceFilesSessionId === sessionId && !store.workspaceFilesError;
-        const workspaceFiles = usable ? store.workspaceFiles : [];
-        const truncated = !usable || store.workspaceFilesTruncated;
-        const knownPaths = workspaceFiles.map((f) => f.path);
-        const missing = findMissingFileMentions(finalText, knownPaths);
-        // truncated 时清单不完整，存在性校验不可靠，放行由后端兜底
-        if (!truncated && shouldBlockMissingFileMentions(knownPaths, missing)) {
-          nudgeInput(`找不到引用的文件：${missing[0]}，请检查后重试`);
-          return;
-        }
       }
       if (useSessionStore.getState().activeSessionId !== sessionId) throw new Error("已切换对话，草稿已保留，请确认后重新发送");
       const validFiles = files.filter((af) => af.status === "success");

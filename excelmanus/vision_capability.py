@@ -89,10 +89,13 @@ def infer_vision_capable(
     *,
     override: str = "auto",
     probe: bool | None = None,
+    canonical_model: str = "",
 ) -> bool:
     """推断当前模型是否支持视觉输入。
 
     优先级：手动覆盖 > 关键词+probe 交叉验证 > 关键词推断。
+    canonical_model 是智能匹配绑定的规范模型名；真实 Model ID
+    关键词未命中时，回退用规范名再做一次关键词推断。
     """
     if override == "true":
         return True
@@ -100,6 +103,13 @@ def infer_vision_capable(
         return False
 
     hint = _keyword_hint(model)
+    if hint is None and canonical_model and canonical_model != model:
+        hint = _keyword_hint(canonical_model)
+        if hint is not None:
+            logger.info(
+                "视觉能力关键词命中规范模型名: model=%s canonical=%s → %s",
+                model, canonical_model, hint,
+            )
     if hint is False:
         logger.info("视觉能力来自关键词推断 (NON_VISION): model=%s → False", model)
         return False

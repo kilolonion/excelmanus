@@ -47,9 +47,9 @@ const PLUGIN_TABS: {
     key: "memory",
     label: "记忆",
     title: "长期记忆",
-    description: "查看 Agent 跨任务保留的信息，并按类型筛选或清理不再需要的内容。",
+    description: "配置 Agent 的跨任务记忆、自动维护与保留期限，并清理不再需要的内容。",
     icon: <Brain className="h-4 w-4" />,
-    capabilities: ["自动沉淀", "分类浏览", "单条清理"],
+    capabilities: ["启停与维护", "分类浏览", "保留期限", "单条清理"],
   },
 ];
 
@@ -75,7 +75,7 @@ export function PluginsTab({
       <nav
         className="flex items-center gap-1 overflow-x-auto scrollbar-none"
         role="tablist"
-        aria-label="插件配置"
+        aria-label="扩展设置"
         data-coach-id="coach-settings-plugin-tabs"
       >
         {PLUGIN_TABS.map((tab) => {
@@ -110,7 +110,7 @@ export function PluginsTab({
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-sm font-semibold">{activeMeta.title}</h3>
             <span className="rounded-full bg-background/70 px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-              插件配置
+              扩展设置
             </span>
           </div>
           <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">

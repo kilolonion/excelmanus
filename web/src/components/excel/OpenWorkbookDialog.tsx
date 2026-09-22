@@ -93,7 +93,7 @@ export function OpenWorkbookDialog() {
     setOpening(`正在打开 ${displayFileName(path)}…`);
     setError(null);
     try {
-      await openWorkbookForConversation(path, session, { signal: controller.signal, layout, showSheet });
+      await openWorkbookForConversation(path, session, { signal: controller.signal, layout, showSheet, makePrimary: switching });
       if (!controller.signal.aborted) close();
     } catch (err) {
       if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "表格打开失败");

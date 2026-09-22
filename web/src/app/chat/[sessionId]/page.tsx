@@ -24,8 +24,9 @@ function ChatPage() {
     setActiveSession(sessionId);
   }, [sessionId, setActiveSession]);
 
-  const handleSend = (text: string, files?: AttachedFile[]) => {
-    sendMessage(text, files, sessionId);
+  const handleSend = (text: string, files?: AttachedFile[], capturedSessionId?: string | null) => {
+    if (capturedSessionId && capturedSessionId !== sessionId) return false;
+    return sendMessage(text, files, sessionId);
   };
 
   return (

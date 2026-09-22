@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -213,6 +214,33 @@ def _command_exists(command: list[str]) -> bool:
     return shutil.which(executable) is not None
 
 
+# 探针首轮超时（秒）。Windows 冷启动下首次 import pandas——杀软首扫
+# 随包运行时、随包不带 .pyc 需全量源码编译——可能超过首轮预算，
+# 超时后按 _PROBE_TIMEOUT_RETRY_SECONDS 宽限再试一次。
+_PROBE_TIMEOUT_SECONDS = 20
+_PROBE_TIMEOUT_RETRY_SECONDS = 90
+
+
+def _resolve_candidate_executable(command: list[str]) -> str | None:
+    """返回候选命令实际启动的解释器路径（规范化），无法解析时返回 None。
+
+    桌面包会把随包 python 目录前置进 PATH：`python` 与
+    EXCELMANUS_RUN_PYTHON 指向同一二进制。按真实路径去重可避免对同一
+    解释器重复探测（每次探测超时都是数十秒级等待）。
+    """
+    executable = command[0]
+    try:
+        if _is_path_like(executable):
+            resolved = str(Path(executable).expanduser().resolve())
+        else:
+            resolved = shutil.which(executable)
+    except OSError:
+        return None
+    if not resolved:
+        return None
+    return os.path.normcase(os.path.normpath(resolved))
+
+
 def _probe_environment(
     command: list[str], *,
     require_excel_deps: bool,
@@ -225,6 +253,9 @@ def _probe_environment(
             detail="可执行文件不存在",
         )
 
+    # 与真实执行一致的隔离标志（-B -I -X utf8）：-I 忽略 PYTHONPATH/
+    # PYTHONHOME/用户 site，否则宿主机环境污染会让探针误杀可用解释器。
+    isolated_command, _ = _ensure_isolated_python(command)
     if require_excel_deps:
         if sandbox_tier in ("GREEN", "YELLOW"):
             # 模拟实际沙盒的 Import Guard，避免探针通过但实际执行失败
@@ -244,28 +275,41 @@ def _probe_environment(
                 "sys.meta_path.insert(0, _B())\n"
                 "import pandas,openpyxl\n"
             )
-            probe_command = [*command, "-B", "-c", probe_code]
+            probe_command = [*isolated_command, "-c", probe_code]
         else:
-            probe_command = [*command, "-B", "-c", "import pandas,openpyxl"]
+            probe_command = [*isolated_command, "-c", "import pandas,openpyxl"]
     else:
-        probe_command = [*command, "-B", "-c", "import sys; print(sys.version_info[0])"]
+        probe_command = [*isolated_command, "-c", "import sys; print(sys.version_info[0])"]
 
-    try:
-        completed = subprocess.run(
-            probe_command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=20,
-            check=False,
-            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
-        )
-    except Exception as exc:  # noqa: BLE001
+    completed: subprocess.CompletedProcess[str] | None = None
+    error_detail = ""
+    error_status = "error"
+    for timeout in (_PROBE_TIMEOUT_SECONDS, _PROBE_TIMEOUT_RETRY_SECONDS):
+        try:
+            completed = subprocess.run(
+                probe_command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+            )
+            break
+        except subprocess.TimeoutExpired as exc:
+            # 超时（多为冷启动）时进入下一轮，用更长预算重试一次
+            error_status = "timeout"
+            error_detail = f"探测超时（{timeout} 秒）：{_shorten(str(exc))}"
+        except Exception as exc:  # noqa: BLE001
+            error_status = "error"
+            error_detail = _shorten(str(exc))
+            break
+    if completed is None:
         return _InterpreterProbe(
             command=command,
-            status="error",
-            detail=_shorten(str(exc)),
+            status=error_status,
+            detail=error_detail or "探测进程未能完成",
         )
 
     if completed.returncode == 0:
@@ -286,16 +330,22 @@ def _probe_environment(
 
 
 # 解释器探测进程级缓存：run_code 每次调用都重探既慢又留出抖动窗口
-# （Windows 冷启动 import pandas 可超 8s 超时）。成功条目常驻，
+# （Windows 冷启动 import pandas 可能超过探测预算）。成功条目常驻，
 # 失败条目 60s 内复用，防止每次调用都全候选扫描一遍。
-_RESOLVE_CACHE: dict[tuple[str, bool, str, str], tuple[list[str] | None, str, float]] = {}
+_ResolveKey = tuple[str, bool, str, str]
+_RESOLVE_CACHE: dict[_ResolveKey, tuple[list[str] | None, str, float]] = {}
 _RESOLVE_FAIL_TTL_SECONDS = 60.0
+# 每个配置独立串行化缓存读写与探测，防止预热和前台同时探测后互相覆盖。
+# 创建锁时只短暂持有全局锁，不让其他解释器等待一次缓慢的探测。
+_RESOLVE_LOCKS: dict[_ResolveKey, Any] = {}
+_RESOLVE_LOCKS_GUARD = threading.Lock()
 
 
 def _resolve_python_command(
     python_command: str, *,
     require_excel_deps: bool,
     sandbox_tier: str = "RED",
+    _cache_failures: bool = True,
 ) -> tuple[list[str], list[_InterpreterProbe], str]:
     import time as _time
 
@@ -305,25 +355,31 @@ def _resolve_python_command(
         str(sandbox_tier or "RED"),
         str(os.environ.get("EXCELMANUS_RUN_PYTHON") or ""),
     )
-    cached = _RESOLVE_CACHE.get(cache_key)
-    if cached is not None:
-        command, mode_or_err, expiry = cached
-        if command is not None:
-            return list(command), [], mode_or_err
-        if _time.monotonic() < expiry:
-            raise RuntimeError(f"{mode_or_err}（60s 内已探测失败，未重试）")
-        _RESOLVE_CACHE.pop(cache_key, None)
-    try:
-        resolved = _resolve_python_command_uncached(
-            python_command,
-            require_excel_deps=require_excel_deps,
-            sandbox_tier=sandbox_tier,
-        )
-    except RuntimeError as exc:
-        _RESOLVE_CACHE[cache_key] = (None, str(exc), _time.monotonic() + _RESOLVE_FAIL_TTL_SECONDS)
-        raise
-    _RESOLVE_CACHE[cache_key] = (resolved[0], resolved[2], 0.0)
-    return resolved
+    with _RESOLVE_LOCKS_GUARD:
+        resolve_lock = _RESOLVE_LOCKS.setdefault(cache_key, threading.Lock())
+    with resolve_lock:
+        cached = _RESOLVE_CACHE.get(cache_key)
+        if cached is not None:
+            command, mode_or_err, expiry = cached
+            if command is not None:
+                return list(command), [], mode_or_err
+            if _time.monotonic() < expiry:
+                raise RuntimeError(f"{mode_or_err}（60s 内已探测失败，未重试）")
+            _RESOLVE_CACHE.pop(cache_key, None)
+        try:
+            resolved = _resolve_python_command_uncached(
+                python_command,
+                require_excel_deps=require_excel_deps,
+                sandbox_tier=sandbox_tier,
+            )
+        except RuntimeError as exc:
+            if _cache_failures:
+                _RESOLVE_CACHE[cache_key] = (
+                    None, str(exc), _time.monotonic() + _RESOLVE_FAIL_TTL_SECONDS,
+                )
+            raise
+        _RESOLVE_CACHE[cache_key] = (list(resolved[0]), resolved[2], 0.0)
+        return resolved
 
 
 def _resolve_python_command_uncached(
@@ -357,11 +413,18 @@ def _resolve_python_command_uncached(
 
     deduped: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
+    seen_targets: set[tuple[str, tuple[str, ...]]] = set()
     for command in candidates:
         key = tuple(item.lower() for item in command)
         if key in seen:
             continue
         seen.add(key)
+        resolved = _resolve_candidate_executable(command)
+        if resolved is not None:
+            target = (resolved, tuple(item.lower() for item in command[1:]))
+            if target in seen_targets:
+                continue
+            seen_targets.add(target)
         deduped.append(command)
 
     probes: list[_InterpreterProbe] = []
@@ -375,14 +438,44 @@ def _resolve_python_command_uncached(
         f"- {_command_to_text(probe.command)} => {probe.status}: {probe.detail}"
         for probe in probes
     )
+    timeout_hint = ""
+    if any(probe.status == "timeout" for probe in probes):
+        timeout_hint = (
+            "提示：探测超时可能与运行时首次加载或安全软件扫描有关，"
+            "可等待 60 秒后重试。\n"
+        )
     raise RuntimeError(
         "自动探测 Python 解释器失败，未找到可用环境。\n"
         f"尝试记录：\n{details}\n"
+        f"{timeout_hint}"
         "可选方案：\n"
         "1) 使用 python_command 显式指定解释器\n"
         "2) 设置环境变量 EXCELMANUS_RUN_PYTHON\n"
         "3) 在目标解释器中安装依赖（pandas/openpyxl）"
     )
+
+
+def warmup_interpreter() -> None:
+    """后台预热解释器解析：填充 ``_RESOLVE_CACHE`` 并加热 OS 文件缓存。
+
+    随包运行时不带 .pyc，首次 import pandas 在杀软扫描下可能超过常规
+    探测预算；分别预热各安全等级，保留其各自的 Import Guard 校验。
+    预热不缓存失败，也不清理其他请求的缓存，让首次真实调用可重新探测。
+    某个等级失败不阻止其他等级预热，最终由调用方记录失败信息。
+    """
+    failures: list[str] = []
+    # 普通审批下的文件写入使用 YELLOW，优先预热，让启动后的首个写入
+    # 尽早共享同一探测；其他等级仍单独验证，不能复用 RED 的宽松结果。
+    for tier in ("YELLOW", "GREEN", "RED"):
+        try:
+            _resolve_python_command(
+                "auto", require_excel_deps=True, sandbox_tier=tier,
+                _cache_failures=False,
+            )
+        except RuntimeError as exc:
+            failures.append(f"{tier}: {exc}")
+    if failures:
+        raise RuntimeError("解释器预热失败：\n" + "\n".join(failures))
 
 
 # ── 软沙盒 ───────────────────────────────────────────────

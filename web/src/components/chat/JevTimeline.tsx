@@ -31,6 +31,8 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
   const status = traceStatus(trace);
   const tone = cardTone(trace);
   const StatusIcon = statusIcon(trace, tone);
+  const title = ["effect", "sent", "outcome"].includes(trace.stage || "") && trace.impact
+    ? trace.impact : traceActionLabel(trace);
   const confidence = formatConfidence(trace.answers.confidence);
   const answers = Object.entries(trace.answers).filter(([key]) => ANSWER_LABELS[key] && key !== "confidence");
   return (
@@ -44,9 +46,9 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
         </span>
       </div>
       <p className="mt-2 break-words text-sm font-semibold leading-6 text-foreground">
-        {trace.outcome && trace.impact ? trace.impact : traceActionLabel(trace)}
+        {title}
       </p>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">{status.description}</p>
+      {status.description !== title && <p className="mt-1 text-xs leading-5 text-muted-foreground">{status.description}</p>}
       {trace.pack === "context.resolve" && (
         <dl className="mt-3 grid gap-2 rounded-lg bg-muted/40 p-2.5 text-xs">
           {["workspace", "target", "edit_intent"].map((key) => trace.answers[key] !== undefined && (
@@ -72,12 +74,12 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
           ))}
           {trace.source && (
             <div className="flex justify-between gap-3">
-              <dt className="text-muted-foreground">建议来源</dt>
-              <dd>{trace.source === "deterministic" ? "确定性规则" : "Jev"}</dd>
+              <dt className="text-muted-foreground">记录来源</dt>
+              <dd>{trace.source === "deterministic" ? "确定性规则" : trace.source === "frontend" ? "界面执行记录" : "Jev"}</dd>
             </div>
           )}
           <div className="flex justify-between gap-3"><dt className="text-muted-foreground">评估模式</dt><dd>{jevGateLabel(trace.gate)}</dd></div>
-          <div className="flex justify-between gap-3"><dt className="text-muted-foreground">连接方式</dt><dd>{trace.transport === "typesafe" ? "TypeSafe 直连" : trace.transport === "gateway" ? "AI Gateway" : "不可用"}</dd></div>
+          {trace.stage === "evaluation" && <div className="flex justify-between gap-3"><dt className="text-muted-foreground">连接方式</dt><dd>{trace.transport === "typesafe" ? "TypeSafe 直连" : trace.transport === "gateway" ? "AI Gateway" : "不可用"}</dd></div>}
           {trace.reason && <div className="border-t border-border/50 pt-2"><dt className="text-muted-foreground">诊断原因</dt><dd className="mt-1 break-all font-mono text-muted-foreground">{trace.reason}</dd></div>}
         </dl>
       </details>
@@ -124,13 +126,13 @@ export function JevTimelinePanel() {
           <span className={cn("size-1.5 rounded-full", pending ? "bg-[var(--em-primary)] motion-safe:animate-pulse" : "bg-muted-foreground/50")} />
           <span role="status">{pending ? "本轮进行中 · 记录随任务更新" : traces.length ? "本轮记录已更新" : "等待下一次任务"}</span>
         </div>
-        <dl className="mt-4 grid grid-cols-3 gap-2">
-          {[{ label: "已评估", value: summary.evaluated }, { label: "已应用", value: summary.applied }, { label: "平均耗时", value: formatLatency(summary.meanMs) }].map((item) => (
+        <dl className="mt-4 grid grid-cols-2 gap-3">
+          {[{ label: "已评估", value: summary.evaluated }, { label: "建议已送达", value: summary.delivered }, { label: "行为已改变", value: summary.applied }, { label: "平均评估耗时", value: formatLatency(summary.meanMs) }].map((item) => (
             <div key={item.label}><dd className="text-lg font-semibold tabular-nums tracking-tight">{item.value}</dd><dt className="mt-0.5 text-[11px] text-muted-foreground">{item.label}</dt></div>
           ))}
         </dl>
       </div>
-      <p className="flex items-start gap-2 text-[11px] leading-5 text-muted-foreground"><Info className="mt-1 size-3 shrink-0" />Jev 为任务提供判断建议；开启的环节会直接接入当前回合。</p>
+      <p className="flex items-start gap-2 text-[11px] leading-5 text-muted-foreground"><Info className="mt-1 size-3 shrink-0" />建议送达表示已进入主模型上下文；行为变化表示系统执行了调整。两者都不等同于任务完成或体验改善。</p>
       {traces.length ? (
         <>
           <StageRail traces={traces} selected={selected} onSelect={(value) => { setPack(value); setLimit(40); }} />
@@ -171,9 +173,9 @@ export function JevInlineRail({ compact = false }: { compact?: boolean }) {
   const latest = traces[traces.length - 1];
   const railSummary = !latest
     ? "等待评估记录"
-    : summary.evaluated > 0
-      ? `${summary.evaluated} 次评估 · ${summary.applied} 项应用`
-      : jevEmptyCopy({ streaming: pending, traces }) || "评估未完成，任务按原流程处理";
+    : summary.evaluated + summary.delivered + summary.applied > 0
+      ? [summary.evaluated + " 次评估", summary.delivered + " 条建议送达", summary.applied + " 项行为变化"].join(" · ")
+      : jevEmptyCopy({ streaming: pending, traces }) || "尚无可确认的执行影响";
   if (!chatEnabled || (!pending && !traces.length)) return null;
 
   return (

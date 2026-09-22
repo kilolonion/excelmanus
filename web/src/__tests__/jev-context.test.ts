@@ -7,15 +7,17 @@ import type { Session } from "@/lib/types";
 
 describe("Jev sheet context", () => {
   beforeEach(() => {
-    useSessionStore.setState({ sessions: [{ id: "s1", workspaceId: "w1" }] as Session[] });
+    useSessionStore.setState({ activeSessionId: "s1", sessions: [{ id: "s1", workspaceId: "w1" }] as Session[] });
     useWorkbookConversationStore.setState({ targets: {}, views: {} });
     useExcelStore.setState({ activeWorkspaceKey: "id:w1", panelOpen: true,
       activeFilePath: "./sales.xlsx", activeSheet: "明细", fullViewPath: null, draftRange: null,
       liveSelection: null });
+    useWorkbookConversationStore.getState().observe("s1", { workspaceId: "w1", workspaceKey: "id:w1", relative: "sales.xlsx" },
+      { status: "ready", sheet: "明细" });
   });
 
   it("sends only the visible workbook identity", () => {
-    expect(buildJevSheetContext("s1")).toEqual({ workspace_id: "w1", path: "./sales.xlsx", sheet: "明细", range: "" });
+    expect(buildJevSheetContext("s1")).toEqual({ workspace_id: "w1", path: "sales.xlsx", sheet: "明细", range: "" });
     expect(buildJevSheetContext()).toBeUndefined();
   });
 
@@ -30,22 +32,25 @@ describe("Jev sheet context", () => {
     useExcelStore.setState({ draftRange: { path: "other.xlsx", sheet: "明细", range: "B2" } });
     expect(buildJevSheetContext("s1")?.range).toBe("");
     useExcelStore.setState({ draftRange: { path: "sales.xlsx", sheet: "明细", range: "B2:B5" } });
-    expect(buildJevSheetContext("s1")?.range).toBe("B2:B5");
+    expect(buildJevSheetContext("s1")?.range).toBe(""); // An old draft cannot replace the observed view.
   });
 
-  it("falls back to the live selection reported by the grid", () => {
+  it("uses the view's selection without mixing in unrelated live or draft state", () => {
+    useWorkbookConversationStore.getState().observe("s1", { workspaceId: "w1", workspaceKey: "id:w1", relative: "sales.xlsx" },
+      { status: "ready", sheet: "明细", range: "C2:C9" });
     useExcelStore.setState({ liveSelection: { path: "sales.xlsx", sheet: "明细", range: "C2:C9" } });
     expect(buildJevSheetContext("s1")?.range).toBe("C2:C9");
     useExcelStore.setState({ liveSelection: { path: "sales.xlsx", sheet: "汇总", range: "C2:C9" } });
-    expect(buildJevSheetContext("s1")?.range).toBe("");
+    expect(buildJevSheetContext("s1")?.range).toBe("C2:C9");
     useExcelStore.setState({
       liveSelection: { path: "sales.xlsx", sheet: "明细", range: "C2:C9" },
       draftRange: { path: "sales.xlsx", sheet: "明细", range: "B2" },
     });
-    expect(buildJevSheetContext("s1")?.range).toBe("B2");
+    expect(buildJevSheetContext("s1")?.range).toBe("C2:C9");
   });
 
   it("uses the session's ready workbook and normal selection", () => {
+    useExcelStore.setState({ panelOpen: false });
     const file = { workspaceId: "w1", workspaceKey: "id:w1", relative: "bound.xlsx" };
     useWorkbookConversationStore.getState().bind("s1", file, "汇总");
     useWorkbookConversationStore.getState().observe("s1", file, { status: "ready", sheet: "汇总", range: "C4:D8" });

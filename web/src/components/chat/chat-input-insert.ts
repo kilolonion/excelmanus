@@ -13,7 +13,10 @@ export function formatFileMention(opts: {
   const path = opts.path.replace(/\\/g, "/").replace(/^\.\//, "");
   let token = `@file:${path}`;
   if (opts.sheet && opts.range) {
-    token += `[${opts.sheet}!${opts.range}]`;
+    const sheet = /[\s,;!'"()[\]]/.test(opts.sheet)
+      ? `'${opts.sheet.replace(/'/g, "''")}'`
+      : opts.sheet;
+    token += `[${sheet}!${opts.range}]`;
   } else if (opts.range) {
     token += `[${opts.range}]`;
   }

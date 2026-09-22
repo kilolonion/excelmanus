@@ -6,6 +6,8 @@ const REASON_LABELS: Record<string, string> = {
   afterEdit: "编辑后",
   beforeRestore: "恢复前",
   checkpoint: "检查点",
+  deleted: "删除前",
+  moved: "移动前",
 };
 
 export function revisionReasonLabel(reason: string, label: string): string {
@@ -34,7 +36,7 @@ export function isCurrentRevision(
   rec: WorkbookRevisionItem,
   currentVersion: string | null,
 ): boolean {
-  if (!currentVersion || !rec.content_version) return false;
+  if (!currentVersion || !rec.content_version || rec.exists_after === false) return false;
   return rec.content_version === currentVersion;
 }
 
@@ -81,7 +83,14 @@ export type RevisionGroup = {
 };
 
 export function groupRevisions(items: WorkbookRevisionItem[]): RevisionGroup[] {
-  const sorted = [...items].sort((a, b) => b.sequence - a.sequence);
+  // Sequence numbers restart in a new path after a move. Timestamps span the
+  // file's lineage, so a renamed file must not reorder its older versions.
+  const newestFirst = (a: WorkbookRevisionItem, b: WorkbookRevisionItem) => {
+    const aTime = Date.parse(a.created_at || "");
+    const bTime = Date.parse(b.created_at || "");
+    return Number.isFinite(aTime) && Number.isFinite(bTime) && aTime !== bTime ? bTime - aTime : b.sequence - a.sequence;
+  };
+  const sorted = [...items].sort(newestFirst);
   const byTx = new Map<string, WorkbookRevisionItem[]>();
   for (const rec of sorted) {
     if (!rec.transaction_id) continue;
@@ -96,7 +105,7 @@ export function groupRevisions(items: WorkbookRevisionItem[]): RevisionGroup[] {
     if (rec.transaction_id && seenTx.has(rec.transaction_id)) continue;
     if (rec.transaction_id) {
       seenTx.add(rec.transaction_id);
-      const members = (byTx.get(rec.transaction_id) ?? [rec]).sort((a, b) => b.sequence - a.sequence);
+      const members = (byTx.get(rec.transaction_id) ?? [rec]).sort(newestFirst);
       groups.push({
         key: rec.transaction_id,
         title: groupTitle(members),

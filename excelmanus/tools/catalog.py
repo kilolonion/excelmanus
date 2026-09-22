@@ -572,6 +572,8 @@ def execution_catalog_from_engine(
     registered = registry.get_all_tools()
     families = _families_with_mcp(flags, registered)
     disallowed: list[str] = list(cap.disallowed_tools)
+    from excelmanus.self_management import disallowed_tools
+    disallowed.extend(disallowed_tools(engine))
     if profile == "csv":
         disallowed.extend(_CSV_ONLY_DISALLOWED)
     return derive_effective_catalog(
@@ -618,6 +620,8 @@ def catalog_from_engine(
     engine._catalog_new_workbook = bool(flags["new_workbook"])
     engine._catalog_profile = profile
     disallowed = tuple(cap.disallowed_tools) + (tuple(_CSV_ONLY_DISALLOWED) if profile == "csv" else ())
+    from excelmanus.self_management import disallowed_tools
+    disallowed += tuple(disallowed_tools(engine))
     allowed = None if cap.allowed_tools is None else list(cap.allowed_tools)
     registered = registry.get_all_tools()
     families = _families_with_mcp(flags, registered)

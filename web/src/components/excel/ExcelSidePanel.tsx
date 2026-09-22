@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
 import { X, Check, XCircle, FileSpreadsheet } from "lucide-react";
 import { FileHistoryWorkspace } from "@/components/history/FileHistoryWorkspace";
+import { formatSelectionConfirmLabel } from "@/lib/excel-selection";
 import { fileBaseName } from "@/lib/revision-display";
 import { panelSlideVariants, panelSlideVariantsMobile, panelSlideVariantsMedium } from "@/lib/sidebar-motion";
 import { ExcelRibbonChrome } from "@/components/excel/ExcelRibbonChrome";
@@ -18,30 +19,17 @@ import { buildExcelFileUrl, downloadFile } from "@/lib/api";
 import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
 import { fileRefFromSession, recentFilesForWorkspace, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
+import { useWorkbookConversationStore, type WorkbookViewState } from "@/stores/workbook-conversation-store";
+import { WorkbookInteractionBar, useWorkbookQuestionRequest } from "./WorkbookInteractionBar";
+import { useWorkbookWorkspaceStore, workbookWorkspaceKey } from "@/stores/workbook-workspace-store";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
   { ssr: false, loading: () => <div role="status" className="flex items-center justify-center h-full text-sm text-muted-foreground">正在准备表格…</div> }
 );
 
-function formatSelectionConfirmLabel(
-  fileName: string,
-  sheet: string,
-  range: string,
-  cellValue?: string,
-): string {
-  const colon = range.indexOf(":");
-  const start = colon === -1 ? range : range.slice(0, colon);
-  const end = colon === -1 ? range : range.slice(colon + 1);
-  const isSingle = start === end;
-  const addr = isSingle ? start : range;
-  const label = `引用 ${fileName} · ${sheet}!${addr}`;
-  if (!isSingle || !cellValue) return label;
-  const shown = cellValue.length > 40 ? `${cellValue.slice(0, 40)}…` : cellValue;
-  return `${label}（值：${shown}）`;
-}
-
 export function ExcelSidePanel() {
+  const workbookQuestion = useWorkbookQuestionRequest();
   const isMobile = useIsMobile();
   const isTablet = useIsTablet();
   const isDesktop = useIsDesktop();
@@ -81,6 +69,11 @@ export function ExcelSidePanel() {
   const session = useSessionStore((s) => s.sessions.find((item) => item.id === s.activeSessionId));
   const viewGeneration = useExcelStore((s) => s.viewGeneration);
   const workspaceKey = activeWorkspaceKey ?? workspaceKeyFromSession(session);
+  const reportView = useCallback((view: WorkbookViewState) => {
+    if (!activeFilePath || !session || useSessionStore.getState().activeSessionId !== session.id) return;
+    useWorkbookConversationStore.getState().observe(session.id, fileRefFromSession(activeFilePath, session), view);
+    if (view.status === "ready" && view.sheet) useWorkbookWorkspaceStore.getState().observeSheet(workbookWorkspaceKey(session.id, workspaceKeyFromSession(session)), activeFilePath, view.sheet);
+  }, [activeFilePath, session]);
   const visibleRecentFiles = recentFilesForWorkspace(recentFiles, workspaceKey);
   const {
     handleCellEdit,
@@ -162,11 +155,8 @@ export function ExcelSidePanel() {
     }
   }, [isMobile, closePanel]);
 
-  const handleRangeSelected = useCallback((range: string, sheet: string, cellValue?: string) => {
+  const handleRangeSelected = useCallback((range: string, sheet: string, cellValue?: string, contentVersion?: string) => {
     const path = activeFilePath || undefined;
-    const contentVersion = path
-      ? useExcelStore.getState().getContentVersion(path) ?? undefined
-      : undefined;
     setDraftRange({ range, sheet, path, contentVersion });
     setDraftCellValue(cellValue);
   }, [setDraftRange, activeFilePath]);
@@ -177,6 +167,7 @@ export function ExcelSidePanel() {
         filePath: activeFilePath,
         sheet: draftRange.sheet,
         range: draftRange.range,
+        contentVersion: draftRange.contentVersion,
       });
     }
     setDraftCellValue(undefined);
@@ -320,8 +311,9 @@ export function ExcelSidePanel() {
                     <FileSpreadsheet className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
                     <span className="truncate max-w-[100px]">{file.filename}</span>
                     <button
-                      onClick={(e) => {
+                      onClick={async (e) => {
                         e.stopPropagation();
+                        if (!await useExcelStore.getState().closeWorkbook(file.path)) return;
                         removeRecentFile(file.path);
                         if (isActive) {
                           const remaining = visibleRecentFiles.filter((f) => f.path !== file.path);
@@ -373,9 +365,11 @@ export function ExcelSidePanel() {
                 viewGeneration={viewGeneration}
                 initialSheet={activeSheet || undefined}
                 selectionMode={selectionMode}
+                readOnly={Boolean(workbookQuestion && selectionMode)}
                 onRangeSelected={handleRangeSelected}
                 withStyles={withStyles}
                 onCellEdit={handleCellEdit}
+                onViewState={reportView}
                 historyActive={panelTab === "history"}
                 onNativeRibbonTab={() => setPanelTab("sheet")}
                 ribbonSlot={
@@ -413,13 +407,15 @@ export function ExcelSidePanel() {
 
           {(writeConflict || writeError) && (
             <ExcelWriteConflictBar
+              filePath={activeFilePath ?? undefined}
               onReload={reloadAfterConflict}
               error={writeConflict ? null : writeError}
             />
           )}
 
           {/* 选区确认栏 */}
-          {selectionMode && draftRange && (
+          <WorkbookInteractionBar filePath={activeFilePath} />
+          {selectionMode && draftRange && !workbookQuestion && (
             <div className="border-t border-border bg-muted/40 px-3 py-2 flex items-center gap-2">
               <span
                 className="text-xs flex-1 min-w-0 truncate"

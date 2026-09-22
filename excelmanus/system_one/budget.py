@@ -26,6 +26,8 @@ class JevTurnBudget:
     spent_latency_ms: float = 0.0
     reserved_latency_ms: float = 0.0
     exhausted_reason: str = ""
+    security_evaluations: int = 0
+    security_latency_ms: float = 0.0
 
     def available_latency_ms(self, *, keep_latency_ms: float = 0.0) -> float:
         return max(0.0, self.max_latency_ms - self.spent_latency_ms - self.reserved_latency_ms - keep_latency_ms)
@@ -40,7 +42,7 @@ class JevTurnBudget:
         accidentally turn an approval check into an implicit allow.
         """
         if security:
-            self.evaluations += 1
+            self.security_evaluations += 1
             return True
         if self.evaluations >= max(0, int(self.max_evaluations) - keep_evaluations):
             self.exhausted_reason = "evaluation_limit"
@@ -55,12 +57,15 @@ class JevTurnBudget:
         self.exhausted_reason = ""
         return True
 
-    def record(self, latency_ms: float, *, reserved_ms: float = 0.0) -> None:
+    def record(self, latency_ms: float, *, reserved_ms: float = 0.0, security: bool = False) -> None:
         self.reserved_latency_ms = max(0.0, self.reserved_latency_ms - reserved_ms)
         try:
             elapsed = float(latency_ms or 0.0)
             if math.isfinite(elapsed):
-                self.spent_latency_ms += max(0.0, elapsed)
+                if security:
+                    self.security_latency_ms += max(0.0, elapsed)
+                else:
+                    self.spent_latency_ms += max(0.0, elapsed)
         except (TypeError, ValueError):
             return
 
@@ -72,6 +77,8 @@ class JevTurnBudget:
             "spent_latency_ms": round(self.spent_latency_ms, 1),
             "reserved_latency_ms": round(self.reserved_latency_ms, 1),
             "exhausted_reason": self.exhausted_reason,
+            "security_evaluations": self.security_evaluations,
+            "security_latency_ms": round(self.security_latency_ms, 1),
         }
 
 

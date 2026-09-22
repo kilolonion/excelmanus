@@ -26,11 +26,11 @@ export interface AgentMenuApi {
 export const AGENT_MENU_ID = "excelmanus.agent";
 
 /**
- * 在 Univer 原生右键菜单的 others 段追加「交给 Agent」子菜单。
+ * 在表格网格、行头、列头的首组菜单中，将「交给 Agent」排在复制之前。
  * 菜单项标题直接进 localeService.t()，不能含英文句点。
  */
 export function registerAgentContextMenu(api: AgentMenuApi, host: AgentMenuHost): void {
-  const submenu = api.createSubmenu({ id: AGENT_MENU_ID, title: "交给 Agent", order: 100 });
+  const submenu = api.createSubmenu({ id: AGENT_MENU_ID, title: "交给 Agent", order: -1 });
 
   submenu.addSubmenu(api.createMenu({
     id: `${AGENT_MENU_ID}.reference`,
@@ -75,5 +75,7 @@ export function registerAgentContextMenu(api: AgentMenuApi, host: AgentMenuHost)
     },
   }));
 
-  submenu.appendTo("contextMenu.others");
+  for (const position of ["mainArea", "rowHeader", "colHeader"]) {
+    submenu.appendTo([`contextMenu.${position}`, "contextMenu.format"]);
+  }
 }

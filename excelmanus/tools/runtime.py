@@ -656,18 +656,11 @@ class ToolRuntime:
             if updated is not None:
                 tcr = updated
 
-        # 8–9. observation 选档（默认 noop）+ finalize_content
+        # Shaping runs inside the dispatcher, before spilling. Finalize once.
         structured = tcr.structured
         if structured is None:
             structured = coerce_legacy_result(tcr.result)
-        from excelmanus.system_one.host import maybe_shape_observation
-
-        tcr.structured = await maybe_shape_observation(
-            self.engine,
-            structured,
-            tool_name=name,
-            arguments=dict(token.arguments),
-        )
+        tcr.structured = structured
         return self._apply_finalize(tcr, token)
 
     def _apply_finalize(self, tcr: ToolCallResult, token: ExecutionToken) -> ToolCallResult:

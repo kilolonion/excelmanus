@@ -65,6 +65,8 @@ describe("ribbonAskActions", () => {
     expect(ribbonAskActions("data").map((a) => a.kind)).toEqual([
       "data-quality",
       "filter-analyze",
+      "chart",
+      "pivot",
       "dedupe",
       "sort",
     ]);

@@ -7,6 +7,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
 import { useFilePreviewStore } from "@/stores/file-preview-store";
 import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
+import { useWorkbookWorkspaceStore, workbookWorkspaceKey } from "@/stores/workbook-workspace-store";
 import { fetchWorkbookView } from "@/lib/api";
 import { fileBaseName } from "@/lib/revision-display";
 import {
@@ -35,6 +36,10 @@ export function ExcelDataRecovery() {
       const nextWorkspaceKey = workspaceKeyFromSession(next);
       const excel = useExcelStore.getState();
       const target = useWorkbookConversationStore.getState().targets[loadedSessionId];
+      const workspace = useWorkbookWorkspaceStore.getState().workspaces[workbookWorkspaceKey(loadedSessionId, nextWorkspaceKey)];
+      const focused = workspace?.files.find((file) => file.path === workspace.focused);
+      excel.closeCompare();
+      excel.closePanel();
       excel.rebindSession(
         excel.activeWorkspaceKey,
         nextWorkspaceKey,
@@ -42,6 +47,7 @@ export function ExcelDataRecovery() {
       if (target?.file.workspaceKey === nextWorkspaceKey) {
         if (target.showSheet) {
           excel.openFullView(target.file.relative, target.sheet, target.layout);
+          if (focused) excel.focusWorkbook(focused.path);
         } else {
           excel.closeFullView();
           useWorkbookConversationStore.getState().observe(loadedSessionId, target.file, { status: "loading" });

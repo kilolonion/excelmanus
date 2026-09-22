@@ -12,11 +12,14 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { buildExcelFileUrl, downloadFile } from "@/lib/api";
+import { formatSelectionConfirmLabel } from "@/lib/excel-selection";
 import { fileBaseName } from "@/lib/revision-display";
 import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
 import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
 import { rememberFullViewTarget } from "@/lib/workspace-surface";
 import { fileRefFromSession, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
+import { recordWorkbookChatNavigation } from "@/lib/workbook-chat-navigation";
+import { WorkbookInteractionBar, useWorkbookQuestionRequest } from "./WorkbookInteractionBar";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -30,24 +33,8 @@ const UniverSheet = dynamic(
   }
 );
 
-function formatSelectionConfirmLabel(
-  fileName: string,
-  sheet: string,
-  range: string,
-  cellValue?: string,
-): string {
-  const colon = range.indexOf(":");
-  const start = colon === -1 ? range : range.slice(0, colon);
-  const end = colon === -1 ? range : range.slice(colon + 1);
-  const isSingle = start === end;
-  const addr = isSingle ? start : range;
-  const label = `引用 ${fileName} · ${sheet}!${addr}`;
-  if (!isSingle || !cellValue) return label;
-  const shown = cellValue.length > 40 ? `${cellValue.slice(0, 40)}…` : cellValue;
-  return `${label}（值：${shown}）`;
-}
-
 export function ExcelFullView() {
+  const workbookQuestion = useWorkbookQuestionRequest();
   const isMobile = useIsMobile();
   const {
     fullViewPath,
@@ -206,6 +193,7 @@ export function ExcelFullView() {
           viewGeneration={viewGeneration}
           initialSheet={displaySheet}
           selectionMode={selectionMode}
+          readOnly={Boolean(workbookQuestion && selectionMode)}
           onRangeSelected={handleRangeSelected}
           withStyles={withStyles}
           onCellEdit={handleCellEdit}
@@ -226,7 +214,10 @@ export function ExcelFullView() {
               onDownload={() => downloadFile(displayPath, fileName, activeSessionId, session?.workspaceId).catch(() => {})}
               onExpand={handleSwitchToPanel}
               expandTitle={isMobile ? "切换到侧边面板" : fullViewLayout === "split" ? "切换到内嵌表格" : "切换到并排对话"}
-              onClose={closeFullView}
+              onClose={() => {
+                recordWorkbookChatNavigation("chat");
+                closeFullView();
+              }}
             />
           }
         />
@@ -247,12 +238,14 @@ export function ExcelFullView() {
 
       {(writeConflict || writeError) && (
         <ExcelWriteConflictBar
+          filePath={displayPath}
           onReload={reloadAfterConflict}
           error={writeConflict ? null : writeError}
         />
       )}
 
-      {selectionMode && draftRange && (
+      <WorkbookInteractionBar filePath={displayPath} />
+      {selectionMode && draftRange && !workbookQuestion && (
         <div className="border-t border-border bg-muted/40 px-3 py-2 flex items-center gap-2 shrink-0">
           <span
             className="text-xs flex-1 min-w-0 truncate"

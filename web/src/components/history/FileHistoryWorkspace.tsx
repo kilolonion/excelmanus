@@ -5,6 +5,7 @@ import { Clock, History } from "lucide-react";
 import { OperationTimeline } from "@/components/excel/OperationTimeline";
 import { RevisionTimelinePanel } from "@/components/chat/CheckpointTimeline";
 import type { ExcelDiffEntry, HistorySubview } from "@/stores/excel-store";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
 
 function SegmentButton({
   active,
@@ -103,7 +104,8 @@ export function FileHistoryWorkspace({
             return (
               <div key={`${d.toolCallId}-${i}`} className="px-3 py-0.5 text-[10px] text-muted-foreground">
                 <span className="text-foreground/70">{time}</span>{" "}
-                <span>{d.affectedRange}</span>{" "}
+                <button type="button" className="underline hover:text-foreground" title="在表格中定位改动区域"
+                  onClick={() => openWorkspaceFile(d.filePath, { sheet: d.sheet, range: d.affectedRange })}>{d.affectedRange}</button>{" "}
                 <span>({d.changes.length} 格)</span>
               </div>
             );

@@ -20,6 +20,7 @@ import type { ProviderGroup } from "./helpers";
 import type { ModelCapabilities, ProfileEntry } from "./types";
 import { SettingsFoldSection } from "../SettingsFoldSection";
 import { ProfileEditorForm } from "./ProfileEditorForm";
+import { requestModelSubTab } from "./model-subtab";
 
 function providerStatusText(group: ProviderGroup, unhealthy: boolean): string {
   const connectedCount = group.profiles.filter(isProfileConnected).length;
@@ -134,6 +135,14 @@ export function ProviderSection() {
       }
     >
       <div className="px-3 pb-3 space-y-2">
+        <button type="button" onClick={() => requestModelSubTab("subscription")} className="flex w-full items-center gap-3 rounded-xl border border-primary/20 bg-primary/5 p-3 text-left transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <Crown className="size-4 shrink-0 text-primary" />
+          <span className="min-w-0 flex-1">
+            <span className="block text-xs font-medium">使用订阅账号连接</span>
+            <span className="mt-1 block text-[11px] text-muted-foreground">ChatGPT、WorkBuddy、Google Antigravity · 无需 API Key</span>
+          </span>
+          <ChevronRight className="size-4 shrink-0 text-primary" />
+        </button>
         {profileError && (
           <div className="rounded-xl border border-destructive/30 bg-destructive/[0.06] px-3 py-2.5 flex items-start gap-2">
             <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0 mt-0.5" />
@@ -419,6 +428,14 @@ function ProviderMemberRow({
           <p className="text-[10px] font-mono text-muted-foreground truncate">
             {formatModelIdForDisplay(profile.model)}
           </p>
+          {profile.canonical_model ? (
+            <p
+              className="text-[10px] font-mono text-[var(--em-primary)]/80 truncate"
+              title={`已匹配到已知模型 ${profile.canonical_model}，继承其上下文窗口与能力配置`}
+            >
+              ⇢ {profile.canonical_model}
+            </p>
+          ) : null}
           {profile.description && (
             <p className="text-[10px] text-muted-foreground truncate">{profile.description}</p>
           )}

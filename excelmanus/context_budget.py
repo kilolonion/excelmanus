@@ -22,10 +22,13 @@ class ContextBudget:
 
     _DEFAULT_TOKENS = _DEFAULT_CONTEXT_TOKENS
 
-    def __init__(self, *, base_tokens: int = 0, model: str = "") -> None:
+    def __init__(
+        self, *, base_tokens: int = 0, model: str = "", canonical_model: str = "",
+    ) -> None:
         self._base_tokens = max(0, base_tokens)
+        infer_key = canonical_model or model
         self._model_tokens = (
-            _infer_context_tokens_for_model(model) if model else 0
+            _infer_context_tokens_for_model(infer_key) if infer_key else 0
         )
         self._override_tokens = 0
         self._override_is_adaptive = False
@@ -41,10 +44,10 @@ class ContextBudget:
             return self._model_tokens
         return self._DEFAULT_TOKENS
 
-    def update_for_model(self, model: str) -> int:
+    def update_for_model(self, model: str, canonical_model: str = "") -> int:
         """切换模型时调用（同步），更新推断值并返回新的 max_tokens。"""
         old = self.max_tokens
-        self._model_tokens = _infer_context_tokens_for_model(model)
+        self._model_tokens = _infer_context_tokens_for_model(canonical_model or model)
         # 自适应缩减过的 override 在模型切换时应清除（新模型可能有不同的窗口）
         if self._override_tokens > 0:
             logger.info("模型切换，清除之前的自适应 override（%d tokens）", self._override_tokens)
@@ -59,11 +62,13 @@ class ContextBudget:
 
     async def update_for_model_async(
         self, model: str, client: object = None, base_url: str = "",
+        canonical_model: str = "",
     ) -> int:
         """切换模型时调用（异步），先尝试 API 查询再回退到静态推断。
 
         比 update_for_model 更精确：若 provider 支持 /models API，
         可获取真实的 context_window 值而非依赖硬编码映射表。
+        静态推断回退优先使用 canonical_model（智能匹配绑定的规范模型名）。
         """
         old = self.max_tokens
         # 清除之前的自适应 override
@@ -84,7 +89,7 @@ class ContextBudget:
         if api_tokens is not None and api_tokens > 0:
             self._model_tokens = api_tokens
         else:
-            self._model_tokens = _infer_context_tokens_for_model(model)
+            self._model_tokens = _infer_context_tokens_for_model(canonical_model or model)
 
         new = self.max_tokens
         if new != old:

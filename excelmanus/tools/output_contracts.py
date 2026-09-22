@@ -337,6 +337,7 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
         {"type": "object", "required": ["raw_input"]},
         {"type": "array", "items": {"type": "object", "required": ["raw_input"]}},
     ]}),
+    "show_workbook": OutputContract(schema={"type": "object", "required": ["kind", "target", "stage", "summary"]}),
     "delegate": OutputContract(schema={"oneOf": [
         {"type": "string"},
         {"type": "object", "required": ["status"],

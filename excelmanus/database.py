@@ -201,7 +201,8 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             thinking_mode        TEXT DEFAULT 'auto',
             model_family         TEXT DEFAULT '',
             custom_extra_body    TEXT DEFAULT '',
-            custom_extra_headers TEXT DEFAULT ''
+            custom_extra_headers TEXT DEFAULT '',
+            canonical_model      TEXT DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS config_kv (
             key        TEXT PRIMARY KEY,
@@ -535,6 +536,10 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
     9: [
         # Automatic/default registrations do not authorize exposing source code.
         "ALTER TABLE workspaces ADD COLUMN source_access INTEGER NOT NULL DEFAULT 0",
+    ],
+    10: [
+        # Jev 智能匹配：档案绑定到的已知规范模型名（不改写上游 Model ID）。
+        "ALTER TABLE model_profiles ADD COLUMN canonical_model TEXT DEFAULT ''",
     ],
 }
 

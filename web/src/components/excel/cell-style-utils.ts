@@ -21,18 +21,18 @@ const V_ALIGN: Record<number, CSSProperties["verticalAlign"]> = {
 
 const BORDER_STYLE: Record<number, string> = {
   1: "1px solid",
-  2: "2px solid",
-  3: "3px solid",
+  2: "1px solid",   // hair
+  3: "1px dotted",
   4: "1px dashed",
-  5: "1px dotted",
-  6: "3px double",
-  7: "1px solid",   // hair
-  8: "2px dashed",
-  9: "1px dashed",
+  5: "1px dashed",  // dash-dot
+  6: "1px dashed",  // dash-dot-dot
+  7: "3px double",
+  8: "2px solid",
+  9: "2px dashed",
   10: "2px dashed",
-  11: "1px dashed",
+  11: "2px dashed",
   12: "2px dashed",
-  13: "2px dashed",
+  13: "3px solid",
 };
 
 /**

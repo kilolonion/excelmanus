@@ -4,6 +4,7 @@ import { useMemo, useRef, useState, useEffect, useCallback } from "react";
 import { ExternalLink, Plus, Minus, RefreshCw } from "lucide-react";
 import type { ExcelDiffEntry, ExcelDiffSummary, ExcelCellDiff, CellStyle, MergeRange } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import { cellStyleToCSS, hasWrapText } from "./cell-style-utils";
 import { buildMergeMaps, getMergeInfo, type MergeSpan } from "./merge-utils";
 import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
@@ -567,12 +568,12 @@ function CrossFileDiffSummary({ summary, filePathA, filePathB }: { summary: Exce
 export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const containerWidth = useContainerWidth(containerRef);
-  const openPanel = useExcelStore((s) => s.openPanel);
   const isMobile = useIsMobile();
   const [expanded, setExpanded] = useState(false);
 
   const handleOpenPanel = () => {
-    openPanel(data.filePath, data.sheet);
+    openWorkspaceFile(data.filePath, { sheet: data.sheet,
+      range: data.changes.length && data.changes.length <= 64 ? data.changes.map((change) => change.cell).join(",") : data.affectedRange });
   };
 
   const isCrossFile = data.diffMode === "cross_file" || data.diffMode === "cross_sheet";

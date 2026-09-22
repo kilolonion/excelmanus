@@ -1469,7 +1469,7 @@ def spill_result_text(
     return spilled.model_text, spilled
 
 
-def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore) -> ToolResult:
+def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore, project_large: bool = True) -> ToolResult:
     """Keep native tool results as usable as their SDK value, with bounded text.
 
     Small results carry the actual payload; large results carry an opaque
@@ -1480,7 +1480,7 @@ def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore) -> ToolRe
         return result
     payload = result.value
     raw = json.dumps(payload, ensure_ascii=False, default=str)
-    if not should_spill(raw):
+    if not project_large or not should_spill(raw):
         return result.with_model_text(raw)
     locator = store.put(raw)
     envelope = {

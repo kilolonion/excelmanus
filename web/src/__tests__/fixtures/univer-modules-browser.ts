@@ -11,7 +11,8 @@ export async function getUniverModules() {
     api.createWorkbook = (...params) => { counters.created++; return createWorkbook(...params); };
     const disposeUnit = api.disposeUnit.bind(api);
     api.disposeUnit = (...params) => { counters.disposed++; return disposeUnit(...params); };
-    Object.assign(window, { workbookAPI: api, workbookCounters: counters });
+    Object.assign(window, { workbookAPI: api, workbookCounters: counters,
+      workbookMarks: { getShapeMap: () => result.univer.__getInjector().get(modules.IMarkSelectionService).getShapeMap() } });
     return result;
   } };
 }

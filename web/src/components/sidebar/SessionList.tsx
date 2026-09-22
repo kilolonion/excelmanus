@@ -43,6 +43,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { applySidebarOrder, moveSidebarItem, type DropSide } from "@/lib/sidebar-order";
 import { AddWorkspaceDialog } from "@/components/sidebar/AddWorkspaceDialog";
 import {
   glassMenuDangerItemClass,
@@ -65,6 +66,8 @@ function isNotFoundError(err: unknown): boolean {
 }
 
 type SessionStatusTone = "running" | "approval" | "question";
+type SidebarDrag = { kind: "workspace" | "session"; id: string; groupKey: string };
+type SidebarDrop = { id: string; side: DropSide; rowKey: string };
 
 function SessionStatusDot({ tone, label }: { tone: SessionStatusTone; label: string }) {
   return (
@@ -79,6 +82,7 @@ function SessionStatusDot({ tone, label }: { tone: SessionStatusTone; label: str
 export const SessionList = memo(function SessionList() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const sessions = useSessionStore((s) => s.sessions);
+  const sidebarSessionOrder = useSessionStore((s) => s.sidebarSessionOrder);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const addSession = useSessionStore((s) => s.addSession);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
@@ -102,10 +106,13 @@ export const SessionList = memo(function SessionList() {
   const [editingWorkspace, setEditingWorkspace] = useState<WorkspaceFolder | null>(null);
   const [workspaceMenuKey, setWorkspaceMenuKey] = useState<string | null>(null);
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null);
-  const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(null);
-  const [dragOverWorkspaceId, setDragOverWorkspaceId] = useState<string | null>(null);
+  const [drag, setDrag] = useState<SidebarDrag | null>(null);
+  const [dragSessions, setDragSessions] = useState<typeof sessions | null>(null);
+  const [dropTarget, setDropTarget] = useState<SidebarDrop | null>(null);
+  const [orderError, setOrderError] = useState<string | null>(null);
   const [reorderingWorkspace, setReorderingWorkspace] = useState(false);
-  const workspaceOrderBeforeDrag = useRef<WorkspaceFolder[] | null>(null);
+  const dragPreview = useRef<HTMLElement | null>(null);
+  const dragBlocked = useRef(false);
 
   useEffect(() => {
     if (editingSessionId && editInputRef.current) {
@@ -167,63 +174,60 @@ export const SessionList = memo(function SessionList() {
     }
   }, []);
 
-  const handleWorkspaceDragStart = useCallback((event: DragEvent<HTMLDivElement>, workspaceId?: string | null) => {
-    if (!workspaceId || reorderingWorkspace) {
+  const handleDragStart = useCallback((event: DragEvent<HTMLElement>, source: SidebarDrag) => {
+    if (reorderingWorkspace || dragBlocked.current) {
       event.preventDefault();
       return;
     }
-    workspaceOrderBeforeDrag.current = workspaces;
-    setDraggedWorkspaceId(workspaceId);
-    setDragOverWorkspaceId(null);
+    const element = event.currentTarget;
+    const rect = element.getBoundingClientRect();
+    // Snapshot only the header/card, before dimming the stationary source rows.
+    const preview = element.cloneNode(true) as HTMLElement;
+    preview.setAttribute("aria-hidden", "true");
+    preview.querySelectorAll("button, input").forEach((child) => child.setAttribute("tabindex", "-1"));
+    Object.assign(preview.style, {
+      position: "fixed", top: "-10000px", left: "0", width: `${rect.width}px`,
+      margin: "0", background: "var(--card)", boxShadow: "0 8px 24px #0003",
+      pointerEvents: "none",
+    });
+    document.body.appendChild(preview);
+    dragPreview.current = preview;
+    event.dataTransfer.setDragImage(preview, event.clientX - rect.left, event.clientY - rect.top);
+    setDrag(source);
+    setDragSessions(sessions);
+    setDropTarget(null);
+    setOrderError(null);
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", workspaceId);
-  }, [reorderingWorkspace, workspaces]);
+    event.dataTransfer.setData("text/plain", source.id);
+  }, [reorderingWorkspace, sessions]);
 
-  const clearWorkspaceDrag = useCallback(() => {
-    setDraggedWorkspaceId(null);
-    setDragOverWorkspaceId(null);
-    workspaceOrderBeforeDrag.current = null;
+  const clearDrag = useCallback(() => {
+    setDrag(null);
+    setDragSessions(null);
+    setDropTarget(null);
+    dragPreview.current?.remove();
+    dragPreview.current = null;
   }, []);
 
-  const handleWorkspaceDragOver = useCallback((event: DragEvent<HTMLDivElement>, workspaceId?: string | null) => {
-    if (!draggedWorkspaceId || !workspaceId || draggedWorkspaceId === workspaceId) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    setDragOverWorkspaceId(workspaceId);
-  }, [draggedWorkspaceId]);
+  useEffect(() => () => { dragPreview.current?.remove(); }, []);
 
-  const handleWorkspaceDrop = useCallback(async (event: DragEvent<HTMLDivElement>, targetWorkspaceId?: string | null) => {
-    event.preventDefault();
-    const sourceWorkspaceId = draggedWorkspaceId;
-    const previous = workspaceOrderBeforeDrag.current ?? workspaces;
-    if (!sourceWorkspaceId || !targetWorkspaceId || sourceWorkspaceId === targetWorkspaceId) {
-      clearWorkspaceDrag();
-      return;
-    }
-    const sourceIndex = previous.findIndex((workspace) => workspace.id === sourceWorkspaceId);
-    const targetIndex = previous.findIndex((workspace) => workspace.id === targetWorkspaceId);
-    if (sourceIndex < 0 || targetIndex < 0) {
-      clearWorkspaceDrag();
-      return;
-    }
-
-    const next = [...previous];
-    const [moved] = next.splice(sourceIndex, 1);
-    next.splice(sourceIndex < targetIndex ? targetIndex - 1 : targetIndex, 0, moved);
+  const saveWorkspaceOrder = useCallback(async (sourceId: string, target: SidebarDrop) => {
+    const previous = workspaces;
+    const next = moveSidebarItem(previous, sourceId, target.id, target.side);
+    if (next === previous) return;
     setWorkspaces(next);
     setReorderingWorkspace(true);
-    clearWorkspaceDrag();
     try {
       const persisted = await reorderWorkspaces(next.map((workspace) => workspace.id));
       if (persisted.length > 0) setWorkspaces(persisted);
     } catch (err) {
       console.error("保存工作区顺序失败:", err);
       setWorkspaces(previous);
-      await reloadWorkspaces();
+      setOrderError("工作区顺序保存失败，已恢复原顺序，请重试。");
     } finally {
       setReorderingWorkspace(false);
     }
-  }, [clearWorkspaceDrag, draggedWorkspaceId, reloadWorkspaces, workspaces]);
+  }, [workspaces]);
 
   useEffect(() => {
     void reloadWorkspaces();
@@ -241,11 +245,11 @@ export const SessionList = memo(function SessionList() {
   const filteredSessions = useMemo(
     () => {
       const q = searchQuery.trim().toLowerCase();
-      return sessions.filter(
+      return (dragSessions ?? sessions).filter(
         (session) => !q || fuzzyMatch(session.title.toLowerCase(), q)
       );
     },
-    [sessions, searchQuery]
+    [sessions, dragSessions, searchQuery]
   );
 
   const groupedSessions = useMemo(() => {
@@ -261,9 +265,9 @@ export const SessionList = memo(function SessionList() {
       sessions: typeof filteredSessions;
     }[] = [];
     for (const ws of workspaces) {
-      const items = filteredSessions.filter(
+      const items = applySidebarOrder(filteredSessions.filter(
         (s) => (ws.id && s.workspaceId === ws.id) || (ws.path && s.workspacePath === ws.path),
-      );
+      ), sidebarSessionOrder[ws.id || ws.path]);
       items.forEach((s) => assigned.add(s.id));
       groups.push({
         key: ws.id || ws.path,
@@ -283,10 +287,10 @@ export const SessionList = memo(function SessionList() {
       canCreate: true,
       canManage: false,
       isDefault: false,
-      sessions: rest,
+      sessions: applySidebarOrder(rest, sidebarSessionOrder.__ungrouped__),
     });
     return groups;
-  }, [filteredSessions, workspaces]);
+  }, [filteredSessions, workspaces, sidebarSessionOrder]);
 
   // Flatten headers and expanded sessions so even a large workspace history
   // renders only the viewport. Collapsed sessions do not retain hidden DOM.
@@ -301,7 +305,9 @@ export const SessionList = memo(function SessionList() {
   }), [groupedSessions, collapsedGroups]);
   const pinnedIndices = rows.flatMap((row, index) =>
     (row.session && (row.session.id === editingSessionId || row.session.id === sessionMenuId))
-      || (!row.session && row.group.key === workspaceMenuKey) ? [index] : []);
+      || (!row.session && row.group.key === workspaceMenuKey)
+      || (drag?.kind === "workspace" && !row.session && row.group.key === drag.groupKey)
+      || (drag?.kind === "session" && row.session?.id === drag.id) ? [index] : []);
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => viewportRef.current,
@@ -310,6 +316,45 @@ export const SessionList = memo(function SessionList() {
     overscan: 5,
     rangeExtractor: (range) => [...new Set([...defaultRangeExtractor(range), ...pinnedIndices])].sort((a, b) => a - b),
   });
+
+  const getDropTarget = (event: DragEvent<HTMLDivElement>, index: number): SidebarDrop | null => {
+    if (!drag) return null;
+    const row = rows[index];
+    const rect = event.currentTarget.getBoundingClientRect();
+    const side: DropSide = event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    if (drag.kind === "session") {
+      if (row.group.key !== drag.groupKey || !row.session || row.session.id === drag.id) return null;
+      return { id: row.session.id, side, rowKey: row.key };
+    }
+    if (!row.group.workspaceId || row.group.key === drag.groupKey) return null;
+    const groupRows = rows.filter((item) => item.group.key === row.group.key);
+    const groupSide = row.session ? "after" : side;
+    return {
+      id: row.group.workspaceId, side: groupSide,
+      rowKey: groupSide === "before" ? groupRows[0].key : groupRows[groupRows.length - 1].key,
+    };
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>, index: number) => {
+    const target = getDropTarget(event, index);
+    if (!drag) return;
+    event.preventDefault();
+    if (target) {
+      if (drag.kind === "workspace") {
+        void saveWorkspaceOrder(drag.id, target);
+      } else {
+        // Include hidden search results so their relative order survives a filtered drag.
+        const group = rows[index].group;
+        const members = sessions.filter((session) => group.workspaceId
+          ? session.workspaceId === group.workspaceId || Boolean(group.path && session.workspacePath === group.path)
+          : !workspaces.some((ws) => session.workspaceId === ws.id || Boolean(ws.path && session.workspacePath === ws.path)));
+        const ordered = applySidebarOrder(members, sidebarSessionOrder[drag.groupKey]);
+        const next = moveSidebarItem(ordered, drag.id, target.id, target.side);
+        useSessionStore.getState().setSidebarSessionOrder(drag.groupKey, next.map((session) => session.id));
+      }
+    }
+    clearDrag();
+  };
 
   const toggleGroup = useCallback((key: string) => {
     setCollapsedGroups((prev) => {
@@ -418,8 +463,12 @@ export const SessionList = memo(function SessionList() {
   );
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full" onDragEnd={clearDrag}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
+      }}>
       {searchRow}
+      {orderError && <p role="alert" className="px-3 pb-2 text-xs text-destructive">{orderError}</p>}
       <ScrollArea className="flex-1 min-h-0" viewportRef={viewportRef}>
         <div className="space-y-2 pb-2">
             {searchQuery && filteredSessions.length === 0 ? (
@@ -435,9 +484,28 @@ export const SessionList = memo(function SessionList() {
                   {virtualizer.getVirtualItems().map((row) => {
                     const { group, session } = rows[row.index];
                     const collapsed = collapsedGroups.has(group.key);
+                    const frozen = Boolean(drag && (drag.kind === "workspace" ? drag.groupKey === group.key : drag.id === session?.id));
+                    const indicator = dropTarget?.rowKey === rows[row.index].key ? dropTarget.side : null;
                     return (
                       <div key={row.key} data-index={row.index} ref={virtualizer.measureElement}
+                        data-sidebar-row={rows[row.index].key}
+                        data-drag-frozen={frozen || undefined}
+                        onDragEnter={(event) => {
+                          if (drag) event.preventDefault();
+                        }}
+                        onDragOver={(event) => {
+                          if (!drag) return;
+                          event.preventDefault();
+                          const target = getDropTarget(event, row.index);
+                          event.dataTransfer.dropEffect = target ? "move" : "none";
+                          setDropTarget(target);
+                        }}
+                        onDrop={(event) => handleDrop(event, row.index)}
                         style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)`, paddingBottom: 2 }}>
+                        {indicator && <div aria-hidden="true" data-drop-indicator={indicator}
+                          className="pointer-events-none absolute inset-x-2 z-10 h-0.5 rounded-full bg-[var(--em-primary)]"
+                          style={indicator === "before" ? { top: -1 } : { bottom: 0 }} />}
+                        <div style={frozen ? { opacity: 0.4, filter: "grayscale(1)" } : undefined}>
                         {!session ? (
                         <div
                           className={cn(
@@ -446,21 +514,23 @@ export const SessionList = memo(function SessionList() {
                             "focus-within:bg-[var(--em-primary-alpha-06)] focus-within:text-[var(--em-primary)]",
                             workspaceMenuKey === group.key && "bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]",
                             group.workspaceId && "cursor-grab active:cursor-grabbing",
-                            draggedWorkspaceId === group.workspaceId && "opacity-50",
-                            dragOverWorkspaceId === group.workspaceId && "bg-[var(--em-primary-alpha-10)] ring-1 ring-[var(--em-primary)]",
                           )}
                           draggable={Boolean(group.workspaceId) && !reorderingWorkspace}
-                          onDragStart={(event) => handleWorkspaceDragStart(event, group.workspaceId)}
-                          onDragOver={(event) => handleWorkspaceDragOver(event, group.workspaceId)}
-                          onDrop={(event) => void handleWorkspaceDrop(event, group.workspaceId)}
-                          onDragEnd={clearWorkspaceDrag}
+                          onPointerDownCapture={(event) => {
+                            const button = (event.target as Element).closest("button");
+                            dragBlocked.current = Boolean(button && !button.hasAttribute("data-workspace-drag-handle"));
+                          }}
+                          onDragStart={(event) => {
+                            if (group.workspaceId) handleDragStart(event, { kind: "workspace", id: group.workspaceId, groupKey: group.key });
+                          }}
                         >
                           <button
                             type="button"
+                            data-workspace-drag-handle="true"
                             className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-0.5 text-left"
                             onClick={() => toggleGroup(group.key)}
                             aria-expanded={!collapsed}
-                            title={`${collapsed ? "展开" : "折叠"}「${group.title}」的对话`}
+                            title={`${collapsed ? "展开" : "折叠"}「${group.title}」的对话${group.workspaceId ? "；按住拖动调整工作区顺序" : ""}`}
                           >
                             <ChevronDown
                               className={cn(
@@ -603,6 +673,11 @@ export const SessionList = memo(function SessionList() {
                         )}
                         tabIndex={0}
                         role="button"
+                        draggable={!isEditing}
+                        onPointerDownCapture={(event) => {
+                          dragBlocked.current = Boolean((event.target as Element).closest("button, input"));
+                        }}
+                        onDragStart={(event) => handleDragStart(event, { kind: "session", id: session.id, groupKey: group.key })}
                         onClick={() => {
                           setActiveSession(session.id);
                         }}
@@ -776,6 +851,7 @@ export const SessionList = memo(function SessionList() {
                       </div>
                     );
                   })()}
+                        </div>
                       </div>
                     );
                   })}

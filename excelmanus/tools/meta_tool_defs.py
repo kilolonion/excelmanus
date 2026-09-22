@@ -7,9 +7,10 @@ from typing import Any
 
 from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.tools.registry import ToolDef
+from excelmanus.workbook.interaction import target_schema
 
 _META_NAMES = frozenset(
-    {"skill", "manage_skills", "delegate", "list_subagents", "ask_user"}
+    {"skill", "manage_skills", "delegate", "list_subagents", "ask_user", "show_workbook"}
 )
 
 
@@ -125,8 +126,10 @@ def get_meta_tools() -> list[ToolDef]:
                                     },
                                 },
                                 "multiSelect": {"type": "boolean", "description": "是否允许多选"},
+                                "selection": target_schema(),
                             },
-                            "required": ["text", "options"],
+                            "required": ["text"],
+                            "anyOf": [{"required": ["options"]}, {"required": ["selection"]}],
                             "additionalProperties": False,
                         },
                     },
@@ -137,6 +140,21 @@ def get_meta_tools() -> list[ToolDef]:
             func=_stub,
             write_effect="none",
             visibility="always",
+        ),
+        ToolDef(
+            name="show_workbook",
+            description=TOOL_DESCRIPTIONS["show_workbook"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "target": target_schema(),
+                    "stage": {"type": "string", "enum": ["inspect", "planned", "changed"]},
+                    "summary": {"type": "string", "maxLength": 500},
+                },
+                "required": ["target", "stage", "summary"],
+                "additionalProperties": False,
+            },
+            func=_stub, write_effect="none", visibility="always",
         ),
     ]
 

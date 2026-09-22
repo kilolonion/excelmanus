@@ -57,10 +57,13 @@ test("preload exposes the native pickers", async () => {
   const { exposedName, exposedApi, invokedChannels } = loadPreload();
 
   assert.equal(exposedName, "excelManusDesktop");
-  assert.deepEqual(Object.keys(exposedApi), ["selectFolder", "pickChatFiles", "mobilePairing"]);
+  assert.deepEqual(Object.keys(exposedApi), ["selectFolder", "pickChatFiles", "mobilePairing", "checkUpdate", "downloadUpdate"]);
   assert.equal(await exposedApi.selectFolder(), "/tmp/example");
   assert.deepEqual(await exposedApi.pickChatFiles(), { files: [], skipped: [] });
   assert.deepEqual(invokedChannels, ["excelmanus:select-folder", "excelmanus:pick-chat-files"]);
+  await exposedApi.checkUpdate();
+  await exposedApi.downloadUpdate();
+  assert.deepEqual(invokedChannels.slice(2), ["excelmanus:check-update", "excelmanus:download-update"]);
 });
 
 test("menu actions are forwarded to the page as DOM events", () => {

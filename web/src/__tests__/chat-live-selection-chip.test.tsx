@@ -45,6 +45,15 @@ beforeEach(() => {
 });
 
 describe("ChatLiveSelectionChip", () => {
+  it("keeps every disjoint area when referencing or asking the agent", () => {
+    const { container } = showChip();
+    act(() => useExcelStore.getState().setLiveSelection({ path: "sales.xlsx", sheet: "明细", range: "A1:B2,D4,F:F,8:9", contentVersion: "abcd" }));
+    fireEvent.click(container.querySelector('[data-em-live-selection-action="reference"]')!);
+    expect(useExcelStore.getState().pendingSelection?.range).toBe("A1:B2,D4,F:F,8:9");
+    fireEvent.click(container.querySelector('[data-em-live-selection-action="analyze"]')!);
+    expect(useExcelStore.getState().pendingTemplateMessage).toContain("@file:sales.xlsx[明细!A1:B2,D4,F:F,8:9]@sha256:abcd");
+  });
+
   it("renders the live selection and wires reference / analyze actions", () => {
     const { container } = showChip();
     const chip = container.querySelector("[data-em-live-selection]");

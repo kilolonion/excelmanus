@@ -102,6 +102,14 @@ class RevisionRecord:
 
     @classmethod
     def from_json_dict(cls, data: dict[str, Any]) -> "RevisionRecord":
+        if not isinstance(data, dict):
+            raise ValueError("history record must be an object")
+        for key in ("label", "createdAt", "created_at", "lineageId", "lineage_id", "parentRevisionId", "parent_revision_id", "op"):
+            if data.get(key) is not None and not isinstance(data[key], str):
+                raise ValueError(f"invalid history field: {key}")
+        for key in ("committed", "existsAfter", "exists_after"):
+            if data.get(key) is not None and not isinstance(data[key], bool):
+                raise ValueError(f"invalid history field: {key}")
         committed = data.get("committed")
         if committed is None:
             committed = True
@@ -226,6 +234,8 @@ class RevisionStore:
         if reason not in VALID_REASONS:
             raise ValueError(f"invalid revision reason: {reason}")
         rel = _canonical_rel(path)
+        if revision_id is not None and not _REVISION_ID_RE.fullmatch(revision_id):
+            raise ValueError("invalid revision id")
         sha = self.put_blob(rel, data)
         existing = self._list_all(rel)
         if exists_after is None:
@@ -254,6 +264,8 @@ class RevisionStore:
         return record
 
     def write_record(self, record: RevisionRecord) -> None:
+        if not _REVISION_ID_RE.fullmatch(record.id):
+            raise ValueError("invalid revision id")
         dest = self._dir_for(record.path) / "records" / f"{record.id}.json"
         from excelmanus.workspace.txlog import write_json_atomic
 
@@ -274,6 +286,8 @@ class RevisionStore:
             raise RevisionIntegrityError("invalid history record") from exc
         if rec.path != rel or rec.id != revision_id:
             raise RevisionIntegrityError("history record identity mismatch")
+        if rec.sequence < 1 or rec.reason not in VALID_REASONS or not re.fullmatch(r"[0-9a-f]{64}", rec.sha256):
+            raise RevisionIntegrityError("invalid history record fields")
         return rec
 
     def list(self, path: str) -> list[RevisionRecord]:
@@ -294,9 +308,10 @@ class RevisionStore:
         records: list[RevisionRecord] = []
         for fp in rec_dir.glob("*.json"):
             try:
-                data = json.loads(fp.read_text(encoding="utf-8"))
-                records.append(RevisionRecord.from_json_dict(data))
-            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                rec = self.get(rel, fp.stem)
+                if rec is not None:
+                    records.append(rec)
+            except (OSError, TypeError, ValueError):
                 continue
         records.sort(key=lambda r: (r.sequence, r.id))
         return records
@@ -310,10 +325,17 @@ class RevisionStore:
                 continue
             for fp in rec_dir.glob("*.json"):
                 try:
+                    if fp.is_symlink():
+                        continue
                     rec = RevisionRecord.from_json_dict(
                         json.loads(fp.read_text(encoding="utf-8"))
                     )
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                    if rec.id != fp.stem or not _REVISION_ID_RE.fullmatch(rec.id) or self._dir_for(rec.path) / "records" != rec_dir:
+                        continue
+                    rec = self.get(rec.path, rec.id)
+                    if rec is None:
+                        continue
+                except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
                     continue
                 if rec.transaction_id == transaction_id:
                     found.append(rec)
@@ -343,12 +365,10 @@ class RevisionStore:
         records = self._list_all(path)
         if keep < 0:
             return 0
-        protected = [rec for rec in records if _is_protected(rec)]
-        volatile = [rec for rec in records if not _is_protected(rec)]
+        volatile = [rec for rec in records if rec.committed and not _is_protected(rec)]
         if len(volatile) <= keep:
             return 0
         drop = volatile[: len(volatile) - keep]
-        keep_recs = protected + volatile[len(volatile) - keep :]
         rel = _canonical_rel(path)
         rec_dir = self._dir_for(rel) / "records"
         removed = 0
@@ -359,7 +379,8 @@ class RevisionStore:
                 removed += 1
             except OSError:
                 pass
-        self._gc_blobs(rel, keep_recs)
+        # Re-read what actually survived unlink failures before deleting blobs.
+        self._gc_blobs(rel)
         return removed
 
     def _gc_blobs(self, path: str, records: Iterable[RevisionRecord] | None = None) -> int:

@@ -95,6 +95,7 @@ async def run_engine_followup(
     display_text: str | None = None,
     mention_contexts: list[ResolvedMention] | None = None,
     context_input: dict[str, Any] | None = None,
+    jev_budget: Any = None,
 ) -> ChatTurnOutcome:
     """按网页直聊参数调用 ``engine.followup``。
 
@@ -103,6 +104,8 @@ async def run_engine_followup(
     if display_text is None:
         display_text, mention_contexts = await resolve_mentions(message, engine)
     context_kwargs = {"context_input": context_input} if context_input else {}
+    if jev_budget is not None:
+        context_kwargs["jev_budget"] = jev_budget
     result = await engine.followup(
         display_text,
         on_event=on_event,
@@ -122,6 +125,7 @@ def submit_question_answer(
     engine: Any,
     question_id: str,
     answer: str,
+    selection: dict[str, Any] | None = None,
 ) -> bool:
     """提交 ask_user 回答，载荷与 ``POST /api/v1/chat/{id}/answer`` 相同。"""
     qid = str(question_id or "").strip()
@@ -130,7 +134,26 @@ def submit_question_answer(
     registry = getattr(engine, "interaction_registry", None)
     if registry is None:
         return False
+    handler = getattr(engine, "_interaction_handler", None)
+    if selection is not None:
+        # The HTTP boundary validated the snapshot off the event loop. Never resolve
+        # another question or overwrite a previously accepted selection on retries.
+        saved = handler.snapshot() if handler is not None else None
+        previous = (saved or {}).get("answers", {}).get(qid)
+        if previous is not None:
+            if previous.get("selection") == selection:
+                return True
+            raise ValueError("此问题已回答，不能用新的区域覆盖")
+        pending = engine._question_flow.current()
+        if pending is None or pending.question_id != qid or not pending.selection:
+            return False
+        payload = {"question_id": qid, "status": "confirmed", "selection": selection,
+                   "raw_input": f"已确认 {selection['file_path']} · {selection['sheet']}!{','.join(selection['ranges'])}",
+                   "note": answer}
+        recorded = handler.record_question_answer(qid, payload) if handler is not None else False
+        return bool(registry.resolve(qid, payload) or recorded)
     payload: dict[str, Any] = {"raw_input": answer, "question_id": qid}
+    pending = None
     try:
         question_flow = getattr(engine, "_question_flow", None)
         pending = question_flow.current() if question_flow is not None else None
@@ -139,7 +162,8 @@ def submit_question_answer(
             payload = parsed.to_tool_result()
     except Exception:
         logger.debug("解析回答失败，使用原始文本", exc_info=True)
-    handler = getattr(engine, "_interaction_handler", None)
+    if pending is not None and pending.question_id == qid and pending.selection:
+        payload["status"] = "clarified"
     recorded = handler.record_question_answer(qid, payload) if handler is not None else False
     if recorded and not registry.has_pending(qid):
         return True

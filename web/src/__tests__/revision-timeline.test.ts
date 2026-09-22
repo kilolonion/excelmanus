@@ -34,6 +34,13 @@ describe("revisionReasonLabel", () => {
 });
 
 describe("groupRevisions", () => {
+  it("keeps newer moved-file records ahead of the old path's higher sequence", () => {
+    const groups = groupRevisions([
+      rev({ revision_id: "old", sequence: 98, created_at: "2026-09-20T09:00:00Z" }),
+      rev({ revision_id: "moved", sequence: 1, created_at: "2026-09-21T09:00:00Z" }),
+    ]);
+    expect(groups.map((g) => g.items[0].revision_id)).toEqual(["moved", "old"]);
+  });
   it("pairs before/after of the same transaction into one edit", () => {
     const groups = groupRevisions([
       rev({
@@ -66,6 +73,9 @@ describe("groupRevisions", () => {
 });
 
 describe("isCurrentRevision", () => {
+  it("does not call a deletion record current just because its bytes match", () => {
+    expect(isCurrentRevision(rev({ revision_id: "deleted", sequence: 2, content_version: "sha256:same", exists_after: false }), "sha256:same")).toBe(false);
+  });
   it("matches the live content version", () => {
     expect(
       isCurrentRevision(

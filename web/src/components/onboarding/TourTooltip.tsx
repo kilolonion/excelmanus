@@ -61,7 +61,7 @@ export function TourTooltip({ step, stepIndex, totalSteps, phase, phaseLabel, in
       <header className="em-tour-header">
         <label className="sr-only" htmlFor="tour-chapter">选择引导章节</label>
         <select id="tour-chapter" value={phase} onChange={(event) => onSectionChange(event.target.value as CoachPhase)}>
-          <option value="basic">对话与任务</option><option value="advanced">文件与表格</option><option value="settings">模型与插件</option>
+          <option value="basic">对话与任务</option><option value="advanced">文件与表格</option><option value="settings">模型与扩展</option>
         </select>
         <span aria-label={`${phaseLabel} 第 ${stepIndex + 1} 步，共 ${totalSteps} 步`}>{stepIndex + 1} / {totalSteps}</span>
         <button type="button" aria-label={collapsed ? "展开引导" : "收起引导"} onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronDown /> : <ChevronUp />}</button>

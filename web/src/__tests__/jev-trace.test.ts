@@ -22,6 +22,8 @@ function makeTrace(overrides: Record<string, unknown> = {}) {
       pack: "exposure.turn",
       gate: "shadow",
       applied: false,
+      stage: "evaluation",
+      evaluated: true,
       transport: "gateway",
       latency_ms: 210,
       action: "minimal",
@@ -41,7 +43,7 @@ describe("jev-trace", () => {
     useJevStore.setState({ drawerOpen: false, pinned: false, railCollapsed: false, chatEnabled: true, seq: 0 });
   });
 
-  it("parses a legacy shadow exposure.turn card as enforce", () => {
+  it("normalizes a legacy shadow gate value to enforce", () => {
     const trace = makeTrace();
     expect(trace).not.toBeNull();
     expect(trace?.pack).toBe("exposure.turn");
@@ -89,29 +91,30 @@ describe("jev-trace", () => {
   });
 
   it("marks deny and unavailable tones", () => {
-    expect(cardTone(makeTrace({ kind: "deny", action: "deny", gate: "enforce", applied: true })!)).toBe("deny");
-    expect(cardTone(makeTrace({ kind: "ask", action: "ask", gate: "enforce", applied: true })!)).toBe("ask");
+    expect(cardTone(makeTrace({ kind: "deny", action: "deny", gate: "enforce", stage: "effect", state_changed: true })!)).toBe("deny");
+    expect(cardTone(makeTrace({ kind: "ask", action: "ask", gate: "enforce", stage: "effect", state_changed: true })!)).toBe("ask");
     expect(cardTone(makeTrace({ transport: "unavailable" })!)).toBe("unavailable");
-    expect(cardTone(makeTrace({ applied: true, gate: "enforce" })!)).toBe("applied");
+    expect(cardTone(makeTrace({ stage: "effect", state_changed: true, gate: "enforce" })!)).toBe("applied");
   });
 
   it("does not present an unapplied denial as an actual intervention", () => {
     const trace = makeTrace({ kind: "deny", action: "deny" })!;
     expect(cardTone(trace)).toBe("unavailable");
-    expect(traceStatus(trace).label).toBe("未采纳");
+    expect(traceStatus(trace).label).toBe("已评估");
     expect(traceActionLabel(trace)).toBe("建议拒绝");
     expect(traceNeedsAttention(trace)).toBe(false);
   });
 
   it("distinguishes skipped, failed, unapplied, and advisory outcomes", () => {
     expect(traceStatus(makeTrace({ gate: "off", transport: "unavailable" })!).label).toBe("已跳过");
-    expect(traceStatus(makeTrace({ gate: "enforce", applied: false })!).label).toBe("未采纳");
-    expect(traceStatus(makeTrace({ pack: "context.resolve", gate: "enforce", applied: true })!).label).toBe("已提供建议");
+    expect(traceStatus(makeTrace({ gate: "enforce", applied: false })!).label).toBe("已评估");
+    expect(traceStatus(makeTrace({ pack: "context.resolve", gate: "enforce", stage: "effect", advice_delivered: true })!).label).toBe("建议已送达");
     const routed = makeTrace({
-      pack: "context.resolve", gate: "enforce", applied: true,
+      pack: "context.resolve", gate: "enforce", stage: "effect", state_changed: true,
       answers: { routed_workspace: "销售" },
+      impact: "会话已绑定到工作区「销售」",
     })!;
-    expect(traceStatus(routed).label).toBe("已路由工作区");
+    expect(traceStatus(routed).label).toBe("行为已改变");
     expect(traceStatus(routed).description).toContain("销售");
     for (const reason of ["error:timeout", "unavailable", "budget_exhausted", "provider_cooldown"]) {
       const trace = makeTrace({ reason })!;
@@ -134,7 +137,41 @@ describe("jev-trace", () => {
       makeTrace({ latency_ms: 0, reason: "disabled", gate: "off" })!,
       makeTrace({ latency_ms: 0, reason: "budget_exhausted" })!,
     ];
-    expect(summarizeTraces(traces)).toEqual({ evaluated: 2, applied: 1, attention: 1, meanMs: 300 });
+    expect(summarizeTraces(traces)).toEqual({ evaluated: 2, applied: 0, delivered: 0, attention: 1, meanMs: 300 });
+  });
+
+  it("separates evaluations, delivery, actual effects and outcomes", () => {
+    const traces = [
+      makeTrace({ stage: "evaluation", evaluated: true, applied: true, latency_ms: 200 })!,
+      makeTrace({ stage: "effect", evaluated: false, advice_delivered: true, latency_ms: 0 })!,
+      makeTrace({ stage: "effect", evaluated: false, state_changed: true, latency_ms: 0 })!,
+      makeTrace({ stage: "sent", evaluated: false, applied: true, latency_ms: 0 })!,
+      makeTrace({ stage: "outcome", evaluated: false, kind: "outcome", applied: true, latency_ms: 0 })!,
+    ];
+    expect(summarizeTraces(traces)).toEqual({ evaluated: 1, applied: 1, delivered: 1, attention: 0, meanMs: 200 });
+    expect(traceStatus(traces[0]).label).toBe("已评估");
+    expect(traceStatus(traces[1]).label).toBe("建议已送达");
+    expect(traceStatus(traces[2]).label).toBe("行为已改变");
+    expect(traceStatus(traces[3]).label).toBe("已发送");
+    expect(traceStatus(traces[4]).label).toBe("结果记录");
+  });
+
+  it("does not treat legacy eligibility as proof of evaluation or execution", () => {
+    const trace = makeTrace({ stage: undefined, evaluated: undefined, applied: true })!;
+    expect(trace.applied).toBe(false);
+    expect(traceStatus(trace).label).toBe("旧格式记录");
+    expect(cardTone(trace)).toBe("unavailable");
+    expect(summarizeTraces([trace])).toMatchObject({ evaluated: 0, applied: 0, delivered: 0 });
+  });
+
+  it("keeps deterministic and frontend effects visible without an evaluator connection", () => {
+    for (const source of ["deterministic", "frontend"]) {
+      const trace = makeTrace({
+        source, stage: "effect", state_changed: true, transport: "unavailable",
+      })!;
+      expect(traceStatus(trace).label).toBe("行为已改变");
+      expect(traceNeedsAttention(trace)).toBe(false);
+    }
   });
 
   it("formats readable answers and rejects invalid measurements", () => {

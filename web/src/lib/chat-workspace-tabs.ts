@@ -7,6 +7,8 @@ import { useWorkbookConversationStore } from "@/stores/workbook-conversation-sto
 import { normalizeRelativePath, workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { currentWorkbookTarget } from "@/lib/workbook-conversation";
 import { useSessionStore } from "@/stores/session-store";
+import { recordWorkbookChatNavigation } from "@/lib/workbook-chat-navigation";
+import { useWorkbookWorkspaceStore, workbookWorkspaceKey } from "@/stores/workbook-workspace-store";
 
 export type ChatWorkspaceTab = "chat" | "sheet";
 
@@ -56,8 +58,9 @@ export function resolveSheetFullViewTarget(input: {
 export function activateChatWorkspaceTab(key: ChatWorkspaceTab): void {
   const excel = useExcelStore.getState();
   if (key === "chat") {
+    recordWorkbookChatNavigation("chat");
     if (excel.compareMode) excel.closeCompare();
-    if (excel.fullViewPath) excel.closeFullView();
+    if (useExcelStore.getState().fullViewPath) excel.closeFullView();
     if (useWordStore.getState().fullViewPath) {
       useWordStore.getState().closeFullView();
     }
@@ -67,7 +70,9 @@ export function activateChatWorkspaceTab(key: ChatWorkspaceTab): void {
     useWorkbookConversationStore.getState().openPicker();
     return;
   }
-  const target = resolveSheetFullViewTarget({
+  const group = useWorkbookWorkspaceStore.getState().workspaces[workbookWorkspaceKey(useSessionStore.getState().activeSessionId, excel.activeWorkspaceKey ?? "_")];
+  const focused = excel.fullViewPath ? group?.files.find((file) => file.path === group.focused) : undefined;
+  const target = focused ?? resolveSheetFullViewTarget({
     activeFilePath: excel.activeFilePath,
     activeSheet: excel.activeSheet,
     recentFiles: excel.recentFiles,
@@ -80,5 +85,6 @@ export function activateChatWorkspaceTab(key: ChatWorkspaceTab): void {
   if (excel.compareMode) excel.closeCompare();
   const discussion = currentWorkbookTarget(useSessionStore.getState().activeSessionId);
   const sheet = discussion?.file.relative === normalizeRelativePath(target.path) ? discussion.sheet ?? target.sheet : target.sheet;
+  recordWorkbookChatNavigation("sheet", target.path);
   openWorkspaceFile(target.path, { intent: "full", sheet, workbookLayout: "embedded" });
 }

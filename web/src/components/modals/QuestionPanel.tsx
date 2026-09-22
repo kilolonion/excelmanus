@@ -7,6 +7,9 @@ import { abortChat, answerQuestion } from "@/lib/api";
 import { resumeAfterInteraction } from "@/lib/chat-actions";
 import { motion } from "framer-motion";
 import type { Question } from "@/lib/types";
+import { useEffect, useRef } from "react";
+import { openWorkbookQuestion } from "@/lib/workbook-interaction";
+import { useWorkbookInteractionStore } from "@/stores/workbook-interaction-store";
 
 /** Options with these labels are treated as "free-text fallback" and hidden from chips. */
 const OTHER_LABELS = new Set(["Other", "其他", "other"]);
@@ -24,8 +27,22 @@ interface InlineQuestionBannerProps {
  */
 export function InlineQuestionBanner({ question, selected, onToggle }: InlineQuestionBannerProps) {
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
+  const sessionId = useSessionStore((s) => s.activeSessionId);
+  const lastOpened = useRef("");
+  useEffect(() => {
+    if (question.selection && question.autoOpen !== false && sessionId && (!question.sessionId || question.sessionId === sessionId)) {
+      const key = `${sessionId}:${question.id}`;
+      if (lastOpened.current === key) return;
+      const current = useWorkbookInteractionStore.getState().request;
+      if (current?.questionId !== question.id || current.sessionId !== sessionId) {
+        if (openWorkbookQuestion(question.id, question.selection, sessionId)) lastOpened.current = key;
+      } else {
+        lastOpened.current = key;
+      }
+    }
+  }, [question.id, question.selection, question.sessionId, question.autoOpen, sessionId]);
 
-  const visibleOptions = question.options.filter((o) => !OTHER_LABELS.has(o.label));
+  const visibleOptions = question.options.filter((o) => !OTHER_LABELS.has(o.label) && !(question.selection && o.label === "补充说明"));
 
   return (
     <motion.div
@@ -54,7 +71,7 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
             )}
           </div>
           <div className="flex items-center gap-0.5 shrink-0">
-            <button
+            {!question.selection && <button
               onClick={() => {
                 const sid = useSessionStore.getState().activeSessionId;
                 const qid = question.id;
@@ -68,7 +85,7 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
               title="跳过此问题"
             >
               <SkipForward className="h-3.5 w-3.5" />
-            </button>
+            </button>}
             <button
               onClick={() => {
                 const sid = useSessionStore.getState().activeSessionId;
@@ -84,6 +101,10 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
         </div>
 
         {/* Option chips */}
+        {question.selection && <button type="button" onClick={() => sessionId && openWorkbookQuestion(question.id, question.selection!, sessionId)}
+          className="mb-2 text-xs underline underline-offset-4" style={{ color: "var(--em-primary)" }}>
+          打开表格选择区域 · {question.selection.sheet}
+        </button>}
         {visibleOptions.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-1">
             {visibleOptions.map((opt) => {

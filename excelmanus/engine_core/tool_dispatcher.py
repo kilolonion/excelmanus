@@ -202,6 +202,7 @@ class ToolDispatcher:
         # ── 策略处理器表 ──
         from excelmanus.engine_core.tool_handlers import (
             AskUserHandler,
+            ShowWorkbookHandler,
             AuditOnlyHandler,
             CodePolicyHandler,
             DefaultToolHandler,
@@ -221,6 +222,7 @@ class ToolDispatcher:
         for _dn in ("delegate", "delegate_to_subagent", "list_subagents", "parallel_delegate"):
             _specific[_dn] = _deleg
         _specific["ask_user"] = AskUserHandler(engine, self)
+        _specific["show_workbook"] = ShowWorkbookHandler(engine, self)
         self._specific_handlers: dict[str, Any] = _specific
         # 动态/条件 handler + 兜底（保持原有顺序）
         _code_policy = CodePolicyHandler(engine, self)
@@ -483,6 +485,9 @@ class ToolDispatcher:
         arguments: dict[str, Any],
     ) -> tuple[str, str, str] | None:
         """同一 run 内只读工具：工具名 + 规范参数 + 文件 content_version。"""
+        # Session settings/permissions can change without a file version bump.
+        if tool_name == "inspect_agent":
+            return None
         owner = getattr(self._engine, "_background_parent", None) or self._engine
         runtime = getattr(owner, "_subagent_runtime", None)
         if runtime is not None and runtime.has_active_runs:
@@ -1890,6 +1895,12 @@ class ToolDispatcher:
         if structured is not None and structured.error is not None and structured.error.code == "SDK_CONTRACT_VIOLATION":
             error = structured.error.code
 
+        # Handlers may have applied a local text limit already. Recover their
+        # original result before making an immutable projection; the final
+        # deterministic spill/cap below still bounds what reaches the model.
+        if success and not output_pending and raw_result_str and len(raw_result_str) > len(result_str):
+            result_str = raw_result_str
+
         # ── CoW 路径拦截提醒：追加到 model_text ──
         if cow_reminders:
             result_str = result_str + "\n" + "\n".join(cow_reminders)
@@ -1928,6 +1939,31 @@ class ToolDispatcher:
             )
 
         if structured is not None and tool_name in self._EXCEL_READ_TOOLS | self._EXCEL_WRITE_TOOLS | {"split_spreadsheet"}:
+            from excelmanus.engine_core.spill import expose_spreadsheet_value
+
+            store = self._spill_store()
+            if store is not None:
+                structured = expose_spreadsheet_value(
+                    structured.with_model_text(result_str), store=store, project_large=False,
+                )
+                result_str = structured.model_text
+
+        unshaped_text = result_str
+        # Semantic shaping sees the full result before deterministic spilling.
+        # The subsequent spill/hard cap remains authoritative on failure/keep.
+        if structured is not None and success and not output_pending:
+            from excelmanus.system_one.host import maybe_shape_observation
+
+            try:
+                structured = await maybe_shape_observation(
+                    e, structured.with_model_text(result_str),
+                    tool_name=tool_name, arguments=arguments,
+                )
+                result_str = structured.model_text
+            except Exception:
+                logger.debug("Jev result shaping unavailable; using bounded projection", exc_info=True)
+
+        if result_str == unshaped_text and structured is not None and tool_name in self._EXCEL_READ_TOOLS | self._EXCEL_WRITE_TOOLS | {"split_spreadsheet"}:
             from excelmanus.engine_core.spill import expose_spreadsheet_value
 
             store = self._spill_store()

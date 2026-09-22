@@ -19,7 +19,7 @@ import {
 const SUB_TABS: { key: ModelSubTab; label: string; icon: ReactNode; coachId: string }[] = [
   { key: "providers", label: "供应商", icon: <Database className="h-3 w-3" />, coachId: "coach-settings-subtab-providers" },
   { key: "roles", label: "模型配置", icon: <Settings2 className="h-3 w-3" />, coachId: "coach-settings-subtab-roles" },
-  { key: "subscription", label: "订阅与 OAuth", icon: <Crown className="h-3 w-3" />, coachId: "coach-settings-subtab-subscription" },
+  { key: "subscription", label: "订阅账号", icon: <Crown className="h-3 w-3" />, coachId: "coach-settings-subtab-subscription" },
   { key: "diagnostics", label: "高级设置", icon: <SlidersHorizontal className="h-3 w-3" />, coachId: "coach-settings-subtab-diagnostics" },
 ];
 
@@ -63,6 +63,7 @@ export function ModelTab() {
               <button
                 key={tab.key}
                 type="button"
+                aria-pressed={isActive}
                 data-coach-id={tab.coachId}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap border ${
                   isActive

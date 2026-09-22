@@ -194,7 +194,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
     const { filePath, sheet, range } = pendingSelection;
     const filename = filePath.split("/").pop() || filePath;
-    const version = useExcelStore.getState().getContentVersion(filePath);
+    const version = pendingSelection.contentVersion;
 
     const textarea = textareaRef.current;
     // 使用 textarea 的当前值，而不是 editText 状态（避免闭包问题）

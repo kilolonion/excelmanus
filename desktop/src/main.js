@@ -8,10 +8,12 @@ const { configureWindowNavigation, initialWindowBounds, isAppUrl } = require("./
 const { readPickedFiles } = require("./picked-files");
 const { closeWindowsBeforeShutdown } = require("./window-lifecycle");
 const { allowPrivateNetwork } = require("./mobile-network");
+const { createUpdateService } = require("./updates");
 
 const LOOPBACK = "127.0.0.1";
 const STARTUP_TIMEOUT_MS = 120_000;
 const REPO_URL = "https://github.com/kilolonion/excelmanus";
+const updates = createUpdateService({ current: app.getVersion(), openExternal: url => shell.openExternal(url) });
 
 let mainWindow = null;
 let backendProcess = null;
@@ -333,6 +335,34 @@ ipcMain.handle("excelmanus:select-folder", async (event) => {
   return result.canceled ? null : (result.filePaths[0] || null);
 });
 
+ipcMain.handle("excelmanus:check-update", async event => {
+  if (!isFrontendSender(event)) throw new Error("更新请求来自无效页面");
+  return updates.check();
+});
+
+ipcMain.handle("excelmanus:download-update", async event => {
+  if (!isFrontendSender(event)) throw new Error("更新请求来自无效页面");
+  return updates.download();
+});
+
+async function checkUpdateFromMenu() {
+  try {
+    const info = await updates.check();
+    const result = await dialog.showMessageBox({
+      type: "info", title: "检查 ExcelManus 更新",
+      message: info.hasUpdate ? `发现新版本 ${info.latest}` : `当前版本 ${info.current} 已是最新正式版本`,
+      detail: info.hasUpdate
+        ? `${info.downloadUrl ? "下载后退出应用，运行新版安装包。" : "该版本尚无适用的安装包，请稍后重试。"}\nWindows 安装时可选择迁移数据安装或卸载后安装。两种方式都保留设置、会话、工作区和用户文件，只替换 ExcelManus 程序。`
+        : "检查完成，未修改应用或用户文件。",
+      buttons: info.hasUpdate && info.downloadUrl ? ["下载安装包", "稍后"] : ["知道了"],
+      defaultId: 0, cancelId: info.hasUpdate && info.downloadUrl ? 1 : 0,
+    });
+    if (result.response === 0 && info.hasUpdate && info.downloadUrl) await updates.download();
+  } catch (error) {
+    dialog.showErrorBox("检查更新失败", error.message);
+  }
+}
+
 ipcMain.handle("excelmanus:pick-chat-files", async (event) => {
   const senderWindow = frontendSenderWindow(event);
   if (!senderWindow) {
@@ -442,6 +472,7 @@ function buildAppMenu() {
     {
       label: "帮助",
       submenu: [
+        { label: "检查更新…", click: () => void checkUpdateFromMenu() },
         { label: "打开日志目录", click: () => void shell.openPath(path.join(userDataRoot(), "logs")) },
         { type: "separator" },
         { label: "项目主页", click: () => void shell.openExternal(REPO_URL) },
@@ -566,13 +597,16 @@ app.on("activate", () => {
 app.on("before-quit", (event) => {
   event.preventDefault();
   if (stopPromise || quitRequested) return;
+  log("收到退出请求，等待窗口关闭");
   quitRequested = true;
   void closeWindowsBeforeShutdown(BrowserWindow.getAllWindows()).then(async (closed) => {
     if (!closed) {
+      log("窗口取消或未完成关闭，保留后台服务");
       quitRequested = false;
       await dialog.showMessageBox({ type: "info", title: "尚未退出", message: "窗口尚未关闭。请完成保存或处理未保存的更改后，再次退出。" });
       return;
     }
+    log("所有窗口已关闭，正在停止后台服务");
     await stopAll();
     app.exit(0);
   }).catch(error => {
@@ -588,6 +622,12 @@ process.on("SIGINT", () => app.quit());
 
 // Test/CLI control is an inherited pipe, never an HTTP endpoint.
 if (process.env.EXCELMANUS_DESKTOP_CONTROL_STDIN === "1") {
-  require("node:readline").createInterface({ input: process.stdin })
+  // Electron replaces process.stdin with an already-ended stream on Windows.
+  // Read the inherited pipe through fs's worker pool instead of that shim.
+  const controlInput = process.platform === "win32"
+    ? require("node:fs").createReadStream(null, { fd: 0, autoClose: false })
+    : process.stdin;
+  controlInput.on("error", error => log(`桌面控制通道错误: ${error.message}`));
+  require("node:readline").createInterface({ input: controlInput })
     .on("line", line => { if (line === "shutdown") app.quit(); });
 }

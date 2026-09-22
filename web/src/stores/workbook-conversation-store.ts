@@ -81,7 +81,8 @@ export const useWorkbookConversationStore = create<WorkbookConversationState>()(
   }),
   observe: (sessionId, file, view) => set((state) => {
     const target = state.targets[sessionId];
-    if (!target || fileRefKey(target.file) !== fileRefKey(file)) return state;
+    if (!isSpreadsheetFile(file.relative)) return state;
+    const isDiscussion = target && fileRefKey(target.file) === fileRefKey(file);
     const key = workbookViewKey(sessionId, file);
     const previous = state.views[key];
     const nextView = view.status === "ready" && previous?.status === "ready"
@@ -92,7 +93,7 @@ export const useWorkbookConversationStore = create<WorkbookConversationState>()(
       && previous?.version === nextView.version && previous?.error === nextView.error) return state;
     return {
       views: { ...state.views, [key]: nextView },
-      ...(view.status === "ready" ? {
+      ...(view.status === "ready" && isDiscussion ? {
         targets: { ...state.targets, [sessionId]: { ...target,
           sheet: view.sheet ?? target.sheet,
           file: { ...target.file, observedVersion: view.version },

@@ -27,6 +27,11 @@ const env = { ...process.env, EXCELMANUS_HOME: home, EXCELMANUS_DESKTOP: '1', EX
 for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
 env.PATH = win ? `${process.env.SystemRoot || process.env.SYSTEMROOT}\\System32` : '/usr/bin:/bin';
 for (const key of ['EXCELMANUS_DB_PATH', 'EXCELMANUS_DATA_ROOT', 'EXCELMANUS_CHAT_HISTORY_DB_PATH', 'EXCELMANUS_MANAGE_TOKEN']) delete env[key];
+// Check the interpreter inside the actual package too: staging checks alone
+// cannot catch an extraResources filter accidentally dropping runtime data.
+execFileSync(python, ['-I', '-B', '-X', 'utf8', fileURLToPath(new URL('./check-python-runtime.py', import.meta.url))], {
+ cwd, env, stdio: 'inherit', timeout: 120_000, windowsHide: true,
+});
 const check = spawnSync(backend, ['--check-runtime'], { cwd, env, encoding: 'utf8', timeout: 90000, windowsHide: true });
 if (check.status !== 0 || !check.stdout?.includes('FROZEN_RUNTIME_OK')) throw new Error(check.stderr || check.stdout || String(check.error));
 console.log(check.stdout.trim());

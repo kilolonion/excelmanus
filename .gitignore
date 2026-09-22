@@ -100,6 +100,8 @@ docs/design/
 docs/agent-*.md
 docs/architecture-*.md
 docs/audit_*.md
+docs/*-audit-*.md
+docs/*-repair-*.md
 docs/baseline-*.md
 docs/bench-*.md
 docs/capability-*.md

@@ -18,6 +18,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
 import { hasProviderLogo, ProviderLogo, providerFallbackInitial } from "@/components/settings/model/ProviderLogo";
 import { applyVisionFromModel } from "@/lib/vision-capability";
+import { SubscriptionSettingsEntry } from "@/components/settings/model/SubscriptionSettingsEntry";
 
 interface ModelCapabilitySummary {
   name: string;
@@ -417,6 +418,9 @@ export function TopModelSelector() {
           )}
         </div>
 
+        <div className="border-t border-border/60 p-1">
+          <SubscriptionSettingsEntry onNavigate={() => setOpen(false)} />
+        </div>
         {/* ── Error banner ── */}
         {switchError && (
           <div className="px-3 py-2 border-t border-destructive/20 bg-destructive/5 flex items-center gap-2">

@@ -40,6 +40,14 @@ describe("truncateMention", () => {
 });
 
 describe("formatFileMention", () => {
+  it("round-trips disjoint references and quotes special worksheet names", () => {
+    const token = formatFileMention({ path: "sales.xlsx", sheet: "O'Brien, Q1", range: "A1:B2,D4,F:F,8:9", version: "abcd" });
+    expect(token).toBe("@file:sales.xlsx['O''Brien, Q1'!A1:B2,D4,F:F,8:9]@sha256:abcd");
+    const map = new Map<string, string>();
+    const [display] = toDisplayMentionTokens([token], map);
+    expect(applyDisplayReplacements(display, map)).toBe(token);
+  });
+
   it("keeps relative path, range, and content version", () => {
     expect(
       formatFileMention({

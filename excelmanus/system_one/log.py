@@ -30,14 +30,20 @@ def record_jev_decision(
                 }
             elif isinstance(answer, ScoreAnswer):
                 answers[key] = {"score": answer.score, "confidence": answer.confidence}
+    extras = dict(decision.extras)
+    extras.setdefault("stage", "outcome" if decision.kind == "outcome" else "evaluation")
+    extras.setdefault("eligible", bool(decision.applied))
+    applied = extras["stage"] == "effect" and bool(
+        extras.get("state_changed") or extras.get("advice_delivered")
+    )
     logger.info(
         "jev decision pack=%s gate=%s kind=%s reason=%s applied=%s extras=%s provider=%s protocol=%s model=%s latency_ms=%s answers=%s usage=%s",
         pack_id,
         gate,
         decision.kind,
         decision.reason,
-        decision.applied,
-        dict(decision.extras),
+        applied,
+        extras,
         getattr(evaluation, "provider_id", "") if evaluation else "",
         getattr(evaluation, "protocol", "") if evaluation else "",
         getattr(evaluation, "model", "") if evaluation else "",

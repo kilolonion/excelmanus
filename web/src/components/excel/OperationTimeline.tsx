@@ -212,12 +212,13 @@ function OperationTimelineItem({ op, onUndo, undoing }: OperationTimelineItemPro
 
 export function OperationTimeline({ filePath = null }: { filePath?: string | null }) {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const { operations, operationsLoading, operationsLoaded, fetchOperationHistory, undoOperationById } =
+  const { operations, operationsLoading, operationsLoaded, operationsError, fetchOperationHistory, undoOperationById } =
     useExcelStore(
       useShallow((s) => ({
         operations: s.operations,
         operationsLoading: s.operationsLoading,
         operationsLoaded: s.operationsLoaded,
+        operationsError: s.operationsError,
         fetchOperationHistory: s.fetchOperationHistory,
         undoOperationById: s.undoOperationById,
       })),
@@ -319,6 +320,7 @@ export function OperationTimeline({ filePath = null }: { filePath?: string | nul
         </div>
       </div>
 
+      {operationsError && <p role="alert" className="px-3 py-2 text-xs text-destructive">{operationsError}</p>}
       {visible.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-10 text-muted-foreground px-6 text-center">
           <Clock className="h-8 w-8 mb-2 opacity-30" />

@@ -194,6 +194,8 @@ class AgentEngine:
                 )
             )
             register_introspection_tools(self._registry)
+            from excelmanus.self_management import get_tools as get_self_management_tools
+            self._registry.register_tools(get_self_management_tools(self))
         # 会话级权限控制：从持久化配置读取，继承上次设置
         self._full_access_enabled: bool = (
             self._load_persisted_full_access(database) if self._is_host_session else False
@@ -400,6 +402,7 @@ class AgentEngine:
         self._context_budget = ContextBudget(
             base_tokens=config.max_context_tokens if _user_pinned else 0,
             model=config.model,
+            canonical_model=getattr(config, "canonical_model", "") or "",
         )
         # CompactionManager / Memory 在 ContextBudget 之前用 config 快照初始化，
         # 必须立刻对齐，否则对话页会显示设置页以外的窗口。
@@ -450,7 +453,10 @@ class AgentEngine:
         probe_client = self._client
         probe_model = strip_managed_prefix(config.model)
         probe_base_url = config.base_url
-        cached = load_capabilities(db, probe_model, probe_base_url)
+        probe_canonical = getattr(config, "canonical_model", "") or ""
+        cached = load_capabilities(
+            db, probe_model, probe_base_url, canonical_model=probe_canonical,
+        )
         if cached is not None and capabilities_cache_is_fresh(cached):
             return
         try:
@@ -466,6 +472,7 @@ class AgentEngine:
                 base_url=probe_base_url,
                 skip_if_cached=True,
                 db=db,
+                canonical_model=probe_canonical,
                 health_timeout=config.cap_probe_health_timeout,
                 tool_timeout=config.cap_probe_tool_timeout,
                 vision_timeout=config.cap_probe_vision_timeout,
@@ -505,11 +512,14 @@ class AgentEngine:
         """
         from excelmanus.vision_capability import infer_vision_capable
 
+        canonical = getattr(config, "canonical_model", "") or ""
         probe: bool | None = None
         if db is not None:
             try:
                 from excelmanus.model_probe import load_capabilities
-                caps = load_capabilities(db, config.model, config.base_url)
+                caps = load_capabilities(
+                    db, config.model, config.base_url, canonical_model=canonical,
+                )
                 if caps is not None:
                     probe = caps.supports_vision
             except Exception:
@@ -518,6 +528,7 @@ class AgentEngine:
             config.model,
             override=config.main_model_vision,
             probe=probe,
+            canonical_model=canonical,
         )
 
     def _refresh_vision_capability(self) -> None:
@@ -526,6 +537,7 @@ class AgentEngine:
 
         model = self._active_model or self._config.model
         base_url = self._active_base_url or self._config.base_url
+        canonical = self.active_canonical_model
         probe: bool | None = None
         caps = getattr(self, "_model_capabilities", None)
         if caps is not None:
@@ -533,7 +545,9 @@ class AgentEngine:
         elif self._database is not None:
             try:
                 from excelmanus.model_probe import load_capabilities
-                cached = load_capabilities(self._database, model, base_url)
+                cached = load_capabilities(
+                    self._database, model, base_url, canonical_model=canonical,
+                )
                 if cached is not None:
                     probe = cached.supports_vision
             except Exception:
@@ -542,6 +556,7 @@ class AgentEngine:
             model,
             override=self._config.main_model_vision,
             probe=probe,
+            canonical_model=canonical,
         )
         logger.info("视觉模式已刷新: model=%s vision=%s", model, self._is_vision_capable)
 
@@ -1997,6 +2012,7 @@ class AgentEngine:
         question_resolver: QuestionResolver | None = None,
         chat_mode: str = "write",
         context_input: dict[str, Any] | None = None,
+        jev_budget: Any = None,
     ) -> ChatResult:
         from excelmanus.agent.session_api import followup as _impl
         return await _impl(
@@ -2011,6 +2027,7 @@ class AgentEngine:
             question_resolver=question_resolver,
             chat_mode=chat_mode,
             context_input=context_input,
+            jev_budget=jev_budget,
         )
 
 
@@ -3049,9 +3066,25 @@ class AgentEngine:
         """当前激活的模型 profile 短名称。"""
         return self._active_model_name
 
+    @property
+    def active_canonical_model(self) -> str:
+        """当前激活档案绑定的规范模型名（智能匹配；未绑定时为空）。"""
+        profile = self._active_profile
+        bound = getattr(profile, "canonical_model", "") if profile else ""
+        return bound or (getattr(self._config, "canonical_model", "") or "")
+
     def sync_model_profiles(self, profiles: tuple["ModelProfile", ...]) -> None:
-        """热更新可用模型档案列表（由 SessionManager 广播调用）。"""
+        """热更新可用模型档案列表（由 SessionManager 广播调用）。
+
+        同时刷新激活档案引用：编辑/回填后 profile 对象已重建，
+        不更新会让 canonical_model 等字段停留在旧快照上。
+        """
         object.__setattr__(self._config, "models", profiles)
+        if self._active_model_name:
+            for p in profiles:
+                if p.name == self._active_model_name:
+                    self._active_profile = p
+                    break
 
     def list_models(self) -> list[dict[str, str]]:
         """列出所有可用模型档案，含当前激活标记。"""
@@ -3211,12 +3244,18 @@ class AgentEngine:
         self._active_profile = matched
         self._sync_from_llm_clients()
         self._model_capabilities = None
-        self._context_budget.update_for_model(matched.model)
+        self._context_budget.update_for_model(
+            matched.model,
+            canonical_model=getattr(matched, "canonical_model", "") or "",
+        )
         self._sync_context_window_consumers()
         self._refresh_vision_capability()
         desc = f"（{matched.description}）" if matched.description else ""
         self._schedule_background_probe(
-            replace(self._config, model=matched.model, base_url=matched.base_url), self._database,
+            replace(
+                self._config, model=matched.model, base_url=matched.base_url,
+                canonical_model=getattr(matched, "canonical_model", "") or "",
+            ), self._database,
         )
         return f"已切换到模型：{matched.name} → {matched.model}{desc}"
 

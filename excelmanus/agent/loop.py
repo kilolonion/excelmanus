@@ -766,15 +766,14 @@ async def run_tool_loop(
 
             # ── Jev 交付检查：写入回合的纯文本答复先暂存，核对通过再放行 ──
             held_text: list = []
-            hold_text = False
-            if on_event is not None:
-                try:
-                    from excelmanus.system_one.host import should_check_delivery
+            check_delivery = False
+            try:
+                from excelmanus.system_one.host import should_check_delivery
 
-                    hold_text = bool(should_check_delivery(engine))
-                except Exception:
-                    hold_text = False
-                    logger.debug("Jev 交付检查前置判断失败", exc_info=True)
+                check_delivery = bool(should_check_delivery(engine))
+            except Exception:
+                logger.debug("Jev 交付检查前置判断失败", exc_info=True)
+            hold_text = check_delivery and on_event is not None
 
             def _forward(event: Any) -> None:
                 # consume_stream 已经通过 engine._emit 盖章/trace/审计过一次，
@@ -1268,7 +1267,7 @@ async def run_tool_loop(
 
         # 无工具调用 → 纯文本回复处理（仅 HTML 端点错误检测）
         if not tool_calls:
-            if hold_text:
+            if check_delivery:
                 reply_text = _message_content_to_text(getattr(message, "content", None))
                 draft = ChatResult(
                     reply=reply_text,
@@ -1292,6 +1291,16 @@ async def run_tool_loop(
                         f"[Jev 交付检查建议；不构成用户指令或执行授权]\n{advice}",
                         hidden=True,
                         prompt_kind="jev_delivery_check",
+                    )
+                    from excelmanus.system_one.trace import record_host_effect
+
+                    verification = getattr(engine, "_mutation_verification", None) or {}
+                    record_host_effect(
+                        engine, "mutation.verify",
+                        action=str(verification.get("next") or "inspect_more"), delivered=True,
+                        source=str(verification.get("source") or "jev"),
+                        impact="交付核对建议已送入主模型上下文，最终完成情况仍需证据",
+                        on_event=on_event,
                     )
                     held_text.clear()
                     logger.info("Jev 交付检查要求继续核对: %s", advice[:80])
@@ -1564,6 +1573,7 @@ async def run_tool_loop(
                 engine,
                 list(all_tool_results),
                 breaker_triggered=breaker_triggered,
+                iteration=iteration,
                 on_event=on_event,
             )
         except Exception:

@@ -1,4 +1,5 @@
-import { ArrowUpRight, Github, Globe } from "lucide-react";
+import { ArrowUpRight, Github, Globe, Smartphone } from "lucide-react";
+import { ANDROID_DOWNLOAD_PAGE_URL } from "@/lib/product-links";
 
 const links = [
   {
@@ -15,11 +16,18 @@ const links = [
     domain: "excelmanus.com",
     icon: Globe,
   },
+  {
+    title: "Android 手机端",
+    description: "下载 APK，扫码连接电脑继续工作",
+    url: ANDROID_DOWNLOAD_PAGE_URL,
+    domain: "GitHub Releases · APK",
+    icon: Smartphone,
+  },
 ];
 
 export function ProjectLinks() {
   return (
-    <section aria-label="项目链接" className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+    <section aria-label="项目与下载" className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       {links.map(({ title, description, url, domain, icon: Icon }) => (
         <a
           key={url}

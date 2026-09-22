@@ -39,7 +39,7 @@ export function getTourScenes(isMobile: boolean): TourScene[] {
       ],
     },
     {
-      id: "settings", label: "模型与插件", steps: [
+      id: "settings", label: "模型与扩展", steps: [
         { target: "coach-settings-profiles", title: "管理模型供应商", description: "在供应商页添加连接并测试可用性。这里切换的是演示选项，不会修改你的默认模型。", icon: "Server", placement: "left", onEnter: "openSettings_model", practice: "model" },
         { target: "coach-settings-model-roles", title: "为不同任务分配模型", description: "在模型配置中，为聊天、记忆等任务选择模型。正式下拉列表来自你已添加的供应商。", icon: "Cpu", placement: "left", onEnter: "openSettings_model_roles", practice: "model" },
         { target: "coach-settings-subtab-subscription", title: "订阅与授权", description: "已有订阅时，可在“订阅与 OAuth”中完成授权；API Key 在供应商页配置。授权流程可以稍后进行。", icon: "KeyRound", placement: "bottom", onEnter: "openSettings_subscription", practice: "subscription" },

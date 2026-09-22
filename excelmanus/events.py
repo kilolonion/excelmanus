@@ -122,6 +122,7 @@ class ToolCallEvent:
     question_options: List[Dict[str, Any]] = field(default_factory=list)
     question_multi_select: bool = False
     question_queue_size: int = 0
+    question_selection: Optional[Dict[str, Any]] = None
     # 待确认审批事件字段
     approval_id: str = ""
     approval_tool_name: str = ""

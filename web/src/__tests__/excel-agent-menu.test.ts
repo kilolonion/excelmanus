@@ -59,17 +59,21 @@ function actionOf(api: ReturnType<typeof fakeApi>, id: string) {
 beforeEach(() => vi.restoreAllMocks());
 
 describe("registerAgentContextMenu", () => {
-  it("registers a submenu appended to the others section in order", () => {
+  it("registers the first item in grid, row and column context menus", () => {
     const f = fakeApi();
     registerAgentContextMenu(f.api, makeHost());
-    expect(f.submenuCalls).toEqual([{ id: AGENT_MENU_ID, title: "交给 Agent", order: 100 }]);
+    expect(f.submenuCalls).toEqual([{ id: AGENT_MENU_ID, title: "交给 Agent", order: -1 }]);
     expect(f.added.map((m) => m.id)).toEqual([
       `${AGENT_MENU_ID}.reference`,
       ...SELECTION_AGENT_ACTIONS.map((a) => `${AGENT_MENU_ID}.${a.kind}`),
       `${AGENT_MENU_ID}.trace-formula`,
     ]);
     expect(f.separators).toEqual([1, 1 + SELECTION_AGENT_ACTIONS.length]);
-    expect(f.appendedTo).toEqual(["contextMenu.others"]);
+    expect(f.appendedTo).toEqual([
+      ["contextMenu.mainArea", "contextMenu.format"],
+      ["contextMenu.rowHeader", "contextMenu.format"],
+      ["contextMenu.colHeader", "contextMenu.format"],
+    ]);
   });
 
   it("uses no English periods in titles (localeService.t splits on dots)", () => {

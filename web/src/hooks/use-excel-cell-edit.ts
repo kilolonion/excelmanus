@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import {
   enqueueExcelCellEdit,
   discardWorkbookEdits,
   isWorkbookEditPaused,
+  subscribeWorkbookEdits,
 } from "@/lib/excel-cell-edit";
 import { useExcelStore } from "@/stores/excel-store";
 import { fileRefFromSession, versionStoreKey, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
@@ -13,6 +14,8 @@ import { useSessionStore } from "@/stores/session-store";
 export function useExcelCellEdit(filePath: string | null) {
   const session = useSessionStore((s) => s.sessions.find((item) => item.id === s.activeSessionId));
   const key = filePath ? versionStoreKey(filePath, workspaceKeyFromSession(session)) : null;
+  const paused = useSyncExternalStore(subscribeWorkbookEdits,
+    () => Boolean(filePath && isWorkbookEditPaused(fileRefFromSession(filePath, session))), () => false);
   const [writeState, setWriteState] = useState(() => ({
     key,
     conflict: Boolean(filePath && isWorkbookEditPaused(fileRefFromSession(filePath, session))),
@@ -62,7 +65,7 @@ export function useExcelCellEdit(filePath: string | null) {
 
   return {
     handleCellEdit,
-    conflict: writeState.conflict,
+    conflict: paused && writeState.conflict,
     writeError: writeState.error,
     reloadAfterConflict,
     dismissWriteError: () => setWriteState((current) => ({ ...current, error: null })),

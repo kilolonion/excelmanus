@@ -91,18 +91,22 @@ class GlobalConfigStore:
             d["api_key"] = _api_key_cipher.decrypt_or_passthrough(raw)
         return d
 
+    _PROFILE_COLUMNS = (
+        "name, model, api_key, base_url, description, protocol, "
+        "thinking_mode, model_family, custom_extra_body, custom_extra_headers, "
+        "canonical_model"
+    )
+
     def list_profiles(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT name, model, api_key, base_url, description, protocol, "
-            "thinking_mode, model_family, custom_extra_body, custom_extra_headers "
+            f"SELECT {self._PROFILE_COLUMNS} "
             "FROM model_profiles ORDER BY id ASC"
         ).fetchall()
         return [self._decrypt_profile_row(row) for row in rows]
 
     def get_profile(self, name: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT name, model, api_key, base_url, description, protocol, "
-            "thinking_mode, model_family, custom_extra_body, custom_extra_headers "
+            f"SELECT {self._PROFILE_COLUMNS} "
             "FROM model_profiles WHERE name = ?",
             (name,),
         ).fetchone()
@@ -120,6 +124,7 @@ class GlobalConfigStore:
         model_family: str = "",
         custom_extra_body: str = "",
         custom_extra_headers: str = "",
+        canonical_model: str = "",
     ) -> bool:
         now = _now_iso()
         try:
@@ -128,11 +133,11 @@ class GlobalConfigStore:
                 "INSERT INTO model_profiles "
                 "(name, model, api_key, base_url, description, protocol, "
                 "thinking_mode, model_family, custom_extra_body, custom_extra_headers, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "canonical_model, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (name, model, enc_api_key, base_url, _profile_description(description), protocol,
                  thinking_mode, model_family, custom_extra_body, custom_extra_headers,
-                 now, now),
+                 canonical_model, now, now),
             )
             self._conn.commit()
             return True
@@ -154,6 +159,7 @@ class GlobalConfigStore:
         model_family: str | None = None,
         custom_extra_body: str | None = None,
         custom_extra_headers: str | None = None,
+        canonical_model: str | None = None,
     ) -> bool:
         sets: list[str] = []
         params: list[Any] = []
@@ -191,6 +197,9 @@ class GlobalConfigStore:
         if custom_extra_headers is not None:
             sets.append("custom_extra_headers = ?")
             params.append(custom_extra_headers)
+        if canonical_model is not None:
+            sets.append("canonical_model = ?")
+            params.append(canonical_model)
         if not sets:
             return False
         sets.append("updated_at = ?")

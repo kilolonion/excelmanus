@@ -58,6 +58,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const remoteVersion = useHealthHubStore((s) => s.remoteVersion);
   const dismissVersion = useHealthHubStore((s) => s.dismissVersion);
   const refreshNow = useHealthHubStore((s) => s.refreshNow);
+  const refreshError = useHealthHubStore((s) => s.refreshError);
   const isStandalone = pathnameStartsWith(pathname, STANDALONE_PATHS);
 
   useEffect(() => {
@@ -234,6 +235,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       remoteVersion={remoteVersion}
       onDismiss={dismissVersion}
       onRefresh={refreshNow}
+      refreshError={refreshError}
     />
   );
 

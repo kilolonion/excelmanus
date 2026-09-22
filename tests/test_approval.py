@@ -59,7 +59,7 @@ def test_text_file_audit_and_undo(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "new\n"
 
     undo_msg = manager.undo(approval_id)
-    assert "已回滚" in undo_msg
+    assert "未回滚" in undo_msg
     assert "manage_spreadsheet_versions" in undo_msg
     assert target.read_text(encoding="utf-8") == "new\n"
 
@@ -85,7 +85,7 @@ def test_undo_rejects_human_edit_after_approved_write(tmp_path: Path) -> None:
     )
     target.write_text("human\n", encoding="utf-8")
     undo_msg = manager.undo(approval_id)
-    assert "已回滚" in undo_msg
+    assert "未回滚" in undo_msg
     assert "manage_spreadsheet_versions" in undo_msg
     assert target.read_text(encoding="utf-8") == "human\n"
 
@@ -119,7 +119,7 @@ def test_binary_snapshot_and_undo(tmp_path: Path) -> None:
     assert target.read_bytes() == b"\x00NEW_BINARY"
 
     undo_msg = manager.undo(approval_id)
-    assert "已回滚" in undo_msg
+    assert "未回滚" in undo_msg
     assert target.read_bytes() == b"\x00NEW_BINARY"
 
 
@@ -149,7 +149,7 @@ def test_empty_file_hash_recorded_and_undo(tmp_path: Path) -> None:
     assert record.changes[0].after_hash == expected_empty_hash
 
     undo_msg = manager.undo(approval_id)
-    assert "已回滚" in undo_msg
+    assert "未回滚" in undo_msg
     assert target.read_text(encoding="utf-8") == ""
 
 
@@ -183,7 +183,7 @@ def test_failed_execution_still_writes_manifest_and_supports_undo(tmp_path: Path
     assert target.read_text(encoding="utf-8") == "after"
 
     undo_msg = manager.undo(approval_id)
-    assert "已回滚" in undo_msg
+    assert "未回滚" in undo_msg
     assert target.read_text(encoding="utf-8") == "after"
 
 
@@ -237,7 +237,7 @@ def test_undo_can_load_record_from_manifest_after_restart(tmp_path: Path) -> Non
     # 模拟重启：使用全新 manager，从 manifest 重建记录。
     manager2 = ApprovalManager(str(tmp_path))
     msg = manager2.undo(approval_id)
-    assert "已回滚" in msg
+    assert "未回滚" in msg
     assert target.exists()
 
 

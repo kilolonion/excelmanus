@@ -272,6 +272,8 @@ class InteractionHandler:
                 question_options=self.question_options_payload(question),
                 question_multi_select=question.multi_select,
                 question_queue_size=e._question_flow.queue_size(),
+                tool_call_id=question.tool_call_id,
+                question_selection=deepcopy(question.selection),
                 iteration=iteration,
             ),
         )
@@ -325,8 +327,9 @@ class InteractionHandler:
             else:
                 raise ValueError("工具参数错误: questions 必须为非空数组。")
 
+        from excelmanus.workbook.interaction import prepare_questions
         pending_list = e._question_flow.enqueue_batch(
-            questions_payload=questions_value,
+            questions_payload=prepare_questions(e, questions_value),
             tool_call_id=tool_call_id,
         )
         persist_runtime = getattr(getattr(e, "_driver", None), "_persist_runtime_state", None)
@@ -373,8 +376,10 @@ class InteractionHandler:
             else:
                 raise ValueError("工具参数错误: questions 必须为非空数组。")
 
+        from excelmanus.workbook.interaction import prepare_questions
+        prepared = await asyncio.to_thread(prepare_questions, e, questions_value)
         pending_list = e._question_flow.enqueue_batch(
-            questions_payload=questions_value,
+            questions_payload=prepared,
             tool_call_id=tool_call_id,
         )
         self._recovery = {

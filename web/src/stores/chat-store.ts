@@ -483,6 +483,14 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
       const visible = stripInjectedUserPromptBlocks(extracted.content);
       if (!visible && extracted.files.length === 0) continue;
       const userMsg: Message = { id: backendMessageId, role: "user", content: visible };
+      const action = msg._workbook_action;
+      if (action && typeof action === "object" && typeof (action as Record<string, unknown>).operation === "string") {
+        userMsg.workbookAction = action as import("@/lib/workbook-handoff").WorkbookActionContext;
+      }
+      const context = msg._workbook_context as import("@/lib/workbook-context").WorkbookMessageContext | undefined;
+      if (context && Array.isArray(context.sheet_contexts) && context.sheet_contexts.length <= 3) {
+        userMsg.workbookContext = context;
+      }
       if (extracted.files.length > 0) {
         userMsg.files = extracted.files;
       }
@@ -920,7 +928,7 @@ interface ChatState {
     messageId: string,
     updater: (message: Extract<Message, { role: "assistant" }>) => Extract<Message, { role: "assistant" }>,
   ) => void;
-  addUserMessage: (id: string, content: string, files?: FileAttachment[]) => void;
+  addUserMessage: (id: string, content: string, files?: FileAttachment[], workbookAction?: import("@/lib/workbook-handoff").WorkbookActionContext, workbookContext?: import("@/lib/workbook-context").WorkbookMessageContext) => void;
   addAssistantMessage: (id: string) => void;
   appendBlock: (messageId: string, block: AssistantBlock) => void;
   updateLastBlock: (messageId: string, updater: (block: AssistantBlock) => AssistantBlock) => void;
@@ -987,9 +995,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return patch ?? {};
     }),
-  addUserMessage: (id, content, files) =>
+  addUserMessage: (id, content, files, workbookAction, workbookContext) =>
     set((state) => {
-      const message: Message = { id, role: "user", content, files, timestamp: Date.now() };
+      const message: Message = { id, role: "user", content, files, timestamp: Date.now(), ...(workbookAction ? { workbookAction } : {}), ...(workbookContext ? { workbookContext } : {}) };
       const newOrder = [...state.messageOrder, id];
       const newById = { ...state.messagesById, [id]: message };
       return {

@@ -1,6 +1,6 @@
 # Skillpack protocol
 
-Applies to: 1.8.0 source tree · Updated: 2026-09-19
+Applies to: 1.8.0 source tree · Updated: 2026-09-21
 
 [Documentation](README.md) · [中文](skillpack_protocol.md) · [Configuration](configuration_en.md)
 
@@ -77,6 +77,9 @@ Default scan order is listed below. Settings can disable general discovery, exte
 | `run_code_templates` | Batch writing, analysis, and formatting templates |
 | `word_basic` | Word reading, editing, and generation |
 | `word_code_runner` | Complex Word processing |
+| `agent_self_management` | Inspect capabilities and adjust session settings; disabled by default |
+
+Individual built-in skills can be gated by runtime switches: `agent_self_management` loads only after Settings → System → Capabilities → Agent self-management is enabled; until then it is hidden from the skill list, name lookups, and incremental loads.
 
 ## 6. Maintenance and validation
 

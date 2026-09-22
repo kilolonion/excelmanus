@@ -4,22 +4,26 @@ import { useSyncExternalStore } from "react";
 import { ArrowLeftRight, FileSpreadsheet, Loader2, MessageSquare, X } from "lucide-react";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { useWorkbookConversationStore, workbookViewKey } from "@/stores/workbook-conversation-store";
-import { workspaceKeyFromSession } from "@/lib/workspace-file-ref";
+import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
 import { hasPendingWorkbookEdits, isWorkbookEditPaused, subscribeWorkbookEdits } from "@/lib/excel-cell-edit";
 import { fileBaseName } from "@/lib/revision-display";
+import { recordWorkbookChatNavigation } from "@/lib/workbook-chat-navigation";
+import { currentWorkbookSendContext } from "@/lib/workbook-context";
+import { useShallow } from "zustand/react/shallow";
+import { useWordStore } from "@/stores/word-store";
 
 export function useWorkbookConversation() {
   const sessionId = useSessionStore((s) => s.activeSessionId);
-  const session = useSessionStore((s) => s.sessions.find((item) => item.id === s.activeSessionId));
-  const target = useWorkbookConversationStore((s) => sessionId ? s.targets[sessionId] : undefined);
-  const valid = target?.file.workspaceKey === workspaceKeyFromSession(session) ? target : undefined;
-  const view = useWorkbookConversationStore((s) => sessionId && valid ? s.views[workbookViewKey(sessionId, valid.file)] : undefined);
-  return { sessionId, target: valid, view };
+  useSessionStore((s) => s.sessions);
+  useWordStore((s) => s.fullViewPath);
+  useWorkbookConversationStore(useShallow((s) => [s.targets, s.views]));
+  useExcelStore(useShallow((s) => [s.panelOpen, s.activeFilePath, s.activeSheet, s.activeWorkspaceKey, s.fullViewPath, s.fullViewSheet, s.fullViewLayout, s.compareMode]));
+  const context = currentWorkbookSendContext(sessionId);
+  return { sessionId, target: context?.target, view: context?.view, isPreview: context?.isPreview };
 }
 
 export function WorkbookContextChip() {
-  const { sessionId, target, view } = useWorkbookConversation();
+  const { sessionId, target, view, isPreview } = useWorkbookConversation();
   const editState = useSyncExternalStore(subscribeWorkbookEdits,
     () => !target ? "" : isWorkbookEditPaused(target.file) ? "保存需要处理" : hasPendingWorkbookEdits(target.file) ? "正在保存…" : "",
     () => "");
@@ -27,16 +31,25 @@ export function WorkbookContextChip() {
   const label = `${fileBaseName(target.file.relative)}${target.sheet ? ` · ${target.sheet}` : ""}`;
   return <div className="flex items-center gap-1.5 px-3 pt-2 pb-1 text-xs text-[var(--em-primary)]" data-workbook-context={target.file.relative}>
     <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
-    <button type="button" className="truncate text-left min-w-0" title={`当前讨论：${target.file.relative}`} onClick={() => {
+    <button type="button" className="truncate text-left min-w-0" title={`本次提问默认引用：${target.file.relative}`} onClick={() => {
+      recordWorkbookChatNavigation("sheet", target.file.relative);
       useExcelStore.getState().openFullView(target.file.relative, target.sheet, target.layout);
     }}>{label}</button>
-    <button type="button" aria-label="更换主对话文件" title="更换主对话文件"
+    <button type="button" aria-label={isPreview ? "设为主对话文件" : "更换主对话文件"} title={isPreview ? "关闭预览后继续讨论此表格" : "更换主对话文件"}
       className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] px-2 py-1 hover:bg-[var(--em-primary-alpha-12)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--em-primary)]"
-      onClick={() => useWorkbookConversationStore.getState().openSwitchPicker(sessionId)}>
-      <ArrowLeftRight className="h-3 w-3" />更换
+      onClick={() => {
+        const store = useWorkbookConversationStore.getState();
+        if (isPreview) { useExcelStore.getState().setPrimaryWorkbook(target.file.relative); }
+        else store.openSwitchPicker(sessionId);
+      }}>
+      <ArrowLeftRight className="h-3 w-3" />{isPreview ? "设为主对话" : "更换"}
     </button>
-    <span className="text-muted-foreground shrink-0 ml-auto">{editState || (view?.status === "ready" ? "已关联" : view?.status === "error" ? "打开失败" : "加载中…")}</span>
-    <button type="button" aria-label="移除当前表格关联" className="p-1 rounded hover:bg-muted shrink-0" onClick={() => useWorkbookConversationStore.getState().detach(sessionId)}><X className="h-3 w-3" /></button>
+    <span className="text-muted-foreground shrink-0 ml-auto">{editState || (view?.status === "ready" ? isPreview ? "本次引用预览" : "已关联" : view?.status === "error" ? "打开失败" : "加载中…")}</span>
+    <button type="button" aria-label={isPreview ? "关闭当前预览" : "移除当前表格关联"} className="p-1 rounded hover:bg-muted shrink-0" onClick={() => {
+      useExcelStore.getState().closePanel();
+      useExcelStore.getState().closeFullView();
+      if (!isPreview) useWorkbookConversationStore.getState().detach(sessionId);
+    }}><X className="h-3 w-3" /></button>
   </div>;
 }
 

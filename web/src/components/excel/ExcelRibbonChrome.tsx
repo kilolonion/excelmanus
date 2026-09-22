@@ -102,7 +102,7 @@ export function ExcelRibbonChrome({
         )}
         <RibbonIconButton
           onClick={onToggleSelection}
-          title={selectionMode ? "退出选区模式" : isMobile ? "选区引用（也可长按表格）" : "选区引用"}
+          title={selectionMode ? "退出选区模式" : isMobile ? "选区引用（也可长按表格）" : "选区引用（Ctrl / ⌘ 可多选不连续区域，也支持整行、整列）"}
           pressed={selectionMode}
         >
           <MousePointerSquareDashed className="h-3.5 w-3.5" />

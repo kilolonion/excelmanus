@@ -6,32 +6,54 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
+
+from openpyxl.styles.colors import COLOR_INDEX
+from openpyxl.xml.functions import fromstring
 
 
 # ── 颜色解析 ──────────────────────────────────────────────────
 
-_IDX_COLORS = {
-    0: "#000000", 1: "#FFFFFF", 2: "#FF0000", 3: "#00FF00",
-    4: "#0000FF", 5: "#FFFF00", 6: "#FF00FF", 7: "#00FFFF",
-    8: "#000000", 9: "#FFFFFF", 10: "#FF0000", 11: "#00FF00",
-    12: "#0000FF", 13: "#FFFF00", 14: "#FF00FF", 15: "#00FFFF",
-    16: "#800000", 17: "#008000", 18: "#000080", 19: "#808000",
-    20: "#800080", 21: "#008080", 22: "#C0C0C0", 23: "#808080",
-}
+_IDX_COLORS = {index: f"#{rgb[-6:]}" for index, rgb in enumerate(COLOR_INDEX)}
 
 _THEME_COLORS = {
-    0: "#FFFFFF", 1: "#000000", 2: "#44546A", 3: "#E7E6E6",
-    4: "#4472C4", 5: "#ED7D31", 6: "#A5A5A5", 7: "#FFC000",
-    8: "#5B9BD5", 9: "#70AD47",
+    0: "#FFFFFF", 1: "#000000", 2: "#EEECE1", 3: "#1F497D",
+    4: "#4F81BD", 5: "#C0504D", 6: "#9BBB59", 7: "#8064A2",
+    8: "#4BACC6", 9: "#F79646", 10: "#0000FF", 11: "#800080",
 }
 
 _BORDER_STYLE_MAP = {
-    "thin": 1, "medium": 2, "thick": 3, "dashed": 4,
-    "dotted": 5, "double": 6, "hair": 7,
-    "mediumDashed": 8, "dashDot": 9, "mediumDashDot": 10,
-    "dashDotDot": 11, "mediumDashDotDot": 12, "slantDashDot": 13,
+    "thin": 1, "hair": 2, "dotted": 3, "dashed": 4,
+    "dashDot": 5, "dashDotDot": 6, "double": 7, "medium": 8,
+    "mediumDashed": 9, "mediumDashDot": 10,
+    "mediumDashDotDot": 11, "slantDashDot": 12, "thick": 13,
 }
+
+
+@lru_cache(maxsize=32)
+def _theme_colors(theme: bytes | str | None) -> dict[int, str]:
+    """Theme indices use light/dark order, not clrScheme's XML child order."""
+    if not theme:
+        return _THEME_COLORS
+    colors = dict(_THEME_COLORS)
+    try:
+        ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        scheme = fromstring(theme).find(f"{ns}themeElements/{ns}clrScheme")
+        if scheme is None:
+            return colors
+        names = ("lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3",
+                 "accent4", "accent5", "accent6", "hlink", "folHlink")
+        for index, name in enumerate(names):
+            entry = scheme.find(f"{ns}{name}")
+            if entry is not None and len(entry):
+                value = entry[0].get("lastClr") or entry[0].get("val")
+                if value and len(value) == 6:
+                    int(value, 16)
+                    colors[index] = f"#{value.upper()}"
+    except (ValueError, TypeError, SyntaxError):
+        pass
+    return colors
 
 
 def _apply_tint(hex_color: str, tint: float) -> str:
@@ -57,12 +79,12 @@ def _apply_tint(hex_color: str, tint: float) -> str:
     return f"#{r:02X}{g:02X}{b:02X}"
 
 
-def resolve_color(color_obj: Any) -> str | None:
+def resolve_color(color_obj: Any, theme_colors: dict[int, str] | None = None) -> str | None:
     """将 openpyxl Color 对象转为 #RRGGBB 字符串。"""
     if color_obj is None:
         return None
     try:
-        if color_obj.type == "rgb" and color_obj.rgb and color_obj.rgb != "00000000":
+        if color_obj.type == "rgb" and color_obj.rgb:
             rgb = str(color_obj.rgb)
             if len(rgb) == 8:
                 hex_val = f"#{rgb[2:]}"
@@ -75,7 +97,7 @@ def resolve_color(color_obj: Any) -> str | None:
         if color_obj.type == "indexed" and color_obj.indexed is not None:
             return _IDX_COLORS.get(color_obj.indexed)
         if color_obj.type == "theme" and color_obj.theme is not None:
-            base = _THEME_COLORS.get(color_obj.theme)
+            base = (theme_colors if theme_colors is not None else _THEME_COLORS).get(color_obj.theme)
             if base is None:
                 return None
             tint = getattr(color_obj, "tint", 0.0) or 0.0
@@ -88,6 +110,8 @@ def resolve_color(color_obj: Any) -> str | None:
 def extract_cell_style(cell_obj: Any) -> dict[str, Any] | None:
     """提取单元格样式，返回 Univer 兼容的样式 dict，无样式返回 None。"""
     style: dict[str, Any] = {}
+    workbook = getattr(getattr(cell_obj, "parent", None), "parent", None)
+    theme_colors = _theme_colors(getattr(workbook, "loaded_theme", None))
     try:
         font = cell_obj.font
         if font:
@@ -99,11 +123,11 @@ def extract_cell_style(cell_obj: Any) -> dict[str, Any] | None:
                 style["ul"] = {"s": 1}
             if font.strike:
                 style["st"] = {"s": 1}
-            if font.size and font.size != 11:
+            if font.size:
                 style["fs"] = font.size
-            if font.name and font.name != "Calibri":
+            if font.name:
                 style["ff"] = font.name
-            fc = resolve_color(font.color)
+            fc = resolve_color(font.color, theme_colors)
             if fc:
                 style["cl"] = {"rgb": fc}
     except Exception:
@@ -111,7 +135,7 @@ def extract_cell_style(cell_obj: Any) -> dict[str, Any] | None:
     try:
         fill = cell_obj.fill
         if fill and fill.patternType and fill.patternType != "none":
-            bg = resolve_color(fill.fgColor)
+            bg = resolve_color(fill.fgColor, theme_colors)
             if bg:
                 style["bg"] = {"rgb": bg}
     except Exception:
@@ -142,7 +166,7 @@ def extract_cell_style(cell_obj: Any) -> dict[str, Any] | None:
                 side = getattr(border, side_name, None)
                 if side and side.style:
                     bd_entry: dict[str, Any] = {"s": _BORDER_STYLE_MAP.get(side.style, 1)}
-                    bc = resolve_color(side.color)
+                    bc = resolve_color(side.color, theme_colors)
                     if bc:
                         bd_entry["cl"] = {"rgb": bc}
                     style.setdefault("bd", {})[univer_key] = bd_entry

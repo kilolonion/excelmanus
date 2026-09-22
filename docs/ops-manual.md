@@ -1,6 +1,6 @@
 # ExcelManus 运维手册
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-19
+适用版本：1.8.0 源码 · 更新日期：2026-09-21
 
 [文档导航](README.md) · [English](ops-manual_en.md) · [配置参考](configuration.md)
 
@@ -85,7 +85,7 @@ npm run dev
                   └─ /     ── 127.0.0.1:3000（Next.js）
 ```
 
-1. 为运行进程设置 `EXCELMANUS_DEPLOY_MODE=server`，关闭应用内的自身升级入口。
+1. 为运行进程设置 `EXCELMANUS_DEPLOY_MODE=server`；服务器默认禁用网页自身更新和远程部署执行，备份恢复接口仍受本机来源限制。如需允许管理员从网页一键更新，另见第 7 节。
 2. 配置至少 16 字符的 `EXCELMANUS_MANAGE_TOKEN`。即使后端监听 loopback，只要反向代理对外暴露，也应配置访问保护。
 3. 浏览器在令牌提示页输入相同令牌；API 客户端使用 `Authorization: Bearer <token>`。不要在公开前端变量中保存令牌，也不要由未经认证的代理为所有访客自动注入令牌。
 4. 同机部署只需让代理访问应用端口；分机部署通过私网、VPN 或明确受控的后端入口连接，不必把 3000/8000 端口向所有公网来源开放。
@@ -207,9 +207,9 @@ bash ./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-
 
 ## 7. 升级、备份与恢复
 
-本机源码版可从设置页停机升级，或停止服务后运行 `./deploy/update.sh`。更新会备份应用数据并尝试 fast-forward；有冲突时不会强制重置本机开发分支。服务器版由运维机部署，桌面版安装新包，详见 [升级与部署](hot-update-design.md)。
+本机源码版可从「设置 → 版本 → 一键更新前后端」停机升级，或停止服务后运行 `./deploy/update.sh`。更新会备份应用数据并尝试 fast-forward；有未提交修改、分支分叉或文件冲突时停止，不自动 stash 或强制覆盖。网页更新要求由 `deploy/start.sh` / `start.ps1` 启动的单 worker 前后端同机实例，并拒绝在任务运行中开始；更新期间有停机窗口，服务恢复后页面才提示刷新。服务器版默认关闭该入口，需显式设置 `EXCELMANUS_WEB_UPGRADE_ENABLED=1` 并启用管理员登录保护；多 worker、分机部署或安装包环境仍由运维机部署，桌面版安装新包。详见 [升级与部署](hot-update-design.md)。
 
-内置升级备份当前不是完整 profile 备份，未包含 `.secret_key`；迁移和灾难恢复不能仅依赖自动生成的备份目录。
+内置升级备份包含主库各数据库、`config.env`、`.secret_key` 及 `data/`、`memory/`、`skillpacks/` 等目录，但不是完整 profile 备份；登记在数据目录外的工作区、外部数据库和部署清单不在其中。迁移和灾难恢复不能仅依赖自动生成的备份目录。
 
 备份前先停止相关进程，使 SQLite、运行状态和文件保持一致。至少保存：
 

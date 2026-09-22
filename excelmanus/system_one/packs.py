@@ -387,6 +387,16 @@ PACKS: dict[str, PackSpec] = {
                     "compare": "Diff/compare view",
                 },
             ),
+            QuestionSpec(
+                qid="file_pick", kind="choice",
+                instructions="Which entry in candidate_files should be shown for this request? Use none when ambiguous.",
+                criteria={"first": "First file", "second": "Second file", "third": "Third file", "none": "No grounded choice"},
+            ),
+            QuestionSpec(
+                qid="compare_pick", kind="choice",
+                instructions="For a requested comparison, select the other file in candidate_files, different from file_pick; otherwise none.",
+                criteria={"first": "First file", "second": "Second file", "third": "Third file", "none": "No grounded comparison"},
+            ),
         ),
     ),
     "approval.tool_call": PackSpec(

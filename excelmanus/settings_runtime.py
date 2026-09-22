@@ -173,6 +173,14 @@ def credentials_from_store() -> dict[str, str]:
     out = {"api_key": api_key, "base_url": base_url, "model": model}
     if protocol:
         out["protocol"] = protocol
+    try:
+        from excelmanus.config import profile_canonical
+
+        canonical = profile_canonical(row)
+        if canonical:
+            out["canonical_model"] = canonical
+    except Exception:
+        pass
     return out
 
 

@@ -223,6 +223,7 @@ class CommandHandler:
                     new_tokens = await e.context_budget.update_for_model_async(
                         e.active_model, client=e._client,
                         base_url=e._active_base_url,
+                        canonical_model=getattr(e, "active_canonical_model", ""),
                     )
                     e._memory.update_context_window(new_tokens)
                     e._compaction_manager.max_context_tokens = new_tokens

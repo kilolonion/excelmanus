@@ -6,23 +6,17 @@ import {
   Loader2,
   Save,
   CheckCircle2,
-  Shield,
   Bot,
-  RotateCcw,
   Gauge,
   Shrink,
   History,
   Clock,
   Users,
   AlertCircle,
-  Brain,
   BookOpen,
   Layers,
-  Eye,
-  ScanEye,
   Zap,
   MessageSquare,
-  Terminal,
   FileText,
   ChevronDown,
   Timer,
@@ -40,6 +34,7 @@ import { apiGet, apiPut } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
+import { WorkbookChatSettings } from "./WorkbookChatSettings";
 
 interface RuntimeConfig {
   // 会话
@@ -55,6 +50,7 @@ interface RuntimeConfig {
   output_cost_per_1k_usd: number;
   // 执行与安全
   subagent_enabled: boolean;
+  agent_self_management_enabled: boolean;
   friendly_error_messages: boolean;
   // 上下文与记忆
   max_context_tokens: number;
@@ -155,13 +151,6 @@ const BASIC_GROUPS: ItemGroup[] = [
         type: "bool",
       },
       {
-        key: "memory_enabled",
-        label: "跨会话记忆",
-        desc: "关闭后不再读写持久记忆，也不再自动提取。已有记录会保留。新开对话后完全生效。",
-        icon: <Brain className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
         key: "chat_history_enabled",
         label: "聊天记录持久化",
         desc: "将会话写入本地数据库以便下次恢复。关闭后服务端不再保存或恢复。保存后将重启服务。",
@@ -175,16 +164,11 @@ const BASIC_GROUPS: ItemGroup[] = [
     icon: <Zap className="h-3.5 w-3.5" />,
     items: [
       {
-        key: "main_model_vision",
-        label: "图片识别",
-        desc: "控制当前对话模型能否处理图片。自动：按模型能力判断；开启：一律允许；关闭：不接受图片。图片由当前模型直接阅读，不会另开视觉模型。",
-        icon: <ScanEye className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "auto", label: "自动" },
-          { value: "true", label: "开启" },
-          { value: "false", label: "关闭" },
-        ],
+        key: "agent_self_management_enabled",
+        label: "Agent 自我管理",
+        desc: "默认关闭。开启后提供自我管理技能及查询、配置工具，可查看自身能力并调整当前对话的推理、上下文和工具开关。仅影响当前对话，不修改密钥或审批权限；保存开关后立即生效。",
+        icon: <SlidersHorizontal className="h-4 w-4" />,
+        type: "bool",
       },
       {
         key: "subagent_enabled",
@@ -192,20 +176,6 @@ const BASIC_GROUPS: ItemGroup[] = [
         desc: "允许主模型把子任务委派出去。未指定名称时用通用子代理；只读探查需显式指定 explorer。关闭后工具仍可见，但执行会被拒绝。已打开的对话需新开，或使用 /subagent on|off。",
         icon: <Bot className="h-4 w-4" />,
         type: "bool",
-      },
-      {
-        key: "log_level",
-        label: "日志级别",
-        desc: "后端模块日志详细程度。保存后立即生效，不影响访问日志。",
-        icon: <FileText className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "DEBUG", label: "DEBUG" },
-          { value: "INFO", label: "INFO" },
-          { value: "WARNING", label: "WARNING" },
-          { value: "ERROR", label: "ERROR" },
-          { value: "CRITICAL", label: "CRITICAL" },
-        ],
       },
     ],
   },
@@ -251,6 +221,20 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         type: "bool",
       },
       {
+        key: "log_level",
+        label: "日志级别",
+        desc: "后端模块日志详细程度。保存后立即生效，不影响访问日志。",
+        icon: <FileText className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "DEBUG", label: "DEBUG" },
+          { value: "INFO", label: "INFO" },
+          { value: "WARNING", label: "WARNING" },
+          { value: "ERROR", label: "ERROR" },
+          { value: "CRITICAL", label: "CRITICAL" },
+        ],
+      },
+      {
         key: "turn_timeout_seconds",
         label: "单轮 wall-clock 上限",
         desc: "限制一条用户消息的总执行时间（秒）。0 表示不限制；模型重试、工具、Code Mode 和同步子代理共用此上限。",
@@ -259,57 +243,10 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         min: 0,
         max: 86400,
       },
-      {
-        key: "responses_continuation_enabled",
-        label: "Responses 原生续接",
-        desc: "启用 Responses API 的 previous_response_id 续接。开启后模型响应会短暂保存，后续请求只发送新增输入。",
-        icon: <ArrowRight className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "responses_background_enabled",
-        label: "Responses 后台响应",
-        desc: "使用 Responses API 的后台响应并轮询到终态；适合较长模型任务，当前回合仍受统一 wall-clock 限制。",
-        icon: <Timer className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "turn_token_budget",
-        label: "单轮 token 上限",
-        desc: "限制本轮模型输入与输出 token 总数。0 表示不限制。",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 10000000,
-      },
-      {
-        key: "turn_cost_budget_usd",
-        label: "单轮成本上限",
-        desc: "限制本轮累计模型成本（美元）。0 表示不限制；provider 没有返回成本时使用下面的估算单价。",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "float",
-        min: 0,
-      },
-      {
-        key: "input_cost_per_1k_usd",
-        label: "输入 token 单价",
-        desc: "provider 未返回成本时，每 1K 输入 token 的估算美元单价。",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "float",
-        min: 0,
-      },
-      {
-        key: "output_cost_per_1k_usd",
-        label: "输出 token 单价",
-        desc: "provider 未返回成本时，每 1K 输出 token 的估算美元单价。",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "float",
-        min: 0,
-      },
     ],
   },
   {
-    title: "压缩与缓存",
+    title: "上下文压缩",
     icon: <Shrink className="h-3.5 w-3.5" />,
     items: [
       {
@@ -336,101 +273,6 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         type: "int",
         min: 100,
         max: 10000,
-      },
-      {
-        key: "prompt_cache_key_enabled",
-        label: "提示词缓存",
-        desc: "向模型接口发送缓存键，提高重复提示词命中率。已打开的对话需新开后生效。",
-        icon: <Zap className="h-4 w-4" />,
-        type: "bool",
-      },
-    ],
-  },
-  {
-    title: "记忆维护",
-    icon: <Sparkles className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "memory_maintenance_enabled",
-        label: "记忆自动维护",
-        desc: "提取新记忆后，按条目数、增量和间隔合并清理。需先开启跨会话记忆。",
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "memory_maintenance_min_entries",
-        label: "维护最少条目数",
-        desc: "记忆少于此数时不触发维护。",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 200,
-      },
-      {
-        key: "memory_maintenance_new_threshold",
-        label: "维护新增阈值",
-        desc: "新增条目达到此数后才可能触发维护。",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 50,
-      },
-      {
-        key: "memory_maintenance_interval_hours",
-        label: "维护最小间隔",
-        desc: "两次维护之间的最短间隔（小时）。",
-        icon: <Clock className="h-4 w-4" />,
-        type: "float",
-      },
-      {
-        key: "memory_maintenance_model",
-        label: "维护模型",
-        desc: "用于记忆维护的模型 ID，留空则使用当前激活模型。",
-        icon: <Brain className="h-4 w-4" />,
-        type: "string",
-      },
-      {
-        key: "memory_expire_days",
-        label: "记忆过期天数",
-        desc: "会话启动时清理超过此天数的记忆。0 表示不过期。",
-        icon: <Clock className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 3650,
-      },
-    ],
-  },
-  {
-    title: "图片请求投影",
-    icon: <Eye className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "image_pixel_budget",
-        label: "请求像素预算",
-        desc: "发给模型的请求版总像素上限。填正整数，或 low（512×512）。不改写历史，只影响当次请求。",
-        icon: <Eye className="h-4 w-4" />,
-        type: "string",
-      },
-      {
-        key: "image_max_bytes",
-        label: "请求编码上限",
-        desc: "单张请求版图片的编码字节上限（默认 1MiB）。超出走质量阶梯，历史仍保留规范化附件。",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 1024,
-        max: 20971520,
-      },
-      {
-        key: "image_files_api",
-        label: "Files API 传输",
-        desc: "auto 仅在 DeepSeek 等声明支持的端点上传 file_id；其余走同一请求版本的 inline。失败回退 inline。",
-        icon: <Eye className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "auto", label: "自动" },
-          { value: "true", label: "强制开启" },
-          { value: "false", label: "关闭" },
-        ],
       },
     ],
   },
@@ -468,91 +310,7 @@ const ADVANCED_GROUPS: ItemGroup[] = [
     ],
   },
   {
-    title: "模型重试",
-    icon: <RotateCcw className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "llm_retry_max_attempts",
-        label: "最大重试次数",
-        desc: "模型调用失败时的最大尝试次数（含首次）。遇限流或网络错误会自动重试。已打开的对话需新开后生效。",
-        icon: <RotateCcw className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 10,
-      },
-      {
-        key: "llm_retry_base_delay_seconds",
-        label: "重试基准延迟",
-        desc: "指数退避的起始等待时间（秒）。",
-        icon: <Timer className="h-4 w-4" />,
-        type: "float",
-      },
-      {
-        key: "llm_retry_max_delay_seconds",
-        label: "重试最大延迟",
-        desc: "单次重试等待上限（秒）。若接口返回 Retry-After，则优先采用。",
-        icon: <Timer className="h-4 w-4" />,
-        type: "float",
-      },
-    ],
-  },
-  {
-    title: "代码与校验",
-    icon: <Shield className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "code_policy_enabled",
-        label: "代码风险分级",
-        desc: "对程序内执行的代码做绿 / 黄 / 红分级，决定自动运行还是先确认。关闭后仍在本机子进程运行，只保留基础文件围栏。写入历史在 .excelmanus/revisions。已打开的对话需新开后生效。",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "code_policy_green_auto_approve",
-        label: "绿区自动执行",
-        desc: "判定为低风险的代码自动执行。绿区会额外限制网络、起进程和写出工作区。",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "code_policy_yellow_auto_approve",
-        label: "黄区自动执行",
-        desc: "中风险代码自动执行。默认关闭；打开后仍不会自动批准写入文件系统。",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "tool_schema_validation_mode",
-        label: "参数结构校验",
-        desc: "关闭：不检查。影子：只记日志不拦截。强制：参数不合规则拒绝。仅对新开对话生效。",
-        icon: <Shield className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "off", label: "关闭" },
-          { value: "shadow", label: "影子" },
-          { value: "enforce", label: "强制" },
-        ],
-      },
-      {
-        key: "tool_schema_validation_canary_percent",
-        label: "强制校验比例",
-        desc: "强制模式下实际拦截的请求百分比。未命中的请求按影子模式处理。",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 100,
-      },
-      {
-        key: "tool_schema_strict_path",
-        label: "严格路径校验",
-        desc: "拒绝工具参数里的绝对路径和上级目录穿越。",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-    ],
-  },
-  {
-    title: "工具与 Hook",
+    title: "工具执行",
     icon: <Zap className="h-3.5 w-3.5" />,
     items: [
       {
@@ -572,78 +330,10 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         max: 32,
       },
       {
-        key: "hooks_command_enabled",
-        label: "技能 Hook 外部命令",
-        desc: "允许技能包在会话开始、用户提交、工具前后、子代理起止时运行外部命令。默认关闭，需授权。已打开的对话需新开后生效。",
-        icon: <Terminal className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "hooks_command_timeout_seconds",
-        label: "Hook 命令超时",
-        desc: "外部命令最长执行时间（秒）。超时则跳过，不影响主流程。",
-        icon: <Timer className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 300,
-      },
-      {
-        key: "hooks_output_max_chars",
-        label: "Hook 输出上限",
-        desc: "外部命令返回内容注入对话的最大字符数。",
-        icon: <Shrink className="h-4 w-4" />,
-        type: "int",
-        min: 1000,
-        max: 100000,
-      },
-      {
         key: "tool_result_hard_cap_chars",
         label: "工具结果全局截断",
         desc: "工具返回内容的全局字符上限。0 表示关闭这一层；各工具自己的上限和上下文压缩仍可能截断。已打开的对话需新开后生效。",
         icon: <Shrink className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 100000,
-      },
-    ],
-  },
-  {
-    title: "技能发现",
-    icon: <Sparkles className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "skills_discovery_enabled",
-        label: "自动发现兼容目录",
-        desc: "除内置和用户 / 项目目录外，还扫描 Claude、OpenClaw、Cursor 等常用技能文件夹。关闭后只加载内置以及 .excelmanus/skillpacks。",
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_discovery_include_agents",
-        label: "加载 .agents/skills",
-        desc: "扫描项目里的 .agents/skills 文件夹（Cursor 等工具常用位置）。与子代理无关。",
-        icon: <Bot className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_discovery_scan_workspace_ancestors",
-        label: "扫描上级目录中的技能",
-        desc: "从当前工作目录到项目根，逐层查找 .agents/skills。仅在当前目录位于项目工作区内时生效。",
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_discovery_scan_external_tool_dirs",
-        label: "兼容 Claude 与 OpenClaw",
-        desc: "从 ~/.claude/skills、~/.openclaw/skills 及项目内同名文件夹加载技能。未使用这些工具时可关闭。",
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_context_char_budget",
-        label: "技能注入长度上限",
-        desc: "用 /技能名 激活技能时，注入对话的正文总字符上限。0 表示不限制。不影响技能列表扫描。",
-        icon: <Gauge className="h-4 w-4" />,
         type: "int",
         min: 0,
         max: 100000,
@@ -695,7 +385,7 @@ const GUIDE_SECTIONS: GuideSection[] = [
     category: "设置",
     categoryColor: "text-violet-600 dark:text-violet-400",
     categoryBg: "bg-violet-50 dark:bg-violet-950/40",
-    title: "模型与插件",
+    title: "模型与扩展",
     description: "了解供应商、任务模型、订阅授权、规则、技能、MCP、记忆和系统设置",
     icon: <SlidersHorizontal className="h-4 w-4" />,
   },
@@ -852,17 +542,23 @@ export function RuntimeTab() {
 
   if (loading && !config) {
     return (
-      <div className="flex items-center justify-center py-12 text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin mr-2" />
-        加载配置…
+      <div className="space-y-5">
+        <WorkbookChatSettings />
+        <div className="flex items-center justify-center py-12 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin mr-2" />
+          加载配置…
+        </div>
       </div>
     );
   }
 
   if (!merged) {
     return (
-      <div className="text-center py-12 text-muted-foreground text-sm">
-        无法获取系统配置
+      <div className="space-y-5">
+        <WorkbookChatSettings />
+        <div className="text-center py-12 text-muted-foreground text-sm">
+          无法获取系统配置
+        </div>
       </div>
     );
   }
@@ -965,6 +661,7 @@ export function RuntimeTab() {
 
   return (
     <div className="space-y-5">
+      <WorkbookChatSettings />
       {renderGroups(BASIC_GROUPS)}
 
       <button

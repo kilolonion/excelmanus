@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 interface VersionUpdateToastProps {
   /** 新版本可用（软提示） */
   newVersionAvailable: boolean;
-  /** API schema 不兼容（强制刷新） */
+  /** API schema 不兼容（提示保存后刷新） */
   apiIncompatible: boolean;
   /** 远端后端版本号 */
   remoteVersion: string | null;
@@ -14,13 +14,14 @@ interface VersionUpdateToastProps {
   onDismiss: () => void;
   /** 立即刷新 */
   onRefresh: () => void;
+  refreshError?: string | null;
 }
 
 /**
  * 版本更新提示 toast — 固定在页面右下角。
  *
  * - 新版本可用：可关闭的柔性提示
- * - API 不兼容：不可关闭的强制提示，3 秒后自动刷新
+ * - API 不兼容：提示用户保存后刷新，不强制打断编辑
  */
 export function VersionUpdateToast({
   newVersionAvailable,
@@ -28,6 +29,7 @@ export function VersionUpdateToast({
   remoteVersion,
   onDismiss,
   onRefresh,
+  refreshError,
 }: VersionUpdateToastProps) {
   if (!newVersionAvailable && !apiIncompatible) return null;
 
@@ -55,6 +57,7 @@ export function VersionUpdateToast({
                 立即刷新
               </Button>
             </div>
+            {refreshError && <p role="alert" className="mt-2 text-xs text-destructive">{refreshError}</p>}
           </div>
         </div>
       </div>
@@ -73,8 +76,8 @@ export function VersionUpdateToast({
             新版本已就绪
           </p>
           <p className="text-xs text-muted-foreground mt-1">
-            后端已更新{remoteVersion ? ` 到 v${remoteVersion}` : ""}，
-            刷新页面以获取最新体验。
+            网页或服务已更新{remoteVersion ? `（服务 v${remoteVersion}）` : ""}。
+            保存当前工作后刷新即可使用新版，工作区和用户文件保留原位。
           </p>
           <div className="flex items-center gap-2 mt-2.5">
             <Button
@@ -95,6 +98,7 @@ export function VersionUpdateToast({
               稍后
             </Button>
           </div>
+          {refreshError && <p role="alert" className="mt-2 text-xs text-destructive">{refreshError}</p>}
         </div>
         <button
           className="text-muted-foreground hover:text-foreground transition-colors shrink-0"

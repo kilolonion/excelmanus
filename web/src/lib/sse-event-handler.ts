@@ -19,6 +19,7 @@ import { getIsMobile } from "@/hooks/use-mobile";
 import type { AssistantBlock, Session, TaskItem } from "@/lib/types";
 import { instantSessionTitle } from "@/lib/session-title";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
+import { parseWorkbookTarget, parseWorkbookPresentation, showWorkbookPresentation } from "@/lib/workbook-interaction";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,7 +79,9 @@ function workbenchBusy(): boolean {
   return Boolean(
     excelStore.panelOpen
     || excelStore.compareMode
+    || excelStore.fullViewPath
     || wordStore.panelOpen
+    || wordStore.fullViewPath
     || previewStore.textOpen
     || previewStore.imageOpen
   );
@@ -537,6 +540,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "tool_call_end": {
+      if (data.tool_name === "show_workbook" && data.success !== false && !ctx.fromReplay) {
+        const presentation = parseWorkbookPresentation(data.result as string);
+        if (presentation && showWorkbookPresentation(presentation, ctx.effectiveSessionId)) ctx.suppressAutoOpen = true;
+      }
       const toolCallIdRaw = data.tool_call_id;
       const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
       if (toolCallId) {
@@ -544,7 +551,8 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         S().clearToolProgress(toolCallId);
       }
       // ask_user batch 结束后清理残留的 pendingQuestion
-      if ((data.tool_name as string) === "ask_user" && S().pendingQuestion) {
+      if ((data.tool_name as string) === "ask_user" && S().pendingQuestion
+        && (!S().pendingQuestion?.toolCallId || S().pendingQuestion?.toolCallId === toolCallId)) {
         S().setPendingQuestion(null);
         useSessionStore.getState().patchSession(ctx.effectiveSessionId, {
           pendingQuestion: false,
@@ -716,6 +724,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         options: (data.options as { label: string; description: string }[]) || [],
         multiSelect: Boolean(data.multi_select),
         queueSize: typeof data.queue_size === "number" ? data.queue_size : undefined,
+        selection: parseWorkbookTarget(data.selection),
+        toolCallId: typeof data.tool_call_id === "string" ? data.tool_call_id : undefined,
+        sessionId: ctx.effectiveSessionId,
+        autoOpen: !ctx.fromReplay,
       });
       useSessionStore.getState().patchSession(ctx.effectiveSessionId, {
         pendingQuestion: true,
@@ -1059,48 +1071,96 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
 
     case "ui_hint": {
       if (ctx.fromReplay) break;
+      const activeSession = useSessionStore.getState().activeSessionId;
+      if (activeSession && activeSession !== ctx.effectiveSessionId) break;
       const surface = String(data.surface || "");
       const suppress = Boolean(data.suppress_auto_open);
+      const suppressChanged = suppress && !ctx.suppressAutoOpen;
+      let closedCompare = false;
+      const recordUI = (impact: string, changed = false) => {
+        const didChange = changed || suppressChanged || closedCompare;
+        useJevStore.getState().appendFromEvent({
+          pack: "ui.surface", gate: "enforce", stage: didChange ? "effect" : "outcome",
+          source: "frontend", action: surface, kind: "noop",
+          evaluated: false, applied: didChange, state_changed: didChange,
+          reason: "ui_guard_result", transport: "unavailable", latency_ms: 0,
+          impact: (suppressChanged ? "已关闭本轮自动打开；" : "")
+            + (closedCompare ? "已收起本轮自动对比；" : "") + impact,
+        });
+      };
       if (suppress) {
         ctx.suppressAutoOpen = true;
-        if (ctx.autoOpenedCompareThisTurn) {
+        if (ctx.autoOpenedCompareThisTurn && useExcelStore.getState().compareMode) {
           useExcelStore.getState().closeCompare();
+          closedCompare = !useExcelStore.getState().compareMode;
         }
       }
-      if (surface === "stay" || surface === "none" || !surface) break;
-      if (getIsMobile()) break;
-      if (surface === "files_tab") {
-        useUIStore.getState().setSidebarTab("files");
+      if (surface === "stay" || surface === "none" || !surface) {
+        recordUI("保持当前界面");
         break;
       }
-      if (workbenchBusy()) break;
+      if (getIsMobile()) {
+        recordUI("移动端未执行界面切换");
+        break;
+      }
+      if (surface === "files_tab") {
+        const changed = useUIStore.getState().sidebarTab !== "files";
+        useUIStore.getState().setSidebarTab("files");
+        recordUI(changed ? "已切换文件列表" : "文件列表已经打开", changed);
+        break;
+      }
+      if (workbenchBusy()) {
+        recordUI("正在使用工作台，未切换界面");
+        break;
+      }
       const filePath = String(data.file_path || "");
       const sheetRaw = String(data.sheet || "");
       const sheet = sheetRaw || undefined;
-      if (filePath && pathIsDismissed(filePath)) break;
+      if (filePath && pathIsDismissed(filePath)) {
+        recordUI("用户已关闭该文件，未重新打开");
+        break;
+      }
+      if (!filePath || classifyWorkspaceFile(filePath) !== "spreadsheet") {
+        recordUI("缺少有效表格目标，未切换界面");
+        break;
+      }
       if (surface === "side_panel") {
-        if (filePath) openWorkspaceFile(filePath, {
+        openWorkspaceFile(filePath, {
           intent: "preview",
           sheet,
           sessionId: ctx.effectiveSessionId,
         });
+        const opened = useExcelStore.getState();
+        const changed = opened.panelOpen && opened.activeFilePath === filePath;
+        recordUI(changed ? "已设置侧栏打开状态；文件加载结果另行处理" : "侧栏打开请求未改变状态", changed);
       } else if (surface === "sheet_full") {
-        if (filePath) openWorkspaceFile(filePath, {
+        openWorkspaceFile(filePath, {
           intent: "full",
           sheet,
           sessionId: ctx.effectiveSessionId,
         });
+        const changed = useExcelStore.getState().fullViewPath === filePath;
+        recordUI(changed ? "已设置表格页打开状态；文件加载结果另行处理" : "表格页打开请求未改变状态", changed);
       } else if (surface === "compare") {
         const fileB = String(data.file_path_b || "");
-        if (filePath && fileB) {
+        if (filePath && fileB && filePath !== fileB && classifyWorkspaceFile(fileB) === "spreadsheet" && !pathIsDismissed(fileB)) {
           useExcelStore.getState().openCompare(filePath, fileB);
+          const opened = useExcelStore.getState();
+          const changed = opened.compareMode && opened.compareFileA === filePath && opened.compareFileB === fileB;
+          recordUI(changed ? "已设置对比视图状态；文件加载结果另行处理" : "对比视图请求未改变状态", changed);
+        } else {
+          recordUI("缺少有效对比目标，未切换界面");
         }
+      } else {
+        recordUI("未识别界面建议，保持当前界面");
       }
       break;
     }
 
     case "jev_trace": {
       if (ctx.fromReplay) break;
+      const activeSession = useSessionStore.getState().activeSessionId;
+      if (activeSession && activeSession !== ctx.effectiveSessionId) break;
       useJevStore.getState().appendFromEvent(data);
       break;
     }

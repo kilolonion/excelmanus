@@ -282,6 +282,7 @@ async def test_observation_gate_off_does_not_reshape() -> None:
 @pytest.mark.asyncio
 async def test_observation_signed_truncate_keeps_value_ui(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _sign(monkeypatch, "observation.shape")
     engine = _stub(
@@ -291,6 +292,7 @@ async def test_observation_signed_truncate_keeps_value_ui(
             jev_calibrated=True,
         ),
     )
+    object.__setattr__(engine.config, "workspace_root", str(tmp_path))
     original = _big_result()
     decision = Decision(
         kind="noop",

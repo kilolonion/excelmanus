@@ -291,7 +291,6 @@ class MentionResolver:
         """
         try:
             from openpyxl import load_workbook
-            from openpyxl.utils import get_column_letter
             from excelmanus.workbook.data import WorkbookRefBindError, _bind_area_in_workbook
             from excelmanus.workbook.refs import parse_ref
             from excelmanus.workbook.snapshot import (
@@ -313,10 +312,12 @@ class MentionResolver:
                         error_code="RANGE_INVALID",
                     )
                 default_sheet = None
-                if len(area.areas) == 1 and getattr(area.areas[0], "sheet", None):
-                    default_sheet = area.areas[0].sheet
+                named_sheets = area.sheets()
+                if len(named_sheets) == 1:
+                    # Browser mentions use Sheet!A1:B2,D4:E5 for same-sheet unions.
+                    default_sheet = named_sheets[0]
                 try:
-                    if default_sheet is None:
+                    if default_sheet is None and any(not part.sheet for part in area.areas):
                         default_sheet = require_default_sheet(list(wb.sheetnames), None)
                     rects = _bind_area_in_workbook(wb, area, default_sheet=default_sheet)
                 except SheetRequired as exc:
@@ -331,147 +332,23 @@ class MentionResolver:
                     )
                 if not rects:
                     return ResolvedMention(mention=mention, error="引用没有可绑定区域", error_code="RANGE_INVALID")
+                # Share both read and text budgets across areas; never read their bounding box.
+                previews = rects[:50]
+                cell_budget = max(1, 2000 // len(previews))
+                summary = ""
                 if len(rects) > 1:
-                    return ResolvedMention(
-                        mention=mention,
-                        error="mention 范围不支持并集，请改用单一矩形。",
-                        error_code="REF_UNSUPPORTED",
-                    )
-                rect = rects[0]
-                if rect.whole_column or rect.whole_row:
-                    return ResolvedMention(
-                        mention=mention,
-                        error="mention 不支持整轴引用。请写有限矩形，例如 A1:A100。",
-                        error_code="REF_UNSUPPORTED",
-                    )
-                sheet_name = rect.sheet
-                if sheet_name not in wb.sheetnames:
-                    return ResolvedMention(
-                        mention=mention,
-                        error=f"工作表不存在：{sheet_name}",
-                        error_code="SHEET_NOT_FOUND",
-                        error_fields={"requested_sheet": sheet_name, "available_sheets": list(wb.sheetnames)},
-                    )
-                ws = wb[sheet_name]
-                min_col, min_row, max_col, max_row = rect.min_col, rect.min_row, rect.max_col, rect.max_row
-                cell_range = rect.to_a1(include_sheet=False)
-
-                # ── 工作表全局信息 ──
-                sheet_total_rows = ws.max_row or 0
-                sheet_total_cols = ws.max_column or 0
-                sheet_index = wb.sheetnames.index(sheet_name) if sheet_name in wb.sheetnames else 0
-                total_sheets = len(wb.sheetnames)
-                requested_range = cell_range
-                requested_rows = max_row - min_row + 1
-                requested_cols = max_col - min_col + 1
-                # 先限制读取量，再做文本预算；避免巨大选区先整块载入内存。
-                max_col = min(max_col, min_col + 99)
-                max_row = min(max_row, min_row + max(1, 2000 // (max_col - min_col + 1)) - 1)
-
-                # 构建列头（字母标识）
-                col_headers = [
-                    get_column_letter(c) for c in range(min_col, max_col + 1)
-                ]
-
-                # 读取单元格数据
-                data_rows: list[list[str]] = []
-                for row in ws.iter_rows(
-                    min_row=min_row,
-                    max_row=max_row,
-                    min_col=min_col,
-                    max_col=max_col,
-                    values_only=True,
-                ):
-                    data_rows.append(
-                        [str(v) if v is not None else "" for v in row]
-                    )
-
-                # ── 选区元数据 ──
-                range_label = f"{sheet_name}!{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
-                num_rows = len(data_rows)
-                num_cols = len(col_headers)
-
-                # 首行值（可能是表头）
-                first_row_values = data_rows[0] if data_rows else []
-                # 判断首行是否为表头：全部非空且非纯数字
-                has_header = bool(first_row_values) and all(
-                    v and not v.replace(".", "").replace(",", "").lstrip("-").isdigit()
-                    for v in first_row_values
-                )
-
-                # 列类型推断（跳过首行如果是表头）
-                col_types: list[str] = []
-                for ci in range(num_cols):
-                    col_values = [
-                        data_rows[ri][ci]
-                        for ri in range(1 if has_header else 0, num_rows)
-                        if ci < len(data_rows[ri])
-                    ]
-                    col_types.append(self._infer_col_type(col_values))
-
-                # 空值统计
-                empty_count = sum(
-                    1 for row in data_rows for v in row if not v
-                )
-                total_cells = num_rows * num_cols
-
-                # ── 组装富上下文 ──
-                lines: list[str] = []
-
-                # 1) 选区定位摘要
-                lines.append(f"[Selection] {sheet_name}!{requested_range} ({requested_cols}列×{requested_rows}行)")
-                if requested_rows != num_rows or requested_cols != num_cols:
-                    lines.append(f"[Preview] 已截断：仅展示 {range_label}，不是完整选区内容。")
-                lines.append(f"[Requested] {requested_range}；数据为磁盘缓存值，公式可能尚未重算。")
-                lines.append(
-                    f"[Sheet] \"{sheet_name}\" (第{sheet_index + 1}/{total_sheets}个工作表, "
-                    f"全表{sheet_total_rows}行×{sheet_total_cols}列)"
-                )
-
-                # 2) 选区在表中的位置描述
-                pos_parts: list[str] = []
-                if min_row == 1:
-                    pos_parts.append("从第1行开始（含表头行）")
-                else:
-                    pos_parts.append(f"从第{min_row}行开始")
-                if max_row == sheet_total_rows:
-                    pos_parts.append("到最后一行")
-                else:
-                    pos_parts.append(f"到第{max_row}行")
-                if min_col == 1 and max_col == sheet_total_cols:
-                    pos_parts.append("覆盖全部列")
-                else:
-                    pos_parts.append(
-                        f"列{get_column_letter(min_col)}-{get_column_letter(max_col)}"
-                        f"(全表共{get_column_letter(sheet_total_cols)}列)"
-                    )
-                lines.append(f"[Position] {', '.join(pos_parts)}")
-
-                # 3) 列结构描述
-                col_descs: list[str] = []
-                for ci, col_letter in enumerate(col_headers):
-                    header_label = first_row_values[ci] if has_header and ci < len(first_row_values) else ""
-                    ctype = col_types[ci] if ci < len(col_types) else "unknown"
-                    type_label = {"numeric": "数值", "date": "日期", "text": "文本", "empty": "空"}.get(ctype, ctype)
-                    if header_label:
-                        col_descs.append(f"{col_letter}(\"{header_label}\",{type_label})")
-                    else:
-                        col_descs.append(f"{col_letter}({type_label})")
-                lines.append(f"[Columns] {' | '.join(col_descs)}")
-
-                # 4) 数据质量提示
-                if empty_count > 0:
-                    pct = round(empty_count / total_cells * 100)
-                    lines.append(f"[DataQuality] {empty_count}/{total_cells}个单元格为空({pct}%)")
-
-                # 5) 数据内容表格
-                lines.append("")
-                lines.append("| " + " | ".join(col_headers) + " |")
-                lines.append("| " + " | ".join("---" for _ in col_headers) + " |")
-                for row_data in data_rows:
-                    lines.append("| " + " | ".join(row_data) + " |")
-
-                context = "\n".join(lines)
+                    summary = f"[SelectionSet] {len(rects)} 个区域：{range_spec}\n"
+                if len(rects) > len(previews):
+                    summary += f"[Preview] 仅预览前 {len(previews)} 个区域，其余区域仍在引用中。\n"
+                token_budget = max(1, (self._max_file_tokens - _count_tokens(summary)) // len(previews))
+                blocks = []
+                for rect in previews:
+                    block = self._describe_excel_area(wb, rect, cell_budget)
+                    if _count_tokens(block) > token_budget:
+                        marker = "\n[Preview] 本区域内容因预算截断，引用范围保持不变。"
+                        block = _truncate_to_tokens(block, max(1, token_budget - _count_tokens(marker))) + marker
+                    blocks.append(block)
+                context = summary + "\n\n".join(blocks)
             finally:
                 wb.close()
 
@@ -485,6 +362,139 @@ class MentionResolver:
                 error=f"范围读取失败：{mention.value}[{mention.range_spec}]：{exc}",
                 error_code="RANGE_INVALID" if isinstance(exc, ValueError) else "TOOL_ERROR",
             )
+
+    def _describe_excel_area(self, wb, rect, cell_budget: int) -> str:
+        """Describe one area with a bounded read, keeping gaps between selections untouched."""
+        from openpyxl.utils import get_column_letter
+
+        sheet_name = rect.sheet
+        ws = wb[sheet_name]
+        min_col, min_row, max_col, max_row = rect.min_col, rect.min_row, rect.max_col, rect.max_row
+        cell_range = rect.to_a1(include_sheet=False)
+        # Whole axes retain their reference, but preview only the worksheet's used extent.
+        if rect.whole_column:
+            max_row = max(min_row, min(max_row, ws.max_row or 1))
+        if rect.whole_row:
+            max_col = max(min_col, min(max_col, ws.max_column or 1))
+
+        # ── 工作表全局信息 ──
+        sheet_total_rows = ws.max_row or 0
+        sheet_total_cols = ws.max_column or 0
+        sheet_index = wb.sheetnames.index(sheet_name) if sheet_name in wb.sheetnames else 0
+        total_sheets = len(wb.sheetnames)
+        requested_range = cell_range
+        requested_rows = max_row - min_row + 1
+        requested_cols = max_col - min_col + 1
+        # 先限制读取量，再做文本预算；避免巨大选区先整块载入内存。
+        max_col = min(max_col, min_col + min(100, cell_budget) - 1)
+        max_row = min(max_row, min_row + max(1, cell_budget // (max_col - min_col + 1)) - 1)
+
+        # 构建列头（字母标识）
+        col_headers = [
+            get_column_letter(c) for c in range(min_col, max_col + 1)
+        ]
+
+        # 读取单元格数据
+        data_rows: list[list[str]] = []
+        for row in ws.iter_rows(
+            min_row=min_row,
+            max_row=max_row,
+            min_col=min_col,
+            max_col=max_col,
+            values_only=True,
+        ):
+            data_rows.append(
+                [str(v) if v is not None else "" for v in row]
+            )
+
+        # ── 选区元数据 ──
+        range_label = f"{sheet_name}!{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+        num_rows = len(data_rows)
+        num_cols = len(col_headers)
+
+        # 首行值（可能是表头）
+        first_row_values = data_rows[0] if data_rows else []
+        # 判断首行是否为表头：全部非空且非纯数字
+        has_header = bool(first_row_values) and all(
+            v and not v.replace(".", "").replace(",", "").lstrip("-").isdigit()
+            for v in first_row_values
+        )
+
+        # 列类型推断（跳过首行如果是表头）
+        col_types: list[str] = []
+        for ci in range(num_cols):
+            col_values = [
+                data_rows[ri][ci]
+                for ri in range(1 if has_header else 0, num_rows)
+                if ci < len(data_rows[ri])
+            ]
+            col_types.append(self._infer_col_type(col_values))
+
+        # 空值统计
+        empty_count = sum(
+            1 for row in data_rows for v in row if not v
+        )
+        total_cells = num_rows * num_cols
+
+        # ── 组装富上下文 ──
+        lines: list[str] = []
+
+        # 1) 选区定位摘要
+        lines.append(f"[Selection] {sheet_name}!{requested_range} ({requested_cols}列×{requested_rows}行)")
+        if rect.whole_column or rect.whole_row:
+            lines.append("[Preview] 整行/整列按工作表已用范围预览，引用仍包含完整行/列。")
+        if requested_rows != num_rows or requested_cols != num_cols:
+            lines.append(f"[Preview] 已截断：仅展示 {range_label}，不是完整选区内容。")
+        lines.append(f"[Requested] {requested_range}；数据为磁盘缓存值，公式可能尚未重算。")
+        lines.append(
+            f"[Sheet] \"{sheet_name}\" (第{sheet_index + 1}/{total_sheets}个工作表, "
+            f"全表{sheet_total_rows}行×{sheet_total_cols}列)"
+        )
+
+        # 2) 选区在表中的位置描述
+        pos_parts: list[str] = []
+        if min_row == 1:
+            pos_parts.append("从第1行开始（含表头行）")
+        else:
+            pos_parts.append(f"从第{min_row}行开始")
+        if max_row == sheet_total_rows:
+            pos_parts.append("到最后一行")
+        else:
+            pos_parts.append(f"到第{max_row}行")
+        if min_col == 1 and max_col == sheet_total_cols:
+            pos_parts.append("覆盖全部列")
+        else:
+            pos_parts.append(
+                f"列{get_column_letter(min_col)}-{get_column_letter(max_col)}"
+                f"(全表共{get_column_letter(sheet_total_cols)}列)"
+            )
+        lines.append(f"[Position] {', '.join(pos_parts)}")
+
+        # 3) 列结构描述
+        col_descs: list[str] = []
+        for ci, col_letter in enumerate(col_headers):
+            header_label = first_row_values[ci] if has_header and ci < len(first_row_values) else ""
+            ctype = col_types[ci] if ci < len(col_types) else "unknown"
+            type_label = {"numeric": "数值", "date": "日期", "text": "文本", "empty": "空"}.get(ctype, ctype)
+            if header_label:
+                col_descs.append(f"{col_letter}(\"{header_label}\",{type_label})")
+            else:
+                col_descs.append(f"{col_letter}({type_label})")
+        lines.append(f"[Columns] {' | '.join(col_descs)}")
+
+        # 4) 数据质量提示
+        if empty_count > 0:
+            pct = round(empty_count / total_cells * 100)
+            lines.append(f"[DataQuality] {empty_count}/{total_cells}个单元格为空({pct}%)")
+
+        # 5) 数据内容表格
+        lines.append("")
+        lines.append("| " + " | ".join(col_headers) + " |")
+        lines.append("| " + " | ".join("---" for _ in col_headers) + " |")
+        for row_data in data_rows:
+            lines.append("| " + " | ".join(row_data) + " |")
+
+        return "\n".join(lines)
 
     def _resolve_text_file(
         self, mention: Mention, path: Path

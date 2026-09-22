@@ -1,6 +1,8 @@
 import { create } from "zustand";
-import { useConnectionStore } from "@/stores/connection-store";
+import { useConnectionStore, WEB_UPGRADE_REQUEST_KEY } from "@/stores/connection-store";
 import { apiGet } from "@/lib/api";
+import { refreshApp } from "@/lib/app-refresh";
+import { fetchWebBuild, versionDifference } from "@/lib/web-version";
 
 export interface HealthData {
   status: string;
@@ -26,6 +28,7 @@ interface HealthHubState {
   newVersionAvailable: boolean;
   apiIncompatible: boolean;
   remoteVersion: string | null;
+  refreshError: string | null;
   dismissVersion: () => void;
   refreshNow: () => void;
 }
@@ -47,7 +50,11 @@ const baselineRef: {
   initialized: false,
 };
 
-let dismissVersionNotice = false;
+let dismissedVersion: string | null = null;
+let observedVersion: string | null = null;
+let frontendBuildId: string | null = process.env.NEXT_PUBLIC_WEB_BUILD_ID || null;
+let frontendChanged = false;
+let latestHealth: HealthPayload | null = null;
 let pollCount = 0;
 let failCount = 0;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -84,6 +91,7 @@ function schedulePoll(delayMs: number): void {
 }
 
 function applyVersionState(data: HealthPayload): void {
+  latestHealth = data;
   const remoteBuildId = data.build_id ?? null;
   const remoteFingerprint = data.version_fingerprint ?? null;
   const remoteSchema = data.api_schema_version ?? null;
@@ -93,14 +101,12 @@ function applyVersionState(data: HealthPayload): void {
     baselineRef.fingerprint = remoteFingerprint;
     baselineRef.apiSchemaVersion = remoteSchema;
     baselineRef.initialized = true;
-    return;
   }
 
-  if (
-    remoteSchema !== null
-    && baselineRef.apiSchemaVersion !== null
-    && remoteSchema > baselineRef.apiSchemaVersion
-  ) {
+  const difference = versionDifference(baselineRef, {
+    buildId: remoteBuildId, fingerprint: remoteFingerprint, apiSchemaVersion: remoteSchema,
+  });
+  if (difference.incompatible) {
     useHealthHubStore.setState({
       newVersionAvailable: false,
       apiIncompatible: true,
@@ -109,18 +115,30 @@ function applyVersionState(data: HealthPayload): void {
     return;
   }
 
-  let changed = false;
-  if (remoteBuildId !== null && baselineRef.buildId !== null) {
-    changed = remoteBuildId !== baselineRef.buildId;
-  } else if (remoteFingerprint !== null && baselineRef.fingerprint !== null) {
-    changed = remoteFingerprint !== baselineRef.fingerprint;
-  }
-
+  observedVersion = `${remoteBuildId || ""}|${remoteFingerprint || ""}|${latestFrontendBuild || ""}`;
   useHealthHubStore.setState((state) => ({
     apiIncompatible: false,
     remoteVersion: data.version ?? state.remoteVersion,
-    newVersionAvailable: dismissVersionNotice ? state.newVersionAvailable : (state.newVersionAvailable || changed),
+    newVersionAvailable: observedVersion !== dismissedVersion && (difference.changed || frontendChanged),
   }));
+}
+
+let latestFrontendBuild: string | null = null;
+
+async function pollFrontendVersion(): Promise<void> {
+  if (typeof window === "undefined" || window.excelManusDesktop) return;
+  try {
+    const build = await fetchWebBuild();
+    if (!build) return;
+    latestFrontendBuild = build;
+    if (frontendBuildId === null) frontendBuildId = build;
+    frontendChanged = build !== frontendBuildId;
+    if (latestHealth) applyVersionState(latestHealth);
+    else {
+      observedVersion = `||${build}`;
+      useHealthHubStore.setState({ newVersionAvailable: frontendChanged && observedVersion !== dismissedVersion });
+    }
+  } catch { /* A temporary frontend outage is handled by connection recovery. */ }
 }
 
 async function pollHealth(): Promise<void> {
@@ -130,6 +148,7 @@ async function pollHealth(): Promise<void> {
   }
 
   pollCount += 1;
+  await pollFrontendVersion();
   try {
     const data = await apiGet<HealthPayload>("/health", {
       direct: true,
@@ -165,6 +184,10 @@ async function pollHealth(): Promise<void> {
 export function ensureHealthHubPolling(): void {
   if (pollingStarted) return;
   pollingStarted = true;
+  try {
+    const requestId = sessionStorage.getItem(WEB_UPGRADE_REQUEST_KEY);
+    if (requestId) void useConnectionStore.getState().triggerRestart("恢复网页更新进度", { upgradeRequestId: requestId });
+  } catch { /* storage may be unavailable */ }
   pollCount = 0;
   failCount = 0;
 
@@ -190,13 +213,12 @@ export const useHealthHubStore = create<HealthHubState>((set) => ({
   newVersionAvailable: false,
   apiIncompatible: false,
   remoteVersion: null,
+  refreshError: null,
   dismissVersion: () => {
-    dismissVersionNotice = true;
+    dismissedVersion = observedVersion;
     set((state) => ({ ...state, newVersionAvailable: false }));
   },
   refreshNow: () => {
-    if (typeof window !== "undefined") {
-      window.location.reload();
-    }
+    set({ refreshError: refreshApp() });
   },
 }));

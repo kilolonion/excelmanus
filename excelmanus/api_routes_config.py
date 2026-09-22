@@ -21,6 +21,7 @@ from excelmanus.api_app_state import (
     _sync_config_profiles_from_db,
     _user_config_store,
     apply_profile_to_config,
+    backfill_canonical_models,
     error_json_response as _error_json_response,
     get_config,
     get_config_store,
@@ -30,7 +31,15 @@ from excelmanus.api_app_state import (
     set_restart_reason,
 )
 from excelmanus.api_sse import sse_format as _sse_format
-from excelmanus.config import THINKING_EFFORT_ORDER, format_deprecated_model_message
+from excelmanus.config import (
+    CANONICAL_MATCH_THRESHOLD,
+    THINKING_EFFORT_ORDER,
+    canonical_match_enabled,
+    format_deprecated_model_message,
+    infer_model_family,
+    match_canonical_model,
+    profile_canonical,
+)
 from excelmanus.logger import get_logger, setup_logging
 
 if TYPE_CHECKING:
@@ -41,7 +50,7 @@ logger = get_logger("api.config")
 router = APIRouter()
 
 
-def _supports_vision_for(model: str, base_url: str) -> bool:
+def _supports_vision_for(model: str, base_url: str, canonical_model: str = "") -> bool:
     """给模型列表带上与引擎一致的视觉推断，供新对话在 engine 创建前使用。"""
     from excelmanus.vision_capability import infer_vision_capable
 
@@ -53,12 +62,14 @@ def _supports_vision_for(model: str, base_url: str) -> bool:
     if db is not None:
         try:
             from excelmanus.model_probe import load_capabilities
-            caps = load_capabilities(db, model, base_url)
+            caps = load_capabilities(db, model, base_url, canonical_model=canonical_model)
             if caps is not None:
                 probe = caps.supports_vision
         except Exception:
             logger.debug("模型列表视觉推断加载 probe 失败", exc_info=True)
-    return infer_vision_capable(model, override=override, probe=probe)
+    return infer_vision_capable(
+        model, override=override, probe=probe, canonical_model=canonical_model,
+    )
 
 
 class ModelSwitchRequest(BaseModel):
@@ -83,6 +94,7 @@ async def list_models(request: Request) -> JSONResponse:
             p.get("name", ""), p.get("model", ""), p.get("base_url", ""),
         ):
             continue
+        canonical = profile_canonical(p)
         models.append({
             "name": p["name"],
             "model": p["model"],
@@ -90,8 +102,9 @@ async def list_models(request: Request) -> JSONResponse:
             "description": p.get("description", ""),
             "active": p["name"] == active_name,
             "base_url": p.get("base_url", ""),
+            "canonical_model": canonical,
             "supports_vision": _supports_vision_for(
-                p["model"], p.get("base_url") or "",
+                p["model"], p.get("base_url") or "", canonical,
             ),
         })
     if models and not any(m["active"] for m in models):
@@ -157,6 +170,7 @@ async def _activate_named_profile(name: str) -> JSONResponse | None:
                 if engine is not None:
                     caps = load_capabilities(
                         db, engine.current_model, engine.active_base_url,
+                        canonical_model=getattr(engine, "active_canonical_model", ""),
                     )
                     if caps is not None:
                         engine.set_model_capabilities(caps)
@@ -323,6 +337,7 @@ class ModelProfileCreate(BaseModel):
     model_family: str = ""
     custom_extra_body: str = ""
     custom_extra_headers: str = ""
+    canonical_model: str = ""
     clone_from: str = ""
 
     @field_validator("name", "model")
@@ -332,6 +347,46 @@ class ModelProfileCreate(BaseModel):
         if not value:
             raise ValueError("模型名称与 Model ID 不能为空")
         return value
+
+
+def _resolve_canonical_binding(
+    model: str, *, explicit: str | None,
+) -> str | None:
+    """计算档案应写入的 canonical_model 绑定值。
+
+    - explicit 非 None：前端显式指定/清空，直接使用；
+    - 开关关闭：返回 None（新增时视为 ""，更新时保持原值）；
+    - 开关开启：按置信度自动匹配，未达阈值返回 ""（清除过期绑定）。
+    """
+    if explicit is not None:
+        return explicit.strip()
+    if not canonical_match_enabled():
+        return None
+    hit = match_canonical_model(model)
+    if hit is not None and hit.confidence >= CANONICAL_MATCH_THRESHOLD:
+        return hit.canonical
+    return ""
+
+
+def _canonical_for_profile_coords(
+    req_name: str | None, model: str, base_url: str,
+) -> str:
+    """按请求坐标定位档案并返回其 canonical_model（开关关闭时为 ""）。"""
+    store = get_config_store()
+    if store is None:
+        return ""
+    if req_name:
+        row = store.get_profile(req_name)
+        if row is not None:
+            return profile_canonical(row)
+    for p in store.list_profiles():
+        if (
+            p.get("model") == model
+            and _normalize_base_url(str(p.get("base_url") or ""))
+            == _normalize_base_url(base_url)
+        ):
+            return profile_canonical(p)
+    return ""
 
 
 def _deprecated_model_error_response(model: str, *, prefix: str = "") -> JSONResponse | None:
@@ -361,10 +416,12 @@ async def get_model_config(request: Request) -> JSONResponse:
                 "model_family": p.get("model_family", ""),
                 "custom_extra_body": p.get("custom_extra_body", ""),
                 "custom_extra_headers": p.get("custom_extra_headers", ""),
+                "canonical_model": p.get("canonical_model", ""),
             }
             for p in (get_config_store().list_profiles() if get_config_store() else [])
         ],
         "active": user_cfg.get_active_model() if user_cfg is not None else None,
+        "canonical_match_enabled": canonical_match_enabled(),
     }
     return JSONResponse(content=result)
 
@@ -463,6 +520,16 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
             return _error_json_response(404, f"未找到可复制凭证的档案: {request.clone_from}")
         api_key = str(source.get("api_key") or "")
 
+    # Jev 智能匹配：开启时自动绑定规范模型名并回填模型族
+    canonical = _resolve_canonical_binding(
+        request.model,
+        explicit=(
+            request.canonical_model
+            if "canonical_model" in request.model_fields_set else None
+        ),
+    ) or ""
+    model_family = request.model_family or infer_model_family(canonical)
+
     created = get_config_store().add_profile(
         name=request.name,
         model=request.model,
@@ -471,9 +538,10 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
         description=request.description or "",
         protocol=request.protocol or "auto",
         thinking_mode=request.thinking_mode or "auto",
-        model_family=request.model_family or "",
+        model_family=model_family,
         custom_extra_body=request.custom_extra_body or "",
         custom_extra_headers=request.custom_extra_headers or "",
+        canonical_model=canonical,
     )
     if not created:
         return _error_json_response(500, f"保存模型档案失败: {request.name}")
@@ -487,7 +555,14 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
         if err is not None:
             return err
 
-    return JSONResponse(status_code=201, content={"status": "created", "name": request.name})
+    return JSONResponse(
+        status_code=201,
+        content={
+            "status": "created",
+            "name": request.name,
+            "canonical_model": canonical,
+        },
+    )
 
 
 @router.delete("/api/v1/config/models/profiles/{name:path}")
@@ -528,7 +603,8 @@ async def update_model_profile(
     if get_config_store() is None:
         return _error_json_response(503, "配置存储未初始化")
 
-    if not get_config_store().get_profile(name):
+    stored = get_config_store().get_profile(name)
+    if not stored:
         return _error_json_response(404, f"未找到模型: {name}")
     if request.name != name and get_config_store().get_profile(request.name):
         return _error_json_response(409, f"模型名称已存在: {request.name}")
@@ -542,6 +618,21 @@ async def update_model_profile(
     if deprecated is not None:
         return deprecated
 
+    # Jev 智能匹配：开启时按新 Model ID 重新绑定规范名；关闭时保持原绑定。
+    canonical_update = _resolve_canonical_binding(
+        request.model,
+        explicit=(
+            request.canonical_model
+            if "canonical_model" in request.model_fields_set else None
+        ),
+    )
+    effective_canonical = (
+        canonical_update
+        if canonical_update is not None
+        else str(stored.get("canonical_model") or "")
+    )
+    model_family = request.model_family or infer_model_family(effective_canonical)
+
     updated = get_config_store().update_profile(
         name,
         new_name=request.name if request.name != name else None,
@@ -551,9 +642,10 @@ async def update_model_profile(
         description=request.description if "description" in request.model_fields_set else None,
         protocol=request.protocol or None,
         thinking_mode=request.thinking_mode,
-        model_family=request.model_family,
+        model_family=model_family,
         custom_extra_body=request.custom_extra_body,
         custom_extra_headers=request.custom_extra_headers,
+        canonical_model=canonical_update,
     )
     if not updated:
         return _error_json_response(500, f"保存模型档案失败: {request.name}")
@@ -568,7 +660,11 @@ async def update_model_profile(
         if err is not None:
             return err
 
-    return JSONResponse(content={"status": "updated", "name": request.name})
+    return JSONResponse(content={
+        "status": "updated",
+        "name": request.name,
+        "canonical_model": effective_canonical,
+    })
 
 
 # ── 模型配置导出/导入 API ──────────────────────────────
@@ -802,7 +898,10 @@ async def get_model_capabilities(request: Request) -> JSONResponse:
     req_base_url = request.query_params.get("base_url")
     model, base_url, _, _protocol = _resolve_model_info(req_name, req_model, req_base_url)
 
-    caps = load_capabilities(db, model, base_url)
+    caps = load_capabilities(
+        db, model, base_url,
+        canonical_model=_canonical_for_profile_coords(req_name, model, base_url),
+    )
     return JSONResponse(content={
         "capabilities": caps.to_dict() if caps else None,
         "model": model,
@@ -827,7 +926,9 @@ async def get_all_model_capabilities(request: Request) -> JSONResponse:
     profiles = get_config_store().list_profiles() if get_config_store() else []
     for p in profiles:
         p_model, p_base_url, _, _ = _profile_connection(p)
-        caps = load_capabilities(db, p_model, p_base_url)
+        caps = load_capabilities(
+            db, p_model, p_base_url, canonical_model=profile_canonical(p),
+        )
         result.append({
             "name": p["name"],
             "model": p_model,
@@ -924,6 +1025,9 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
             skip_if_cached=False,
             db=None,  # 先不自动存，下面用 profile 坐标手动存
             thinking_mode=req_thinking_mode,
+            canonical_model=_canonical_for_profile_coords(
+                req_name, cache_model, cache_base_url,
+            ),
         )
     except Exception as exc:
         return _error_json_response(500, f"探测失败: {exc}")
@@ -967,10 +1071,12 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
         targets.append((p["name"], p_model, p_base_url, p_api_key, p_protocol))
 
     results: list[dict] = []
-    # 构建 name → thinking_mode 映射
+    # 构建 name → thinking_mode / canonical_model 映射
     _thinking_mode_map: dict[str, str] = {}
+    _canonical_map: dict[str, str] = {}
     for p in profiles:
         _thinking_mode_map[p["name"]] = p.get("thinking_mode", "auto")
+        _canonical_map[p["name"]] = profile_canonical(p)
 
     for name, model, base_url, api_key, protocol in targets:
         if db is not None:
@@ -981,6 +1087,7 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
             caps = await run_full_probe(
                 client=client, model=model, base_url=base_url,
                 skip_if_cached=False, db=db, thinking_mode=_tm,
+                canonical_model=_canonical_map.get(name, ""),
             )
             results.append({
                 "name": name, "model": model,
@@ -1783,6 +1890,7 @@ def _jev_enforce_ready() -> bool:
 
 
 _RUNTIME_SETTING_KEYS: dict[str, str] = {
+    "agent_self_management_enabled": "EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED",
     # ── 会话 ──
     "session_ttl_seconds": "EXCELMANUS_SESSION_TTL_SECONDS",
     "max_sessions": "EXCELMANUS_MAX_SESSIONS",
@@ -1873,6 +1981,8 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     "typesafe_api_key": "EXCELMANUS_TYPESAFE_API_KEY",
     "jev_active_provider": "EXCELMANUS_JEV_ACTIVE_PROVIDER",
     "jev_timeout_seconds": "EXCELMANUS_JEV_TIMEOUT_SECONDS",
+    # ── Jev 智能匹配（模型档案 → 已知规范模型名绑定）──
+    "model_canonical_match_enabled": "EXCELMANUS_MODEL_CANONICAL_MATCH",
 }
 
 
@@ -1916,6 +2026,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "prompt_cache_key_enabled": get_config().prompt_cache_key_enabled,
         # ── 推理配置 ──
         "thinking_effort": get_config().thinking_effort,
+        "agent_self_management_enabled": get_config().agent_self_management_enabled,
         "thinking_budget": get_config().thinking_budget,
         # ── 子代理 ──
         "subagent_max_iterations": get_config().subagent_max_iterations,
@@ -1971,6 +2082,8 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         **_jev_provider_payload(),
         "jev_timeout_seconds": get_config().jev_timeout_seconds,
         "jev_enforce_ready": _jev_enforce_ready(),
+        # ── Jev 智能匹配 ──
+        "model_canonical_match_enabled": get_config().model_canonical_match_enabled,
     })
 
 
@@ -2011,6 +2124,7 @@ class RuntimeConfigUpdate(BaseModel):
     prompt_cache_key_enabled: bool | None = None
     # ── 推理配置 ──
     thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    agent_self_management_enabled: bool | None = None
     thinking_budget: int | None = Field(default=None, ge=0)
     # ── 子代理 ──
     subagent_max_iterations: int | None = Field(default=None, gt=0)
@@ -2071,6 +2185,8 @@ class RuntimeConfigUpdate(BaseModel):
     # deliberately rather than by accident.
     jev_providers_replace: bool = False
     jev_timeout_seconds: float | None = Field(default=None, gt=0)
+    # ── Jev 智能匹配 ──
+    model_canonical_match_enabled: bool | None = None
 
 
 @router.put("/api/v1/config/runtime")
@@ -2171,6 +2287,25 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
     if "log_level" in payload:
         setup_logging(str(payload["log_level"]))
 
+    if "agent_self_management_enabled" in payload and get_session_manager() is not None:
+        await get_session_manager().broadcast_self_management(payload["agent_self_management_enabled"])
+
+    # Jev 智能匹配开启：为存量档案回填规范模型名，并把新档案列表广播给活跃会话。
+    canonical_backfilled = 0
+    if payload.get("model_canonical_match_enabled") is True:
+        try:
+            canonical_backfilled = backfill_canonical_models()
+        except Exception:
+            logger.debug("智能匹配回填失败", exc_info=True)
+        if canonical_backfilled:
+            _sync_config_profiles_from_db()
+            if get_session_manager() is not None and get_config() is not None:
+                await get_session_manager().broadcast_model_profiles(get_config().models)
+            user_cfg = _user_config_store()
+            active_name = user_cfg.get_active_model() if user_cfg is not None else None
+            if active_name:
+                apply_profile_to_config(active_name)
+
     # 上下文窗口 / 压缩配置必须广播到已打开的对话。
     # 引擎持有 replace() 后的 config 副本，只改全局 get_config() 不会反映到对话页。
     _CONTEXT_OPT_KEYS = {
@@ -2257,6 +2392,7 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
     resp = JSONResponse(content={
         "status": "ok",
         "updated": updated_fields,
+        "canonical_backfilled": canonical_backfilled,
         "restarting": need_restart,
         "restart_reason": restart_reason,
         "mcp_reloaded": mcp_reloaded,

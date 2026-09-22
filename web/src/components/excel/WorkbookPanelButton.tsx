@@ -11,8 +11,10 @@ import { useHintTooltip } from "@/hooks/use-hint-tooltip";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
+import { useWorkbookWorkspaceStore, workbookWorkspaceKey } from "@/stores/workbook-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
 import { isSpreadsheetFile } from "@/lib/file-kind";
+import { recordWorkbookChatNavigation } from "@/lib/workbook-chat-navigation";
 import {
   Tooltip,
   TooltipContent,
@@ -42,6 +44,7 @@ export function toggleWorkbookPanelView(isMobile: boolean) {
   const sessions = useSessionStore.getState();
   const session = sessions.sessions.find((item) => item.id === sessions.activeSessionId);
   if (isMobile && (excel.fullViewPath || excel.compareMode)) {
+    recordWorkbookChatNavigation("chat");
     excel.closePanel();
     excel.closeCompare();
     excel.closeFullView();
@@ -49,11 +52,16 @@ export function toggleWorkbookPanelView(isMobile: boolean) {
   }
   if (!isMobile && excel.fullViewPath && excel.fullViewLayout === "split") {
     if (excel.panelTab === "history") excel.setPanelTab("sheet");
-    else excel.closeFullView();
+    else {
+      recordWorkbookChatNavigation("chat");
+      excel.closeFullView();
+    }
     return;
   }
+  const group = useWorkbookWorkspaceStore.getState().workspaces[workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session))];
+  const focused = excel.fullViewPath ? group?.files.find((file) => file.path === group.focused) : undefined;
   const path = excel.activeWorkspaceKey === workspaceKeyFromSession(session)
-    ? excel.fullViewPath || resolveWorkbookPanelPath(excel.activeFilePath, excel.recentFiles, excel.activeWorkspaceKey)
+    ? focused?.path || excel.fullViewPath || resolveWorkbookPanelPath(excel.activeFilePath, excel.recentFiles, excel.activeWorkspaceKey)
     : undefined;
   if (!path) {
     useWorkbookConversationStore.getState().openPicker(isMobile ? "embedded" : "split");
@@ -61,7 +69,8 @@ export function toggleWorkbookPanelView(isMobile: boolean) {
   }
   const target = session ? useWorkbookConversationStore.getState().targets[session.id] : undefined;
   const sheet = target?.file.workspaceKey === excel.activeWorkspaceKey && target.file.relative === normalizeRelativePath(path)
-    ? target.sheet : path === excel.fullViewPath ? excel.fullViewSheet : excel.activeSheet;
+    ? target.sheet : focused?.sheet ?? (path === excel.fullViewPath ? excel.fullViewSheet : excel.activeSheet);
+  recordWorkbookChatNavigation("sheet", path);
   closeWordSurfaces();
   excel.closeCompare();
   excel.openFullView(path, sheet ?? undefined, isMobile ? "embedded" : "split");

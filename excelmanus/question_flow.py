@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
@@ -40,6 +41,7 @@ class PendingQuestion:
     options: list[QuestionOption]
     multi_select: bool
     created_at_utc: str
+    selection: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,7 @@ class QuestionFlowManager:
                 ],
                 "multi_select": item.multi_select,
                 "created_at_utc": item.created_at_utc,
+                "selection": deepcopy(item.selection),
             }
             for item in self._queue
         ]
@@ -129,6 +132,7 @@ class QuestionFlowManager:
                     options=options,
                     multi_select=bool(item.get("multi_select", False)),
                     created_at_utc=str(item.get("created_at_utc") or ""),
+                    selection=deepcopy(item.get("selection")),
                 )
             )
 
@@ -197,11 +201,8 @@ class QuestionFlowManager:
             raise ValueError("tool_call_id 不能为空。")
 
         tid = tool_call_id.strip()
-        results: list[PendingQuestion] = []
-        for qp in questions_payload:
-            pending = self._build_pending(qp, tid)
-            self._queue.append(pending)
-            results.append(pending)
+        results = [self._build_pending(qp, tid) for qp in questions_payload]
+        self._queue.extend(results)
         return results
 
     def format_prompt(self, question: PendingQuestion | None = None) -> str:
@@ -363,10 +364,18 @@ class QuestionFlowManager:
         text = str(question_payload.get("text", "")).strip()
         header = str(question_payload.get("header", "")).strip()
         raw_options = question_payload.get("options")
+        selection = question_payload.get("selection")
+        if selection is not None:
+            if not isinstance(selection, dict):
+                raise ValueError("question.selection 必须是对象")
+            if not raw_options:
+                raw_options = [{"label": "补充说明", "description": "输入文字说明需要的范围或取消原因"}]
         multi_select_raw = question_payload.get(
             "multiSelect",
             question_payload.get("multi_select", False),
         )
+        if multi_select_raw is None:
+            multi_select_raw = False
 
         if not text:
             raise ValueError("question.text 不能为空。")
@@ -429,6 +438,7 @@ class QuestionFlowManager:
             options=options,
             multi_select=multi_select_raw,
             created_at_utc=datetime.now(timezone.utc).isoformat(),
+            selection=deepcopy(selection),
         )
 
     @staticmethod

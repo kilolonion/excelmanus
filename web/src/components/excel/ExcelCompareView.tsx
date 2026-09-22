@@ -81,6 +81,7 @@ export function ExcelCompareView() {
   const compareSheetA = useExcelStore((s) => s.compareSheetA);
   const compareSheetB = useExcelStore((s) => s.compareSheetB);
   const compareRelationship = useExcelStore((s) => s.compareRelationship);
+  const compareReturnPath = useExcelStore((s) => s.compareReturnPath);
   const closeCompare = useExcelStore((s) => s.closeCompare);
   const openCompare = useExcelStore((s) => s.openCompare);
   const setCompareRelationship = useExcelStore((s) => s.setCompareRelationship);
@@ -231,7 +232,7 @@ export function ExcelCompareView() {
       <div className="em-surface-header flex items-center gap-2 border-b border-border bg-muted/20 flex-shrink-0">
         <Button variant="ghost" size="sm" onClick={handleClose} className="h-7 gap-1.5 text-xs">
           <ArrowLeft className="h-3.5 w-3.5" />
-          返回聊天
+          {compareReturnPath ? "返回表格" : "返回聊天"}
         </Button>
         <div className="h-4 w-px bg-border" />
         <ArrowLeftRight className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />

@@ -391,6 +391,8 @@ class ConversationMemory:
         *,
         hidden: bool = False,
         prompt_kind: str | None = None,
+        workbook_action: dict[str, Any] | None = None,
+        workbook_context: dict[str, Any] | None = None,
     ) -> None:
         """添加用户消息。
 
@@ -405,6 +407,11 @@ class ConversationMemory:
             extra["_ui_hidden"] = True
         if prompt_kind:
             extra["_prompt_kind"] = prompt_kind
+        if workbook_action is not None:
+            # Durable UI metadata for retry/edit; stripped from provider messages.
+            extra["_workbook_action"] = json.loads(json.dumps(workbook_action, ensure_ascii=False))
+        if workbook_context is not None:
+            extra["_workbook_context"] = json.loads(json.dumps(workbook_context, ensure_ascii=False))
 
         durable = self._durablize_content(content)
         msg = {

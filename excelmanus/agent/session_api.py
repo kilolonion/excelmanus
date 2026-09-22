@@ -75,6 +75,7 @@ async def followup(
     question_resolver: QuestionResolver | None = None,
     chat_mode: str = "write",
     context_input: dict[str, Any] | None = None,
+    jev_budget: Any = None,
 ) -> ChatResult:
     """用户后续：控制面处理完毕后入 inbox next-turn 并 wakeup。
 
@@ -186,6 +187,7 @@ async def followup(
             "question_resolver": question_resolver,
             "chat_mode": chat_mode,
             "context_input": context_input or {},
+            "jev_budget": jev_budget,
         },
     )
     result = await engine._driver.wait_for_item(item)
@@ -219,8 +221,15 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     )
 
     def _add_user_turn_to_memory(text: str) -> None:
+        incoming = extra.get("context_input") or {}
+        action = incoming.get("workbook_action")
+        metadata = {"workbook_action": action} if isinstance(action, dict) else {}
+        from excelmanus.workbook.ui_context import render_workbook_ui_context
+        group = incoming.get("sheet_contexts")
+        if isinstance(group, list) and len(group) > 1 and render_workbook_ui_context(engine, incoming, text):
+            metadata["workbook_context"] = {"sheet_context": incoming.get("sheet_context"), "sheet_contexts": group}
         if not normalized_images:
-            engine._memory.add_user_message(text)
+            engine._memory.add_user_message(text, **metadata)
             return
         from excelmanus.attachments.store import get_attachment_store
         from excelmanus.attachments.types import AttachmentError
@@ -239,7 +248,7 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
                 )
             parts.append({"type": "image", "attachment": ref.to_dict()})
             engine._tool_dispatcher._injected_image_hashes.add(ref.attachment_id)
-        engine._memory.add_user_message(parts if parts else text)
+        engine._memory.add_user_message(parts if parts else text, **metadata)
 
     effective_slash_command = slash_command
     effective_raw_args = raw_args or ""
@@ -344,7 +353,8 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     engine._turn_image_count = len(normalized_images)
     from excelmanus.system_one.host import maybe_record_turn_exposure
 
-    await maybe_record_turn_exposure(engine, user_message, on_event=on_event)
+    await maybe_record_turn_exposure(engine, user_message, on_event=on_event, budget=extra.get("jev_budget"))
+    engine._jev_context_input = extra.get("context_input") or {}
     from excelmanus.system_one.intent_context import suggest_context
 
     context_advice = await suggest_context(engine, user_message, extra.get("context_input"), on_event=on_event)
@@ -370,8 +380,24 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     )
     engine._last_route_result = route_result
     _add_user_turn_to_memory(user_message)
+    from excelmanus.workbook.ui_context import render_workbook_action, render_workbook_ui_context
+
+    view_context = render_workbook_ui_context(engine, extra.get("context_input"), user_message)
+    if view_context:
+        engine._memory.add_user_message(view_context, hidden=True, prompt_kind="workbook_view_context")
+    action_context = render_workbook_action(engine, extra.get("context_input"))
+    if action_context:
+        engine._memory.add_user_message(action_context, hidden=True, prompt_kind="workbook_action")
     if context_advice:
         engine._memory.add_user_message(context_advice, hidden=True, prompt_kind="jev_context_advice")
+        from excelmanus.system_one.trace import record_host_effect
+
+        context_decision = getattr(engine, "_jev_context_decision", None)
+        record_host_effect(
+            engine, "context.resolve",
+            action=str((context_decision.extras if context_decision else {}).get("next") or "continue"),
+            delivered=True, impact="上下文定位与澄清建议已送入主模型上下文", on_event=on_event,
+        )
     if skill_invocation:
         engine._memory.add_user_message(
             skill_invocation, hidden=True, prompt_kind="skill_invocation",
@@ -455,7 +481,6 @@ def finalize_driver_turn(
         ),
     )
     from excelmanus.system_one.host import (
-        clear_turn_exposure,
         emit_recovery_outcome,
         remember_turn_tools,
     )
@@ -465,7 +490,6 @@ def finalize_driver_turn(
         emit_recovery_outcome(engine, on_event=on_event)
     except Exception:
         logger.debug("Jev 恢复结果记录失败；继续回合收尾", exc_info=True)
-    clear_turn_exposure(engine)
 
 
 # ── Skill 解析与 Hook 管理（委托到 SkillResolver）──────────

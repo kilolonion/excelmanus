@@ -6,6 +6,10 @@ Name "ExcelManus installer performance fixture"
 OutFile "${BENCH_EXE}"
 !addplugindir /x86-unicode "${BENCH_PLUGINS}"
 !include LogicLib.nsh
+!ifdef BENCH_OWNED_REMOVAL
+  !include "${PROJECT_DIR}\installer\safe-remove.nsh"
+  !insertmacro ExcelManusRemovalFunctions ""
+!endif
 !ifdef BENCH_FAST
   !include "${PROJECT_DIR}\installer\extract-files.nsh"
   LangString appCannotBeClosed 1033 "Cannot install fixture files"
@@ -60,7 +64,14 @@ Section
   RMDir /r "$PLUGINSDIR\7z-out"
   !insertmacro RecordStage "cleanup-staging"
   SetOutPath "${BENCH_ROOT}"
-  RMDir /r $INSTDIR
+  !ifdef BENCH_OWNED_REMOVAL
+    StrCpy $R9 "$INSTDIR\${EXCELMANUS_MANIFEST}"
+    Call ExcelManusRemoveOwnedFiles
+    Delete "$INSTDIR\${EXCELMANUS_MANIFEST}"
+    RMDir $INSTDIR
+  !else
+    RMDir /r $INSTDIR
+  !endif
   !insertmacro RecordStage "remove-installed-files"
   FileClose $BenchLog
   SetErrorLevel 0

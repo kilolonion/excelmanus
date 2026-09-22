@@ -436,7 +436,8 @@ def run_helper(
     action = str(request.get("action") or "upgrade")
 
     def _finish(ok: bool, error: str = "", extra: dict[str, Any] | None = None) -> None:
-        payload: dict[str, Any] = {"ok": ok, "action": action, "error": error or None}
+        payload: dict[str, Any] = {"request_id": request.get("request_id"), "ok": ok, "action": action, "error": error or None,
+                                   "phase": "更新完成，等待服务恢复" if ok else "更新未完成", "progress": 100}
         if extra:
             payload.update(extra)
         try:
@@ -444,8 +445,13 @@ def run_helper(
         except OSError:
             logger.warning("无法写入 upgrade-status.json", exc_info=True)
 
+    def _progress(message: str, percent: int) -> None:
+        write_upgrade_status({"request_id": request.get("request_id"), "action": action,
+                              "ok": None, "phase": message, "progress": percent})
+
     exit_code = 0
     if not skip_stop:
+        _progress("正在停止当前服务", 5)
         logger.info("停止当前服务...")
         time.sleep(1.0)
         stop_supervised(runtime, project_root=project_root)
@@ -483,6 +489,7 @@ def run_helper(
     skip_deps = bool(request.get("skip_deps"))
     use_mirror = bool(request.get("use_mirror"))
     if not skip_backup:
+        _progress("正在备份 ExcelManus 设置和会话，用户文件保留原位", 10)
         logger.info("备份用户数据...")
         bk = backup_user_data(project_root)
         if not bk.success:
@@ -500,11 +507,17 @@ def run_helper(
             return 1
         cleanup_old_backups(project_root, max_keep=2)
 
-    result = apply_on_stopped_tree(
-        project_root,
-        skip_deps=skip_deps,
-        use_mirror=use_mirror,
-    )
+    try:
+        result = apply_on_stopped_tree(
+            project_root,
+            skip_deps=skip_deps,
+            use_mirror=use_mirror,
+            progress_cb=lambda message, percent: _progress(message, 15 + round(percent * .8)),
+        )
+    except Exception as exc:
+        from excelmanus.updater import UpdateResult
+        logger.exception("更新进程失败")
+        result = UpdateResult(outcome=UpgradeOutcome.FAILED, error=str(exc))
     clear_request()
     extra = {
         "outcome": result.outcome.value,
@@ -522,7 +535,8 @@ def run_helper(
         return exit_code
     try:
         exec_start(runtime, project_root)
-    except FileNotFoundError as exc:
+    except OSError as exc:
         logger.error("%s", exc)
+        _finish(False, f"无法恢复服务: {exc}", extra)
         return 1
     return exit_code

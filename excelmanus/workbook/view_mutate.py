@@ -10,19 +10,12 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.styles.colors import Color
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_to_tuple
+from excelmanus.tools._style_extract import _BORDER_STYLE_MAP
 
 
 _H_ALIGN = {1: "left", 2: "center", 3: "right", 4: "justify"}
 _V_ALIGN = {1: "top", 2: "center", 3: "bottom"}
-_BORDER_STYLE = {
-    1: "thin",
-    2: "medium",
-    3: "thick",
-    4: "dashed",
-    5: "dotted",
-    6: "double",
-    7: "hair",
-}
+_BORDER_STYLE = {value: name for name, value in _BORDER_STYLE_MAP.items()}
 
 
 def _rgb(value: Any) -> str | None:

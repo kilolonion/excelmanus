@@ -322,6 +322,11 @@ class WorkspaceFileService:
         }
 
     def list_history(self, file_path: str) -> list[RevisionRecord]:
+        # Listing can migrate legacy indexes. Serialize it with mutations and GC.
+        with self._workspace_lock():
+            return self._list_history(file_path)
+
+    def _list_history(self, file_path: str) -> list[RevisionRecord]:
         rel = self._canonical(file_path)
         lineage_id = self.lineages.current_lineage_id(rel)
         if not lineage_id:
@@ -335,8 +340,11 @@ class WorkspaceFileService:
         for item in data.get("records") or []:
             path = str(item.get("path") or rel)
             paths.add(path)
-            rec = self.store.get(path, str(item.get("revision_id") or ""))
-            if rec is not None and rec.committed:
+            try:
+                rec = self.store.get(path, str(item.get("revision_id") or ""))
+            except RevisionIntegrityError:
+                continue
+            if rec is not None and rec.committed and (not rec.lineage_id or rec.lineage_id == lineage_id):
                 records[rec.id] = rec
         # Records own history; the lineage index is only a projection. Include
         # checkpoints written by older releases (and migrated overlay backups)
@@ -351,9 +359,7 @@ class WorkspaceFileService:
                     owner = before.lineage_id if before else after.lineage_id if after else lineage_id
                 if owner == lineage_id:
                     records[rec.id] = rec
-        if records:
-            return sorted(records.values(), key=lambda r: (r.created_at or "", r.sequence, r.id))
-        return [r for r in self.store.list(rel) if r.committed]
+        return sorted(records.values(), key=lambda r: (r.created_at or "", r.sequence, r.id))
 
     def checkpoint(
         self, file_path: str, *, expected_version: str, label: str | None = None,
@@ -372,7 +378,8 @@ class WorkspaceFileService:
                 digest = content_sha256(data)
                 existing = next(
                     (item for item in self.store.list(rel)
-                     if item.reason == "checkpoint" and item.label == label and item.sha256 == digest),
+                     if item.reason == "checkpoint" and item.label == label and item.sha256 == digest
+                     and item.lineage_id == lineage_id),
                     None,
                 )
                 if existing is not None:
@@ -386,16 +393,17 @@ class WorkspaceFileService:
 
     def read_history(self, file_path: str, revision_id: str) -> tuple[RevisionRecord, bytes]:
         rel = self._canonical(file_path)
-        rec, data = self._load_revision(rel, revision_id)
-        if not rec.committed:
-            raise CommitError("NOT_FOUND", "修订尚未提交")
-        return rec, data
+        with self._workspace_lock():
+            rec, data = self._load_revision(rel, revision_id)
+            if not rec.committed:
+                raise CommitError("NOT_FOUND", "修订尚未提交")
+            return rec, data
 
     def delete_checkpoint(self, file_path: str, revision_id: str) -> None:
         """Explicitly remove one checkpoint; never remove automatic recovery history."""
         rel = self._canonical(file_path)
         with self._workspace_lock():
-            rec = next((r for r in self.list_history(rel) if r.id == revision_id), None)
+            rec = next((r for r in self._list_history(rel) if r.id == revision_id), None)
             if rec is None:
                 raise CommitError("NOT_FOUND", "检查点不存在")
             if rec.reason != "checkpoint":
@@ -1078,14 +1086,14 @@ class WorkspaceFileService:
         try:
             return self.store.read_revision(rel, revision_id)
         except (KeyError, FileNotFoundError, RevisionIntegrityError):
-            for rec in self.list_history(rel):
+            for rec in self._list_history(rel):
                 if rec.id == revision_id:
                     data = self.store.read_blob(rec.path, rec.sha256)
                     if data is None:
                         raise CommitError("NOT_FOUND", f"revision blob missing: {revision_id}")
                     return rec, data
             rec = self.store.get(rel, revision_id)
-            if rec is not None:
+            if rec is not None and rec.committed:
                 data = self.store.read_blob(rec.path, rec.sha256)
                 if data is None:
                     raise CommitError("NOT_FOUND", f"revision blob missing: {revision_id}")

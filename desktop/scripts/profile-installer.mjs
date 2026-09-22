@@ -15,6 +15,7 @@ const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const installer = resolve(args.find(arg => !arg.startsWith('--')) || join(desktopRoot, 'dist', 'ExcelManus Setup 1.8.0.exe'));
 const fast = args.includes('--fast');
+const ownedRemoval = args.includes('--owned-removal');
 const work = join(desktopRoot, '.build', 'install-profile', `run-${Date.now()}`);
 mkdirSync(work, { recursive: true });
 const listing = execFileSync(await getPath7za(), ['l', '-slt', installer], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
@@ -32,6 +33,7 @@ execFileSync(compiler.path, [
   `-DBENCH_ROOT=${work}`, `-DBENCH_ARCHIVE=${archive}`,
   `-DBENCH_RESULT=${result}`, `-DBENCH_PLUGINS=${join(plugins, 'x86-unicode')}`,
   `-DPROJECT_DIR=${desktopRoot}`, ...(fast ? ['-DBENCH_FAST'] : []),
+  ...(ownedRemoval ? ['-DBENCH_OWNED_REMOVAL'] : []),
   join(desktopRoot, 'tests', 'fixtures', 'installer-profile.nsi'),
 ], { encoding: 'utf8', env: { ...process.env, ...compiler.env } });
 console.log(`Profile output: ${result}`);
@@ -53,7 +55,7 @@ try {
   });
 } catch (error) { failure = error; }
 finally { clearInterval(timer); printUpdates(); }
-const summary = { installer, fast, completed: !failure, wallMs: Math.round(performance.now() - started), stages: printed.trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)) };
+const summary = { installer, fast, ownedRemoval, completed: !failure, wallMs: Math.round(performance.now() - started), stages: printed.trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)) };
 writeFileSync(join(work, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
 if (failure) throw failure;
 console.log(`Total process time: ${summary.wallMs} ms`);

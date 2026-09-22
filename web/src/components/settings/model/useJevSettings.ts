@@ -31,6 +31,7 @@ export type JevRuntime = {
   jev_enforce_ready?: boolean;
   jev_active_provider?: string;
   jev_providers?: JevProviderPublic[];
+  model_canonical_match_enabled?: boolean;
   ai_gateway?: { configured: boolean; last4: string };
   typesafe?: { configured: boolean; last4: string };
 };
@@ -48,6 +49,7 @@ function snapshotFromRuntime(data: JevRuntime): JevDraft {
     jev_timeout_seconds: data.jev_timeout_seconds ?? 1.5,
     jev_active_provider: data.jev_active_provider || "",
     ai_gateway_api_key: "",
+    model_canonical_match_enabled: data.model_canonical_match_enabled ?? true,
   };
 }
 

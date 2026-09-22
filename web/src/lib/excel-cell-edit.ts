@@ -110,9 +110,15 @@ const pendingByPath = new Map<string, PendingBatch>();
 const inFlightByPath = new Map<string, Promise<void>>();
 const pausedByPath = new Set<string>();
 const acknowledgedVersions = new Map<string, Map<string, string>>();
+const structurallyChangedVersions = new Map<string, Set<string>>();
 // Includes failed and serialized batches until saved or explicitly discarded.
 const unsavedByPath = new Map<string, Set<PendingBatch>>();
 const editListeners = new Set<() => void>();
+
+/** Includes failed/conflicting batches, not just writes currently in flight. */
+export function hasUnsavedWorkbookEdits(): boolean {
+  return unsavedByPath.size > 0 || pendingByPath.size > 0 || inFlightByPath.size > 0;
+}
 
 export function subscribeWorkbookEdits(listener: () => void): () => void {
   editListeners.add(listener);
@@ -131,6 +137,14 @@ export function acknowledgedWorkbookVersion(
   viewedVersion?: string,
 ): string | undefined {
   return viewedVersion ? acknowledgedVersions.get(fileRefKey(file))?.get(viewedVersion) ?? viewedVersion : undefined;
+}
+
+/** A version advance may preserve values while invalidating old row/column coordinates. */
+export function acknowledgedSelectionVersion(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">, version?: string): string | undefined {
+  if (version && structurallyChangedVersions.get(fileRefKey(file))?.has(version)) {
+    throw new Error("表格行列或工作表结构已改变，请重新选择区域后发送");
+  }
+  return acknowledgedWorkbookVersion(file, version);
 }
 
 /** 将 0-based 列索引转换为 Excel 列字母（0→A, 25→Z, 26→AA）。 */
@@ -488,6 +502,7 @@ export function discardWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceKey"
   pendingByPath.delete(key);
   pausedByPath.delete(key);
   acknowledgedVersions.delete(key);
+  structurallyChangedVersions.delete(key);
   for (const batch of unsavedByPath.get(key) || []) batch.discarded = true;
   unsavedByPath.delete(key);
   emitEditState();
@@ -496,7 +511,7 @@ export function discardWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceKey"
 /** Recovery artifact retains operation order, scope and original snapshot version. */
 export function workbookEditDraft(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): string {
   return JSON.stringify({ file, batches: [...(unsavedByPath.get(fileRefKey(file)) || [])].map((batch) => ({
-    expected_version: batch.expectedVersion,
+    expected_version: acknowledgedWorkbookVersion(file, batch.expectedVersion ?? undefined),
     operations: [...batch.operations, ...changesToSetValuesOps(batch.changes, batch.sheet)],
   })) }, null, 2);
 }
@@ -633,6 +648,7 @@ async function flushPath(key: string): Promise<void> {
     let expected = batch.expectedVersion;
     const ack = acknowledgedVersions.get(key);
     if (expected && ack?.has(expected)) expected = ack.get(expected)!;
+    batch.expectedVersion = expected;
     const result = await runPersist({
       path: batch.path,
       sheet: batch.sheet,
@@ -652,6 +668,14 @@ async function flushPath(key: string): Promise<void> {
     }
     if (result.kind === "ok" && result.contentVersion && expected) {
       const versions = acknowledgedVersions.get(key) || new Map<string, string>();
+      const structural = batch.operations.some((op) => !["set_values", "set_styles", "set_dims"].includes(String(op.op)));
+      const changed = structurallyChangedVersions.get(key) ?? new Set<string>();
+      if (structural) {
+        changed.add(expected);
+        for (const [before, after] of versions) if (after === expected) changed.add(before);
+      }
+      while (changed.size > 128) changed.delete(changed.values().next().value!);
+      structurallyChangedVersions.set(key, changed);
       for (const [before, after] of versions) {
         if (after === expected) versions.set(before, result.contentVersion);
       }
@@ -711,5 +735,6 @@ export function resetExcelCellEditStateForTests(): void {
   inFlightByPath.clear();
   pausedByPath.clear();
   acknowledgedVersions.clear();
+  structurallyChangedVersions.clear();
   unsavedByPath.clear();
 }

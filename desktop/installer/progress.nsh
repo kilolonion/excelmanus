@@ -2,6 +2,9 @@
 ; progress. Neither measures the whole installation (including upgrades and
 ; installer caching). Keep their controls hidden until the install has finished
 ; and use a separate native activity indicator that they cannot reset.
+!ifdef APP_GUID
+  !include "${PROJECT_DIR}\installer\upgrade.nsh"
+!endif
 !ifndef BUILD_UNINSTALLER
   ; Keep upstream pages available when selecting our extraction wrapper later.
   !addincludedir "${PROJECT_DIR}\node_modules\app-builder-lib\templates\nsis"
@@ -11,6 +14,9 @@
   ; This hook runs after the directory page, immediately before MUI_PAGE_INSTFILES.
   ; Setting SHOW earlier would attach it to the directory/install-mode page.
   !macro customPageAfterChangeDir
+    !ifmacrodef ExcelManusUpgradePage
+      !insertmacro ExcelManusUpgradePage
+    !endif
     !define MUI_PAGE_CUSTOMFUNCTION_SHOW ExcelManusProgressShow
     !define MUI_PAGE_CUSTOMFUNCTION_LEAVE ExcelManusProgressLeave
   !macroend
@@ -33,6 +39,9 @@
   !macroend
 
   !macro customHeader
+    !ifmacrodef ExcelManusUpgradeFunctions
+      !insertmacro ExcelManusUpgradeFunctions
+    !endif
     ; Change include resolution only after upstream pages/multiUser.nsh have
     ; loaded. Doing this in the initial header selects NSIS's unrelated
     ; MultiUser.nsh on Windows, where filenames are case-insensitive.
@@ -84,6 +93,14 @@
   !macroend
 
   !macro customInstall
+    !ifdef APP_GUID
+      !ifndef EXCELMANUS_SAFE_UPGRADE_ACTIVE
+        !error "ExcelManus safe upgrade override was not loaded"
+      !endif
+      !ifndef EXCELMANUS_INSTALL_LOCATION_LOCK_ACTIVE
+        !error "ExcelManus install location guard was not loaded"
+      !endif
+    !endif
     !ifndef EXCELMANUS_FAST_EXTRACT_ACTIVE
       !error "ExcelManus extraction override was not loaded; check NSIS include order"
     !endif

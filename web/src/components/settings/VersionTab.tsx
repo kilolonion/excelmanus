@@ -37,11 +37,13 @@ import {
   executeRemoteDeploy,
   startVersionUpgrade,
 } from "@/lib/api";
-import type { DeployStatusInfo, DeployResult, VersionManifest } from "@/lib/api";
+import type { DeployStatusInfo, DeployResult, VersionManifest, WebUpgradeCapability } from "@/lib/api";
 import { fetchVersionManifest } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { RollbackPanel } from "@/components/settings/RollbackPanel";
 import { ProjectLinks } from "@/components/settings/ProjectLinks";
+import { DesktopUpdateCard } from "@/components/settings/DesktopUpdateCard";
+import { appRefreshBlocker } from "@/lib/app-refresh";
 
 interface VersionInfo {
   current: string;
@@ -99,6 +101,7 @@ export function VersionTab() {
   const [deletingBackup, setDeletingBackup] = useState<string | null>(null);
   const [deletingInstall, setDeletingInstall] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [upgradeCapability, setUpgradeCapability] = useState<WebUpgradeCapability | null>(null);
   const [cleaningUp, setCleaningUp] = useState(false);
   const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
   const [migrating, setMigrating] = useState(false);
@@ -127,17 +130,19 @@ export function VersionTab() {
       // A packaged app has no source checkout, deployment tools or source
       // installation registry. Do not invoke those endpoints from Desktop.
       if (window.excelManusDesktop || v.check_method === "desktop_installer") return;
-      const [b, i, ds, manifest] = await Promise.all([
+      const [b, i, ds, manifest, capability] = await Promise.all([
         apiGet<{ backups: BackupEntry[] }>("/version/backups"),
         apiGet<{ installations: InstallationEntry[] }>("/version/installations"),
         fetchDeployStatus().catch(() => null),
         fetchVersionManifest().catch(() => null),
+        apiGet<WebUpgradeCapability>("/version/upgrade/capability", { cache: "no-store" }).catch(() => null),
       ]);
       setBackups(b.backups ?? []);
       setInstallations(i.installations ?? []);
       if (ds) setDeployStatus(ds);
       if (manifest?.git_commit) setCurrentGitCommit(manifest.git_commit);
       setLastUpgrade(manifest?.last_upgrade ?? null);
+      setUpgradeCapability(capability);
     } catch {
       setActionMsg({ type: "err", text: "版本信息加载失败，请重试。" });
     } finally {
@@ -201,15 +206,17 @@ export function VersionTab() {
   };
 
   const handleApplyUpdate = async () => {
-    if (!confirm("确定要执行更新？服务会先停止，备份数据后再拉起新版本。未提交的本地改动会被 git stash；无法 fast-forward 时不会 reset --hard。")) return;
+    const blocked = appRefreshBlocker();
+    if (blocked) { showMsg("err", blocked); return; }
+    if (!confirm("更新 ExcelManus 前后端？会先备份应用数据，再更新程序并重建网页。期间短暂断开连接，完成后自动恢复。不会删除、移动或清空工作区和用户文件；设置和会话会保留。源码存在未提交修改时会停止更新。")) return;
     setUpdating(true);
     try {
-      await startVersionUpgrade({ useMirror: false });
-      void triggerRestart("版本更新：正在停机、拉取代码并重启", { requireVersionChange: true });
+      const result = await startVersionUpgrade({ useMirror: false });
+      if (!result.accepted || !result.request_id) throw new Error(result.error || "服务器未返回更新编号，请检查服务端版本");
+      await triggerRestart("网页更新：仅更新 ExcelManus，工作区和用户文件保留原位", { requireVersionChange: true, upgradeRequestId: result.request_id });
     } catch (err) {
       showMsg("err", `更新失败: ${err instanceof Error ? err.message : "未知错误"}`);
-      setUpdating(false);
-    }
+    } finally { setUpdating(false); }
   };
 
   const handleCleanupBackups = async () => {
@@ -314,17 +321,7 @@ export function VersionTab() {
 
   if (isDesktopApp) {
     return <div className="space-y-4">
-      <div className="rounded-lg border border-border p-4 space-y-3">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <Sparkles className="h-5 w-5 text-[var(--em-primary)]" />
-          ExcelManus Desktop
-          <Badge variant="secondary">v{version?.current || process.env.NEXT_PUBLIC_APP_VERSION || "unknown"}</Badge>
-        </div>
-        <p className="text-sm text-muted-foreground">下载适用于 Windows 或 macOS 的新版安装包，退出应用后安装。已有对话、模型配置和工作区数据会保留。</p>
-        <a href="https://github.com/kilolonion/excelmanus/releases" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm text-[var(--em-primary)] underline underline-offset-4">
-          <Download className="h-4 w-4" />打开下载页面
-        </a>
-      </div>
+      <DesktopUpdateCard current={version?.current || process.env.NEXT_PUBLIC_APP_VERSION || "unknown"} />
       <p className="text-xs leading-relaxed text-muted-foreground">备份应用数据时，可从应用菜单「文件 → 打开数据目录」找到数据位置，退出应用后复制该目录。添加在其他位置的工作区文件夹需要单独备份。日志位于「帮助 → 打开日志目录」。</p>
       <ProjectLinks />
       {actionMsg?.type === "err" && <div role="status" className="text-sm text-destructive">
@@ -399,7 +396,7 @@ export function VersionTab() {
             </div>
           </div>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-2 shrink-0 mt-2 sm:mt-0">
-            {version?.has_update && isStandalone && (
+            {version?.has_update && upgradeCapability?.supported && (
               <Button
                 variant="default"
                 size="sm"
@@ -412,12 +409,12 @@ export function VersionTab() {
                 ) : (
                   <Download className="h-3.5 w-3.5" />
                 )}
-                执行更新
+                一键更新前后端
               </Button>
             )}
-            {version?.has_update && !isStandalone && (
+            {version?.has_update && !upgradeCapability?.supported && (
               <Badge variant="outline" className="text-[10px] h-6 px-2 text-amber-600 dark:text-amber-400">
-                服务器部署请在运维机运行 deploy.sh
+                此实例暂不能从网页更新
               </Badge>
             )}
             <Button
@@ -435,6 +432,11 @@ export function VersionTab() {
               检查更新
             </Button>
           </div>
+        </div>
+        <div className="mt-3 space-y-1 text-xs leading-relaxed text-muted-foreground">
+          <p>网页热更新会更新 ExcelManus 前后端并自动恢复连接，设置和会话继续沿用。不会删除、搬迁或清空工作区、表格、文档及其他用户文件。</p>
+          <p>服务器发布新版后，当前页面也会提示刷新；未保存的表格修改和运行中的任务会阻止刷新。</p>
+          {!upgradeCapability?.supported && <p className="text-amber-700 dark:text-amber-400">{upgradeCapability?.reason || "当前服务尚未提供网页更新能力，请先升级服务端。"}</p>}
         </div>
         {version?.has_update && version.release_notes && !updating && (
           <div className="mt-3 pt-3 border-t border-border">

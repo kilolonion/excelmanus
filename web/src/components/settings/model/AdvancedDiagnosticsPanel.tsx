@@ -1,6 +1,6 @@
 "use client";
 
-import { Brain, Check, Loader2, Save, CheckCircle2, Zap } from "lucide-react";
+import { ArrowRight, Brain, Check, Clock, Eye, Gauge, Loader2, RotateCcw, Save, CheckCircle2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { THINKING_EFFORT_LEVELS, type ThinkingEffort } from "@/lib/thinking";
@@ -8,6 +8,165 @@ import { useUIStore } from "@/stores/ui-store";
 import { useAdminModel } from "./admin-model-context";
 import { ConfigTransferPanel } from "./ConfigTransferPanel";
 import { ModelCapabilitiesPanel } from "./ModelCapabilitiesPanel";
+import { RuntimeSettingsPanel, type RuntimeSettingGroup } from "../RuntimeSettingsPanel";
+
+const MODEL_RUNTIME_SETTING_GROUPS: RuntimeSettingGroup[] = [
+  {
+    title: "模型请求",
+    description: "控制模型能力判断、Responses 续接与提示词缓存等请求行为。",
+    icon: <Zap className="h-4 w-4" />,
+    items: [
+      {
+        key: "main_model_vision",
+        label: "图片识别",
+        desc: "自动时按模型能力判断；也可为当前对话统一开启或关闭图片输入。",
+        icon: <Eye className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "auto", label: "自动" },
+          { value: "true", label: "开启" },
+          { value: "false", label: "关闭" },
+        ],
+      },
+      {
+        key: "responses_continuation_enabled",
+        label: "Responses 原生续接",
+        desc: "使用 previous_response_id 续接响应，让后续请求只发送新增输入。",
+        icon: <ArrowRight className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "responses_background_enabled",
+        label: "Responses 后台响应",
+        desc: "使用后台响应并轮询到终态，适合耗时较长的模型任务。",
+        icon: <Clock className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "prompt_cache_key_enabled",
+        label: "提示词缓存",
+        desc: "向模型接口发送缓存键，提高重复提示词的缓存命中率。",
+        icon: <Zap className="h-4 w-4" />,
+        type: "bool",
+      },
+    ],
+  },
+  {
+    title: "单轮预算",
+    description: "限制一次任务使用的 token 与估算成本；0 表示不限制。",
+    icon: <Gauge className="h-4 w-4" />,
+    defaultOpen: false,
+    items: [
+      {
+        key: "turn_token_budget",
+        label: "单轮 token 上限",
+        desc: "限制本轮模型输入与输出 token 总数。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 10000000,
+      },
+      {
+        key: "turn_cost_budget_usd",
+        label: "单轮成本上限",
+        desc: "限制本轮累计模型成本（美元）。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+        min: 0,
+        max: 100000,
+      },
+      {
+        key: "input_cost_per_1k_usd",
+        label: "输入 token 估算单价",
+        desc: "供应商未返回成本时，每 1K 输入 token 的估算美元单价。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+        min: 0,
+        max: 1000,
+      },
+      {
+        key: "output_cost_per_1k_usd",
+        label: "输出 token 估算单价",
+        desc: "供应商未返回成本时，每 1K 输出 token 的估算美元单价。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+        min: 0,
+        max: 1000,
+      },
+    ],
+  },
+  {
+    title: "失败重试",
+    description: "设置模型请求遇到限流或网络错误时的重试次数和退避时间。",
+    icon: <RotateCcw className="h-4 w-4" />,
+    defaultOpen: false,
+    items: [
+      {
+        key: "llm_retry_max_attempts",
+        label: "最大尝试次数",
+        desc: "模型调用失败时的总尝试次数，包含首次调用。",
+        icon: <RotateCcw className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 10,
+      },
+      {
+        key: "llm_retry_base_delay_seconds",
+        label: "重试基准延迟",
+        desc: "指数退避的起始等待时间（秒）。",
+        icon: <Clock className="h-4 w-4" />,
+        type: "float",
+        min: 0,
+        max: 300,
+      },
+      {
+        key: "llm_retry_max_delay_seconds",
+        label: "重试最大延迟",
+        desc: "单次重试等待上限（秒）；Retry-After 仍会优先采用。",
+        icon: <Clock className="h-4 w-4" />,
+        type: "float",
+        min: 0,
+        max: 3600,
+      },
+    ],
+  },
+  {
+    title: "图片传输",
+    description: "限制发送给模型的图片尺寸与编码体积，并选择 Files API 的使用方式。",
+    icon: <Eye className="h-4 w-4" />,
+    defaultOpen: false,
+    items: [
+      {
+        key: "image_pixel_budget",
+        label: "请求像素预算",
+        desc: "填写总像素上限，或输入 low 使用 512×512。",
+        icon: <Eye className="h-4 w-4" />,
+        type: "string",
+      },
+      {
+        key: "image_max_bytes",
+        label: "请求编码上限",
+        desc: "单张请求图片的编码字节上限；超出时会自动降低质量。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 1024,
+        max: 20971520,
+      },
+      {
+        key: "image_files_api",
+        label: "Files API 传输",
+        desc: "自动时仅向明确支持的端点上传 file_id，失败会回退为内联图片。",
+        icon: <Eye className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "auto", label: "自动" },
+          { value: "true", label: "强制开启" },
+          { value: "false", label: "关闭" },
+        ],
+      },
+    ],
+  },
+];
 
 export function AdvancedDiagnosticsPanel() {
   const {
@@ -128,6 +287,7 @@ export function AdvancedDiagnosticsPanel() {
           }}
         />
       </div>
+      <RuntimeSettingsPanel groups={MODEL_RUNTIME_SETTING_GROUPS} />
     </div>
   );
 }

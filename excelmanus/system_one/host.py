@@ -33,7 +33,7 @@ from excelmanus.system_one.policy import (
     next_sticky_profile,
 )
 from excelmanus.system_one.types import Decision
-from excelmanus.system_one.trace import emit_jev_trace
+from excelmanus.system_one.trace import emit_jev_trace, record_host_effect
 
 logger = get_logger("system_one.host")
 _MAX_OBSERVATION_EVALUATIONS_PER_TURN = 3
@@ -96,11 +96,17 @@ def clear_turn_exposure(engine: Any) -> None:
     engine._tools_cache = None  # type: ignore[attr-defined]
     engine._skill_pin = None  # type: ignore[attr-defined]
     engine._skill_pin_evaluated = False  # type: ignore[attr-defined]
+    engine._skill_pin_reported = False
+    engine._jev_context_decision = None
     engine._loop_wrap = None  # type: ignore[attr-defined]
+    engine._jev_loop_evaluations = 0
+    engine._jev_loop_result_count = 0
     engine._jev_observation_evaluations = 0  # type: ignore[attr-defined]
     engine._jev_turn_budget = None  # type: ignore[attr-defined]
     engine._mutation_verification = None  # type: ignore[attr-defined]
+    engine._jev_delivery_checks = 0
     engine._recovery_hint = None  # type: ignore[attr-defined]
+    engine._jev_context_input = None
 
 
 def remember_turn_tools(engine: Any, chat_result: Any) -> None:
@@ -142,13 +148,19 @@ async def maybe_record_turn_exposure(
     user_text: str,
     *,
     on_event: Any | None = None,
+    budget: Any = None,
 ) -> None:
-    """片 I：控制命令之后、USER_PROMPT_SUBMIT 落定后。L4 是否收窄看 applied。
+    """片 I：控制命令之后、USER_PROMPT_SUBMIT 落定后，选择工具预加载类别。
 
     片 K 复用本评估的 mode_hint；工具调用方式由主模型逐步选择。
     """
     clear_turn_exposure(engine)
-    reset_turn_budget(engine)
+    from excelmanus.system_one.budget import JevTurnBudget
+
+    if isinstance(budget, JevTurnBudget):
+        engine._jev_turn_budget = budget
+    else:
+        reset_turn_budget(engine)
     if is_child_session(engine):
         return
     if not _jev_connected(engine):
@@ -270,6 +282,10 @@ def maybe_enqueue_mode_switch(engine: Any, *, on_event: Any | None = None) -> No
     emit = getattr(handler, "emit_user_question_event", None)
     if callable(emit) and pending is not None:
         emit(question=pending, on_event=on_event, iteration=0)
+        record_host_effect(
+            engine, "exposure.turn", action=hint, changed=True,
+            impact="已加入模式确认问题，等待用户选择", on_event=on_event,
+        )
 
 
 def _observation_must_keep(result: Any) -> bool:
@@ -337,32 +353,28 @@ def _apply_observation_shape(
         return result
     text = str(result.model_text or "")
     coverage = dict(result.coverage or {})
-    if shape == "pointer":
+    if shape in {"pointer", "truncate"}:
+        root = getattr(getattr(engine, "config", None), "workspace_root", None)
+        if not root:
+            return result
+        from excelmanus.engine_core.spill import SpillStore
+
+        # Re-running a read may return a changed workbook. Preserve this exact
+        # observation before removing any of it from the model's context.
+        locator = SpillStore(str(root)).put(text)
+        retrieval = f"[完整结果：read_text_file(file_path='{locator}')；这是本次结果的固定句柄]"
         coverage.update({"declared": True, "truncated": True, "kind": "truncated"})
+        coverage["spill_locator"] = str(locator)
         return replace(
             result,
-            model_text=_pointer_text(tool_name, arguments),
-            truncated=True,
-            coverage=coverage,
-        )
-    if shape == "truncate":
-        coverage.update({"declared": True, "truncated": True, "kind": "truncated"})
-        return replace(
-            result,
-            model_text=_head_tail(text, T_TIGHT_CHARS),
+            model_text=retrieval + ("\n" + _head_tail(text, T_TIGHT_CHARS) if shape == "truncate" else ""),
             truncated=True,
             coverage=coverage,
         )
     if shape == "spill":
         root = getattr(getattr(engine, "config", None), "workspace_root", None)
         if not root:
-            coverage.update({"declared": True, "truncated": True, "kind": "truncated"})
-            return replace(
-                result,
-                model_text=_head_tail(text, T_TIGHT_CHARS),
-                truncated=True,
-                coverage=coverage,
-            )
+            return result
         from excelmanus.engine_core.spill import SpillStore, project_for_wire
 
         projection = project_for_wire(text, store=SpillStore(str(root)))
@@ -417,13 +429,19 @@ async def maybe_shape_observation(
     if not decision_can_apply("observation.shape", decision, settings):
         return result
     shape = str(decision.extras.get("shape") or "keep")
-    return _apply_observation_shape(
+    shaped = _apply_observation_shape(
         result,
         shape,
         tool_name=tool_name,
         arguments=args,
         engine=engine,
     )
+    if shaped.model_text != result.model_text:
+        record_host_effect(
+            engine, "observation.shape", action=shape, changed=True,
+            impact=f"工具结果由 {len(result.model_text)} 字符缩为 {len(shaped.model_text)} 字符，保留完整结果句柄",
+        )
+    return shaped
 
 
 _UI_SURFACES = frozenset(
@@ -445,9 +463,9 @@ def _has_pending_interaction(engine: Any) -> bool:
 def _turn_outcome(engine: Any, chat_result: Any) -> str:
     if bool(getattr(chat_result, "truncated", False)):
         return "fail"
-    state = getattr(engine, "_state", None)
-    failures = int(getattr(state, "last_failure_count", 0) or 0) if state is not None else 0
-    successes = int(getattr(state, "last_success_count", 0) or 0) if state is not None else 0
+    calls = list(getattr(chat_result, "tool_calls", None) or [])
+    failures = sum(not bool(getattr(item, "success", False)) for item in calls)
+    successes = len(calls) - failures
     if failures and not successes:
         return "fail"
     if failures:
@@ -464,6 +482,10 @@ async def maybe_emit_ui_hint(
     """片 O：reply 已产出、done 之前。开启后直接应用 UI 建议，失败静默。"""
     if engine is None or is_child_session(engine):
         return
+    if not callable(on_event):
+        on_event = getattr(getattr(engine, "_driver", None), "_on_event", None)
+    if not callable(on_event):
+        return
     if _has_pending_interaction(engine):
         return
     outcome = _turn_outcome(engine, chat_result)
@@ -477,6 +499,8 @@ async def maybe_emit_ui_hint(
     from excelmanus.system_one.adapter import ui_surface_state_from_engine
 
     state = ui_surface_state_from_engine(engine, chat_result, turn_outcome=outcome)
+    if not state.get("candidate_files"):
+        return
     decision = await _eval_traced(engine, "ui.surface", state, on_event=on_event)
     if not decision_can_apply("ui.surface", decision, settings):
         return
@@ -484,9 +508,19 @@ async def maybe_emit_ui_hint(
     surface = str(extras.get("surface") or "stay")
     if surface not in _UI_SURFACES:
         surface = "stay"
-    candidates = [str(item) for item in (state.get("candidate_files") or []) if item][:3]
-    file_path = candidates[0] if candidates else ""
-    file_b = candidates[1] if len(candidates) > 1 else ""
+    candidates = [str(item) for item in (state.get("candidate_files") or []) if item]
+    file_path = str(extras.get("file_path") or (candidates[0] if len(candidates) == 1 else ""))
+    file_b = str(extras.get("file_b") or "")
+    if file_path not in candidates:
+        file_path = ""
+    if file_b not in candidates or file_b == file_path:
+        file_b = ""
+    if surface in {"side_panel", "sheet_full", "compare"} and not file_path:
+        return
+    if surface == "compare" and not file_b:
+        return
+    if surface in {"stay", "none"} and not extras.get("suppress_heuristic"):
+        return
     event = ToolCallEvent(
         event_type=EventType.UI_HINT,
         ui_hint_surface=surface,
@@ -502,6 +536,12 @@ async def maybe_emit_ui_hint(
             emit(on_event, event)
         elif callable(on_event):
             on_event(event)
+        else:
+            return
+        record_host_effect(
+            engine, "ui.surface", action=surface, stage="sent",
+            impact="界面建议已发出，是否执行以界面处理记录为准", on_event=on_event,
+        )
     except Exception:
         logger.debug("ui_hint emit failed; continuing turn", exc_info=True)
 
@@ -515,7 +555,7 @@ async def maybe_verify_mutation(
     """Post-write intent verification; the result is consumed by the host."""
     if engine is None or is_child_session(engine) or chat_result is None:
         return ""
-    if getattr(engine, "_mutation_verification", None) is not None:
+    if not _delivery_check_available(engine):
         return ""
     state_obj = getattr(engine, "_state", None)
     affected = list(getattr(state_obj, "affected_files", None) or []) if state_obj else []
@@ -524,12 +564,42 @@ async def maybe_verify_mutation(
     if _turn_outcome(engine, chat_result) == "fail":
         return ""
     settings = live_jev_settings(getattr(engine, "config", None))
-    if not jev_is_active(settings) or gate_for_pack("mutation.verify", settings) == "off":
+    if gate_for_pack("mutation.verify", settings) == "off":
         return ""
     from excelmanus.system_one.adapter import mutation_verify_state_from_engine
 
     state = mutation_verify_state_from_engine(engine, chat_result)
-    decision = await _eval_traced(engine, "mutation.verify", state, on_event=on_event)
+    from excelmanus.system_one.evidence import delivery_requires_inspection
+
+    decision = (
+        await _eval_traced(engine, "mutation.verify", state, on_event=on_event)
+        if jev_is_active(settings) else Decision.noop("unavailable")
+    )
+    # A timeout, missing key or depleted semantic budget cannot erase write
+    # evidence. This bounded follow-up uses the existing verification gate.
+    if delivery_requires_inspection(state) or (
+        not decision_can_apply("mutation.verify", decision, settings) and state.get("checklist")
+    ):
+        evidence_items = [
+            {**item, "verdict": "unknown"}
+            for item in state.get("checklist", []) if isinstance(item, Mapping)
+        ]
+        # Keep useful semantic per-item findings when deterministic evidence
+        # also requires inspection; provider failure has no such findings.
+        reported_items = [
+            dict(item) for item in decision.extras.get("items", [])
+            if isinstance(item, Mapping) and item.get("verdict") != "evidenced"
+        ]
+        decision = Decision(
+            kind="noop", reason="deterministic_evidence_requires_followup",
+            applied=True, extras={
+                "next": "inspect_more", "source": "deterministic",
+                "items": (reported_items + evidence_items)[:5],
+                "missing_items": max(len(reported_items), len(evidence_items)),
+            },
+        )
+    # A settings change during the await still wins over the fallback.
+    settings = live_jev_settings(getattr(engine, "config", None))
     extras = decision.extras or {}
     items = [
         item for item in (extras.get("items") or [])
@@ -543,7 +613,10 @@ async def maybe_verify_mutation(
         "missing_items": int(extras.get("missing_items") or 0),
         "applied": decision_can_apply("mutation.verify", decision, settings),
         "reason": decision.reason,
+        "source": extras.get("source") or "jev",
+        "write_operation_count": len(getattr(state_obj, "write_operations_log", None) or []),
     }
+    engine._jev_delivery_checks = int(getattr(engine, "_jev_delivery_checks", 0) or 0) + 1
     if not decision_can_apply("mutation.verify", decision, settings):
         return ""
     action = engine._mutation_verification["next"]
@@ -560,16 +633,26 @@ async def maybe_verify_mutation(
     return advice
 
 
+def _delivery_check_available(engine: Any) -> bool:
+    if int(getattr(engine, "_jev_delivery_checks", 0) or 0) >= 2:
+        return False
+    previous = getattr(engine, "_mutation_verification", None)
+    if previous is None:
+        return True
+    writes = len(getattr(getattr(engine, "_state", None), "write_operations_log", None) or [])
+    return isinstance(previous, Mapping) and writes > int(previous.get("write_operation_count") or 0)
+
+
 def should_check_delivery(engine: Any) -> bool:
-    """Only withhold text while a written turn still has its one check available."""
+    """Recheck new writes once; unchanged evidence cannot cause a check loop."""
     if is_child_session(engine) or _has_pending_interaction(engine):
         return False
-    if getattr(engine, "_mutation_verification", None) is not None:
+    if not _delivery_check_available(engine):
         return False
     if not getattr(getattr(engine, "_state", None), "affected_files", None):
         return False
     settings = live_jev_settings(getattr(engine, "config", None))
-    return jev_is_active(settings) and gate_for_pack("mutation.verify", settings) != "off"
+    return gate_for_pack("mutation.verify", settings) != "off"
 
 
 async def maybe_suggest_recovery(
@@ -623,6 +706,13 @@ async def maybe_suggest_recovery(
     if not decision_can_apply("recovery.next_step", decision, settings):
         return ""
     action = engine._recovery_hint["next"]
+    record_jev_decision(
+        pack_id="recovery.next_step", gate=gate_for_pack("recovery.next_step", settings),
+        decision=Decision(
+            kind="noop", reason="recovery_advice_created", applied=True,
+            extras={"stage": "advice", "next": action, "source": source},
+        ),
+    )
     if breaker_triggered:
         return "Jev 恢复建议：本轮已触发连续失败停止条件，请先核对错误与目标信息，再发起后续请求。"
     return {
@@ -652,6 +742,8 @@ def emit_recovery_outcome(engine: Any, *, on_event: Any | None = None) -> None:
         outcome = "not_continued"
     elif hint.get("same_failure_repeated"):
         outcome = "repeated"
+    elif hint.get("following_success") is False:
+        outcome = "different_failure"
     else:
         outcome = "escaped"
     settings = live_jev_settings(getattr(engine, "config", None))
@@ -667,6 +759,7 @@ def emit_recovery_outcome(engine: Any, *, on_event: Any | None = None) -> None:
             "next": str(hint.get("next") or ""),
             "source": str(hint.get("source") or "jev"),
             "outcome": outcome,
+            "stage": "outcome",
         },
     )
     record_jev_decision(pack_id="recovery.next_step", gate=gate, decision=decision)
@@ -745,13 +838,22 @@ async def maybe_pin_skills(engine: Any) -> None:
     if not entries:
         return
     from excelmanus.system_one.adapter import last_user_text
+    from excelmanus.prompt.skill_catalog import is_warmup_ping
+    from excelmanus.system_one.evidence import rank_skills
 
-    candidates = [{"name": name, "desc": desc[:80]} for name, desc in entries[:3]]
+    text = last_user_text(engine)
+    if is_warmup_ping(text):
+        return
+    active = {str(getattr(skill, "name", "")) for skill in getattr(engine, "_active_skills", ()) or ()}
+    entries = rank_skills(text, [(name, desc) for name, desc in entries if name not in active])
+    if not entries:
+        return
+    candidates = [{"name": name, "desc": desc[:160]} for name, desc in entries]
     decision = await _eval_traced(
         engine,
         "skill.pin",
         {
-            "user_text": last_user_text(engine),
+            "user_text": text,
             "candidates": candidates,
             "skill_names": [name for name, _desc in entries[:10]],
         },
@@ -763,30 +865,36 @@ async def maybe_pin_skills(engine: Any) -> None:
         engine._skill_pin = pin  # type: ignore[attr-defined]
 
 
-async def maybe_suggest_loop_wrap(engine: Any, *, on_event: Any | None = None) -> str:
-    """Supply a next-step suggestion once per turn; the main model owns strategy."""
+async def maybe_suggest_loop_wrap(
+    engine: Any, *, tool_results: list[Any] | None = None,
+    iteration: int = 0, on_event: Any | None = None,
+) -> str:
+    """Evaluate fresh evidence at most twice, delivering at most one useful suggestion."""
     if engine is None or is_child_session(engine):
         return ""
     if not _jev_connected(engine):
         return ""
-    if getattr(engine, "_loop_wrap", None) is not None:
+    previous = getattr(engine, "_loop_wrap", None)
+    if isinstance(previous, Mapping) and previous.get("next") != "continue":
+        return ""
+    if int(getattr(engine, "_jev_loop_evaluations", 0) or 0) >= 2:
+        return ""
+    if len(tool_results or []) <= int(getattr(engine, "_jev_loop_result_count", 0) or 0):
         return ""
     settings = live_jev_settings(getattr(engine, "config", None))
     if gate_for_pack("loop.wrap", settings) == "off":
         return ""
-    from excelmanus.system_one.adapter import last_user_text
+    from excelmanus.system_one.evidence import loop_state
 
-    state = getattr(engine, "_state", None)
+    state = loop_state(engine, tool_results or [], iteration=iteration)
+    if state is None:
+        return ""
+    engine._jev_loop_evaluations = int(getattr(engine, "_jev_loop_evaluations", 0) or 0) + 1
+    engine._jev_loop_result_count = len(tool_results or [])
     decision = await _eval_traced(
         engine,
         "loop.wrap",
-        {
-            "user_text": last_user_text(engine),
-            "iteration": int(getattr(state, "last_iteration_count", 0) or 0) if state else 0,
-            "consecutive_failures": int(getattr(engine, "_last_failure_count", 0) or 0),
-            "last_tools": list(getattr(engine, "_exposure_last_tools", None) or ())[:10],
-            "last_error": "",
-        },
+        state,
         on_event=on_event,
     )
     extras = dict(decision.extras or {})
@@ -795,7 +903,7 @@ async def maybe_suggest_loop_wrap(engine: Any, *, on_event: Any | None = None) -
         return ""
     engine._loop_wrap = {**extras, "applied": True}  # type: ignore[attr-defined]
     return {
-        "continue": "请按已有证据继续处理未完成事项。",
+        "continue": "",
         "retry": "请检查上一步是否需要纠正；只有确认允许且尚未提交的操作才可重试。",
         "ask_user": "请检查是否缺少用户必须补充的信息，必要时提出一个简短问题。",
         "stop": "现有结果可能已覆盖用户请求。请对照实际证据收尾；发现缺项时继续处理，勿仅凭此建议宣告完成。",
@@ -804,7 +912,7 @@ async def maybe_suggest_loop_wrap(engine: Any, *, on_event: Any | None = None) -
 
 async def maybe_advise_after_tools(
     engine: Any, tool_results: list[Any], *, breaker_triggered: bool = False,
-    on_event: Any | None = None,
+    iteration: int = 0, on_event: Any | None = None,
 ) -> str:
     """Consume Jev advice at the completed tool-batch boundary, before the next LLM call."""
     if is_child_session(engine) or not tool_results or not _jev_connected(engine):
@@ -824,6 +932,10 @@ async def maybe_advise_after_tools(
             previous["same_failure_repeated"] = any(
                 item.get("error_code") in previous.get("error_codes", []) for item in facts.get("error_facts", [])
             )
+            previous["different_failure"] = bool(
+                following and not previous["following_success"]
+                and not previous["same_failure_repeated"]
+            )
     if not tool_results[-1].success:
         advice = await maybe_suggest_recovery(
             engine, tool_results, breaker_triggered=breaker_triggered, on_event=on_event,
@@ -834,7 +946,9 @@ async def maybe_advise_after_tools(
         # not consume its only evaluation after the first successful batch.
         return ""
     else:
-        advice = await maybe_suggest_loop_wrap(engine, on_event=on_event)
+        advice = await maybe_suggest_loop_wrap(
+            engine, tool_results=tool_results, iteration=iteration, on_event=on_event,
+        )
         kind = "jev_loop_advice"
     if advice and not breaker_triggered:
         engine._memory.add_user_message(
@@ -843,6 +957,17 @@ async def maybe_advise_after_tools(
         )
         if kind == "jev_recovery_advice" and isinstance(getattr(engine, "_recovery_hint", None), dict):
             engine._recovery_hint["delivered"] = True
+            hint = engine._recovery_hint
+            record_host_effect(
+                engine, "recovery.next_step", action=str(hint["next"]),
+                impact="恢复建议已送入主模型上下文，尚不能确认是否遵循",
+                delivered=True, source=str(hint["source"]), on_event=on_event,
+            )
+        elif kind == "jev_loop_advice":
+            record_host_effect(
+                engine, "loop.wrap", action=str((engine._loop_wrap or {}).get("next") or ""),
+                impact="下一步建议已送入主模型上下文", delivered=True, on_event=on_event,
+            )
     return advice if breaker_triggered else ""
 
 
@@ -880,11 +1005,11 @@ def _prune_stub(tool_name: str, arguments: Mapping[str, Any] | None) -> str:
     return pointer.replace("重调同参可取回", "已省略；重调同参可取回")
 
 
-async def maybe_prune_observations(engine: Any, memory: Any) -> int:
+async def maybe_prune_observations(
+    engine: Any, memory: Any, *, protected_indices: set[int] | None = None,
+) -> int:
     """片 P：L1 机械 pruner 之前。最近 K / 错误 / pending / 不可重放永不剪。"""
     if engine is None or memory is None or is_child_session(engine):
-        return 0
-    if _has_pending_interaction(engine):
         return 0
     if not _jev_connected(engine):
         return 0
@@ -893,7 +1018,13 @@ async def maybe_prune_observations(engine: Any, memory: Any) -> int:
         return 0
     msgs = list(getattr(memory, "messages", None) or [])
     tool_idxs = [i for i, msg in enumerate(msgs) if isinstance(msg, Mapping) and msg.get("role") == "tool"]
+    if _has_pending_interaction(engine):
+        if protected_indices is not None:
+            protected_indices.update(tool_idxs)
+        return 0
     protected = set(tool_idxs[-T_PRUNE_KEEP:]) if tool_idxs else set()
+    if protected_indices is not None:
+        protected_indices.update(protected)
     lookup = _tool_call_lookup(msgs)
     from excelmanus.system_one.adapter import last_user_text
 
@@ -902,8 +1033,6 @@ async def maybe_prune_observations(engine: Any, memory: Any) -> int:
     user_text = last_user_text(engine)
     applied_ok = decision_is_applied("observation.prune", settings)
     for idx in tool_idxs:
-        if scanned >= T_PRUNE_BATCH:
-            break
         if idx in protected:
             continue
         msg = msgs[idx]
@@ -912,11 +1041,19 @@ async def maybe_prune_observations(engine: Any, memory: Any) -> int:
             continue
         if content.startswith("spill:") or "已省略" in content or "已收起" in content:
             continue
-        if '"status": "error"' in content or '"status":"error"' in content:
+        import re
+
+        if re.search(r'"status"\s*:\s*"error"', content):
+            if protected_indices is not None:
+                protected_indices.add(idx)
             continue
         call_id = str(msg.get("tool_call_id") or "")
         tool_name, args = lookup.get(call_id, (str(msg.get("name") or ""), {}))
         if not tool_name or not _re_fetchable(tool_name, args):
+            if protected_indices is not None:
+                protected_indices.add(idx)
+            continue
+        if scanned >= T_PRUNE_BATCH:
             continue
         scanned += 1
         decision = await _eval_traced(
@@ -931,14 +1068,30 @@ async def maybe_prune_observations(engine: Any, memory: Any) -> int:
                 "re_fetchable": True,
             },
         )
-        if not applied_ok or not decision.applied or not (decision.extras or {}).get("prune"):
+        if not applied_ok or not decision.applied:
             continue
-        stub = _prune_stub(tool_name, args)
+        if not (decision.extras or {}).get("prune"):
+            if protected_indices is not None:
+                protected_indices.add(idx)
+            continue
+        from excelmanus.engine_core.spill import SpillStore
+
+        root = getattr(getattr(engine, "config", None), "workspace_root", None)
+        if not root:
+            if protected_indices is not None:
+                protected_indices.add(idx)
+            continue
+        locator = SpillStore(str(root)).put(content)
+        stub = f"[已省略旧结果；原始结果可用 read_text_file(file_path='{locator}') 取回]"
         msg["content"] = stub
         emit = getattr(memory, "_emit_replace", None)
         if callable(emit):
             emit(msg, kind="tool/result")
         pruned += 1
+        record_host_effect(
+            engine, "observation.prune", action="prune", changed=True,
+            impact=f"旧结果由 {len(content)} 字符缩为 {len(stub)} 字符，保留固定取回入口",
+        )
     return pruned
 
 

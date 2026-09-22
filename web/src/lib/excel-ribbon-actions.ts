@@ -9,7 +9,9 @@ export type RibbonAskKind =
   | "data-quality"
   | "filter-analyze"
   | "dedupe"
-  | "sort";
+  | "sort"
+  | "chart"
+  | "pivot";
 
 export interface RibbonAskContext {
   path: string;
@@ -26,7 +28,9 @@ export const FORMULA_ASK_ACTIONS: { kind: RibbonAskKind; label: string; title: s
 
 export const DATA_ASK_ACTIONS: { kind: RibbonAskKind; label: string; title: string }[] = [
   { kind: "data-quality", label: "数据质量", title: "检查空值、重复、类型异常；先报告，不改表" },
-  { kind: "filter-analyze", label: "筛选分析", title: "分析可筛维度和建议条件，不是表格上的自动筛选" },
+  { kind: "filter-analyze", label: "筛选方案", title: "携带当前选区和筛选条件，生成可确认的筛选方案" },
+  { kind: "chart", label: "创建图表", title: "选择图表类型和数据列，交给 Agent 生成方案" },
+  { kind: "pivot", label: "透视汇总", title: "指定行、列和汇总字段，交给 Agent 生成方案" },
   { kind: "dedupe", label: "去重", title: "先报告重复行和判定键，再问是否删除" },
   { kind: "sort", label: "排序", title: "先确认排序列和升降序，再写入" },
 ];
@@ -46,6 +50,10 @@ export function buildRibbonAskPrompt(kind: RibbonAskKind, ctx: RibbonAskContext)
   });
 
   switch (kind) {
+    case "chart":
+      return `请为 ${mention} 制定图表方案，确认类型、数据系列和放置位置后再执行。`;
+    case "pivot":
+      return `请为 ${mention} 制定透视汇总方案，确认行列字段、汇总方式和输出位置后再执行。`;
     case "explain-formula":
       return `请解释 ${mention} 的公式含义、引用和可能错误。只说明，不要改表。公式缓存值不是已经重算。`;
     case "trace-formula":

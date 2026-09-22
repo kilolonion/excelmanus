@@ -10,6 +10,7 @@ import {
   LoadingStatusSpinner,
 } from "@/components/ui/loading-visual";
 import { useConnectionStore } from "@/stores/connection-store";
+import { refreshApp } from "@/lib/app-refresh";
 
 /**
  * 全局重启/断连等待遮罩 — 以 portal 形式挂载到 body，覆盖整个应用。
@@ -23,6 +24,7 @@ export function GlobalRestartOverlay() {
   const restartTimeout = useConnectionStore((s) => s.restartTimeout);
   const elapsedSeconds = useConnectionStore((s) => s.elapsedSeconds);
   const phase = useConnectionStore((s) => s.phase);
+  const restartError = useConnectionStore((s) => s.restartError);
   const reset = useConnectionStore((s) => s.reset);
 
   const visible = status === "restarting" || status === "disconnected";
@@ -53,7 +55,13 @@ export function GlobalRestartOverlay() {
           <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 text-center md:px-16">
             <LoadingBrandMark />
 
-            {restartTimeout ? (
+            {restartError ? (
+              <div className="mt-7 max-w-md space-y-4">
+                <h1 className="text-xl font-semibold">{phase || "暂时无法刷新"}</h1>
+                <p role="alert" className="text-sm text-destructive">{restartError}</p>
+                <Button onClick={reset}>返回当前页面</Button>
+              </div>
+            ) : restartTimeout ? (
               <TimeoutContent />
             ) : (
               <ActiveContent
@@ -152,6 +160,10 @@ function ActiveContent({
 }
 
 function TimeoutContent() {
+  const retryRefresh = () => {
+    const blocked = refreshApp();
+    if (blocked) useConnectionStore.setState({ restartError: blocked, phase: "请先保存当前工作" });
+  };
   return (
     <>
       <div className="mt-7 flex items-center gap-2 md:mt-9">
@@ -165,7 +177,7 @@ function TimeoutContent() {
           后端未能在预期时间内恢复
         </p>
         <p className="text-xs text-muted-foreground/60">
-          请查看升级日志（/tmp/excelmanus-upgrade.log）或手动刷新页面
+          请查看服务日志，或稍后重新连接。工作区和用户文件仍保留原位。
         </p>
       </div>
       <div className="mt-6 flex gap-3 pb-[max(1.5rem,env(safe-area-inset-bottom))] md:pb-0">
@@ -173,7 +185,7 @@ function TimeoutContent() {
           variant="outline"
           size="sm"
           className="gap-1.5"
-          onClick={() => window.location.reload()}
+          onClick={retryRefresh}
         >
           <RefreshCw className="h-3.5 w-3.5" />
           刷新页面
@@ -181,10 +193,7 @@ function TimeoutContent() {
         <Button
           size="sm"
           className="gap-1.5"
-          onClick={() => {
-            useConnectionStore.getState().reset();
-            window.location.reload();
-          }}
+          onClick={retryRefresh}
         >
           <Wifi className="h-3.5 w-3.5" />
           重新连接

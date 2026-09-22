@@ -1,6 +1,6 @@
 "use client";
 
-import { readActiveRange } from "@/lib/excel-selection";
+import { isSingleCellSelection, readActiveRange } from "@/lib/excel-selection";
 
 import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -24,7 +24,10 @@ import {
   isWorkbookEditPaused,
   discardWorkbookEdits,
   workbookEditDraft,
+  acknowledgedSelectionVersion,
 } from "@/lib/excel-cell-edit";
+import { useWorkbookFocusStore } from "@/stores/workbook-focus-store";
+import { highlightWorkbookRanges, type WorkbookHighlightRegistry } from "@/lib/workbook-focus";
 import { saveBlob } from "@/lib/save-blob";
 import { letterToColIndex, windowCellPatch, demoWorkbookView, viewMatchesLease, viewSnapshotToUniver, type WorkbookViewSnapshot } from "@/lib/workbook-view";
 import { pageForCell, pagesForViewport, rangeIsLoaded, mergeViewWindows, firstUnloadedCell } from "@/lib/workbook-window";
@@ -44,6 +47,8 @@ import {
 import { getUniverModules } from "@/lib/univer-modules";
 import type { WorkbookViewState } from "@/stores/workbook-conversation-store";
 import { registerAgentContextMenu, type AgentMenuSelection } from "@/lib/excel-agent-menu";
+import { useWorkbookWorkflowStore } from "@/stores/workbook-workflow-store";
+import { captureWorkbookParameters, workbookCommandRange, workbookOperationKind } from "@/lib/workbook-handoff";
 
 export { prefetchUniverModules, warmUniverModules } from "@/lib/univer-modules";
 
@@ -69,7 +74,11 @@ interface UniverSheetProps {
   /** 点到 Univer 自带的 开始 / 公式 / 数据 时回调 */
   onNativeRibbonTab?: () => void;
   active?: boolean;
+  focused?: boolean;
   onViewState?: (view: WorkbookViewState) => void;
+  linkedSelection?: { sequence: number; sheet: string; range: string };
+  /** Let short split panes retain their sheet tabs inside the assigned height. */
+  fitContainer?: boolean;
 }
 
 function createPreviewWorkbookId(): string {
@@ -186,11 +195,13 @@ function applyWorkbookEditable(api: FUniver, readOnly: boolean) {
   }
 }
 
-export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true, readOnly = false, ribbonSlot, historyActive = false, onNativeRibbonTab, active = true, onViewState }: UniverSheetProps) {
+export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true, readOnly = false, ribbonSlot, historyActive = false, onNativeRibbonTab, active = true, focused = true, onViewState, linkedSelection, fitContainer = false }: UniverSheetProps) {
+  const focusRequest = useWorkbookFocusStore((state) => state.request);
   const onViewStateRef = useRef(onViewState);
   onViewStateRef.current = onViewState;
   const containerRef = useRef<HTMLDivElement>(null);
   const univerRef = useRef<FUniver | null>(null);
+  const highlightRegistryRef = useRef<WorkbookHighlightRegistry | null>(null);
   const workbookIdRef = useRef<string>(createPreviewWorkbookId());
   const loadingShellFileRef = useRef<string | null>(null);
   const [loadingShellKey, setLoadingShellKey] = useState<string | null>(null);
@@ -199,6 +210,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   const readOnlyRef = useRef(readOnly);
   const suppressEditsRef = useRef(false);
   const viewRef = useRef<WorkbookViewSnapshot | null>(null);
+  const [viewContentVersion, setViewContentVersion] = useState<string | null>(null);
   const identityRef = useRef({ fileRef, sessionId, viewGeneration });
   identityRef.current = { fileRef, sessionId, viewGeneration };
   const requestRef = useRef<AbortController | null>(null);
@@ -214,6 +226,8 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   const externalRefreshRef = useRef(false);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
   const withStylesRef = useRef(withStyles);
   withStylesRef.current = withStyles;
   const sheetNamesRef = useRef(new Map<string, string>());
@@ -383,7 +397,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   useEffect(() => {
     const path = filePathRef.current;
     const store = useExcelStore.getState();
-    if (store.liveSelection && normalizeRelativePath(store.liveSelection.path) !== normalizeRelativePath(path)) {
+    if (focusedRef.current && store.liveSelection && normalizeRelativePath(store.liveSelection.path) !== normalizeRelativePath(path)) {
       store.setLiveSelection(null);
     }
     return () => {
@@ -406,7 +420,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     try {
       const ws = api.getActiveWorkbook()?.getActiveSheet();
       const r = ws?.getSelection()?.getActiveRange();
-      if (r && r.getHeight?.() === 1 && r.getWidth?.() === 1) {
+      if (r && isSingleCellSelection(selection.range)) {
         let raw: unknown = r.getFormula?.();
         if (typeof raw !== "string" || !raw) raw = r.getCellData?.()?.f;
         if (typeof raw === "string" && raw.trim()) {
@@ -471,7 +485,10 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         if (!sheet) continue;
         const identity = { unitId: workbookIdRef.current, subUnitId: sheet.getSheetId() };
         const command = (id: string, params: Record<string, unknown>) => {
-          if (api.syncExecuteCommand(id, { ...identity, ...params }, { onlyLocal: true }) === false) {
+          // onlyLocal value mutations bypass Univer's formula dependency updates.
+          // The surrounding suppressEdits guard keeps hydration out of persistence;
+          // allow value patches to recalculate after refresh or version restore.
+          if (api.syncExecuteCommand(id, { ...identity, ...params }, { onlyLocal: id !== "sheet.mutation.set-range-values" }) === false) {
             throw new Error("更新表格视图失败，请重试");
           }
         };
@@ -479,7 +496,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         const meta = next.sheets.find((item) => item.name === win.sheet)!;
         if (sheet.getMaxRows() < Math.max(meta.used.rows, win.rect.r1)) command("sheet.mutation.set-worksheet-row-count", { rowCount: Math.max(meta.used.rows, win.rect.r1, 200) });
         if (sheet.getMaxColumns() < Math.max(meta.used.cols, win.rect.c1)) command("sheet.mutation.set-worksheet-column-count", { columnCount: Math.max(meta.used.cols, win.rect.c1, 50) });
-        command("sheet.mutation.set-range-values", { cellValue: windowCellPatch(win, snapshot.cellData) });
+        command("sheet.mutation.set-range-values", { cellValue: windowCellPatch(win, snapshot.cellData, wb.getWorkbook().getStyles().toJSON()) });
         if (next.with_styles !== false) {
           const intersects = (r: IRange) => r.endRow >= win.rect.r0 - 1 && r.startRow <= win.rect.r1 - 1 && r.endColumn >= win.rect.c0 - 1 && r.startColumn <= win.rect.c1 - 1;
           const oldMerges = (snapshot.mergeData || []).filter(intersects);
@@ -511,6 +528,12 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     const visible = sheet?.getVisibleRange?.();
     const name = sheet?.getSheetName?.();
     if (!name) return;
+    if (externalRefreshRef.current && needsRefreshRef.current) {
+      // A restored file can shrink or remove sheets. Rebuild all loaded state;
+      // patching only the viewport leaves cells/merges from the previous version.
+      await loadDataRef.current(api, name);
+      return;
+    }
     const pages = cell ? [pageForCell(cell.row, cell.col)] : pagesForViewport(visible || { startRow: 0, endRow: 30, startColumn: 0, endColumn: 10 });
     const version = useExcelStore.getState().getContentVersion(file.relative, file.workspaceKey) || undefined;
     const fileKey = versionStoreKey(file.relative, file.workspaceKey);
@@ -548,6 +571,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         applyWindow(next);
         viewRef.current = current.content_version === next.content_version && !needsRefreshRef.current
           ? mergeViewWindows(current, next) : next;
+        setViewContentVersion(viewRef.current.content_version);
         needsRefreshRef.current = false;
         expected = next.content_version;
         rememberSnapshotVersion(file.relative, next.content_version, file.workspaceKey);
@@ -630,7 +654,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     enqueueWorkbookCommand({ path: identity.fileRef.relative, operations: ops, file: identity.fileRef,
       sessionId: identity.sessionId, viewGeneration: identity.viewGeneration ?? useExcelStore.getState().viewGeneration,
       expectedVersion: viewRef.current?.content_version ?? null,
-      onConflict: () => reportError("文件已被修改，本次编辑尚未保存。可先导出编辑草稿，再重新加载核对。"),
+      onConflict: () => reportError("文件已被修改，本次编辑尚未保存。请核对双方修改并合并，或让 Agent 重新规划。"),
       onError: reportError,
     });
   };
@@ -703,6 +727,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         }
 
         viewRef.current = view;
+        setViewContentVersion(view.content_version);
         styledPagesRef.current.clear();
         prefetchedPagesRef.current.clear();
         needsRefreshRef.current = false;
@@ -713,6 +738,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           setError("文件无工作表");
           reportView?.({ status: "error", error: "文件无工作表" });
           setLoading(false);
+          setSyncing(false);
           return;
         }
 
@@ -782,10 +808,15 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         });
       } catch (err) {
         if (controller.signal.aborted || loadVersion !== loadVersionRef.current) return;
+        if ((err as { code?: string }).code === "SHEET_NOT_FOUND" && preferredSheet !== null) {
+          await loadDataRef.current(providedApi, null);
+          return;
+        }
         console.error("Error loading Excel data:", err);
         reportView?.({ status: "error", error: err instanceof Error ? err.message : "加载失败" });
         setError(err instanceof Error ? err.message : "加载失败");
         setLoading(false);
+        setSyncing(false);
       } finally {
         if (loadVersion === loadVersionRef.current) endSuppressEdits();
         if (requestRef.current === controller) requestRef.current = null;
@@ -806,13 +837,13 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
     const init = async () => {
       try {
-        const { createUniver, LocaleType, UniverSheetsCorePreset, sheetsCoreZhCN, mergeWorksheetSnapshotWithDefault } =
+        const { createUniver, LocaleType, UniverSheetsCorePreset, sheetsCoreZhCN, mergeWorksheetSnapshotWithDefault, IMarkSelectionService } =
           await getUniverModules();
         normalizeSheetRef.current = mergeWorksheetSnapshotWithDefault;
 
         if (disposed || !containerRef.current) return;
 
-        const { univerAPI } = createUniver({
+        const { univer, univerAPI } = createUniver({
           locale: LocaleType.ZH_CN,
           locales: {
             [LocaleType.ZH_CN]: sheetsCoreZhCN,
@@ -838,6 +869,8 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
         api = univerAPI;
         univerRef.current = univerAPI;
+        // The mark service is registered when the first workbook starts rendering.
+        highlightRegistryRef.current = { getShapeMap: () => univer.__getInjector().get(IMarkSelectionService).getShapeMap() };
         try {
           registerAgentContextMenu(univerAPI, {
             readSelection: () => readAgentSelectionRef.current(univerAPI),
@@ -845,7 +878,12 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
               filePath: sel.path, sheet: sel.sheet, range: sel.range,
               contentVersion: sel.version ?? undefined,
             }),
-            onAsk: (kind, sel) => useExcelStore.getState().setPendingTemplateMessage(buildGridAskPrompt(kind, sel)),
+            onAsk: (kind, sel) => {
+              const { fileRef: file, sessionId } = identityRef.current;
+              if (kind === "clean-selection" && file && sessionId) {
+                useWorkbookWorkflowStore.getState().openHandoff({ file, sessionId, operation: "clean-selection", sheet: sel.sheet, range: sel.range, version: sel.version ?? undefined });
+              } else useExcelStore.getState().setPendingTemplateMessage(buildGridAskPrompt(kind, sel));
+            },
           });
         } catch (error) {
           console.warn("Agent context menu registration skipped:", error);
@@ -872,7 +910,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           if (!view || !identityRef.current.fileRef || !viewMatchesLease(view, identityRef.current.fileRef)
             || requestRef.current || loadingShellFileRef.current || suppressEditsRef.current) return;
           const selection = readActiveRange(univerAPI);
-          if (activeRef.current && selection.sheet && selection.range) {
+          if (activeRef.current && focusedRef.current && selection.sheet && selection.range) {
             useExcelStore.getState().setLiveSelection({
               path: filePathRef.current,
               sheet: selection.sheet,
@@ -892,8 +930,14 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           requestWindow(event);
         }));
         subscriptions.push(univerAPI.addEvent(univerAPI.Event.BeforeSheetEditStart, (event) => {
-          if (loadingShellFileRef.current || !viewRef.current) event.cancel = true;
+          if (!activeRef.current || !focusedRef.current || loadingShellFileRef.current || !viewRef.current) event.cancel = true;
         }));
+        // Univer emits undo/redo through separate events, not BeforeCommandExecute.
+        for (const name of [univerAPI.Event.BeforeUndo, univerAPI.Event.BeforeRedo]) {
+          subscriptions.push(univerAPI.addEvent(name, (event) => {
+            if (!activeRef.current || !focusedRef.current || readOnlyRef.current || loadingShellFileRef.current || !viewRef.current) event.cancel = true;
+          }));
+        }
         unsubscribeValueChanged = () => {
           if (windowTimer) clearTimeout(windowTimer);
           for (const sub of subscriptions) sub?.dispose?.();
@@ -903,7 +947,13 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           if (before && typeof univerAPI.addEvent === "function") {
             subscriptions.push(univerAPI.addEvent(before, (evt) => {
               if (suppressEditsRef.current || evt.options?.onlyLocal) return;
+              // Each pane owns an engine. Global keyboard shortcuts must never
+              // execute a user command in a background/hidden pane.
               const id = String(evt?.id || "");
+              if (id.startsWith("sheet.command.") && (!activeRef.current || !focusedRef.current)) {
+                evt.cancel = true;
+                return;
+              }
               if (id.startsWith("sheet.mutation.") && (loadingShellFileRef.current || !viewRef.current)) {
                 evt.cancel = true;
                 return;
@@ -919,7 +969,20 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
                 setWindowStatus("正在同步最新版本，请稍后编辑");
                 return;
               }
-              if (isUnsupportedWorkbookMutation(id)) { evt.cancel = true; setError("此操作尚不能保存，请通过聊天完成"); return; }
+              if (isUnsupportedWorkbookMutation(id)) {
+                evt.cancel = true;
+                const { sessionId } = identityRef.current;
+                if (!file || !sessionId || !viewRef.current || readOnlyRef.current) return;
+                try {
+                  const selection = readActiveRange(univerAPI);
+                  const commandSheet = univerAPI.getActiveWorkbook()?.getSheetBySheetId(evt.params?.subUnitId)?.getSheetName();
+                  useWorkbookWorkflowStore.getState().openHandoff({ file, sessionId,
+                    operation: workbookOperationKind(id), sheet: commandSheet ?? selection.sheet,
+                    range: workbookCommandRange(evt.params, selection.range), version: viewRef.current.content_version,
+                    parameters: { command: id, captured: captureWorkbookParameters(evt.params) } });
+                } catch (error) { setError(error instanceof Error ? error.message : "无法收集操作参数，请重试"); }
+                return;
+              }
               if (!id.startsWith("sheet.mutation.")) return;
               if (id !== "sheet.mutation.set-range-values" && !id.includes("worksheet-merge")) return;
               const wb = univerAPI.getActiveWorkbook?.();
@@ -977,6 +1040,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         }
       }
       univerRef.current = null;
+      highlightRegistryRef.current = null;
       loadingShellFileRef.current = null;
       setLoadingShellKey(null);
       setEngineReady(false);
@@ -986,6 +1050,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   useEffect(() => {
     const boundFile = identityRef.current.fileRef;
     viewRef.current = null;
+    setViewContentVersion(null);
     needsRefreshRef.current = false;
     if (activeRef.current) void loadData();
     return () => {
@@ -1000,6 +1065,23 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     if (!engineReady || loading || !univerRef.current) return;
     activateWorkbookSheet(univerRef.current, initialSheet);
   }, [engineReady, loading, initialSheet]);
+
+  // Optional cross-pane navigation. It is deliberately view-only: linked panes
+  // never write or change the focused conversation target.
+  useEffect(() => {
+    if (!linkedSelection || !active || loading || !univerRef.current) return;
+    const workbook = univerRef.current.getActiveWorkbook();
+    const sheet = workbook?.getSheetByName(linkedSelection.sheet);
+    if (!sheet) return;
+    try {
+      activateWorkbookSheet(univerRef.current, linkedSelection.sheet);
+      const range = sheet.getRange(linkedSelection.range);
+      sheet.scrollToCell(Math.max(0, range.getRow()), Math.max(0, range.getColumn()));
+      sheet.setActiveRange(range);
+    } catch {
+      // A linked range may have been deleted; the source pane remains usable.
+    }
+  }, [linkedSelection, active, loading, engineReady]);
 
   useEffect(() => {
     if (!change || !viewRef.current) return;
@@ -1076,11 +1158,75 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     applyWorkbookEditable(univerRef.current, readOnly);
   }, [readOnly, loading]);
 
-  // highlightCells 变化时高亮单元格
+  // Highlights are overlays and are disposed on navigation; they never change saved formatting.
   useEffect(() => {
-    if (!highlightCells?.length || !univerRef.current) return;
-    // 通过 Univer API 的高亮逻辑在此实现
-  }, [highlightCells]);
+    if (!highlightCells?.length || !univerRef.current || !active || loading) return;
+    const sheet = univerRef.current.getActiveWorkbook()?.getActiveSheet();
+    if (!sheet) return;
+    const overlay = highlightWorkbookRanges(sheet, highlightCells.slice(0, 64), "changed", highlightRegistryRef.current ? {
+      registry: highlightRegistryRef.current,
+      isActive: () => univerRef.current?.getActiveWorkbook()?.getActiveSheet()?.getSheetId() === sheet.getSheetId(),
+    } : undefined);
+    return () => overlay.dispose();
+  }, [highlightCells, active, loading, engineReady]);
+
+  useEffect(() => {
+    const api = univerRef.current;
+    const file = identityRef.current.fileRef;
+    if (!focusRequest || !api || !file || !active || loading || !viewRef.current
+      || !viewMatchesLease(viewRef.current, file)
+      || (!focusRequest.persistent && useWorkbookFocusStore.getState().completedId === focusRequest.id)
+      || focusRequest.file.workspaceKey !== file.workspaceKey
+      || normalizeRelativePath(focusRequest.file.relative) !== normalizeRelativePath(file.relative)) return;
+    let cancelled = false;
+    let overlay: { dispose: () => void } | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const focusVersion = () => focusRequest.persistent ? focusRequest.version : acknowledgedSelectionVersion(file, focusRequest.version);
+    const unsubscribe = useExcelStore.subscribe((next, previous) => {
+      const key = versionStoreKey(file.relative, file.workspaceKey);
+      if (next.workbookChanges[key]?.sequence !== previous.workbookChanges[key]?.sequence && overlay) {
+        overlay.dispose();
+        overlay = undefined;
+        cancelled = true;
+        setWindowStatus("表格已更新，区域高亮已移除，请核对当前版本");
+      }
+    });
+    const focus = async () => {
+      try {
+        if (focusRequest.version && focusVersion() !== viewRef.current?.content_version) {
+          setWindowStatus("引用来自旧版本，请核对当前表格后重新选择区域");
+          useWorkbookFocusStore.getState().complete(focusRequest.id);
+          return;
+        }
+        const workbook = api.getActiveWorkbook();
+        const sheet = focusRequest.sheet ? workbook?.getSheetByName(focusRequest.sheet) : workbook?.getActiveSheet();
+        if (!sheet) { setWindowStatus("引用的工作表已不存在，请核对当前版本"); return; }
+        activateWorkbookSheet(api, sheet.getSheetName());
+        const range = sheet.getRange(focusRequest.ranges[0]);
+        const row = Math.max(0, range.getRow());
+        const col = Math.max(0, range.getColumn());
+        sheet.scrollToCell(row, col);
+        await loadWindowRef.current(sheet, { row, col });
+        if (cancelled || (!focusRequest.persistent && useWorkbookFocusStore.getState().completedId === focusRequest.id)
+          || api.getActiveWorkbook()?.getActiveSheet()?.getSheetName() !== sheet.getSheetName()) return;
+        if (focusRequest.version && focusVersion() !== viewRef.current?.content_version) {
+          setWindowStatus("表格版本已变化，请核对后重新选择区域");
+          return;
+        }
+        if (focusRequest.select !== false) sheet.setActiveRange(range);
+        overlay = highlightWorkbookRanges(sheet, focusRequest.ranges, focusRequest.stage, highlightRegistryRef.current ? {
+          registry: highlightRegistryRef.current,
+          isActive: () => univerRef.current === api && api.getActiveWorkbook()?.getActiveSheet()?.getSheetId() === sheet.getSheetId(),
+        } : undefined);
+        useWorkbookFocusStore.getState().complete(focusRequest.id);
+        if (!focusRequest.persistent) timer = setTimeout(() => overlay?.dispose(), 8000);
+      } catch (error) {
+        if (!cancelled) setWindowStatus(error instanceof Error ? error.message : "无法定位此区域，请核对工作表和版本");
+      }
+    };
+    void focus();
+    return () => { cancelled = true; unsubscribe(); if (timer) clearTimeout(timer); overlay?.dispose(); };
+  }, [focusRequest, active, loading, engineReady, viewContentVersion, fileRef?.workspaceKey, fileRef?.relative]);
 
     // 同步 Univer 选区状态
   useEffect(() => {
@@ -1115,15 +1261,12 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
         const startRow = range.getRow();        // 0-based
         const startCol = range.getColumn();      // 0-based
-        const numRows = range.getHeight();
-        const numCols = range.getWidth();
-
         const selection = readActiveRange(api);
         if (!selection.sheet || !selection.range) {
           onRangeSelected("", "");
           return;
         }
-        const isSingleCell = numRows === 1 && numCols === 1;
+        const isSingleCell = isSingleCellSelection(selection.range);
         const cellValue = isSingleCell
           ? readSingleCellValue(range, sheet, startRow, startCol)
           : undefined;
@@ -1141,6 +1284,8 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     } catch {
       // The pointer handler below also covers touch selection timing.
     }
+
+    extractSelection();
 
     // 回退：在容器上通过 pointerup 也捕获
     const container = containerRef.current;
@@ -1218,7 +1363,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   });
 
   return (
-    <div className="relative w-full h-full min-h-[400px] bg-white dark:bg-gray-800" data-workbook-loading={loading || undefined} aria-busy={loading}>
+    <div className={`relative w-full h-full ${fitContainer ? "min-h-0" : "min-h-[400px]"} bg-white dark:bg-gray-800`} data-workbook-loading={loading || undefined} aria-busy={loading}>
       <div
         ref={containerRef}
         className="w-full h-full bg-white dark:bg-gray-800"
@@ -1251,6 +1396,10 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       {error && (
         <div role="alert" className={`absolute z-20 bg-background/95 border p-3 ${viewRef.current ? "bottom-8 left-3 right-3 rounded shadow-sm" : "inset-x-3 top-24 rounded"}`}>
           <div className="flex items-center gap-3"><span className="text-sm text-destructive flex-1">{error}</span>
+            {identityRef.current.fileRef && isWorkbookEditPaused(identityRef.current.fileRef) && <button className="text-sm underline shrink-0" type="button" onClick={() => {
+              const { fileRef: file, sessionId } = identityRef.current;
+              if (file && sessionId) useWorkbookWorkflowStore.getState().openConflict({ file, sessionId });
+            }}>核对并合并</button>}
             {identityRef.current.fileRef && isWorkbookEditPaused(identityRef.current.fileRef) && (
               <button className="text-sm underline shrink-0" type="button" onClick={() => {
                 const file = identityRef.current.fileRef!;
@@ -1278,7 +1427,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
               tab={nativeRibbonTab}
               filePath={filePath}
               fallbackSheet={initialSheet}
-              getSelection={() => readActiveRange(univerRef.current)}
+              getSelection={() => ({ ...readActiveRange(univerRef.current), version: viewRef.current?.content_version })}
             />,
             ribbonCommandHost,
           )

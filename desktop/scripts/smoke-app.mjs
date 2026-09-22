@@ -35,6 +35,9 @@ try {
  const settings=await api('config/runtime');
  if(settings.session_ttl_seconds!==1729)throw Error('Setting was not preserved after restart');
  if(Number(readFileSync(join(home,'frontend-port'),'utf8'))!==fp)throw Error('Frontend port changed');
+ // End the inherited pipe as well: Windows fs reads use a worker thread, and
+ // leaving its writer open can keep a read pending during Electron teardown.
+ child.stdin.end('shutdown\n');
  await stopProcess(child,'Electron',console.log,75_000);
  if(child.exitCode!==0)throw Error(`App quit failed: ${child.exitCode}`);
  for(const port of [bp,fp]) {try {await fetch(`http://127.0.0.1:${port}/api/v1/health`,{signal:AbortSignal.timeout(1000)});}catch{continue;}throw Error(`Orphan listener ${port}`);}

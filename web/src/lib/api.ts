@@ -3,6 +3,7 @@ import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 import { saveBlob } from "@/lib/save-blob";
 import { formatApiErrorMessage } from "@/lib/api-error";
 import { displayFileName } from "@/lib/file-identity";
+import { parseWorkbookTarget } from "@/lib/workbook-interaction-types";
 
 const API_BASE_PATH = "/api/v1";
 const MANAGE_TOKEN_STORAGE_KEY = "excelmanus_manage_token";
@@ -387,6 +388,9 @@ export async function fetchSessionDetail(
       options: (pq.options as { label: string; description: string }[]) || [],
       multiSelect: Boolean(pq.multi_select),
       queueSize: typeof pq.queue_size === "number" ? pq.queue_size : 1,
+      selection: parseWorkbookTarget(pq.selection),
+      toolCallId: typeof pq.tool_call_id === "string" ? pq.tool_call_id : undefined,
+      sessionId,
     };
   }
 
@@ -583,12 +587,13 @@ export async function answerQuestion(
   sessionId: string,
   questionId: string,
   answer: string,
+  selection?: import("@/lib/workbook-interaction").WorkbookTarget,
 ): Promise<{ status: string; resume_required?: boolean }> {
   const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/answer`, { direct: true });
   const res = await apiFetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ question_id: questionId, answer }),
+    body: JSON.stringify({ question_id: questionId, answer, ...(selection ? { selection } : {}) }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   }));
   if (!res.ok) {
@@ -1839,12 +1844,15 @@ export interface WorkbookRevisionItem {
   label: string;
   parent_revision_id: string | null;
   created_at?: string;
+  exists_after?: boolean | null;
+  op?: string;
 }
 
 export interface RevisionListResponse {
   path: string;
   content_version: string | null;
   revisions: WorkbookRevisionItem[];
+  total?: number;
 }
 
 export async function fetchRevisions(
@@ -1888,21 +1896,27 @@ export async function deleteRevision(opts: {
   });
 }
 
+export type RevisionPreviewResponse = Partial<import("@/lib/workbook-view").WorkbookViewSnapshot> & {
+  revision_id: string;
+  revision_reason: string;
+  revision_label: string;
+  paragraphs?: { text?: string }[];
+};
+
 export async function fetchRevisionPreview(opts: {
   path: string;
   revisionId: string;
   sessionId?: string | null;
   workspaceId?: string | null;
   signal?: AbortSignal;
-}): Promise<Partial<import("@/lib/workbook-view").WorkbookViewSnapshot> & {
-  revision_id: string;
-  revision_reason: string;
-  revision_label: string;
-  paragraphs?: { text?: string }[];
-}> {
+  sheet?: string;
+  rect?: string;
+}): Promise<RevisionPreviewResponse> {
   const params = new URLSearchParams({ path: opts.path, revision_id: opts.revisionId });
   if (opts.sessionId) params.set("session_id", opts.sessionId);
   if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
+  if (opts.sheet) params.set("sheet", opts.sheet);
+  if (opts.rect) params.set("rect", opts.rect);
   return apiGet(`/revisions/preview?${params.toString()}`, { signal: opts.signal });
 }
 
@@ -1916,6 +1930,7 @@ export async function cleanupVersionBackups(
 
 export interface UpdateApplyResult {
   accepted?: boolean;
+  request_id?: string;
   success?: boolean;
   old_version?: string;
   new_version?: string;
@@ -1924,6 +1939,20 @@ export interface UpdateApplyResult {
   error?: string | null;
   needs_restart?: boolean;
   message?: string;
+}
+
+export interface WebUpgradeStatus {
+  request_id?: string;
+  ok?: boolean | null;
+  phase?: string;
+  progress?: number;
+  error?: string | null;
+  outcome?: string;
+}
+
+export interface WebUpgradeCapability {
+  supported: boolean;
+  reason: string | null;
 }
 
 export async function startVersionUpgrade(opts?: {

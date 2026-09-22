@@ -26,10 +26,13 @@ def test_recovery_stats_counts(tmp_path: Path) -> None:
     log = _write_log(
         tmp_path,
         [
-            _line({"next": "inspect_more", "source": "deterministic"}),
-            _line({"next": "inspect_more", "source": "jev"}),
-            _line({"next": "inspect_more", "source": "jev", "outcome": "escaped"}, kind="outcome", reason="recovery_outcome:escaped"),
-            _line({"next": "stop", "source": "deterministic", "outcome": "stopped"}, kind="outcome", reason="recovery_outcome:stopped"),
+            _line({"stage": "advice", "next": "inspect_more", "source": "deterministic"}),
+            _line({"stage": "advice", "next": "inspect_more", "source": "jev"}),
+            _line({"stage": "effect", "advice_delivered": True, "next": "inspect_more", "source": "jev"}),
+            _line({"stage": "outcome", "next": "inspect_more", "source": "jev", "outcome": "escaped"}, kind="outcome", reason="recovery_outcome:escaped"),
+            _line({"stage": "outcome", "next": "stop", "source": "deterministic", "outcome": "stopped"}, kind="outcome", reason="recovery_outcome:stopped"),
+            _line({"stage": "evaluation", "next": "inspect_more"}),
+            _line({"next": "inspect_more"}),
             "unrelated log line",
             "jev decision pack=recovery.next_step extras={bad python} provider=x",
         ],
@@ -47,4 +50,5 @@ def test_recovery_stats_counts(tmp_path: Path) -> None:
     assert escape == 1.0
     markdown = stats.to_markdown()
     assert "deterministic" in markdown
-    assert "采纳率" in markdown
+    assert "送达后继续调用比例" in markdown
+    assert stats.legacy_rows == 1

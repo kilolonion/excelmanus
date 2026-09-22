@@ -1,6 +1,6 @@
 """版本、备份与更新管理 API 路由。
 
-本机升级通过脱离 API 的 helper 停机后改树；远程部署仅允许 standalone 控制面。
+网页升级通过独立 helper 停机后更新；服务器需显式启用并认证。
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import json as _json
 import os
 import subprocess
 import time
+import uuid
 from functools import partial
 from pathlib import Path
 
@@ -52,6 +53,63 @@ def _require_control_plane(request: Request) -> JSONResponse | None:
     if not _is_loopback(request):
         return _error(403, "升级、恢复与远程部署仅允许本机请求")
     return None
+
+
+def _web_upgrade_denial(request: Request) -> JSONResponse | None:
+    """Only this upgrade action can be enabled on a managed server.
+
+    Restore/deployment endpoints retain their separate control-plane policy.
+    """
+    from excelmanus.api_app_state import get_config
+    from excelmanus.auth.access import access_enabled, authenticated
+    from excelmanus.upgrade.runtime import read_runtime
+
+    if os.environ.get("EXCELMANUS_DESKTOP") == "1":
+        return _error(409, "桌面版请使用安装包更新")
+    cfg = get_config()
+    remote = (cfg is not None and cfg.is_server) or not _is_loopback(request)
+    if remote:
+        if os.environ.get("EXCELMANUS_WEB_UPGRADE_ENABLED") != "1":
+            return _error(403, "此服务器尚未启用网页更新，请由管理员设置 EXCELMANUS_WEB_UPGRADE_ENABLED=1")
+        if not access_enabled() or not authenticated(request):
+            return _error(403, "网页更新需要启用登录保护并通过管理员认证")
+    elif access_enabled() and not authenticated(request):
+        return _error(403, "请先通过管理员认证")
+    from excelmanus.updater import _is_git_repo
+    root = _get_project_root().resolve()
+    if not _is_git_repo(root):
+        return _error(409, "此安装没有 Git 源码，请使用安装包或部署工具更新")
+    runtime = read_runtime() or {}
+    try:
+        managed_root = Path(runtime.get("project_root") or "").resolve()
+        workers = int(runtime.get("workers") or 1)
+    except (TypeError, ValueError, OSError):
+        return _error(409, "启动记录无效，请通过 deploy/start.sh 或 start.ps1 重新启动")
+    if not runtime.get("project_root") or managed_root != root:
+        return _error(409, "请通过 deploy/start.sh 或 start.ps1 启动此实例，以便更新后自动恢复服务")
+    if workers != 1:
+        return _error(409, "多工作进程部署请使用运维发布流程更新")
+    if runtime.get("backend_only") or runtime.get("frontend_only"):
+        return _error(409, "前后端独立部署请使用运维发布流程，网页会自动提示已发布的新版本")
+    from excelmanus.upgrade.helper import _start_command
+    try:
+        _start_command(runtime, root)
+    except (TypeError, ValueError, OSError):
+        return _error(409, "未找到可用的服务启动脚本，暂不能从网页更新")
+    return None
+
+
+@router.get("/api/v1/version/upgrade/status")
+async def version_upgrade_status(request: Request) -> JSONResponse:
+    from excelmanus.upgrade.runtime import read_upgrade_status
+    return JSONResponse(content=read_upgrade_status() or {}, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/v1/version/upgrade/capability")
+async def version_upgrade_capability(request: Request) -> JSONResponse:
+    denied = _web_upgrade_denial(request)
+    reason = _json.loads(denied.body).get("error") if denied else None
+    return JSONResponse(content={"supported": denied is None, "reason": reason}, headers={"Cache-Control": "no-store"})
 
 
 _GIT_COMMIT_UNSET = object()
@@ -157,15 +215,26 @@ def _exit_after_response() -> None:
 def _schedule_helper_and_exit(root: Path, request_payload: dict) -> JSONResponse:
     from excelmanus.api_app_state import set_draining, set_restart_reason
     from excelmanus.upgrade.helper import spawn_detached_helper
-    from excelmanus.upgrade.runtime import write_request
+    from excelmanus.upgrade.runtime import reserve_request, clear_request, write_upgrade_status
 
-    write_request(request_payload)
-    spawn_detached_helper(root)
+    request_id = uuid.uuid4().hex
+    payload = {**request_payload, "request_id": request_id}
+    try:
+        reserve_request(payload)
+    except FileExistsError:
+        return _error(409, "已有更新或恢复请求正在处理，请等待完成")
+    try:
+        write_upgrade_status({"request_id": request_id, "action": payload["action"], "ok": None, "phase": "准备更新", "progress": 0})
+        spawn_detached_helper(root)
+    except Exception as exc:
+        clear_request()
+        write_upgrade_status({"request_id": request_id, "action": payload["action"], "ok": False, "error": f"无法启动更新进程: {exc}"})
+        return _error(500, "无法启动更新进程，当前服务保持运行，请查看日志后重试")
     set_restart_reason("正在停机升级")
     set_draining(True)
     return JSONResponse(
         status_code=202,
-        content={"accepted": True, "message": "已开始停机升级，服务即将退出。"},
+        content={"accepted": True, "request_id": request_id, "message": "已开始网页更新，完成后将自动恢复连接。"},
         background=BackgroundTask(_exit_after_response),
     )
 
@@ -308,17 +377,29 @@ class UpgradeRequest(BaseModel):
 
 @router.post("/api/v1/version/upgrade")
 async def version_upgrade(body: UpgradeRequest, request: Request) -> JSONResponse:
-    denied = _require_control_plane(request)
+    denied = _web_upgrade_denial(request)
     if denied:
         return denied
-    from excelmanus.updater import _is_git_repo
+    from excelmanus.auth.access import require_browser_header
+    from excelmanus.api_app_state import get_runtime
+    require_browser_header(request)
+    runtime = get_runtime()
+    if runtime.draining or any(not task.done() for task in runtime.active_chat_tasks.values()):
+        return _error(409, "还有任务正在运行或服务正在重启，请稍后再更新")
+    manager = runtime.session_manager
+    if manager is not None:
+        sessions = await manager.list_sessions()
+        if any(session.get("in_flight") for session in sessions):
+            return _error(409, "还有任务正在运行，请等待完成后再更新")
+    # No await from this point through reservation/draining: other chat requests
+    # on this single-worker event loop cannot enter between the final checks.
+    if runtime.draining or any(not task.done() for task in runtime.active_chat_tasks.values()):
+        return _error(409, "还有任务正在运行，请等待完成后再更新")
 
     root = _get_project_root()
-    if not _is_git_repo(root):
-        return _error(400, "项目不是 Git 仓库，无法自动更新")
     return _schedule_helper_and_exit(root, {
         "action": "upgrade",
-        "skip_backup": body.skip_backup,
+        "skip_backup": False,
         "skip_deps": body.skip_deps,
         "use_mirror": body.use_mirror,
     })

@@ -124,6 +124,20 @@ class MetaToolBuilder:
         loaded = getattr(e, "_loaded_tool_names", None)
         if not isinstance(loaded, set):
             loaded = e._loaded_tool_names = set()
+        exposure = getattr(e, "_turn_exposure", None)
+        if isinstance(exposure, dict) and not exposure.get("preload_reported"):
+            exposure["preload_reported"] = True
+            from excelmanus.system_one.packs import resolve_profile_tools
+            from excelmanus.system_one.trace import record_host_effect
+
+            profile = turn_wire_profile(e)
+            names = {schema_tool_name(item) for item in tools}
+            additions = resolve_profile_tools(profile, names) - DEFAULT_DISCLOSURE_CORE_TOOLS - loaded if profile != "full" else set()
+            if additions:
+                record_host_effect(
+                    e, "exposure.turn", action=profile, changed=True,
+                    impact=f"按任务预加载了 {len(additions)} 个此前未披露的授权工具",
+                )
         loaded.update(schema_tool_name(item) for item in tools
                       if schema_tool_name(item) not in DEFAULT_DISCLOSURE_CORE_TOOLS)
         cache_key = (*cache_key[:-1], frozenset(loaded))
@@ -170,4 +184,7 @@ class MetaToolBuilder:
             if profile != "full" else frozenset()
         )
         visible = DEFAULT_DISCLOSURE_CORE_TOOLS | initial | loaded
+        from excelmanus.self_management import SKILL_NAME, TOOL_NAMES
+        if any(skill.name == SKILL_NAME for skill in e._active_skills):
+            visible |= TOOL_NAMES
         return [item for item in schemas if schema_tool_name(item) in visible]

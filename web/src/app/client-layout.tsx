@@ -19,10 +19,12 @@ import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import { useChatStore } from "@/stores/chat-store";
+import { useWorkbookWorkflowStore } from "@/stores/workbook-workflow-store";
 
 const SettingsDialog = dynamic(() => import("@/components/settings/SettingsDialog").then((m) => m.SettingsDialog), { ssr: false });
 const ExcelSidePanel = dynamic(() => import("@/components/excel/ExcelSidePanel").then((m) => m.ExcelSidePanel), { ssr: false });
 const WordSidePanel = dynamic(() => import("@/components/word/WordSidePanel").then((m) => m.WordSidePanel), { ssr: false });
+const WorkbookWorkflowDialogs = dynamic(() => import("@/components/excel/WorkbookWorkflowDialogs").then((m) => m.WorkbookWorkflowDialogs), { ssr: false });
 
 const AdminPanel = dynamic(
   () => import("@/components/admin/AdminPanel").then((m) => ({ default: m.AdminPanel })),
@@ -111,6 +113,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
 }
 
 function WorkspaceOverlays() {
+  const hasWorkbookWorkflow = useWorkbookWorkflowStore((s) => Boolean(s.handoff || s.conflict));
   const settingsOpen = useUIStore((s) => s.settingsOpen);
   const adminOpen = useUIStore((s) => s.adminOpen);
   const hasApproval = useChatStore((s) => !!s.pendingApproval);
@@ -119,6 +122,7 @@ function WorkspaceOverlays() {
   const hasExcelPanel = useExcelStore((s) => s.panelOpen || !!s.activeFilePath);
   const wordPanelOpen = useWordStore((s) => s.panelOpen);
   return <>
+    {hasWorkbookWorkflow && <WorkbookWorkflowDialogs />}
     {hasExcelPanel && <ExcelSidePanel />}
     {wordPanelOpen && <WordSidePanel />}
     {hasApproval && <ApprovalModal />}

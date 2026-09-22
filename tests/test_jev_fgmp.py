@@ -78,8 +78,8 @@ def _stub(**overrides: object) -> SimpleNamespace:
             _loader=SimpleNamespace(get_skillpacks=lambda: packs),
         ),
         "memory": SimpleNamespace(
-            get_messages=lambda: [{"role": "user", "content": "帮我把表拆一下"}],
-            messages=[],
+            get_messages=lambda: [{"role": "user", "content": "使用 beta 处理 second 任务"}],
+            messages=[{"role": "user", "content": "使用 beta 处理 second 任务"}],
             add_user_message=lambda *a, **k: None,
         ),
         "_memory": None,
@@ -213,7 +213,7 @@ async def test_g_enforce_advice_does_not_take_over_loop() -> None:
         applied=True,
     )
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
-        await maybe_suggest_loop_wrap(engine)
+        await maybe_suggest_loop_wrap(engine, tool_results=[SimpleNamespace(tool_name="inspect_spreadsheet", success=True, result="ok")], iteration=1)
     assert engine._loop_wrap["applied"] is True
     assert engine.memory.messages == [{"role": "user", "content": "你好"}]
 
@@ -236,7 +236,7 @@ async def test_g_signed_stop_does_not_take_over_loop(monkeypatch: pytest.MonkeyP
         applied=True,
     )
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
-        await maybe_suggest_loop_wrap(engine)
+        await maybe_suggest_loop_wrap(engine, tool_results=[SimpleNamespace(tool_name="inspect_spreadsheet", success=True, result="ok")], iteration=1)
     assert engine._loop_wrap["next"] == "stop"
     assert engine._loop_wrap["applied"] is True
     assert engine.memory.messages == [{"role": "user", "content": "你好"}]
@@ -349,7 +349,7 @@ def _fat_tool_memory(n: int = 6) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_p_signed_stubs_old_keeps_recent_k(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_p_signed_stubs_old_keeps_recent_k(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _sign(monkeypatch, "observation.prune")
     engine = _stub(
         config=_config(
@@ -359,6 +359,7 @@ async def test_p_signed_stubs_old_keeps_recent_k(monkeypatch: pytest.MonkeyPatch
         ),
     )
     memory = _fat_tool_memory(6)
+    object.__setattr__(engine.config, "workspace_root", str(tmp_path))
     decision = Decision(
         kind="noop",
         reason="prune",
@@ -368,9 +369,9 @@ async def test_p_signed_stubs_old_keeps_recent_k(monkeypatch: pytest.MonkeyPatch
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
         n = await maybe_prune_observations(engine, memory)
     assert n == 2  # batch cap 3 but last 4 of 6 are protected → 2 candidates
-    stubs = [m["content"] for m in memory.messages if m.get("role") == "tool" and "已收起" in str(m.get("content"))]
+    stubs = [m["content"] for m in memory.messages if m.get("role") == "tool" and "已省略" in str(m.get("content"))]
     assert stubs
-    assert all("inspect_spreadsheet" in s and "已省略" in s for s in stubs)
+    assert all("read_text_file" in s and "spill:" in s for s in stubs)
     recent = [m["content"] for m in memory.messages if m.get("role") == "tool"][-4:]
     assert all("已收起" not in c for c in recent)
 
@@ -400,9 +401,10 @@ async def test_p_gate_off_does_not_prune() -> None:
 
 
 @pytest.mark.asyncio
-async def test_p_skips_errors_pending_and_child(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_p_skips_errors_pending_and_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _sign(monkeypatch, "observation.prune")
     cfg = _config(jev_enabled="enforce", jev_observation="enforce", jev_calibrated=True)
+    object.__setattr__(cfg, "workspace_root", str(tmp_path))
     child = _stub(config=cfg, _subagent_config={"name": "c"})
     pending = _stub(
         config=cfg,

@@ -16,7 +16,15 @@ def _execute_write(tmp_path: Path, manager: ApprovalManager, filename: str, *,
     approval_id = manager.new_approval_id()
 
     def execute(tool_name: str, arguments: dict, tool_scope: list) -> str:
-        target.write_text(f"content of {filename}", encoding="utf-8")
+        from excelmanus.workbook_commit import content_version_of_file
+        from excelmanus.workspace.file_service import WorkspaceFileService
+
+        service = WorkspaceFileService(tmp_path)
+        data = f"content of {filename}".encode()
+        if target.exists():
+            service.update(filename, data, expected_version=content_version_of_file(target))
+        else:
+            service.create(filename, data)
         return "ok"
 
     manager.execute_and_audit(

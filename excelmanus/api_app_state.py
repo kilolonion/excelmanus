@@ -18,6 +18,10 @@ from fastapi.responses import JSONResponse
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
+from excelmanus.logger import get_logger
+
+logger = get_logger("api.state")
+
 
 @dataclass
 class AppRuntime:
@@ -266,6 +270,8 @@ def is_placeholder_model_profile(
 
 def apply_profile_to_config(name: str) -> bool:
     """把指定档案完整写入运行时 config 快照，不继承其它档案的凭证。"""
+    from excelmanus.config import profile_canonical
+
     config = get_config()
     store = get_config_store()
     if config is None or store is None:
@@ -281,6 +287,7 @@ def apply_profile_to_config(name: str) -> bool:
     object.__setattr__(config, "api_key", api_key)
     object.__setattr__(config, "base_url", base_url)
     object.__setattr__(config, "protocol", protocol)
+    object.__setattr__(config, "canonical_model", profile_canonical(profile))
     if _is_subscription_profile(name, model) or (api_key and base_url and model):
         set_config_incomplete(False)
     else:
@@ -309,6 +316,11 @@ def ensure_active_model() -> None:
         purged = True
     if purged:
         _sync_config_profiles_from_db()
+    # Jev 智能匹配：为存量档案补绑规范模型名（幂等，仅填空槽）。
+    try:
+        backfill_canonical_models()
+    except Exception:
+        logger.debug("规范模型名回填失败", exc_info=True)
     profiles = [
         row for row in store.list_profiles()
         if not is_placeholder_model_profile(
@@ -346,12 +358,47 @@ def ensure_active_model() -> None:
     apply_profile_to_config(first)
 
 
+def backfill_canonical_models() -> int:
+    """Jev 智能匹配开启时，为缺少 canonical_model 的档案按置信度补绑规范名。
+
+    只补空槽位并顺手回填空的 model_family；不改写已绑定值，返回回填数量。
+    """
+    from excelmanus.config import (
+        CANONICAL_MATCH_THRESHOLD,
+        canonical_match_enabled,
+        infer_model_family,
+        match_canonical_model,
+    )
+
+    store = get_config_store()
+    if store is None or not canonical_match_enabled():
+        return 0
+    changed = 0
+    for row in store.list_profiles():
+        if str(row.get("canonical_model") or "").strip():
+            continue
+        hit = match_canonical_model(str(row.get("model") or ""))
+        if hit is None or hit.confidence < CANONICAL_MATCH_THRESHOLD:
+            continue
+        fields: dict[str, str] = {"canonical_model": hit.canonical}
+        if not str(row.get("model_family") or "").strip():
+            family = infer_model_family(hit.canonical)
+            if family:
+                fields["model_family"] = family
+        if store.update_profile(str(row["name"]), **fields):
+            changed += 1
+    if changed:
+        _sync_config_profiles_from_db()
+        logger.info("智能匹配回填完成：%d 个档案已绑定规范模型名", changed)
+    return changed
+
+
 def build_model_profiles_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
     """把 config_store 的 profile 行转换为 ModelProfile 列表（过滤占位档案）。
 
     纯函数，不依赖绑定的 runtime；API lifespan 与 bench 进程共用。
     """
-    from excelmanus.config import ModelProfile
+    from excelmanus.config import ModelProfile, profile_canonical
 
     profiles: list[Any] = []
     for row in rows:
@@ -370,6 +417,7 @@ def build_model_profiles_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
             model_family=row.get("model_family", ""),
             custom_extra_body=row.get("custom_extra_body", ""),
             custom_extra_headers=row.get("custom_extra_headers", ""),
+            canonical_model=profile_canonical(row),
         ))
     return profiles
 

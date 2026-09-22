@@ -35,20 +35,11 @@ def _fail(result: UpdateResult, outcome: UpgradeOutcome, error: str) -> UpdateRe
     return result
 
 
-def _hard_reset_to(project_root: Path, commit: str) -> tuple[bool, str]:
-    """依赖/构建/预检失败后回到更新前的 commit。冲突路径禁止调用此函数。"""
+def _rollback_code_to(project_root: Path, commit: str) -> tuple[bool, str]:
+    """Return code to the previous commit without deleting local/user files."""
     if not commit:
         return False, "无更新前 commit"
-    _, status_out, _ = _run_cmd(["git", "status", "--porcelain"], cwd=project_root)
-    stashed = False
-    if status_out.strip():
-        rc_stash, _, _ = _run_cmd(
-            ["git", "stash", "--include-untracked"], cwd=project_root,
-        )
-        stashed = rc_stash == 0
-    rc, _, err = _run_cmd(["git", "reset", "--hard", commit], cwd=project_root)
-    if rc == 0 and stashed:
-        _run_cmd(["git", "stash", "pop"], cwd=project_root)
+    rc, _, err = _run_cmd(["git", "reset", "--keep", commit], cwd=project_root)
     return rc == 0, err or ""
 
 
@@ -97,16 +88,11 @@ def apply_on_stopped_tree(
         return _fail(result, UpgradeOutcome.NOT_GIT_REPO, "项目不是 Git 仓库，无法更新")
 
     _, pre_update_commit, _ = _run_cmd(["git", "rev-parse", "HEAD"], cwd=project_root)
-    _, status_out, _ = _run_cmd(["git", "status", "--porcelain"], cwd=project_root)
-    has_stash = False
+    status_rc, status_out, status_err = _run_cmd(["git", "status", "--porcelain", "--untracked-files=no"], cwd=project_root)
+    if status_rc != 0:
+        return _fail(result, UpgradeOutcome.PRECHECK_FAILED, f"无法检查本地代码: {status_err}")
     if status_out.strip():
-        rc_stash, _, stash_err = _run_cmd(
-            ["git", "stash", "--include-untracked"], cwd=project_root,
-        )
-        if rc_stash == 0:
-            has_stash = True
-        else:
-            _p(f"警告: git stash 失败 ({stash_err})，跳过本地修改暂存", 31)
+        return _fail(result, UpgradeOutcome.PRECHECK_FAILED, "ExcelManus 源码存在未提交修改，请先处理后再更新。未移动或暂存任何工作区和用户文件。")
 
     _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
     branch = branch or "main"
@@ -123,11 +109,9 @@ def apply_on_stopped_tree(
 
     _p("正在拉取最新代码...", 30)
     rc, _, err = _run_cmd(
-        ["git", "merge", f"{git_remote}/{branch}", "--ff-only"], cwd=project_root,
+        ["git", "merge", f"{git_remote}/{branch}", "--ff-only", "--no-overwrite-ignore"], cwd=project_root,
     )
     if rc != 0:
-        if has_stash:
-            _run_cmd(["git", "stash", "pop"], cwd=project_root)
         return _fail(
             result,
             UpgradeOutcome.FF_CONFLICT,
@@ -136,10 +120,6 @@ def apply_on_stopped_tree(
             "请手动执行: git pull --rebase 或 git merge 解决冲突后重试。",
         )
     result.steps_completed.append("git_pull")
-    if has_stash:
-        rc_pop, _, _ = _run_cmd(["git", "stash", "pop"], cwd=project_root)
-        if rc_pop != 0:
-            _p("警告: git stash pop 失败，本地修改保留在 stash 中", 43)
     _p("代码已更新", 45)
 
     domestic = use_mirror or _is_domestic_network()
@@ -187,7 +167,7 @@ def apply_on_stopped_tree(
 
         if not be_ok:
             _p("后端依赖安装失败，正在回滚代码...", 55)
-            rb_ok, rb_err = _hard_reset_to(project_root, pre_update_commit)
+            rb_ok, rb_err = _rollback_code_to(project_root, pre_update_commit)
             return _fail(
                 result,
                 UpgradeOutcome.DEPS_FAILED,
@@ -197,7 +177,7 @@ def apply_on_stopped_tree(
         _p("后端依赖已更新", 65)
         if not fe_ok:
             _p("前端依赖安装失败，正在回滚代码...", 70)
-            rb_ok, rb_err = _hard_reset_to(project_root, pre_update_commit)
+            rb_ok, rb_err = _rollback_code_to(project_root, pre_update_commit)
             fe_msg = fe_err[-200:] if fe_err else "未知错误"
             return _fail(
                 result,
@@ -223,7 +203,7 @@ def apply_on_stopped_tree(
             _p("前端构建完成", 82)
         else:
             _p("前端构建失败，正在回滚代码...", 80)
-            rb_ok, rb_err = _hard_reset_to(project_root, pre_update_commit)
+            rb_ok, rb_err = _rollback_code_to(project_root, pre_update_commit)
             build_msg = build_err[-200:] if build_err else "未知错误"
             return _fail(
                 result,
@@ -235,7 +215,7 @@ def apply_on_stopped_tree(
     db_ok, db_msg = verify_database_migration(project_root)
     if not db_ok:
         _p(f"数据库预检失败，正在回滚代码... ({db_msg})", 90)
-        rb_ok, rb_err = _hard_reset_to(project_root, pre_update_commit)
+        rb_ok, rb_err = _rollback_code_to(project_root, pre_update_commit)
         return _fail(
             result,
             UpgradeOutcome.PRECHECK_FAILED,

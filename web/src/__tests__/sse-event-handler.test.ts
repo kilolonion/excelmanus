@@ -131,6 +131,8 @@ const excelActions: Record<string, ReturnType<typeof vi.fn>> = {
 const excelView = {
   compareMode: false,
   panelOpen: false,
+  fullViewPath: null as string | null,
+  activeFilePath: null as string | null,
   dismissedPaths: new Set<string>(),
 };
 
@@ -203,6 +205,7 @@ import {
   type DeltaBatcher,
 } from "@/lib/sse-event-handler";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import { useJevStore } from "@/stores/jev-store";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -259,12 +262,16 @@ describe("sse-event-handler", () => {
     sessionMock.patchSession.mockClear();
     excelView.compareMode = false;
     excelView.panelOpen = false;
+    excelView.fullViewPath = null;
+    excelView.activeFilePath = null;
     excelView.dismissedPaths = new Set();
     wordView.panelOpen = false;
     previewView.textOpen = false;
     previewView.imageOpen = false;
     mobileMock.getIsMobile.mockReturnValue(false);
-    vi.mocked(openWorkspaceFile).mockClear();
+    vi.mocked(openWorkspaceFile).mockReset();
+    useJevStore.getState().reset();
+    useJevStore.getState().setChatEnabled(true);
     vi.mocked(useChatStore.setState).mockClear();
     uiMock.setFullAccessEnabled.mockClear();
     uiMock.setChatMode.mockClear();
@@ -1145,6 +1152,42 @@ describe("sse-event-handler", () => {
       expect(openWorkspaceFile).not.toHaveBeenCalled();
     });
 
+    it("does not replace an already open full workbook", () => {
+      excelView.fullViewPath = "current.xlsx";
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" }),
+        makeCtx(),
+      );
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+      expect(useJevStore.getState().traces.at(-1)?.stateChanged).toBe(false);
+    });
+
+    it("records an effect only after the requested open state is set", () => {
+      const event = makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" });
+      dispatchSSEEvent(event, makeCtx());
+      expect(useJevStore.getState().traces.at(-1)?.stateChanged).toBe(false);
+      vi.mocked(openWorkspaceFile).mockImplementationOnce((path) => {
+        excelView.panelOpen = true;
+        excelView.activeFilePath = path;
+        return "spreadsheet";
+      });
+      dispatchSSEEvent(event, makeCtx());
+      expect(useJevStore.getState().traces.at(-1)?.stateChanged).toBe(true);
+    });
+
+    it("ignores navigation and trace records for another active session", () => {
+      sessionMock.activeSessionId = "another-session";
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" }),
+        makeCtx(),
+      );
+      dispatchSSEEvent(makeEvent("jev_trace", {
+        pack: "ui.surface", stage: "effect", state_changed: true, gate: "enforce",
+      }), makeCtx());
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+      expect(useJevStore.getState().traces).toHaveLength(0);
+    });
+
     it("does not reopen a dismissed path", () => {
       excelView.dismissedPaths.add("book.xlsx");
       dispatchSSEEvent(
@@ -1184,6 +1227,7 @@ describe("sse-event-handler", () => {
         ctx,
       );
       expect(excelActions.openCompare).toHaveBeenCalledWith("a.xlsx", "b.xlsx");
+      excelView.compareMode = true;
       dispatchSSEEvent(
         makeEvent("ui_hint", { surface: "stay", suppress_auto_open: true }),
         ctx,

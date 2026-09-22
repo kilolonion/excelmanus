@@ -21,7 +21,7 @@ export function CompletionStep({ configured, onFinish, onSkip, onBack }: Complet
       <div className="em-onboarding-completion-topics">
         <span><MessageSquare aria-hidden="true" /> 对话与任务</span>
         <span><FolderOpen aria-hidden="true" /> 文件与表格</span>
-        <span><Settings aria-hidden="true" /> 模型与插件</span>
+        <span><Settings aria-hidden="true" /> 模型与扩展</span>
       </div>
       <Button onClick={onFinish} className="em-onboarding-primary-action">体验功能引导 <ArrowRight aria-hidden="true" /></Button>
       <button type="button" onClick={onSkip} className="em-onboarding-secondary-action">跳过引导，直接进入工作区</button>

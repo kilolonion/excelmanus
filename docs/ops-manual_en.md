@@ -1,6 +1,6 @@
 # ExcelManus operations guide
 
-Applies to: 1.8.0 source tree · Updated: 2026-09-19
+Applies to: 1.8.0 source tree · Updated: 2026-09-21
 
 [Documentation](README.md) · [中文](ops-manual.md) · [Configuration](configuration_en.md)
 
@@ -85,7 +85,7 @@ Browser ── HTTPS ── Nginx
                    └─ /     ── 127.0.0.1:3000 (Next.js)
 ```
 
-1. Set `EXCELMANUS_DEPLOY_MODE=server` for the backend to disable application-driven self-updates.
+1. Set `EXCELMANUS_DEPLOY_MODE=server` for the backend. Servers disable web-driven self-updates and remote deployment by default; backup/restore endpoints also remain limited to local origins. To let an administrator update from the web UI, see section 7.
 2. Configure `EXCELMANUS_MANAGE_TOKEN` with at least 16 characters. A reverse proxy can expose a loopback backend, so loopback binding alone is not remote access protection.
 3. Enter the same token in the browser's token prompt. API clients send `Authorization: Bearer <token>`. Do not embed it in public frontend variables or have an unauthenticated proxy inject it for every visitor.
 4. On one host, only the proxy needs access to application ports. Across hosts, use a private network, VPN, or explicitly controlled backend endpoint instead of opening ports 3000/8000 to every public source.
@@ -207,9 +207,9 @@ Build for a compatible operating system, architecture, and Node.js runtime; do n
 
 ## 7. Updates, backups, and recovery
 
-Local source installations can apply a stop-then-update through Settings or run `./deploy/update.sh` after stopping services. The updater backs up application data and attempts a fast-forward; it does not force-reset a conflicting local branch. Deploy servers from the operations machine and update desktop apps with new bundles. See [update behavior](hot-update-design.md).
+Local source installations can apply a stop-then-update from Settings → Version → Update frontend and backend, or run `./deploy/update.sh` after stopping services. The updater backs up application data and attempts a fast-forward; uncommitted changes, diverged branches, or path conflicts stop the update instead of stashing or overwriting files. Web updates require a single-worker instance launched by `deploy/start.sh` / `start.ps1` with frontend and backend on the same host, refuse to start while tasks are running, and include a downtime window before the page prompts a refresh. Servers keep this entry disabled unless `EXCELMANUS_WEB_UPGRADE_ENABLED=1` is set together with administrator login protection. Multi-worker, split deployments, and packaged installs still update through the operations machine; desktop apps install new bundles. See [update behavior](hot-update-design.md).
 
-The built-in update backup is not a full profile copy and currently omits `.secret_key`. Do not rely solely on that generated backup for migration or disaster recovery.
+The built-in update backup covers the main databases, `config.env`, `.secret_key`, and the `data/`, `memory/`, and `skillpacks/` directories, but it is not a full profile copy; workspaces outside the data directory, external databases, and deployment inventories are excluded. Do not rely solely on that generated backup for migration or disaster recovery.
 
 Stop related processes before a backup so SQLite, execution state, and files form a consistent set. Save at least:
 

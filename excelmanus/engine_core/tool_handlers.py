@@ -452,6 +452,30 @@ class DelegationHandler(BaseToolHandler):
 # 询问用户处理器（AskUserHandler）
 # ---------------------------------------------------------------------------
 
+class ShowWorkbookHandler(BaseToolHandler):
+    """Present a validated, version-bound range without changing workbook cells."""
+
+    def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
+        return tool_name == "show_workbook"
+
+    async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
+        from excelmanus.workbook.interaction import bind_target
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+        from excelmanus.engine_core.tool_result import ToolResult
+
+        stage = arguments.get("stage")
+        if stage not in {"inspect", "planned", "changed"}:
+            raise ValueError("stage 必须为 inspect/planned/changed")
+        raw = arguments.get("target")
+        if stage == "changed" and (not isinstance(raw, dict) or not raw.get("content_version")):
+            raise ValueError("展示已修改区域需要写入回执中的 content_version")
+        target = await asyncio.to_thread(bind_target, self._engine, raw, require_ranges=True)
+        value = {"kind": "workbook_presentation", "target": target, "stage": stage,
+                 "summary": str(arguments.get("summary") or "")[:500], "scope_source": "agent"}
+        result = ToolResult(success=True, value=value, model_text=json.dumps(value, ensure_ascii=False))
+        return _ToolExecOutcome(result_str=result.model_text, success=True, structured=result)
+
+
 class AskUserHandler(BaseToolHandler):
     """处理 ask_user 工具调用。
 
@@ -544,6 +568,14 @@ class HighRiskApprovalHandler(BaseToolHandler):
 
             decision = await maybe_jev_approval(e, tool_name=tool_name, arguments=arguments)
             action = approval_gate_action(decision)
+            if action in {"deny", "auto"}:
+                from excelmanus.system_one.trace import record_host_effect
+
+                record_host_effect(
+                    e, "approval.tool_call", action=action, changed=True,
+                    impact="审批路径已改为拒绝调用" if action == "deny" else "审批路径已改为自动放行，执行结果另行记录",
+                    on_event=on_event,
+                )
             if action == "deny":
                 return _jev_denied_outcome(
                     tool_name, arguments, decision.reason if decision else "deny",
@@ -705,6 +737,14 @@ class CodePolicyHandler(BaseToolHandler):
             code_tier=getattr(_analysis.tier, "value", None),
         )
         action = approval_gate_action(decision)
+        if action in {"deny", "auto"}:
+            from excelmanus.system_one.trace import record_host_effect
+
+            record_host_effect(
+                e, "approval.tool_call", action=action, changed=True,
+                impact="审批路径已改为拒绝调用" if action == "deny" else "审批路径已改为自动放行，执行结果另行记录",
+                on_event=on_event,
+            )
         if action == "deny":
             return _jev_denied_outcome(
                 tool_name, arguments, decision.reason if decision else "deny",
@@ -784,6 +824,7 @@ class CodePolicyHandler(BaseToolHandler):
 
         structured = coerce_legacy_result(result_value)
         result_str = structured.model_text
+        raw_result_str = result_str
         tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
         if tool_def is not None:
             result_str = tool_def.truncate_result(result_str)
@@ -839,6 +880,7 @@ class CodePolicyHandler(BaseToolHandler):
         log_tool_call(logger, tool_name, _augmented_args, result=result_str)
         return _ToolExecOutcome(
             result_str=result_str,
+            raw_result_str=raw_result_str,
             success=structured.success,
             error=structured.error.message if structured.error else None,
             audit_record=audit_record,

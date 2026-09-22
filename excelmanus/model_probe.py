@@ -303,6 +303,7 @@ async def probe_thinking(
     timeout: float = 30.0,
     strategy_timeout: float = 8.0,
     thinking_mode: str = "auto",
+    strategy_model: str = "",
 ) -> tuple[bool, str, str]:
     """探测模型是否支持输出思考过程。
 
@@ -338,6 +339,7 @@ async def probe_thinking(
         timeout,
         strategy_timeout,
         base_url,
+        strategy_model=strategy_model,
     )
 
 
@@ -418,14 +420,17 @@ async def _probe_openai_thinking(
     timeout: float,
     strategy_timeout: float,
     base_url: str = "",
+    strategy_model: str = "",
 ) -> tuple[bool, str, str]:
     """OpenAI 兼容 API 多策略思考探测。
 
     按 provider 特征依次尝试不同的 thinking 启用参数，
     流式检查 delta 中是否出现 reasoning_content/reasoning/thinking 字段。
+    strategy_model 是策略选择用的提示名（如绑定的规范模型名），
+    请求仍发送真实 model。
     """
     provider = _detect_openai_provider(base_url)
-    strategies = _get_thinking_strategies(provider, model)
+    strategies = _get_thinking_strategies(provider, strategy_model or model)
 
     last_err = ""
     inconclusive = False
@@ -472,15 +477,17 @@ async def run_full_probe(
     thinking_strategy_timeout: float = 8.0,
     stage_callback: Any = None,
     source: str = "",
+    canonical_model: str = "",
 ) -> ModelCapabilities:
     """运行完整的三项能力探测，返回 ModelCapabilities。
 
     如果 db 中有缓存且 skip_if_cached=True，直接返回缓存。
+    canonical_model 非空时，缓存读取回退到规范模型名，思考策略探测也以其为提示。
     """
     cap_id = _cap_key(model, base_url)
 
     if skip_if_cached and db is not None:
-        cached = load_capabilities(db, model, base_url)
+        cached = load_capabilities(db, model, base_url, canonical_model=canonical_model)
         if cached is not None and capabilities_cache_is_fresh(cached):
             logger.info(
                 "模型 %s 能力探测已缓存（tool=%s, vision=%s, thinking=%s）",
@@ -535,6 +542,7 @@ async def run_full_probe(
         timeout=thinking_total_timeout,
         strategy_timeout=thinking_strategy_timeout,
         thinking_mode=thinking_mode,
+        strategy_model=canonical_model,
     ))
 
     tasks = (tool_task, vision_task, thinking_task)
@@ -602,8 +610,32 @@ def save_capabilities(db: Any, caps: ModelCapabilities) -> None:
         logger.warning("保存模型能力探测结果失败", exc_info=True)
 
 
-def load_capabilities(db: Any, model: str, base_url: str) -> ModelCapabilities | None:
-    """从 config_kv 表加载缓存的能力探测结果。"""
+def load_capabilities(
+    db: Any,
+    model: str,
+    base_url: str,
+    canonical_model: str = "",
+) -> ModelCapabilities | None:
+    """从 config_kv 表加载缓存的能力探测结果。
+
+    canonical_model 非空且真实坐标无缓存时，回退读规范模型名的缓存，
+    返回值的 model/base_url 仍改写为真实坐标供请求编译使用。
+    """
+    caps = _load_capabilities_row(db, model, base_url)
+    if caps is not None:
+        return caps
+    if canonical_model and canonical_model != model:
+        caps = _load_capabilities_row(db, canonical_model, base_url)
+        if caps is not None:
+            caps.model = model
+            caps.base_url = base_url
+            if not caps.source:
+                caps.source = "canonical"
+        return caps
+    return None
+
+
+def _load_capabilities_row(db: Any, model: str, base_url: str) -> ModelCapabilities | None:
     key = f"model_caps:{_cap_key(model, base_url)}"
     try:
         row = db.conn.execute(

@@ -80,7 +80,9 @@ def test_payload_shape_is_bounded_and_has_impact() -> None:
     assert payload["answers"]["domain"] == "chitchat"
     assert payload["answers"]["needs_write"] == pytest.approx(0.02)
     assert payload["answers"]["mode_hint"] == "keep"
-    assert "未应用" in payload["impact"]
+    assert payload["evaluated"] is True
+    assert payload["stage"] == "evaluation"
+    assert "后续执行记录" in payload["impact"]
     blob = str(payload)
     assert "user_text" not in blob
     assert "api_key" not in blob
@@ -92,7 +94,7 @@ def test_trace_keeps_only_public_calibration_and_transport_provenance() -> None:
     payload = build_jev_trace_payload(
         "exposure.turn",
         _decision(),
-        gate="shadow",
+        gate="enforce",
         transport="gateway",
     )
     assert len(payload["calibration_fingerprint"]) == 64
@@ -104,7 +106,7 @@ def test_unavailable_payload_still_names_pack() -> None:
     payload = build_jev_trace_payload(
         "exposure.turn",
         Decision.noop("unavailable", profile="full", transport="unavailable"),
-        gate="shadow",
+        gate="enforce",
         transport="unavailable",
     )
     assert payload["pack"] == "exposure.turn"
@@ -138,6 +140,7 @@ def test_emit_is_silent_when_jev_is_inactive() -> None:
         _emit=lambda on_event, event: captured.append(event),
     )
     emit_jev_trace(off, _decision(), pack_id="exposure.turn", on_event=captured.append)
+    assert captured == []
     no_key = SimpleNamespace(
         config=_config(jev_enabled="shadow", ai_gateway_api_key=None, typesafe_api_key=None),
         _subagent_config=None,
@@ -145,7 +148,8 @@ def test_emit_is_silent_when_jev_is_inactive() -> None:
         _emit=lambda on_event, event: captured.append(event),
     )
     emit_jev_trace(no_key, _decision(), pack_id="exposure.turn", on_event=captured.append)
-    assert captured == []
+    assert captured
+    assert captured[0].jev_trace["applied"] is False
 
 
 def test_child_does_not_emit() -> None:

@@ -1,8 +1,8 @@
 # ExcelManus 文档导航 · Documentation
 
-本文档集对应 **1.8.0 源码**，最近同步于 **2026-09-19**。安装包是否已发布、支持的系统架构及签名状态，以对应发布资产为准。
+本文档集对应 **1.8.0 源码**，最近同步于 **2026-09-21**。安装包是否已发布、支持的系统架构及签名状态，以对应发布资产为准。
 
-These guides describe the **1.8.0 source tree**, updated on **2026-09-19**. Installer availability, architecture, and signing status depend on the published assets.
+These guides describe the **1.8.0 source tree**, updated on **2026-09-21**. Installer availability, architecture, and signing status depend on the published assets.
 
 ## 使用与部署 · Using and deploying
 
@@ -13,6 +13,7 @@ These guides describe the **1.8.0 source tree**, updated on **2026-09-19**. Inst
 | 启动、部署、备份与排障 / Deployment, backups, troubleshooting | [运维手册](ops-manual.md) | [Operations](ops-manual_en.md) |
 | 技能编写与加载 / Skill authoring and loading | [Skillpack 协议](skillpack_protocol.md) | [Skillpack protocol](skillpack_protocol_en.md) |
 | 升级方式与边界 / Update behavior | [升级与部署](hot-update-design.md) | Covered in [Operations](ops-manual_en.md) |
+| 网页与桌面更新 / Web and desktop updates | [升级与部署](hot-update-design.md) | [Desktop README](../desktop/README.md) |
 | 隐私与服务说明 / Privacy and terms | [隐私政策](privacy-policy.md) · [用户服务协议](terms-of-service.md) | Chinese documents |
 
 运行服务的 API 请求与响应结构可在 [本机 API 文档](http://localhost:8000/docs) 查看；使用其他端口时相应替换地址。
@@ -35,7 +36,7 @@ The running service exposes its request and response schemas at [the local API r
 
 ## 文档状态 · Document status
 
-以上页面是当前使用与维护入口。
+以上页面是当前使用与维护入口；本轮同步覆盖版本、配置、部署、更新、工作簿交互、历史和自我管理说明。
 
 The pages above are the current usage and maintenance entry points.
 

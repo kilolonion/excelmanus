@@ -74,9 +74,10 @@ _PACK_FIELDS: dict[str, tuple[str, ...]] = {
     "loop.wrap": (
         "user_text",
         "iteration",
-        "consecutive_failures",
         "last_tools",
-        "last_error",
+        "observations",
+        "pending_items",
+        "has_more_results",
     ),
     "observation.prune": (
         "user_text",
@@ -211,12 +212,15 @@ def bound_state(pack_id: str, state: Mapping[str, Any] | None) -> dict[str, Any]
             out[key] = _clip_text(src.get("result_head"), _MAX_HEAD)
         elif key == "tool":
             out[key] = _clip_tool(src.get("tool"))
+        elif key in {"candidate_files", "files_written"}:
+            # A clipped path points to a different file. Drop oversize paths
+            # instead of turning them into plausible but invalid identities.
+            raw = src.get(key) or []
+            out[key] = [item for item in raw[:10] if isinstance(item, str) and len(item) <= 300]
         elif key in {
             "last_turn_tools",
             "skill_names",
             "files_touched",
-            "files_written",
-            "candidate_files",
             "families",
             "tools_used",
             "last_tools",
@@ -287,7 +291,7 @@ def exposure_state_from_engine(engine: Any, user_text: str) -> dict[str, Any]:
     )
 
 
-def last_user_text(engine: Any) -> str:
+def last_user_text(engine: Any, *, limit: int | None = _MAX_USER_TEXT) -> str:
     memory = getattr(engine, "memory", None) or getattr(engine, "_memory", None)
     if memory is None:
         return ""
@@ -314,7 +318,7 @@ def last_user_text(engine: Any) -> str:
             continue
         content = item.get("content")
         if isinstance(content, str) and content.strip():
-            return _clip_text(content, _MAX_USER_TEXT)
+            return content if limit is None else _clip_text(content, limit)
         if isinstance(content, list):
             texts = [
                 str(part.get("text") or "")
@@ -323,7 +327,7 @@ def last_user_text(engine: Any) -> str:
             ]
             joined = "".join(texts).strip()
             if joined:
-                return _clip_text(joined, _MAX_USER_TEXT)
+                return joined if limit is None else _clip_text(joined, limit)
     return ""
 
 
@@ -358,6 +362,9 @@ def ui_surface_state_from_engine(
     *,
     turn_outcome: str = "ok",
 ) -> dict[str, Any]:
+    from pathlib import Path
+    from excelmanus.workspace.identity import IdentityError, resolve_canonical
+
     files_written: list[str] = []
     state = getattr(engine, "_state", None)
     if state is not None:
@@ -365,20 +372,59 @@ def ui_surface_state_from_engine(
             str(item)
             for item in (getattr(state, "affected_files", None) or [])
             if item
-        ][:3]
+        ]
+    candidates = list(reversed(files_written))
     tools: list[str] = []
     for item in getattr(chat_result, "tool_calls", None) or ():
         name = str(getattr(item, "tool_name", "") or getattr(item, "name", "") or "")
         if name:
             tools.append(name)
+        arguments = getattr(item, "arguments", None)
+        if isinstance(arguments, Mapping) and bool(getattr(item, "success", False)):
+            path = str(arguments.get("file_path") or arguments.get("path") or "")
+            if path:
+                candidates.append(path)
+    incoming = getattr(engine, "_jev_context_input", None)
+    sheet_context = incoming.get("sheet_context") if isinstance(incoming, Mapping) else None
+    current_id = str(getattr(getattr(engine, "_workspace_ref", None), "workspace_id", "") or "")
+    if isinstance(sheet_context, Mapping) and current_id and sheet_context.get("workspace_id") == current_id:
+        current_path = str(sheet_context.get("path") or "")
+        if current_path:
+            candidates.append(current_path)
+    root = (
+        getattr(getattr(engine, "_workspace_ref", None), "root", None)
+        or getattr(getattr(engine, "config", None), "workspace_root", None)
+    )
+
+    def canonical_files(paths: list[str]) -> list[str]:
+        found: list[str] = []
+        if not root:
+            return found
+        for path in paths:
+            if not path or len(path) > 300:
+                continue
+            try:
+                ident = resolve_canonical(root, path)
+                if Path(ident.relative).suffix.lower() not in {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv", ".tsv"}:
+                    continue
+                if len(ident.public) <= 300 and ident.public not in found:
+                    found.append(ident.public)
+            except (IdentityError, ValueError, OSError):
+                continue
+        return found
+
+    candidates = canonical_files(candidates)
+    # Literal references in the current request outrank an arbitrary first file.
+    user_text = last_user_text(engine)
+    candidates.sort(key=lambda path: Path(path).name not in user_text)
     return bound_state(
         "ui.surface",
         {
-            "user_text": last_user_text(engine),
-            "tools_used": tools[:10],
-            "files_written": files_written,
+            "user_text": user_text,
+            "tools_used": tools[-10:],
+            "files_written": canonical_files(files_written)[:10],
             "turn_outcome": turn_outcome or "ok",
-            "candidate_files": files_written[:3],
+            "candidate_files": candidates[:3],
         },
     )
 
@@ -392,13 +438,14 @@ _CHECKLIST_GREETINGS = frozenset(
 )
 
 
-def delivery_checklist(engine: Any, *, limit: int = 5) -> list[dict[str, str]]:
+def delivery_checklist(engine: Any, *, limit: int | None = 5) -> list[dict[str, Any]]:
     """用户请求的可核对事项清单（≤5 项），供 mutation.verify 逐项判定。
 
     优先取任务清单的子任务标题；无任务时把 user_text 按子句切分；
     仍为空则整段回退为单项。
     """
     items: list[str] = []
+    task_facts: list[dict[str, Any]] = []
     store = getattr(engine, "_task_store", None)
     task_list = getattr(store, "current", None) if store is not None else None
     if task_list is not None:
@@ -406,8 +453,23 @@ def delivery_checklist(engine: Any, *, limit: int = 5) -> list[dict[str, str]]:
             title = str(getattr(item, "title", "") or "").strip()
             if title:
                 items.append(title)
+                criteria = getattr(item, "verification_criteria", None)
+                if isinstance(criteria, Mapping):
+                    task_facts.append({
+                        "target_file": str(criteria.get("target_file") or "")[:300],
+                        "target_sheet": str(criteria.get("target_sheet") or "")[:100],
+                        "target_range": str(criteria.get("target_range") or "")[:100],
+                        "passed": criteria.get("passed"),
+                    })
+                    continue
+                task_facts.append({
+                    "target_file": str(getattr(criteria, "target_file", "") or "")[:300],
+                    "target_sheet": str(getattr(criteria, "target_sheet", "") or "")[:100],
+                    "target_range": str(getattr(criteria, "target_range", "") or "")[:100],
+                    "passed": getattr(criteria, "passed", None),
+                })
     if not items:
-        text = last_user_text(engine).strip()
+        text = last_user_text(engine, limit=None).strip()
         for part in _CHECKLIST_SPLIT_RE.split(text):
             piece = part.strip(" \t，,；;、。")
             if len(piece) < 4:
@@ -418,7 +480,11 @@ def delivery_checklist(engine: Any, *, limit: int = 5) -> list[dict[str, str]]:
         if not items and text:
             items.append(text.strip())
     return [
-        {"id": f"item_{index + 1}", "text": _clip_text(text, 80)}
+        {
+            "id": f"item_{index + 1}", "text": _clip_text(text, 80),
+            "text_truncated": len(text) > 80,
+            **(task_facts[index] if index < len(task_facts) else {}),
+        }
         for index, text in enumerate(items[:limit])
     ]
 
@@ -487,6 +553,7 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
     style_mismatch_total = sum(int(item.get("style_mismatch_count") or 0) for item in write_evidence)
     formula_overwritten_total = sum(int(item.get("formula_overwritten") or 0) for item in write_evidence)
     structure_unverified_total = sum(int(item.get("structure_unverified") or 0) for item in write_evidence)
+    checklist = delivery_checklist(engine, limit=None)
     verification_facts = {
         "success": bool(getattr(chat_result, "success", True)) if chat_result is not None else True,
         "truncated": bool(getattr(chat_result, "truncated", False)) if chat_result is not None else False,
@@ -504,13 +571,16 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
         "evidence_truncated": len(write_evidence) > 10 or len(all_operations) > 10,
         "has_incomplete_evidence": bool(
             not write_evidence or len(write_evidence) < len(all_operations)
-            or any(item.get("truncated") or item.get("skipped") for item in write_evidence)
+            or any(item.get("truncated") or item.get("sampled") or item.get("skipped") for item in write_evidence)
             or any(item.get("status") not in {"success", "ok"} for item in write_evidence)
             or style_mismatch_total > 0
             or formula_overwritten_total > 0
             or structure_unverified_total > 0
         ),
         "has_version_conflict": any("conflict" in str(item).lower() for item in operations),
+        "checklist_count": len(checklist),
+        "checklist_truncated": len(checklist) > 5 or any(item["text_truncated"] for item in checklist),
+        "task_verification_failed": any(item.get("passed") is False for item in checklist),
     }
     return bound_state(
         "mutation.verify",
@@ -523,7 +593,7 @@ def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = Non
             "verification_facts": verification_facts,
             "write_evidence": write_evidence[-10:],
             "write_operations": operations,
-            "checklist": delivery_checklist(engine),
+            "checklist": checklist[:5],
         },
     )
 

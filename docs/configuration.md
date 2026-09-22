@@ -1,6 +1,6 @@
 # 配置参考
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-19
+适用版本：1.8.0 源码 · 更新日期：2026-09-21
 
 [文档导航](README.md) · [English](configuration_en.md) · [运维手册](ops-manual.md)
 
@@ -26,6 +26,7 @@
 | `EXCELMANUS_SECRET_KEY` | Fernet 密钥种子（测试或自定义数据卷） | 空则生成 `{EXCELMANUS_HOME}/.secret_key` |
 | `EXCELMANUS_DESKTOP` | 桌面运行标记，由桌面启动器设置 | 源码启动不设置 |
 | `EXCELMANUS_RUN_PYTHON` | `run_code` 使用的 Python 路径；桌面版自动指定随包运行时 | 随运行环境确定 |
+| `EXCELMANUS_WEB_UPGRADE_ENABLED` | `server` 或非本机访问时允许从网页执行一键更新；需同时启用登录保护并经管理员认证 | 空（服务器网页更新关闭） |
 
 模型密钥和运行时选项应在设置页保存；进程环境中残留的产品设置键会被忽略，并记录警告。
 
@@ -111,6 +112,14 @@
 后台任务结束时会刷新其修改过的文件视图。面板仅展示当前会话，任务仍由对话中的
 `delegate` 启动，不在页面加载时自动恢复执行。
 
+## Agent 自我管理
+
+默认关闭。在「设置 → 系统 → 能力」开启后，agent 可加载 `agent_self_management` 技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话的推理、上下文和工具开关。保存开关后立即同步已有会话；修改仅作用于当前内存会话，不能更改密钥、审批权限或全局默认。
+
+| 配置键 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED` | 启用自我管理技能及 `inspect_agent` / `configure_agent` 工具 | `false` |
+
 ## 上下文自动压缩（Compaction）
 
 上下文接近阈值时，使用当前激活模型概括较早的对话，并保留近期内容。压缩会产生额外模型调用；遇到上下文溢出等情况，当前请求可能需要等待压缩或按恢复流程重试。
@@ -154,7 +163,7 @@
 
 ### Codex 订阅连接
 
-在「设置 → 模型 → 订阅与 OAuth」中连接。当前集成的浏览器回调固定为 `http://localhost:1455/auth/callback`；远程部署使用设备码，或按页面提示粘贴完整回调地址。不要把回调替换成站点域名。OAuth 凭证加密保存到主数据库，属于进程级配置，不构成 ExcelManus 用户账号。
+在「设置 → 模型 → 订阅账号」中连接。当前集成的浏览器回调固定为 `http://localhost:1455/auth/callback`；远程部署使用设备码，或按页面提示粘贴完整回调地址。不要把回调替换成站点域名。OAuth 凭证加密保存到主数据库，属于进程级配置，不构成 ExcelManus 用户账号。
 
 ## 模型能力探测
 
@@ -379,6 +388,7 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 | `EXCELMANUS_JEV_CALIBRATED` | 旧版标定字段，保留用于兼容，运行时不再作为生效门槛 | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe 直连密钥（与提供商列表同步） | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway 密钥（与提供商列表同步） | — |
+| `EXCELMANUS_MODEL_CANONICAL_MATCH` | 「模型 → 模型配置」的模型名智能匹配：保存档案时按置信度把 Model ID 绑定到已知规范模型名，继承其上下文窗口与能力配置；不改写发给上游的 Model ID，开启时会为已有档案补绑 | `true` |
 
 这是可选的决策模型功能，需要 `system-one` extra。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。旧配置中的 `shadow` 会在读取时迁移为 `enforce`，`EXCELMANUS_JEV_CALIBRATED` 不再阻止已开启环节生效。
 
@@ -427,6 +437,8 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 4. FileRegistry 扫描会跳过名为 `users` 的目录，避免把归档残骸扫进工作区。
 
 ## 变更记录
+
+- 2026-09-21：新增 `EXCELMANUS_WEB_UPGRADE_ENABLED` 服务器网页更新开关、Agent 自我管理（`EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED`）与模型名智能匹配（`EXCELMANUS_MODEL_CANONICAL_MATCH`）说明。
 
 - 2026-09-19：同步桌面定位符、4096 token 压缩预算、工具按需加载、能力探测、Jev 检查与恢复设置，以及 OAuth 和密钥迁移说明。
 

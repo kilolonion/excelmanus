@@ -201,12 +201,14 @@ def capability_from_engine(engine: Any) -> CallerCapability:
                 )
                 names = frozenset(catalog.names())
     from excelmanus.security.policy import resolve_approval_policy
+    from excelmanus.self_management import disallowed_tools
 
     return CallerCapability(
         catalog_mode=mode,
         approval=resolve_approval_policy(engine),
         full_access=bool(getattr(engine, "_full_access_enabled", False)),
         allowed_tools=names,
+        disallowed_tools=frozenset(disallowed_tools(engine)),
     )
 
 

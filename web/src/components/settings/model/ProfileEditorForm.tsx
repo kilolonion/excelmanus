@@ -453,6 +453,28 @@ export function ProfileEditorForm() {
               </Button>
             </div>
           </Field>
+          {profileDraft.canonical_model ? (
+            <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+              <span
+                className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium font-mono bg-[var(--em-primary-alpha-12)] text-[var(--em-primary)]"
+                title="已绑定到内置已知模型，继承其上下文窗口与能力配置；不会改写发给上游的 Model ID"
+              >
+                <CheckCircle2 className="h-2.5 w-2.5" />
+                已匹配 {profileDraft.canonical_model}
+              </span>
+              <button
+                type="button"
+                className="text-[10px] text-muted-foreground hover:text-foreground underline underline-offset-2"
+                onClick={() => setProfileDraft((d) => ({ ...d, canonical_model: "" }))}
+              >
+                解除绑定
+              </button>
+            </div>
+          ) : config?.canonical_match_enabled !== false ? (
+            <p className="mt-1.5 text-[10px] text-muted-foreground leading-relaxed">
+              智能匹配已开启：保存后自动把 Model ID 匹配到已知模型名并继承其上下文窗口等配置。
+            </p>
+          ) : null}
           {remoteModelError ? (
             <div className="mt-2">
               <StatusCallout

@@ -8,6 +8,7 @@ import { displayModelLabel } from "@/lib/model-display";
 import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
 import { ProviderAvatar } from "@/components/settings/model/ProviderLogo";
 import type { ModelInfo } from "@/lib/types";
+import { SubscriptionSettingsEntry } from "@/components/settings/model/SubscriptionSettingsEntry";
 
 /**
  * Portal overlay to document.body so `position: fixed` is viewport-relative.
@@ -484,6 +485,9 @@ function SwitchSheet({
               )}
             </div>
 
+            <div className="shrink-0 border-t border-border/60 p-2">
+              <SubscriptionSettingsEntry onNavigate={() => onOpenChange(false)} />
+            </div>
             {/* Error banner */}
             {switchError && (
               <div className="px-4 py-2 border-t border-destructive/20 bg-destructive/5 flex items-center gap-2 shrink-0">

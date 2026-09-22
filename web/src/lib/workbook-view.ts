@@ -87,6 +87,7 @@ export function cellToUniver(cell: ViewCell): Record<string, unknown> {
 export function windowCellPatch(
   win: WorkbookViewWindow,
   previous: Record<number, Record<number, unknown> | undefined> = {},
+  previousStyles: Record<string, unknown> = {},
 ): Record<number, Record<number, unknown>> {
   const patch: Record<number, Record<number, unknown>> = {};
   for (const [r, row] of Object.entries(previous)) {
@@ -98,7 +99,21 @@ export function windowCellPatch(
   }
   for (const [key, cell] of Object.entries(win.cells)) {
     const [r, c] = key.split(",").map(Number);
-    (patch[r - 1] ??= {})[c - 1] = { v: null, f: null, s: null, p: null, t: null, custom: null, ...cellToUniver(cell) };
+    const data: Record<string, unknown> = { v: null, f: null, s: null, p: null, t: null, custom: null, ...cellToUniver(cell) };
+    const oldCell = previous[r - 1]?.[c - 1] as { s?: unknown } | null | undefined;
+    const oldStyle = typeof oldCell?.s === "string" ? previousStyles[oldCell.s] : oldCell?.s;
+    if (cell.s && oldStyle && typeof oldStyle === "object") {
+      // Univer merges style objects (including border sides). A snapshot is a
+      // replacement: explicitly remove properties absent from the restored file.
+      const style: Record<string, unknown> = Object.fromEntries(Object.keys(oldStyle).map((key) => [key, null]));
+      Object.assign(style, cell.s);
+      const oldBorder = (oldStyle as Record<string, unknown>).bd;
+      if (cell.s.bd && typeof cell.s.bd === "object" && oldBorder && typeof oldBorder === "object") {
+        style.bd = { ...Object.fromEntries(Object.keys(oldBorder).map((key) => [key, null])), ...cell.s.bd };
+      }
+      data.s = style;
+    }
+    (patch[r - 1] ??= {})[c - 1] = data;
   }
   return patch;
 }

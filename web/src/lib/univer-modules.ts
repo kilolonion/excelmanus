@@ -4,6 +4,7 @@ type UniverModules = {
   UniverSheetsCorePreset: typeof import("@univerjs/preset-sheets-core").UniverSheetsCorePreset;
   sheetsCoreZhCN: typeof import("@univerjs/preset-sheets-core/locales/zh-CN").default;
   mergeWorksheetSnapshotWithDefault: typeof import("@univerjs/core").mergeWorksheetSnapshotWithDefault;
+  IMarkSelectionService: typeof import("@univerjs/sheets-ui").IMarkSelectionService;
 };
 
 let _univerModuleCache: Promise<UniverModules> | null = null;
@@ -16,12 +17,14 @@ export function getUniverModules() {
       import("@univerjs/preset-sheets-core/locales/zh-CN"),
       import("@univerjs/preset-sheets-core/lib/index.css"),
       import("@univerjs/core"),
-    ]).then(([presetsMod, sheetCoreMod, zhCNMod, , coreMod]) => ({
+      import("@univerjs/sheets-ui"),
+    ]).then(([presetsMod, sheetCoreMod, zhCNMod, , coreMod, sheetsUiMod]) => ({
       createUniver: presetsMod.createUniver,
       LocaleType: presetsMod.LocaleType,
       UniverSheetsCorePreset: sheetCoreMod.UniverSheetsCorePreset,
       sheetsCoreZhCN: zhCNMod.default,
       mergeWorksheetSnapshotWithDefault: coreMod.mergeWorksheetSnapshotWithDefault,
+      IMarkSelectionService: sheetsUiMod.IMarkSelectionService,
     })).catch((error) => { _univerModuleCache = null; throw error; });
   }
   return _univerModuleCache;

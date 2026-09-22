@@ -83,12 +83,16 @@ class SkillpackLoader:
     def list_skillpacks(self) -> list[Skillpack]:
         """返回已加载 Skillpack 列表。"""
         self._refresh_if_invalidated()
-        return list(self._skillpacks.values())
+        return [s for s in self._skillpacks.values() if self._skill_enabled(s.name)]
+
+    def _skill_enabled(self, name: str) -> bool:
+        return (name != "agent_self_management"
+                or self._config.agent_self_management_enabled)
 
     def get_skillpack(self, name: str) -> Skillpack | None:
         """按名称获取 Skillpack。"""
         self._refresh_if_invalidated()
-        return self._skillpacks.get(name)
+        return self._skillpacks.get(name) if self._skill_enabled(name) else None
 
     def get_skillpacks(self) -> dict[str, Skillpack]:
         """返回技能包映射（副本）。"""
@@ -110,7 +114,7 @@ class SkillpackLoader:
         self._skillpacks = merged
         self._loaded_generation = self._generation
         logger.info("已加载 %d 个 Skillpack（全量发现后）", len(self._skillpacks))
-        return dict(self._skillpacks)
+        return self.get_skillpacks()
 
     def load_single(self, skill_dir: Path, *, source: str = "project") -> Skillpack | None:
         """增量加载单个技能目录，merge 到已有 _skillpacks 中。
@@ -140,7 +144,7 @@ class SkillpackLoader:
             return None
         self._skillpacks[skillpack.name] = skillpack
         logger.info("增量加载 Skillpack '%s'（来源=%s）", skillpack.name, source)
-        return skillpack
+        return skillpack if self._skill_enabled(skillpack.name) else None
 
     def _iter_discovery_roots(self) -> list[tuple[str, Path]]:
         """返回按覆盖优先级排序的扫描根目录（低优先级在前）。"""

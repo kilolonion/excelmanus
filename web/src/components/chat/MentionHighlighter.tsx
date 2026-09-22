@@ -5,6 +5,7 @@ import { FilePathLink, isFilePath } from "./FilePathLink";
 import { classifyWorkspaceFile } from "@/lib/file-kind";
 import { extractMentions, mentionCapsuleLabel } from "./mention-tokens";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import { splitWorkbookRangeSpec } from "@/lib/workbook-focus";
 
 interface MentionHighlighterProps {
   text: string;
@@ -16,9 +17,8 @@ interface MentionHighlighterProps {
  * Workspace file mentions all go through openWorkspaceFile.
  */
 export function MentionHighlighter({ text, className }: MentionHighlighterProps) {
-  const handleSpreadsheetClick = useCallback((value: string, rangeSpec?: string) => {
-    const sheet = rangeSpec?.split("!")[0];
-    openWorkspaceFile(value, { sheet });
+  const handleSpreadsheetClick = useCallback((value: string, rangeSpec?: string, version?: string) => {
+    openWorkspaceFile(value, { ...splitWorkbookRangeSpec(rangeSpec), version });
   }, []);
 
   const tokens = extractMentions(text).filter(
@@ -62,8 +62,11 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
             backgroundColor: "color-mix(in srgb, var(--em-primary) 14%, transparent)",
             color: "var(--em-primary)",
           }}
-          onClick={() => handleSpreadsheetClick(token.value, token.rangeSpec)}
-          title="点击预览表格"
+          role="button"
+          tabIndex={0}
+          onClick={() => handleSpreadsheetClick(token.value, token.rangeSpec, token.version)}
+          onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); handleSpreadsheetClick(token.value, token.rangeSpec, token.version); } }}
+          title={token.rangeSpec ? "点击定位到表格中的引用区域" : "点击预览表格"}
         >
           <span className="truncate">{label}</span>
         </span>

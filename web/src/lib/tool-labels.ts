@@ -198,6 +198,8 @@ const STATIC_TITLES: Record<string, string> = {
   skill: "加载技能",
   activate_skill: "加载技能",
   introspect_capability: "查看能力",
+  inspect_agent: "查看自身配置",
+  configure_agent: "调整自身配置",
   read_word: "读取文档",
   inspect_word: "查看文档结构",
   search_word: "搜索文档",
@@ -210,6 +212,7 @@ const STATIC_TITLES: Record<string, string> = {
   write_plan: "编写计划",
   exit_plan_mode: "退出计划",
   ask_user: "询问用户",
+  show_workbook: "展示表格区域",
 };
 
 export function toolActionTitle(name: string, args?: Record<string, unknown>): string {

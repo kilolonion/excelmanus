@@ -97,7 +97,7 @@ def slim_error_text(text: str) -> str | None:
 
 
 def _is_pruned_or_external(content: str) -> bool:
-    if content.startswith(_SPILL_PREFIX):
+    if _SPILL_PREFIX in content:
         return True
     if "已收起" in content:
         return True
@@ -116,6 +116,7 @@ def prune_messages(
     threshold: int = PRUNE_THRESHOLD_CHARS,
     head: int = PRUNE_HEAD_CHARS,
     tail: int = PRUNE_TAIL_CHARS,
+    protected_indices: set[int] | None = None,
 ) -> dict[int, str]:
     """扫描 ``role=="tool"`` 消息，返回 ``{index: new_content}``。
 
@@ -123,6 +124,8 @@ def prune_messages(
     """
     edits: dict[int, str] = {}
     for i, msg in enumerate(messages):
+        if protected_indices and i in protected_indices:
+            continue
         if msg.get("role") != "tool":
             continue
         content = msg.get("content")

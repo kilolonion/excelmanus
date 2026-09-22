@@ -8,6 +8,8 @@ import {
 } from "@/lib/session-title";
 interface SessionState {
   sessions: Session[];
+  sidebarSessionOrder: Record<string, string[]>;
+  setSidebarSessionOrder: (groupKey: string, ids: string[]) => void;
   activeSessionId: string | null;
   lastWorkspaceId: string | null;
   lastWorkspacePath: string | null;
@@ -29,6 +31,10 @@ export const useSessionStore = create<SessionState>()(
   persist(
     (set, get) => ({
       sessions: [],
+      sidebarSessionOrder: {},
+      setSidebarSessionOrder: (groupKey, ids) => set((state) => ({
+        sidebarSessionOrder: { ...state.sidebarSessionOrder, [groupKey]: [...new Set(ids)] },
+      })),
       activeSessionId: null,
       lastWorkspaceId: null,
       lastWorkspacePath: null,
@@ -127,6 +133,7 @@ export const useSessionStore = create<SessionState>()(
       name: "excelmanus-sessions",
       partialize: (state) => ({
         sessions: state.sessions,
+        sidebarSessionOrder: state.sidebarSessionOrder,
         activeSessionId: state.activeSessionId,
         lastWorkspaceId: state.lastWorkspaceId,
         lastWorkspacePath: state.lastWorkspacePath,

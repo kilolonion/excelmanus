@@ -22,7 +22,7 @@ function CallbackContent() {
 
     if (error) {
       window.opener.postMessage(
-        { type: "codex-oauth-callback", error },
+        { type: "codex-oauth-callback", error, state },
         window.location.origin,
       );
       setTimeout(() => window.close(), 2000);

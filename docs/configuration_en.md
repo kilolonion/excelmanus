@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Applies to: 1.8.0 source tree · Updated: 2026-09-19
+Applies to: 1.8.0 source tree · Updated: 2026-09-21
 
 [Documentation](README.md) · [中文](configuration.md) · [Operations](ops-manual_en.md)
 
@@ -26,6 +26,7 @@ The process may use a few **locators** to find the data volume and bind ports. S
 | `EXCELMANUS_SECRET_KEY` | Fernet key seed (tests / custom volumes) | empty → `{EXCELMANUS_HOME}/.secret_key` |
 | `EXCELMANUS_DESKTOP` | Desktop marker, set by the desktop launcher | Unset for source launches |
 | `EXCELMANUS_RUN_PYTHON` | Python executable for `run_code`; desktop sets its bundled runtime | Depends on the runtime |
+| `EXCELMANUS_WEB_UPGRADE_ENABLED` | Allow one-click web upgrades on `server` mode or non-loopback access; also requires login protection and administrator authentication | empty (server web upgrade off) |
 
 Do not put model secrets or runtime options in the process environment; leftover product keys are ignored and logged.
 
@@ -115,6 +116,14 @@ refresh their changed file views. The panel shows the selected session; tasks
 are started through `delegate` in chat and are not automatically resumed when
 the page loads.
 
+## Agent self-management
+
+Off by default. Enable it under Settings → System → Capabilities to make the `agent_self_management` skill available: `inspect_agent` reports capabilities and settings, and `configure_agent` adjusts reasoning, context, and tool switches for the current session. Saving the switch applies to live sessions immediately. Changes stay in the in-memory session; credentials, approval permissions, and global defaults cannot be modified.
+
+| Setting key | Description | Default |
+|---|---|---|
+| `EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED` | Enable the self-management skill and its `inspect_agent` / `configure_agent` tools | `false` |
+
 ## Context Auto-Compaction
 
 As context approaches the threshold, the active model summarizes earlier dialogue while retaining recent content. Compaction adds model requests. Context overflow or recovery may require the current request to wait for compaction or retry.
@@ -161,7 +170,7 @@ It writes profiles to the database; it is not part of startup configuration load
 
 ### Codex subscription connection
 
-Connect under Settings → Model → Subscription & OAuth. The browser callback in this integration is fixed to `http://localhost:1455/auth/callback`. For remote deployments, use a device code or paste the full callback URL as prompted. Do not replace it with your deployment domain. OAuth credentials are encrypted in the main database as process-level configuration; this does not create an ExcelManus user account.
+Connect under Settings → Model → Subscription account. The browser callback in this integration is fixed to `http://localhost:1455/auth/callback`. For remote deployments, use a device code or paste the full callback URL as prompted. Do not replace it with your deployment domain. OAuth credentials are encrypted in the main database as process-level configuration; this does not create an ExcelManus user account.
 
 ## Model capability probes
 
@@ -393,6 +402,7 @@ Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Verce
 | `EXCELMANUS_JEV_CALIBRATED` | Legacy calibration field retained for compatibility; it no longer gates runtime application | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe direct key (synced with the provider list) | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway key (synced with the provider list) | — |
+| `EXCELMANUS_MODEL_CANONICAL_MATCH` | Model-name matching under Model → Model roles: saving a profile binds the Model ID to a known canonical name when confidence is high enough, inheriting its context window and capability settings; the upstream Model ID is never rewritten, and enabling it back-fills existing profiles | `true` |
 
 This optional feature requires the `system-one` extra. `off` disables the master gate or the selected pack; `enforce` applies enabled packs directly, with no observation-only runtime. Enabling the master gate fills omitted pack switches as enabled, while an explicitly disabled child switch still stops that pack. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. Legacy `shadow` values are migrated to `enforce` when read, and `EXCELMANUS_JEV_CALIBRATED` no longer blocks enabled packs.
 
@@ -441,6 +451,8 @@ Do not auto-merge multiple `users/{id}` trees. If old isolation directories rema
 4. FileRegistry still skips directories named `users` so leftover archives are not scanned.
 
 ## Changelog
+
+- 2026-09-21: Added the `EXCELMANUS_WEB_UPGRADE_ENABLED` server web-upgrade switch, agent self-management (`EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED`), and canonical model-name matching (`EXCELMANUS_MODEL_CANONICAL_MATCH`).
 
 - 2026-09-19: Updated desktop locators, the 4096-token compaction budget, tool disclosure, capability probes, Jev verification/recovery settings, OAuth, and encryption-key migration.
 

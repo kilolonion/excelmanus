@@ -27,11 +27,25 @@ import { displayFileName, toPublicFileIdentity } from "@/lib/file-identity";
 import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
 import { fileRefFromSession } from "@/lib/workspace-file-ref";
 import type { WorkbookViewLayout } from "@/lib/workspace-surface";
+import { useWorkbookWorkspaceStore, workbookWorkspaceKey } from "@/stores/workbook-workspace-store";
 
 let workspaceFilesRequest: { sessionId: string | null; workspaceId: string | null; version: number; promise: Promise<void> } | null = null;
+let operationHistoryRequest = 0;
+const undoRequests = new Set<string>();
 
 function activeSessionId(): string | null {
   return useSessionStore.getState().activeSessionId;
+}
+
+function openWorkspaceWorkbook(path: string, sheet?: string) {
+  const session = activeSession();
+  const key = workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session));
+  const workspaces = useWorkbookWorkspaceStore.getState();
+  const discussion = session ? useWorkbookConversationStore.getState().targets[session.id] : undefined;
+  if (!workspaces.workspaces[key]?.files.length && discussion?.file.workspaceKey === workspaceKeyFromSession(session)) {
+    workspaces.open(key, discussion.file.relative, discussion.sheet);
+  }
+  return workspaces.open(key, path, sheet);
 }
 
 /** Univer 兼容的单元格样式（轻量子集） */
@@ -257,6 +271,7 @@ interface ExcelState {
   operations: OperationRecord[];
   operationsLoading: boolean;
   operationsLoaded: boolean;
+  operationsError: string | null;
 
   // 侧栏：表格 / 历史
   panelTab: ExcelPanelTab;
@@ -275,6 +290,7 @@ interface ExcelState {
   compareSheetA: string | null;
   compareSheetB: string | null;
   compareRelationship: FileRelationship | null;
+  compareReturnPath: string | null;
 
   // 合并结果（最近一次）
   lastMergeResult: MergeResultInfo | null;
@@ -308,6 +324,9 @@ interface ExcelState {
   evictRecentFile: (path: string, workspaceKey?: string | null) => void;
   openFullView: (path: string, sheet?: string, layout?: WorkbookViewLayout) => void;
   closeFullView: () => void;
+  focusWorkbook: (path: string) => void;
+  setPrimaryWorkbook: (path: string, sheet?: string) => void;
+  closeWorkbook: (path: string) => Promise<boolean>;
   enterSelectionMode: () => void;
   exitSelectionMode: () => void;
   confirmSelection: (sel: { filePath: string; sheet: string; range: string; contentVersion?: string }) => void;
@@ -390,6 +409,7 @@ export const useExcelStore = create<ExcelState>()(
   operations: [],
   operationsLoading: false,
   operationsLoaded: false,
+  operationsError: null,
   panelTab: "sheet",
   historySubview: "revisions",
 
@@ -404,6 +424,7 @@ export const useExcelStore = create<ExcelState>()(
   compareSheetA: null,
   compareSheetB: null,
   compareRelationship: null,
+  compareReturnPath: null,
 
   lastMergeResult: null,
 
@@ -414,6 +435,7 @@ export const useExcelStore = create<ExcelState>()(
       if (!filePath) {
         return { panelOpen: true, panelTab: "sheet", activeWorkspaceKey: workspaceKey };
       }
+      openWorkspaceWorkbook(filePath, sheet);
       return {
         panelOpen: true,
         panelTab: "sheet",
@@ -423,16 +445,11 @@ export const useExcelStore = create<ExcelState>()(
       };
     }),
 
-  openHistory: (filePath, view = "revisions") =>
-    set((s) => {
-      if (filePath && !isSpreadsheetFile(filePath)) return {};
-      return {
-        panelOpen: true,
-        panelTab: "history",
-        historySubview: view ?? s.historySubview,
-        ...(filePath ? { activeFilePath: filePath } : {}),
-      };
-    }),
+  openHistory: (filePath, view = "revisions") => {
+    if (filePath && !isSpreadsheetFile(filePath)) return;
+    get().openPanel(filePath);
+    set({ panelTab: "history", historySubview: view });
+  },
 
   setPanelTab: (tab) => set({ panelTab: tab }),
 
@@ -514,6 +531,7 @@ export const useExcelStore = create<ExcelState>()(
         draftRange: null,
         liveSelection: null,
         compareMode: false,
+        compareReturnPath: null,
         compareFileA: null,
         compareFileB: null,
         compareSheetA: null,
@@ -714,17 +732,76 @@ export const useExcelStore = create<ExcelState>()(
   openFullView: (path, sheet, layout = "embedded") => {
     if (!isSpreadsheetFile(path)) return;
     const session = activeSession();
-    if (session) useWorkbookConversationStore.getState().bind(session.id, fileRefFromSession(path, session), sheet, layout);
+    const workspace = openWorkspaceWorkbook(path, sheet);
+    const primary = workspace.files[0];
+    if (session) useWorkbookConversationStore.getState().bind(session.id, fileRefFromSession(primary.path, session), primary.sheet, layout);
     set({
       panelOpen: false,
       panelTab: "sheet",
-      fullViewPath: path,
-      fullViewSheet: sheet ?? null,
+      compareMode: false,
+      compareReturnPath: null,
+      fullViewPath: primary.path,
+      fullViewSheet: primary.sheet ?? null,
       fullViewLayout: layout,
       activeFilePath: path,
       activeSheet: sheet ?? null,
       activeWorkspaceKey: workspaceKeyFromSession(session),
+      liveSelection: null,
+      draftRange: null,
     });
+  },
+
+  focusWorkbook: (path) => {
+    const session = activeSession();
+    const key = workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session));
+    const workspace = useWorkbookWorkspaceStore.getState().workspaces[key];
+    const file = workspace?.files.find((entry) => normalizeExcelPath(entry.path) === normalizeExcelPath(path));
+    if (!file || (workspace.focused === file.path && get().activeFilePath === file.path)) return;
+    useWorkbookWorkspaceStore.getState().focus(key, file.path);
+    set({ activeFilePath: file.path, activeSheet: file.sheet ?? null, liveSelection: null, draftRange: null, panelTab: "sheet" });
+  },
+
+  setPrimaryWorkbook: (path, sheet) => {
+    if (!isSpreadsheetFile(path)) return;
+    const session = activeSession();
+    const key = workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session));
+    openWorkspaceWorkbook(path, sheet);
+    useWorkbookWorkspaceStore.getState().promote(key, path);
+    const primary = useWorkbookWorkspaceStore.getState().workspaces[key].files[0];
+    if (session) {
+      const conversation = useWorkbookConversationStore.getState();
+      const layout = get().fullViewPath ? get().fullViewLayout : conversation.targets[session.id]?.layout ?? get().fullViewLayout;
+      conversation.bind(session.id, fileRefFromSession(primary.path, session), primary.sheet, layout);
+      conversation.setShowSheet(session.id, Boolean(get().fullViewPath));
+    }
+    set({ activeFilePath: primary.path, activeSheet: primary.sheet ?? null, liveSelection: null, draftRange: null,
+      ...(get().fullViewPath ? { fullViewPath: primary.path, fullViewSheet: primary.sheet ?? null } : {}) });
+  },
+
+  closeWorkbook: async (path) => {
+    const session = activeSession();
+    const key = workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session));
+    const file = fileRefFromSession(path, session);
+    const edits = await import("@/lib/excel-cell-edit");
+    await edits.flushWorkbookEdits(file);
+    if (edits.isWorkbookEditPaused(file) || edits.hasPendingWorkbookEdits(file)
+      || activeSessionId() !== (session?.id ?? null) || workspaceKeyFromSession(activeSession()) !== file.workspaceKey) return false;
+    useWorkbookWorkspaceStore.getState().close(key, path);
+    const workspace = useWorkbookWorkspaceStore.getState().workspaces[key];
+    const primary = workspace?.files[0];
+    const focused = workspace?.files.find((file) => file.path === workspace.focused) ?? primary;
+    if (session) {
+      const conversation = useWorkbookConversationStore.getState();
+      if (primary) {
+        conversation.bind(session.id, fileRefFromSession(primary.path, session), primary.sheet, get().fullViewLayout);
+        conversation.setShowSheet(session.id, Boolean(get().fullViewPath));
+      } else conversation.detach(session.id);
+    }
+    set({ activeFilePath: focused?.path ?? null, activeSheet: focused?.sheet ?? null,
+      fullViewPath: get().fullViewPath ? primary?.path ?? null : null,
+      fullViewSheet: get().fullViewPath ? primary?.sheet ?? null : null,
+      panelOpen: primary ? get().panelOpen : false, liveSelection: null, draftRange: null, selectionMode: false });
+    return true;
   },
 
   closeFullView: () => {
@@ -840,29 +917,34 @@ export const useExcelStore = create<ExcelState>()(
   },
 
   fetchOperationHistory: async (sessionId) => {
-    set({ operationsLoading: true });
+    if (activeSessionId() !== sessionId) return;
+    const request = ++operationHistoryRequest;
+    set({ operationsLoading: true, operationsError: null });
     try {
       const data = await fetchOperations(sessionId, { limit: 100 });
+      if (request !== operationHistoryRequest || activeSessionId() !== sessionId) return;
       set({
         operations: data.operations,
         operationsLoaded: true,
         operationsLoading: false,
       });
-    } catch {
-      set({ operationsLoading: false });
+    } catch (error) {
+      if (request !== operationHistoryRequest || activeSessionId() !== sessionId) return;
+      set({ operationsLoading: false, operationsLoaded: true,
+        operationsError: error instanceof Error ? error.message : "操作记录加载失败，请重试" });
     }
   },
 
   undoOperationById: async (sessionId, approvalId) => {
-    const snapshot = (() => {
-      const state = get();
-      return {
-        operations: state.operations,
-        refreshCounter: state.refreshCounter,
-      };
-    })();
+    const key = `${sessionId}|${approvalId}`;
+    const original = get().operations.find((op) => op.approval_id === approvalId);
+    if (activeSessionId() !== sessionId || undoRequests.has(key) || !original?.undoable) return false;
+    undoRequests.add(key);
+    const source = useSessionStore.getState().sessions.find((s) => s.id === sessionId);
+    const workspaceKey = workspaceKeyFromSession(source);
 
     set((state) => ({
+      operationsError: null,
       operations: state.operations.map((op) =>
         op.approval_id === approvalId
           ? { ...op, undoable: false }
@@ -871,27 +953,31 @@ export const useExcelStore = create<ExcelState>()(
     }));
 
     try {
+      const { flushWorkbookEdits, hasPendingWorkbookEdits, isWorkbookEditPaused } = await import("@/lib/excel-cell-edit");
+      for (const change of original.changes) {
+        const file = { workspaceKey, relative: change.path };
+        await flushWorkbookEdits(file);
+        if (hasPendingWorkbookEdits(file) || isWorkbookEditPaused(file)) throw new Error("仍有未保存的编辑，请处理后再撤销。");
+      }
       const result = await apiUndoOperation(sessionId, approvalId);
       if (result.status === "ok") {
-        const source = useSessionStore.getState().sessions.find((s) => s.id === sessionId);
-        const workspaceKey = workspaceKeyFromSession(source);
-        for (const change of snapshot.operations.find((op) => op.approval_id === approvalId)?.changes || []) {
+        if (activeSessionId() === sessionId) set((state) => ({ operations: state.operations.map((op) =>
+          op.approval_id === approvalId ? { ...op, undoable: false } : op) }));
+        for (const change of original.changes) {
           get().notifyWorkbookChanged(change.path, workspaceKey, undefined, "refresh");
         }
         get().bumpWorkspaceFilesVersion();
         return true;
       }
-      set({
-        operations: snapshot.operations,
-        refreshCounter: snapshot.refreshCounter,
-      });
+      throw new Error(result.message || "撤销失败，请检查文件版本");
+    } catch (error) {
+      if (activeSessionId() === sessionId) set((state) => ({
+        operations: state.operations.map((op) => op.approval_id === approvalId ? { ...op, undoable: original.undoable } : op),
+        operationsError: error instanceof Error ? error.message : "撤销失败，请重试",
+      }));
       return false;
-    } catch {
-      set({
-        operations: snapshot.operations,
-        refreshCounter: snapshot.refreshCounter,
-      });
-      return false;
+    } finally {
+      undoRequests.delete(key);
     }
   },
 
@@ -948,6 +1034,7 @@ export const useExcelStore = create<ExcelState>()(
   openCompare: (fileA, fileB, relationship) => {
     if (!isSpreadsheetFile(fileA) || !isSpreadsheetFile(fileB)) return;
     set({
+      compareReturnPath: get().compareMode ? get().compareReturnPath : get().fullViewPath,
       compareMode: true,
       compareFileA: fileA,
       compareFileB: fileB,
@@ -960,15 +1047,23 @@ export const useExcelStore = create<ExcelState>()(
     });
   },
 
-  closeCompare: () =>
-    set({
+  closeCompare: () => {
+    const session = activeSession();
+    const key = workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session));
+    const primary = useWorkbookWorkspaceStore.getState().workspaces[key]?.files[0];
+    set((state) => ({
+      ...(state.compareMode && state.compareReturnPath ? {
+        fullViewPath: primary?.path ?? state.compareReturnPath, fullViewSheet: primary?.sheet ?? null,
+      } : {}),
+      compareReturnPath: null,
       compareMode: false,
       compareFileA: null,
       compareFileB: null,
       compareSheetA: null,
       compareSheetB: null,
       compareRelationship: null,
-    }),
+    }));
+  },
 
   setCompareSheetA: (sheet) => set({ compareSheetA: sheet }),
 
@@ -1014,12 +1109,14 @@ export const useExcelStore = create<ExcelState>()(
       operations: [],
       operationsLoading: false,
       operationsLoaded: false,
+      operationsError: null,
       panelTab: "sheet",
       historySubview: "revisions",
       fileGroups: [],
       fileGroupsLoaded: false,
       activeGroupId: null,
       compareMode: false,
+      compareReturnPath: null,
       compareFileA: null,
       compareFileB: null,
       compareSheetA: null,

@@ -721,6 +721,13 @@ class SessionManager:
             for entry in self._sessions.values():
                 entry.engine.apply_execution_budget(**values)
 
+    async def broadcast_self_management(self, enabled: bool) -> None:
+        """Apply the user-owned gate immediately, including existing sessions."""
+        from excelmanus.self_management import set_enabled
+        async with self._lock:
+            for entry in self._sessions.values():
+                set_enabled(entry.engine, enabled)
+
     async def broadcast_model_profiles(self, profiles: tuple) -> None:
         """向所有活跃会话广播模型档案列表变更（锁保护）。
 
@@ -1131,6 +1138,7 @@ class SessionManager:
                     self._database,
                     engine.current_model,
                     engine.active_base_url,
+                    canonical_model=getattr(engine, "active_canonical_model", ""),
                 )
                 if caps is not None:
                     engine.set_model_capabilities(caps)
@@ -1913,6 +1921,8 @@ class SessionManager:
                         ],
                         "multi_select": pq.multi_select,
                         "queue_size": engine._question_flow.queue_size(),
+                        "selection": pq.selection,
+                        "tool_call_id": pq.tool_call_id,
                     }
 
             # 序列化最近路由结果，供前端刷新后重建路由状态 block

@@ -14,7 +14,7 @@ from __future__ import annotations
 DEFAULT_DISCLOSURE_CORE_TOOLS: frozenset[str] = frozenset({
     "inspect_spreadsheet", "analyze_spreadsheet", "edit_spreadsheet", "format_spreadsheet",
     "list_directory", "run_code", "introspect_capability",
-    "ask_user", "offer_download", "task_create", "task_update", "sleep", "skill",
+    "ask_user", "show_workbook", "offer_download", "task_create", "task_update", "sleep", "skill",
     "write_plan", "exit_plan_mode",
 })
 
@@ -37,6 +37,7 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         "task_create",
         "task_update",
         "introspect_capability",
+        "inspect_agent",
         "read_image",
         "parallel_search",
     }
@@ -275,12 +276,13 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     "code": ("write_text_file", "edit_text_file", "run_code", "run_shell"),
     "vision": ("read_image",),
-    "interaction": ("ask_user", "offer_download"),
+    "interaction": ("ask_user", "show_workbook", "offer_download"),
     "skills": ("skill", "manage_skills"),
     "tasks": ("task_create", "task_update", "sleep", "write_plan", "exit_plan_mode"),
     "agents": ("delegate", "list_subagents"),
     "memory": ("memory_read_topic",),
     "web": ("parallel_search",),
+    "self_management": ("inspect_agent", "configure_agent"),
     # 扩展工具的名称来自调用级有效目录，不在这里固化服务器名单。
     "mcp": (),
     "other": (),
@@ -306,6 +308,7 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
     "图片/看图": ("read_image",),
     "批量计算/代码": ("run_code",),
     "能力/参数/工具详情": ("introspect_capability",),
+    "自身配置/自我管理/推理设置/工具开关": ("inspect_agent", "configure_agent"),
 }
 
 

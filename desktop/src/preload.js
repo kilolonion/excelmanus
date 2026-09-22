@@ -9,4 +9,6 @@ contextBridge.exposeInMainWorld("excelManusDesktop", {
   selectFolder: () => ipcRenderer.invoke("excelmanus:select-folder"),
   pickChatFiles: () => ipcRenderer.invoke("excelmanus:pick-chat-files"),
   mobilePairing: (action, input) => ipcRenderer.invoke("excelmanus:mobile-pairing", action, input),
+  checkUpdate: () => ipcRenderer.invoke("excelmanus:check-update"),
+  downloadUpdate: () => ipcRenderer.invoke("excelmanus:download-update"),
 });

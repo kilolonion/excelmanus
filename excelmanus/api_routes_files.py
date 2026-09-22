@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -715,6 +715,100 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
     except Exception as exc:
         logger.error("Excel write 失败: %s", exc, exc_info=True)
         return _error_json_response(500, f"写入失败: {exc}")
+
+
+class WorkbookDraftBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    operations: list[dict[str, Any]] = Field(max_length=5000)
+
+
+class WorkbookMergeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str | None = None
+    workspace_id: str | None = None
+    path: str = Field(max_length=300)
+    batches: list[WorkbookDraftBatch] = Field(min_length=1, max_length=100)
+    apply: bool = False
+    expected_version: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    choices: dict[str, Literal["local", "remote"]] = Field(default_factory=dict)
+    operation_id: str | None = None
+
+
+@router.post("/api/v1/files/excel/merge")
+async def merge_workbook_draft(request: WorkbookMergeRequest, raw_request: Request) -> JSONResponse:
+    """Preview is read-only; confirmation rechecks versions and merges in one transaction."""
+    import json
+    from excelmanus.workbook.merge import review_merge
+    from excelmanus.workbook_commit import CommitError, content_version_of
+    from excelmanus.workspace.file_service import WorkspaceFileService
+
+    ws_root, scope_error = _file_workspace_root(raw_request, request.session_id, request.workspace_id)
+    if scope_error is not None:
+        return scope_error
+    resolved = _resolve_excel_path(request.path, request.session_id, workspace_root=ws_root)
+    if resolved is None:
+        return _error_json_response(404, "文件不存在或路径非法")
+    operations = [op for batch in request.batches for op in batch.operations]
+    if len(json.dumps(request.model_dump(), ensure_ascii=False)) > 1_000_000:
+        return _error_json_response(400, "草稿过大，请分批处理")
+
+    def run_merge():
+        dest = Path(resolved).resolve()
+        rel = dest.relative_to(Path(ws_root).resolve()).as_posix()
+        if dest.suffix.lower() not in {".xlsx", ".xlsm"}:
+            return {"status": "replan", "reason": "此文件格式需要由 Agent 核对并重新制定方案。"}, 200
+        versions = {batch.expected_version for batch in request.batches}
+        if len(versions) != 1:
+            return {"status": "replan", "reason": "草稿跨越多个版本，需要由 Agent 分批核对修改。"}, 200
+        version = next(iter(versions))
+        svc = WorkspaceFileService(ws_root)
+        snap = _open_route_snapshot(resolved, request.path, ws_root, request.workspace_id)
+        current = snap.read_bytes()
+        current_version = snap.content_version
+        base = current if version == current_version else svc.store.read_blob(rel, version.removeprefix("sha256:"))
+        if base is None:
+            return {"status": "replan", "reason": "原始版本已不在历史中，无法可靠地自动合并。草稿已保留，可交给 Agent 核对。", "content_version": current_version}, 200
+        if request.apply and request.expected_version != current_version:
+            return {"error": "文件再次变化，请重新核对冲突", "code": "VERSION_CONFLICT", "content_version": current_version}, 409
+        options = {"keep_vba": dest.suffix.lower() == ".xlsm"}
+        preview, _ = review_merge(base, current, operations, **options)
+        preview["content_version"] = current_version
+        if not request.apply or preview["status"] != "review":
+            return preview, 200
+
+        def builder(latest):
+            # This runs under the existing file lock after the expected-version check.
+            if content_version_of(latest or b"") != request.expected_version:
+                raise CommitError("VERSION_CONFLICT", "文件再次变化，请重新核对冲突")
+            result, merged = review_merge(base, latest, operations, choices=request.choices, apply=True, **options)
+            if merged is None:
+                raise ValueError(result.get("reason", "无法自动合并"))
+            return merged
+
+        retained = [{"sheet": row["sheet"], "cell": row["cell"], "field": row["field"],
+                     "retained": "current" if row["conflict"] and request.choices.get(row["id"]) == "remote" else "local"}
+                    for row in preview["cells"][:40]]
+        receipt = svc.update_with_builder(rel, builder, expected_version=request.expected_version,
+            operation_id=request.operation_id, intent={"merge_base": version, "operations": operations, "choices": request.choices},
+            event_context={"source": "user", "session_id": request.session_id,
+                           "summary": "用户已核对并合并并发草稿；请重新读取文件，保留双方修改。以下只列出前 40 项保留决策：" + json.dumps(retained, ensure_ascii=False)})
+        if receipt.state != "committed":
+            return {"error": receipt.message or "合并失败", "code": receipt.error_code or receipt.state}, 409 if receipt.error_code == "VERSION_CONFLICT" else 400
+        return {"status": "merged", "content_version": receipt.primary_version(), "operation_id": receipt.operation_id}, 200
+
+    try:
+        body, status = await run_in_threadpool(run_merge)
+        if body.get("status") == "merged":
+            manager = get_session_manager()
+            if manager is not None:
+                try:
+                    manager.drain_workspace_events()
+                except Exception:
+                    logger.warning("合并已保存，改动通知等待重试", exc_info=True)
+        return JSONResponse(content=body, status_code=status)
+    except (ValueError, KeyError, CommitError) as exc:
+        return _error_json_response(409 if getattr(exc, "code", "") == "VERSION_CONFLICT" else 400, str(exc))
 
 
 @router.get("/api/v1/files/excel/list")

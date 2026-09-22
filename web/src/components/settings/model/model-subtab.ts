@@ -6,7 +6,7 @@ const listeners = new Set<Listener>();
 let pending: ModelSubTab | null = null;
 
 export function requestModelSubTab(tab: ModelSubTab) {
-  pending = tab;
+  pending = listeners.size === 0 ? tab : null;
   listeners.forEach((fn) => fn(tab));
 }
 

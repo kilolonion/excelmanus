@@ -119,6 +119,9 @@ if TYPE_CHECKING:
 
 logger = get_logger("api")
 
+# 解释器后台预热每进程只做一次（lifespan 可能随测试/重启反复进入）
+_interpreter_warmup_started = False
+
 # ── 请求 / 响应模型 ──────────────────────────────────────
 
 
@@ -631,6 +634,28 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
     scan_task = asyncio.get_running_loop().run_in_executor(
         None, _background_install_scan,
     )
+
+    if os.environ.get("EXCELMANUS_DESKTOP") == "1":
+        global _interpreter_warmup_started
+        if not _interpreter_warmup_started:
+            _interpreter_warmup_started = True
+            # 随包运行时不带 .pyc，首个 run_code 的冷探测可能撞超时；
+            # 启动即后台预热，把冷加载成本移出用户首个代码执行。
+            import threading
+
+            def _background_interpreter_warmup() -> None:
+                try:
+                    from excelmanus.tools.code_tools import warmup_interpreter
+
+                    warmup_interpreter()
+                except Exception:
+                    logger.debug("解释器预热失败（首个 run_code 会重新探测）", exc_info=True)
+
+            threading.Thread(
+                target=_background_interpreter_warmup,
+                name="interpreter-warmup",
+                daemon=True,
+            ).start()
 
     if os.environ.get("EXCELMANUS_DESKTOP_CONTROL_STDIN") == "1":
         import threading

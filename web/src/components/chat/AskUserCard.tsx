@@ -10,6 +10,8 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { parseWorkbookTarget, openWorkbookTarget } from "@/lib/workbook-interaction";
+import { useSessionStore } from "@/stores/session-store";
 
 interface AskUserCardProps {
   args: Record<string, unknown>;
@@ -17,7 +19,20 @@ interface AskUserCardProps {
   result?: string;
 }
 
-type ParsedQuestion = { header?: string; text?: string; options?: { label: string; description?: string }[] };
+type ParsedQuestion = { header?: string; text?: string; options?: { label: string; description?: string }[]; selection?: { file_path: string; sheet: string; ranges?: string[] } };
+
+function QuestionAnswer({ result }: { result: string }) {
+  let answers: { raw_input?: string; selection?: unknown }[] = [];
+  try { const value = JSON.parse(result); answers = Array.isArray(value) ? value : [value]; } catch { /* legacy text */ }
+  if (!answers.length || answers.some((a) => !a || typeof a.raw_input !== "string")) return <p className="text-xs whitespace-pre-wrap break-words">{result}</p>;
+  return <div className="text-xs space-y-1 min-w-0">{answers.map((answer, index) => {
+    const target = parseWorkbookTarget(answer.selection);
+    return target ? <button type="button" key={index} className="block text-left underline underline-offset-4 break-all" onClick={() => {
+      const sid = useSessionStore.getState().activeSessionId;
+      if (sid) openWorkbookTarget(target, sid, "inspect");
+    }}>{answer.raw_input}</button> : <p key={index} className="whitespace-pre-wrap break-words">{answer.raw_input}</p>;
+  })}</div>;
+}
 
 /**
  * 将 ask_user 工具调用的「提问」和「用户回答」合并为一张卡片。
@@ -216,9 +231,7 @@ export const AskUserCard = React.memo(function AskUserCard({
           <div className="flex items-center justify-center w-5 h-5 rounded-full shrink-0 mt-0.5 bg-muted/60">
             <User className="h-3 w-3 text-muted-foreground" />
           </div>
-          <p className="flex-1 min-w-0 text-[12px] text-foreground leading-relaxed whitespace-pre-wrap break-words">
-            {result}
-          </p>
+          <QuestionAnswer result={result} />
         </div>
       )}
     </div>
@@ -251,6 +264,7 @@ function QuestionContent({ question: q }: { question: ParsedQuestion }) {
           ))}
         </div>
       )}
+      {q.selection && <p className="text-xs text-muted-foreground mt-2 break-all">在表格中选择 · {q.selection.file_path} · {q.selection.sheet}{q.selection.ranges?.length ? ` · 建议 ${q.selection.ranges.join("、")}` : ""}</p>}
     </div>
   );
 }

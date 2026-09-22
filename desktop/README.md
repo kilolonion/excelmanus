@@ -79,6 +79,22 @@ npm run dist:mac   # On macOS
 npm run dist:win   # On Windows
 ```
 
+The default Windows package retains non-solid, differential-aware 7z archives
+for faster extraction. `npm run dist:win:compact` builds a smaller, solid archive
+in `dist-compact/` for bandwidth-constrained distribution; it takes longer to
+extract and does not produce differential update metadata. Both contain the
+same runtime features. The current update UI downloads a full installer in the
+browser; generating a blockmap alone does not enable delta downloads.
+
+All `dist` commands now run runtime smoke checks before packaging. After a build,
+measure the actual payload with:
+
+```powershell
+npm run size:report -- dist/win-unpacked --installer "dist/ExcelManus Setup 1.8.0.exe" --output .build/package-report.json
+```
+
+Use `--baseline <previous-report.json>` to compare bytes and file counts.
+
 Run only the command for the current platform. Both commands rebuild the Web UI, stage the frontend and runtimes, package the backend, and invoke electron-builder. Artifacts are written to `desktop/dist/`. Staging synchronizes the desktop package and lockfile version with `pyproject.toml`.
 
 The Windows installation page uses a separate animated activity bar while work
@@ -114,6 +130,15 @@ npm run prepare:backend
 
 The staging script currently selects the official Node.js v22.23.2 distribution and checks it against the upstream SHA-256 manifest. The Python runtime is copied from uv's managed distribution and populated from the locked `desktop-runtime` dependency group: spreadsheet, document, analysis, plotting and VBA libraries. API/model/MCP dependencies remain in the frozen backend and are not duplicated in this interpreter. The managed interpreter's pip, IDLE, ensurepip and standard-library tests are excluded. Known dependency test suites and bytecode caches are removed; datasets, fonts, native libraries, runtime testing helpers and license metadata remain. Preparation runs offline feature checks before accepting the runtime. The frozen backend executable must not be used as a Python interpreter for `run_code`.
 
+The frozen API backend excludes optional plotting/scientific/GUI integrations
+that pandas and Pillow can pull in during analysis. NumPy, pandas, Pillow and
+spreadsheet/document engines remain in the backend; SciPy, sklearn, Matplotlib,
+Seaborn, Plotly and Tk remain in the separate interpreter. Frozen smoke checks
+execute scientific analysis and chart creation through the real sandboxed
+`run_code` path, in addition to checking the interpreter's standalone features.
+ExcelManus source files and executable skill scripts remain available; redundant
+source copies of FastAPI, Uvicorn and tiktoken are omitted from the backend.
+
 Next.js `output: "standalone"` supplies the traced JS runtime dependencies.
 Staging additionally excludes its build cache and dependency test suites, type
 declarations and source maps. Application routes, public files, native modules
@@ -125,12 +150,17 @@ To profile the real Windows extraction operations without registering an app:
 ```powershell
 node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe'
 node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe' --fast
+node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe' --fast --owned-removal
 ```
 
 The first measures the upstream copy path; `--fast` measures the destination-local
 move path against the same payload. Results go to unique `.build/install-profile`
 directories. Run them sequentially without other builds for comparable timings.
 They measure file operations, not upgrade removal, registry writes or shortcuts.
+`--owned-removal` additionally measures the real manifest-based program removal
+used by upgrades, including path validation, without registering an application.
+The last-file removal prunes empty parent directories; a nonempty parent stops
+that traversal immediately, preserving user files and avoiding futile operations.
 
 ## Validate the packaged runtime
 
@@ -180,7 +210,11 @@ The default durable profile is `profile/` inside Electron's user-data directory.
 
 The app selects available ports at launch and reuses the frontend port when possible to preserve browser-local preferences. Configuration restarts drain the API and ask Electron to relaunch the backend on the same port.
 
-Source-tree Git update, backup-restore, and deployment controls are disabled in desktop mode. Upgrade by installing a new app bundle while retaining the profile. This is separate from restoring a workbook revision inside the workspace.
+Source-tree Git update, backup-restore, and deployment controls are disabled in desktop mode. Settings → Version and Help → Check for updates check official GitHub Releases and open a matching installer download in the browser. Save work and exit before running it; downloads are not executed automatically.
+
+On Windows, an existing registered installation is replaced at the same location and scope. The installer asks whether to migrate data (default: reuse the existing profile and shortcuts) or uninstall then reinstall (reuse the profile and recreate shortcuts). Both preserve settings, conversations, workspaces and user files. Migration reuses data in place rather than moving workspace files. macOS users replace the existing app with the new DMG's application.
+
+The Windows uninstaller removes only application files from a build-generated manifest, never recursively deletes the install root, and refuses data-deletion flags. Upgrades also use the new package's safe uninstaller for legacy installations. Legacy files not identifiable from a manifest are retained conservatively. Tests cover files inside the install directory as well as path traversal and junctions.
 
 ## Windows lifecycle and acceptance
 

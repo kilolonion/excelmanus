@@ -9,11 +9,11 @@ import {
   workspaceLayout,
 } from "@/lib/workspace-surface";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { useWorkbookWorkspace } from "@/hooks/use-workbook-workspace";
 import styles from "./WorkspaceViewHost.module.css";
-
 const loading = () => <div role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">正在准备工作区…</div>;
 const ExcelCompareView = dynamic(() => import("@/components/excel/ExcelCompareView").then((m) => m.ExcelCompareView), { ssr: false, loading });
-const ExcelFullView = dynamic(() => import("@/components/excel/ExcelFullView").then((m) => m.ExcelFullView), { ssr: false, loading });
+const WorkbookWorkspace = dynamic(() => import("@/components/excel/WorkbookWorkspace").then((m) => m.WorkbookWorkspace), { ssr: false, loading });
 const WordFullView = dynamic(() => import("@/components/word/WordFullView").then((m) => m.WordFullView), { ssr: false, loading });
 
 export function WorkspaceViewHost({ children, composer }: { children: ReactNode; composer?: ReactNode }) {
@@ -23,6 +23,9 @@ export function WorkspaceViewHost({ children, composer }: { children: ReactNode;
   const compareMode = useExcelStore((s) => s.compareMode);
   const wordFullViewPath = useWordStore((s) => s.fullViewPath);
   const [excelMounted, setExcelMounted] = useState(() => !!fullViewPath);
+  const { key, workspace, workspaceKey } = useWorkbookWorkspace();
+  const activeWorkspaceKey = useExcelStore((s) => s.activeWorkspaceKey);
+  const panelOpen = useExcelStore((s) => s.panelOpen);
 
   if (fullViewPath && !excelMounted) setExcelMounted(true);
 
@@ -60,7 +63,7 @@ export function WorkspaceViewHost({ children, composer }: { children: ReactNode;
           aria-hidden={surface !== "excel"}
           inert={surface !== "excel" ? true : undefined}
         >
-          <ExcelFullView />
+          {workspace.files.length > 0 && <WorkbookWorkspace key={key} active={surface === "excel" && activeWorkspaceKey === workspaceKey && !panelOpen} />}
         </div>
       )}
       {surface === "compare" && (

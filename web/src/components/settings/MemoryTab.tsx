@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Trash2, Loader2, Brain, ChevronRight, Star } from "lucide-react";
+import { Trash2, Loader2, Brain, ChevronRight, Star, Clock, Layers, Sparkles, ToggleLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiGet, apiDelete } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { isSettingsDemoActive, onSettingsDemoChange, DEMO_MEMORIES } from "@/components/onboarding/demo-settings";
+import { RuntimeSettingsPanel, type RuntimeSettingGroup } from "./RuntimeSettingsPanel";
 
 interface MemoryEntry {
   id: string;
@@ -33,6 +34,89 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 const CATEGORIES = ["file_pattern", "user_pref", "error_solution", "general"] as const;
 const CONTENT_PREVIEW_LEN = 100;
+
+const MEMORY_SETTING_GROUPS: RuntimeSettingGroup[] = [
+  {
+    title: "记忆配置",
+    description: "控制跨任务记忆的读写、保留时间和自动维护。已有条目不会因关闭功能而删除。",
+    icon: <Brain className="h-4 w-4" />,
+    items: [
+      {
+        key: "memory_enabled",
+        label: "跨会话记忆",
+        desc: "允许 Agent 在新任务中读取并沉淀长期信息；新开任务后完全生效。",
+        icon: <ToggleLeft className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "memory_expire_days",
+        label: "记忆过期天数",
+        desc: "任务启动时清理超过此天数的记忆；0 表示不过期。",
+        icon: <Clock className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 3650,
+      },
+    ],
+  },
+  {
+    title: "自动维护",
+    description: "在记忆积累到一定规模后自动合并重复内容并清理低价值条目。",
+    icon: <Sparkles className="h-4 w-4" />,
+    defaultOpen: false,
+    items: [
+      {
+        key: "memory_maintenance_enabled",
+        label: "记忆自动维护",
+        desc: "提取新记忆后，按条目数、增量和间隔执行维护。",
+        disabledDesc: "请先开启跨会话记忆。",
+        disabledWhen: (settings) => !settings.memory_enabled,
+        icon: <Sparkles className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "memory_maintenance_min_entries",
+        label: "维护最少条目数",
+        desc: "记忆少于此数时不触发维护。",
+        disabledDesc: "开启记忆自动维护后可调整。",
+        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 200,
+      },
+      {
+        key: "memory_maintenance_new_threshold",
+        label: "维护新增阈值",
+        desc: "新增条目达到此数后才可能触发维护。",
+        disabledDesc: "开启记忆自动维护后可调整。",
+        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+      {
+        key: "memory_maintenance_interval_hours",
+        label: "维护最小间隔",
+        desc: "两次维护之间的最短间隔（小时）。",
+        disabledDesc: "开启记忆自动维护后可调整。",
+        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
+        icon: <Clock className="h-4 w-4" />,
+        type: "float",
+      },
+      {
+        key: "memory_maintenance_model",
+        label: "维护模型",
+        desc: "用于记忆维护的模型 ID；留空时使用当前激活模型。",
+        disabledDesc: "开启记忆自动维护后可调整。",
+        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
+        icon: <Brain className="h-4 w-4" />,
+        type: "string",
+      },
+    ],
+  },
+];
 
 function formatTimestamp(ts: string): string {
   try {
@@ -158,16 +242,10 @@ export function MemoryTab() {
 
   const orderedCategories = categoryFilter ? [categoryFilter] : CATEGORIES.filter((c) => groupedByCategory[c]?.length);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-3">
+      <RuntimeSettingsPanel groups={MEMORY_SETTING_GROUPS} />
+
       <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-2">
@@ -222,15 +300,19 @@ export function MemoryTab() {
           <p className="text-[10px] text-muted-foreground">点击条目查看完整内容，或清理不再准确的信息</p>
         </div>
         <DemoMemoryBanner />
-        {orderedCategories.length === 0 && !isSettingsDemoActive() && (
+        {loading ? (
+          <div className="flex items-center justify-center py-10 text-muted-foreground">
+            <Loader2 className="h-5 w-5 animate-spin" />
+          </div>
+        ) : orderedCategories.length === 0 && !isSettingsDemoActive() ? (
           <div className="rounded-xl border border-dashed text-center py-10">
             <Brain className="h-8 w-8 mx-auto mb-2 text-muted-foreground/30" />
             <p className="text-xs text-muted-foreground">
               {categoryFilter ? `暂无「${CATEGORY_LABELS[categoryFilter] ?? categoryFilter}」类记忆` : "Agent 尚未记录任何记忆"}
             </p>
           </div>
-        )}
-        {orderedCategories.map((cat) => (
+        ) : null}
+        {!loading && orderedCategories.map((cat) => (
           <div key={cat} className="space-y-1.5">
             {!categoryFilter && (
               <div className="flex items-center gap-1.5 px-0.5 pt-1">

@@ -93,6 +93,7 @@ def _hint(**overrides: object) -> dict:
     [
         (_hint(), "escaped"),
         (_hint(same_failure_repeated=True), "repeated"),
+        (_hint(following_success=False), "different_failure"),
         (_hint(following_success=None), "not_continued"),
         (_hint(delivered=False), "not_delivered"),
         (

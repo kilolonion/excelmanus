@@ -44,6 +44,35 @@ def _init_repo(path: Path) -> None:
 
 
 class TestApplyFfOnly:
+    @pytest.mark.parametrize("dirty", [False, True])
+    def test_update_keeps_untracked_and_modified_user_files(self, tmp_path: Path, dirty: bool) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / ".gitignore").write_text("*.xlsx\n", encoding="utf-8")
+        _git(repo, "add", ".gitignore")
+        _git(repo, "commit", "-m", "ignore workbooks")
+        before = _git(repo, "rev-parse", "HEAD")
+        # A future source commit introduces a path already used by an ignored user file.
+        (repo / "user.xlsx").write_bytes(b"upstream file")
+        _git(repo, "add", "-f", "user.xlsx")
+        _git(repo, "commit", "-m", "future source")
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        _git(repo, "reset", "--keep", before)
+        (repo / "user.xlsx").write_bytes(b"user data")
+        (repo / "notes.txt").write_bytes(b"user notes")
+        if dirty:
+            (repo / "README").write_bytes(b"local changes")
+        info = VersionInfo(current="1", latest="2", has_update=True, check_method="git", commits_behind=1)
+        with patch("excelmanus.upgrade.apply.check_for_updates", return_value=info):
+            result = apply_on_stopped_tree(repo, skip_deps=True)
+        assert not result.success
+        assert _git(repo, "rev-parse", "HEAD") == before
+        assert (repo / "user.xlsx").read_bytes() == b"user data"
+        assert (repo / "notes.txt").read_bytes() == b"user notes"
+        assert _git(repo, "stash", "list") == ""
+        if dirty:
+            assert (repo / "README").read_bytes() == b"local changes"
+
     def test_divergent_history_does_not_hard_reset(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         origin = tmp_path / "origin.git"

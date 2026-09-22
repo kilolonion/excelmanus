@@ -20,7 +20,11 @@ datas.append((str(PROJECT_ROOT / "pyproject.toml"), "."))
 
 # ExcelManus loads prompts and skillpacks from package data at runtime.
 for package in ("excelmanus", "fastapi", "uvicorn", "tiktoken"):
-    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    # Preserve ExcelManus sources (including executable skill scripts). Other
+    # packages are already in PYZ; shipping their .py files again is redundant.
+    package_datas, package_binaries, package_hiddenimports = collect_all(
+        package, include_py_files=package == "excelmanus",
+    )
     datas.extend(package_datas)
     binaries.extend(package_binaries)
     hiddenimports.extend(package_hiddenimports)
@@ -40,7 +44,15 @@ analysis = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["pytest", "tests"],
+    # pandas/Pillow probe optional scientific and GUI integrations. The API
+    # process never executes user analysis: run_code launches the separately
+    # bundled interpreter, where these libraries and their data remain intact.
+    # Keep numpy, pandas, Pillow and all spreadsheet/document engines here.
+    excludes=[
+        "pytest", "tests", "hypothesis",
+        "scipy", "sklearn", "seaborn", "plotly", "matplotlib",
+        "tkinter", "IPython", "notebook", "jupyterlab",
+    ],
     noarchive=False,
 )
 

@@ -51,6 +51,7 @@ export async function openWorkbookForConversation(path: string, session: Session
   signal?: AbortSignal;
   layout?: WorkbookViewLayout;
   showSheet?: boolean;
+  makePrimary?: boolean;
 }) {
   assertWorkbookSession(session);
   if (!isSpreadsheetFile(path)) throw new Error("请选择 Excel 或 CSV 表格");
@@ -73,6 +74,7 @@ export async function openWorkbookForConversation(path: string, session: Session
     useExcelStore.setState({ activeFilePath: file.relative, activeSheet: sheet ?? null });
     const conversation = useWorkbookConversationStore.getState();
     conversation.bind(session.id, file, sheet, opts.layout);
+    excel.setPrimaryWorkbook(file.relative, sheet);
     conversation.setShowSheet(session.id, false);
     conversation.observe(session.id, file, { status: "ready", sheet, version: view.content_version });
     return;
@@ -83,4 +85,5 @@ export async function openWorkbookForConversation(path: string, session: Session
     sessionId: session.id, workspaceId: session.workspaceId,
     workbookLayout: opts?.layout,
   });
+  if (opts?.makePrimary) excel.setPrimaryWorkbook(file.relative);
 }

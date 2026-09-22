@@ -10,7 +10,12 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from excelmanus.data_home import get_data_home
-from excelmanus.model_identity import longest_prefix_match, normalize_lookup_table
+from excelmanus.model_identity import (
+    longest_prefix_match,
+    model_match_candidates,
+    normalize_lookup_table,
+    normalize_model_tokens,
+)
 class ConfigError(Exception):
     """配置缺失或校验失败时抛出的异常。"""
 
@@ -29,6 +34,7 @@ class ModelProfile:
     model_family: str = ""  # 实际模型族：claude|gpt|gemini|deepseek|qwen|glm|grok
     custom_extra_body: str = ""  # 自定义 extra_body JSON
     custom_extra_headers: str = ""  # 自定义 extra_headers JSON
+    canonical_model: str = ""  # 智能匹配绑定的已知规范模型名（仅用于本地配置，不改写上游 Model ID）
 
 
 # 基础 URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
@@ -416,6 +422,252 @@ def is_context_window_user_pinned(max_context_tokens: int, model: str) -> bool:
     return max_context_tokens != _infer_context_tokens_for_model(model)
 
 
+# ── 已知模型规范名匹配（Jev 智能匹配，可开关）─────────────────────
+# 把用户填写的 Model ID 与内置已知模型表比对，置信度足够时把档案绑定到
+# 规范模型名，从而继承其上下文窗口、模型族与已探测能力配置。
+# 只绑定本地配置，不改写发给上游 API 的 Model ID。
+CANONICAL_MATCH_THRESHOLD = 0.85
+
+
+@dataclass(frozen=True)
+class CanonicalModelMatch:
+    """已知模型名匹配结果。"""
+
+    canonical: str  # 命中的内置规范模型名（_MODEL_CONTEXT_WINDOW 的原始键）
+    confidence: float  # 0~1；>= CANONICAL_MATCH_THRESHOLD 才会自动绑定
+    reason: str  # 命中规则标签（诊断用）
+
+
+# 供应商/命名空间前缀 token（去掉后再比对，如 openai-gpt-5.6-sol、azure-xxx）
+_VENDOR_PREFIX_TOKENS = frozenset({
+    "openai", "anthropic", "google", "meta", "xai", "amazon", "aws",
+    "azure", "bedrock", "deepseek", "moonshot", "zhipu", "mistral",
+    "cohere", "alibaba", "aliyun", "bytedance", "volcengine", "nvidia",
+    "ai21", "huggingface", "hf", "openrouter", "openai-codex",
+    "workbuddy", "antigravity",
+})
+# 尾部修饰性后缀（剥掉后不影响模型身份，如 -preview、-20260301、-v2）
+_NOISE_SUFFIX_TOKENS = frozenset({
+    "preview", "latest", "exp", "experimental", "beta", "alpha",
+    "stable", "free", "fast", "thinking", "instruct", "chat", "base",
+    "it", "fp8", "bf16", "awq", "gptq", "int4", "int8",
+})
+_VERSION_TOKEN_RE = re.compile(r"^v?\d+$")
+_DIGIT_GLUE_RE = re.compile(r"^(\d+)([a-z][a-z0-9]*)$")
+
+
+def _drop_vendor_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """剥掉开头最多 2 个供应商前缀 token，至少保留 2 个模型 token。"""
+    rest = list(tokens)
+    dropped = 0
+    while len(rest) > 2 and dropped < 2 and rest[0] in _VENDOR_PREFIX_TOKENS:
+        rest.pop(0)
+        dropped += 1
+    return tuple(rest)
+
+
+def _loose_tokens(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """宽松形态：数字+字母粘连拆分（4o→4,o），相邻纯数字段合并（5,6→56）。"""
+    out: list[str] = []
+    for tok in tokens:
+        m = _DIGIT_GLUE_RE.match(tok)
+        if m:
+            out.extend((m.group(1), m.group(2)))
+        else:
+            out.append(tok)
+    merged: list[str] = []
+    for tok in out:
+        if merged and merged[-1].isdigit() and tok.isdigit():
+            merged[-1] += tok
+        else:
+            merged.append(tok)
+    return tuple(merged)
+
+
+def _token_variants(tokens: tuple[str, ...]) -> list[tuple[tuple[str, ...], float]]:
+    """生成 (tokens, 权重) 变体：raw / 去供应商前缀 / 宽松 / 宽松+去前缀。"""
+    variants: list[tuple[tuple[str, ...], float]] = [(tokens, 1.0)]
+    loose = _loose_tokens(tokens)
+    if loose != tokens:
+        variants.append((loose, 0.95))
+    stripped = _drop_vendor_tokens(tokens)
+    if stripped != tokens:
+        variants.append((stripped, 0.97))
+        loose_stripped = _loose_tokens(stripped)
+        if loose_stripped not in (stripped, loose):
+            variants.append((loose_stripped, 0.92))
+    return variants
+
+
+@lru_cache(maxsize=1)
+def _canonical_key_variants() -> tuple[tuple[tuple[str, ...], float, str], ...]:
+    """已知模型表键的匹配变体：[(tokens, 权重, 原始键)]，权重按序取先。"""
+    entries: list[tuple[tuple[str, ...], float, str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for raw_key in _MODEL_CONTEXT_WINDOW:
+        norm = normalize_model_tokens(raw_key)
+        toks = tuple(t for t in norm.split("-") if t)
+        if not toks:
+            continue
+        for variant, weight in _token_variants(toks):
+            if variant in seen:
+                continue
+            seen.add(variant)
+            entries.append((variant, weight, raw_key))
+    return tuple(entries)
+
+
+def _is_cosmetic_suffix(tok: str) -> bool:
+    return (
+        tok in _NOISE_SUFFIX_TOKENS
+        or tok.isdigit()
+        or _VERSION_TOKEN_RE.match(tok) is not None
+    )
+
+
+def _levenshtein_leq1(a: str, b: str) -> bool:
+    """两个字符串编辑距离是否 ≤ 1。"""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la > lb:
+        a, b, la, lb = b, a, lb, la
+    i = j = diffs = 0
+    while i < la and j < lb:
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+            continue
+        diffs += 1
+        if diffs > 1:
+            return False
+        if la == lb:
+            i += 1
+            j += 1
+        else:
+            j += 1
+    return diffs + (lb - j) + (la - i) <= 1
+
+
+def match_canonical_model(model: str) -> CanonicalModelMatch | None:
+    """把输入 Model ID 匹配到内置已知模型表的规范名。
+
+    评分规则（候选 tokens × 表键变体）：
+    - 归一化 token 完全一致：1.0 - 权重损耗（raw 命中=1.0，去前缀=0.97，
+      宽松形态=0.95，宽松+去前缀≈0.92）；
+    - 候选 = 键 + 修饰性/版本/日期后缀：0.9 - 权重损耗；
+    - 候选 = 键 + 其他后缀：0.78 - 权重损耗（低于阈值，仅作建议）；
+    - 归一化串编辑距离 ≤1 且首 token 相同：0.75（仅作建议）。
+    返回得分最高的命中；无任何命中返回 None。
+    """
+    cand_variants: list[tuple[tuple[str, ...], float]] = []
+    seen: set[tuple[str, ...]] = set()
+    for cand in model_match_candidates(model):
+        toks = tuple(t for t in cand.split("-") if t)
+        if not toks:
+            continue
+        for variant, weight in _token_variants(toks):
+            if variant not in seen:
+                seen.add(variant)
+                cand_variants.append((variant, weight))
+
+    if not cand_variants:
+        return None
+
+    best: CanonicalModelMatch | None = None
+    tied_keys: set[str] = set()
+    for cand_toks, cand_w in cand_variants:
+        for key_toks, key_w, raw_key in _canonical_key_variants():
+            if cand_toks == key_toks:
+                score = cand_w + key_w - 1.0
+                reason = "exact" if cand_w == key_w == 1.0 else "variant"
+            elif len(cand_toks) > len(key_toks) and cand_toks[: len(key_toks)] == key_toks:
+                extras = cand_toks[len(key_toks):]
+                base = 0.9 if all(_is_cosmetic_suffix(t) for t in extras) else 0.78
+                score = base - (1.0 - cand_w) - (1.0 - key_w)
+                reason = "suffix"
+            else:
+                continue
+            if best is None or score > best.confidence:
+                best = CanonicalModelMatch(raw_key, round(score, 4), reason)
+                tied_keys = {raw_key}
+            elif score == best.confidence:
+                tied_keys.add(raw_key)
+
+    # 同分命中多个不同规范名 → 歧义，不绑定
+    if best is not None and len(tied_keys) <= 1:
+        return best
+    if best is not None:
+        return None
+
+    # 兜底：归一化串编辑距离 ≤1（同首 token），仅作为低置信度建议
+    cand_norms = {cand for cand in model_match_candidates(model) if cand}
+    for key_toks, key_w, raw_key in _canonical_key_variants():
+        if key_w != 1.0:
+            continue
+        key_norm = "-".join(key_toks)
+        for cand_norm in cand_norms:
+            if cand_norm.split("-", 1)[0] != key_toks[0]:
+                continue
+            if _levenshtein_leq1(cand_norm, key_norm):
+                return CanonicalModelMatch(raw_key, 0.75, "edit_distance")
+    return None
+
+
+# 规范模型名前缀 → 模型族；只覆盖已知表里的厂商，未命中返回 ""。
+_MODEL_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("claude", "claude"),
+    # 注意：前缀按归一化后的 token 形态书写（字母→数字边界已分段，o4 → o-4）
+    ("gpt", "gpt"), ("o-1", "gpt"), ("o-3", "gpt"), ("o-4", "gpt"),
+    ("codex", "gpt"), ("chatgpt", "gpt"),
+    ("gemini", "gemini"),
+    ("deepseek", "deepseek"),
+    ("qwen", "qwen"), ("qwq", "qwen"), ("qvq", "qwen"),
+    ("glm", "glm"),
+    ("grok", "grok"),
+    ("kimi", "moonshot"), ("moonshot", "moonshot"),
+    ("minimax", "minimax"), ("m-2-her", "minimax"),
+    ("doubao", "doubao"),
+    ("mistral", "mistral"), ("ministral", "mistral"), ("devstral", "mistral"),
+    ("codestral", "mistral"), ("magistral", "mistral"), ("pixtral", "mistral"),
+    ("voxtral", "mistral"),
+    ("llama", "meta"),
+    ("nova", "amazon"),
+    ("jamba", "ai21"),
+    ("command", "cohere"), ("c4ai", "cohere"),
+    ("hunyuan", "hunyuan"),
+    ("step", "stepfun"),
+)
+
+
+def infer_model_family(canonical: str) -> str:
+    """由规范模型名推断 model_family（用于前端提供商分组/图标）。"""
+    norm = normalize_model_tokens(canonical)
+    for prefix, family in _MODEL_FAMILY_PREFIXES:
+        if norm == prefix or norm.startswith(prefix + "-"):
+            return family
+    return ""
+
+
+def canonical_match_enabled() -> bool:
+    """Jev 智能匹配开关（默认开启）；读运行时设置，未配置时按默认开启。"""
+    from excelmanus.settings_runtime import get_setting
+
+    raw = (get_setting("EXCELMANUS_MODEL_CANONICAL_MATCH") or "").strip().lower()
+    if not raw:
+        return True
+    return raw in ("1", "true", "yes", "on")
+
+
+def profile_canonical(row: Mapping[str, object]) -> str:
+    """读取档案行的 canonical_model；开关关闭时视为未绑定。"""
+    if not canonical_match_enabled():
+        return ""
+    return str(row.get("canonical_model") or "").strip()
+
+
 @dataclass(frozen=True)
 class ExcelManusConfig:
     """不可变的全局配置对象。"""
@@ -444,6 +696,7 @@ class ExcelManusConfig:
     skills_project_dir: str = ".excelmanus/skillpacks"
     skills_context_char_budget: int = 12000  # 技能正文字符预算，0 表示不限制
     skills_discovery_enabled: bool = True
+    agent_self_management_enabled: bool = False  # 用户显式启用自身能力查询与会话配置技能/工具
     skills_discovery_scan_workspace_ancestors: bool = True
     skills_discovery_include_agents: bool = True
     skills_discovery_scan_external_tool_dirs: bool = True
@@ -576,6 +829,10 @@ class ExcelManusConfig:
     jev_timeout_seconds: float = 1.5
     # Legacy compatibility flag; runtime application no longer depends on it.
     jev_calibrated: bool = False
+    # 当前激活模型绑定到的已知规范模型名（仅用于本地配置推断）
+    canonical_model: str = ""
+    # Jev 智能匹配：加入/保存模型档案时按置信度绑定已知规范模型名
+    model_canonical_match_enabled: bool = True
 
     @property
     def is_standalone(self) -> bool:
@@ -978,16 +1235,19 @@ def _parse_csv_tuple(value: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
-def _load_context_optimization_config(model: str = "") -> _ContextOptimizationConfig:
+def _load_context_optimization_config(
+    model: str = "", canonical: str = "",
+) -> _ContextOptimizationConfig:
     """加载上下文优化相关配置，避免字段声明/解析/回填三处漂移。
 
     优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 设置 > 模型自动推断 > 默认 256k。
+    智能匹配开启时优先用绑定的规范模型名推断。
     """
     env_max_ctx = _s("EXCELMANUS_MAX_CONTEXT_TOKENS")
     if env_max_ctx:
         max_context_tokens = _parse_int(env_max_ctx, "EXCELMANUS_MAX_CONTEXT_TOKENS", _DEFAULT_CONTEXT_TOKENS)
-    elif model:
-        max_context_tokens = _infer_context_tokens_for_model(model)
+    elif model or canonical:
+        max_context_tokens = _infer_context_tokens_for_model(canonical or model)
     else:
         max_context_tokens = _DEFAULT_CONTEXT_TOKENS
     retention_raw = (_s("EXCELMANUS_PROMPT_CACHE_RETENTION") or "").strip().lower()
@@ -1050,6 +1310,7 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
     model = _s("EXCELMANUS_MODEL") or ""
     protocol = _parse_protocol(_s("EXCELMANUS_PROTOCOL"), "EXCELMANUS_PROTOCOL")
 
+    creds: dict[str, str] = {}
     if not api_key or not base_url or not model:
         creds = credentials_from_store()
         api_key = api_key or creds.get("api_key", "")
@@ -1057,6 +1318,7 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         model = model or creds.get("model", "")
         if not _s("EXCELMANUS_PROTOCOL") and creds.get("protocol"):
             protocol = _parse_protocol(creds.get("protocol"), "EXCELMANUS_PROTOCOL")
+    canonical_model = (creds.get("canonical_model") or "").strip()
 
     if not api_key and not allow_incomplete:
         raise ConfigError(
@@ -1372,7 +1634,9 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         "EXCELMANUS_FRIENDLY_ERROR_MESSAGES",
         True,
     )
-    context_optimization = _load_context_optimization_config(model=model)
+    context_optimization = _load_context_optimization_config(
+        model=model, canonical=canonical_model,
+    )
     hooks_command_enabled = _parse_bool(
         _s("EXCELMANUS_HOOKS_COMMAND_ENABLED"),
         "EXCELMANUS_HOOKS_COMMAND_ENABLED",
@@ -1590,6 +1854,10 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         cap_probe_thinking_total_timeout=cap_probe_thinking_total_timeout,
         cap_probe_thinking_strategy_timeout=cap_probe_thinking_strategy_timeout,
         subagent_enabled=subagent_enabled,
+        agent_self_management_enabled=_parse_bool(
+            _s("EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED"),
+            "EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED", False,
+        ),
         parallel_readonly_tools=parallel_readonly_tools,
         parallel_tool_max=parallel_tool_max,
         subagent_max_iterations=subagent_max_iterations,
@@ -1657,4 +1925,10 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         jev_providers=jev_providers,
         jev_timeout_seconds=jev_timeout_seconds,
         jev_calibrated=jev_calibrated,
+        canonical_model=canonical_model,
+        model_canonical_match_enabled=_parse_bool(
+            _s("EXCELMANUS_MODEL_CANONICAL_MATCH"),
+            "EXCELMANUS_MODEL_CANONICAL_MATCH",
+            True,
+        ),
     )

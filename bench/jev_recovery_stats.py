@@ -1,4 +1,4 @@
-"""统计 jev decision 日志里 recovery.next_step 的建议与采纳结果。
+"""统计 jev decision 日志里 recovery.next_step 的建议送达及后续工具结果。
 
 用法：python bench/jev_recovery_stats.py "logs/*.log" [更多 glob...]
 
@@ -7,7 +7,7 @@
 extras 用 ``ast.literal_eval`` 解析；解析失败的行跳过并计数。
 
 输出 Markdown：按来源（deterministic / jev）分列的建议次数、next 分布、
-outcome 分布、采纳率 (escaped+repeated)/delivered、摆脱率 escaped/(escaped+repeated)。
+outcome 分布、送达后继续调用比例、后续工具成功比例。不能推断建议采纳或任务成功。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 
-OUTCOMES = ("escaped", "repeated", "not_continued", "not_delivered", "stopped")
+OUTCOMES = ("escaped", "different_failure", "repeated", "not_continued", "not_delivered", "stopped")
 SOURCES = ("deterministic", "jev")
 
 _LINE_RE = re.compile(r"jev decision pack=recovery\.next_step\b.*?\bextras=")
@@ -28,9 +28,11 @@ _EXTRAS_RE = re.compile(r"\bextras=(\{.*\})\s+provider=")
 @dataclass
 class RecoveryStats:
     parse_failures: int = 0
-    # 建议行（kind != "outcome"）
+    # advice lifecycle rows; an evaluation is not an advice row.
     advice_by_source: dict[str, int] = field(default_factory=lambda: {s: 0 for s in SOURCES})
     advice_by_next: dict[str, int] = field(default_factory=dict)
+    delivered_by_source: dict[str, int] = field(default_factory=lambda: {s: 0 for s in SOURCES})
+    legacy_rows: int = 0
     # outcome 行
     outcomes: dict[str, dict[str, int]] = field(
         default_factory=lambda: {s: {o: 0 for o in OUTCOMES} for s in SOURCES}
@@ -57,10 +59,19 @@ class RecoveryStats:
         source = str(extras.get("source") or "jev")
         if source not in SOURCES:
             source = "jev"
-        if outcome:
+        stage = str(extras.get("stage") or "")
+        if not stage:
+            self.legacy_rows += 1
+            return True
+        if outcome and stage in {"outcome", "advice_outcome"}:
             self.outcome_total += 1
             bucket = self.outcomes[source]
             bucket[outcome] = bucket.get(outcome, 0) + 1
+            return True
+        if stage == "effect" and extras.get("advice_delivered"):
+            self.delivered_by_source[source] += 1
+            return True
+        if stage != "advice":
             return True
         self.advice_by_source[source] += 1
         nxt = str(extras.get("next") or "unknown")
@@ -68,14 +79,16 @@ class RecoveryStats:
         return True
 
     def _rates(self, source: str) -> tuple[int, int, float | None, float | None]:
-        delivered = self.advice_by_source[source] - self.outcomes[source].get("not_delivered", 0)
-        continued = self.outcomes[source].get("escaped", 0) + self.outcomes[source].get("repeated", 0)
-        adoption = (continued / delivered) if delivered > 0 else None
+        delivered = self.delivered_by_source[source]
+        continued = sum(self.outcomes[source].get(name, 0) for name in ("escaped", "different_failure", "repeated"))
+        adoption = (continued / delivered) if delivered > 0 and continued <= delivered else None
         escape = (self.outcomes[source]["escaped"] / continued) if continued > 0 else None
         return delivered, continued, adoption, escape
 
     def to_markdown(self) -> str:
-        lines: list[str] = ["# Jev 恢复建议采纳统计", ""]
+        lines: list[str] = ["# Jev 恢复建议与后续工具结果", ""]
+        lines.append("以下比例不代表建议被遵循、任务完成或因果改善；没有生命周期标记的旧日志不计入比率。")
+        lines.append("")
         lines.append("## 建议次数（按来源）")
         lines.append("")
         lines.append("| source | advice |")
@@ -103,7 +116,7 @@ class RecoveryStats:
         lines.append("")
         lines.append("## 比率")
         lines.append("")
-        lines.append("| source | delivered | adopted(escaped+repeated) | 采纳率 | 摆脱率 |")
+        lines.append("| source | 已送达 | 后续有工具结果 | 送达后继续调用比例 | 后续工具成功比例 |")
         lines.append("|---|---|---|---|---|")
         for source in SOURCES:
             delivered, continued, adoption, escape = self._rates(source)
@@ -112,6 +125,7 @@ class RecoveryStats:
             lines.append(f"| {source} | {delivered} | {continued} | {adoption_s} | {escape_s} |")
         lines.append("")
         lines.append(f"解析失败行数：{self.parse_failures}")
+        lines.append(f"未计入的旧格式行数：{self.legacy_rows}")
         return "\n".join(lines)
 
 

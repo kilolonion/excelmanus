@@ -70,7 +70,9 @@ def context_state(engine: Any, user_text: str, context_input: Mapping[str, Any] 
         if len(ident.public) > 300:
             return
         sheet = str(sheet or "")[:100]
-        cell_range = str(cell_range or "")[:100]
+        cell_range = str(cell_range or "")
+        if len(cell_range) > 4096:
+            cell_range = ""  # Never cut a multi-area reference in the middle of an address.
         key = (ident.public, sheet, cell_range)
         if key in seen:
             return
@@ -85,12 +87,19 @@ def context_state(engine: Any, user_text: str, context_input: Mapping[str, Any] 
         sheet, cell_range = region.rsplit("!", 1) if "!" in region else ("", region)
         add_target(mention.value, sheet, cell_range, source="explicit_mention")
 
+    ui_views: list[Mapping[str, Any]] = []
     ui = incoming.get("sheet_context")
     if isinstance(ui, Mapping):
+        ui_views.append(ui)
+    for item in incoming.get("sheet_contexts") or []:
+        if isinstance(item, Mapping) and item not in ui_views and len(ui_views) < 3:
+            ui_views.append(item)
+    for index, ui_view in enumerate(ui_views):
         # Even if a browser tab lags behind a session switch, do not carry its view across workspaces.
-        ui_workspace = str(ui.get("workspace_id") or "")
+        ui_workspace = str(ui_view.get("workspace_id") or "")
         if current_id and ui_workspace == current_id:
-            add_target(ui.get("path"), ui.get("sheet"), ui.get("range"), source="active_view")
+            add_target(ui_view.get("path"), ui_view.get("sheet"), ui_view.get("range"),
+                       source="active_view" if index == 0 else "linked_view")
 
     memory = getattr(engine, "_memory", None)
     messages = getattr(memory, "messages", [])
@@ -133,8 +142,8 @@ def context_state(engine: Any, user_text: str, context_input: Mapping[str, Any] 
                 if isinstance(sheet, Mapping) and sheet.get("name"):
                     add_target(path, sheet["name"], source="sheet_catalog")
 
-    source_priority = {"explicit_mention": 0, "active_view": 1, "recent_tool": 2,
-                       "file_catalog": 3, "sheet_catalog": 4}
+    source_priority = {"explicit_mention": 0, "active_view": 1, "linked_view": 2,
+                       "recent_tool": 3, "file_catalog": 4, "sheet_catalog": 5}
     targets.sort(key=lambda row: (
         row["source"] != "explicit_mention",
         Path(row["path"]).name not in user_text,
@@ -238,7 +247,8 @@ async def suggest_context(engine: Any, user_text: str, context_input: Mapping[st
         emit_jev_trace(engine, Decision.noop(f"unavailable:{type(exc).__name__}"), pack_id=PACK, on_event=on_event)
         return ""
     advice = render_advice(decision) if decision_can_apply(PACK, decision, settings) else ""
-    emit_jev_trace(engine, replace(decision, applied=bool(advice)), pack_id=PACK, on_event=on_event)
+    engine._jev_context_decision = decision if advice else None
+    emit_jev_trace(engine, decision, pack_id=PACK, on_event=on_event)
     return advice
 
 
@@ -270,6 +280,8 @@ async def route_session_workspace(
     session_id: str | None,
     user_text: str,
     context_input: Mapping[str, Any] | None,
+    *,
+    budget: Any = None,
 ) -> tuple[str | None, Decision | None]:
     """Pre-acquire workspace routing for sessions with no committed work.
 
@@ -324,6 +336,8 @@ async def route_session_workspace(
         "",
     )
     shim = _routing_shim(config, bound_path, bound_id, bound_title, session_id)
+    if budget is not None:
+        shim._jev_turn_budget = budget
     from excelmanus.logger import get_logger
     from excelmanus.system_one.runtime import evaluate_for_host
     from excelmanus.system_one.policy import live_jev_config

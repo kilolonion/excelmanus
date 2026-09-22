@@ -1,6 +1,6 @@
 # 技能装载与工作区
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-19
+适用版本：1.8.0 源码 · 更新日期：2026-09-21
 
 [文档导航](README.md) · [Skillpack 协议](skillpack_protocol.md)
 
@@ -10,7 +10,7 @@ ExcelManus 采用单用户、多会话和可登记多个本机文件夹的工作
 
 | 来源 | 默认位置 | 说明 |
 | --- | --- | --- |
-| system | `excelmanus/skillpacks/system` | 随包提供的默认技能 |
+| system | `excelmanus/skillpacks/system` | 随包提供的默认技能；个别技能（如 `agent_self_management`）由运行时开关门控，未开启时不参与加载 |
 | user | `~/.excelmanus/skillpacks` | 用户技能；外部工具目录可按开关参与发现 |
 | project | `<workspace_root>/.excelmanus/skillpacks` | 项目技能；还可扫描受配置控制的 `.agents/skills` 等目录 |
 

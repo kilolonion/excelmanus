@@ -295,6 +295,14 @@ def attach_skill_catalog(engine: Any) -> str:
     engine._skill_catalog_digest = digest
     if memory is not None:
         memory.add_user_message(text, hidden=True, prompt_kind="skill_catalog")
+        if pin and pin in {name for name, _desc in entries} and not getattr(engine, "_skill_pin_reported", False):
+            from excelmanus.system_one.trace import record_host_effect
+
+            engine._skill_pin_reported = True
+            record_host_effect(
+                engine, "skill.pin", action=pin, changed=True,
+                impact="相关技能已在注入主模型的目录中置顶，尚未调用技能",
+            )
         last = memory.messages[-1] if memory.messages else None
         seq = last.get("_seq") if isinstance(last, dict) else None
         engine._skill_catalog_seq = seq if isinstance(seq, int) else None

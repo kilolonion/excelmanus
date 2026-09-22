@@ -27,6 +27,10 @@ export interface JevTrace {
   reason: string;
   answers: Record<string, string | number | boolean>;
   impact: string;
+  stage?: string;
+  evaluated?: boolean;
+  adviceDelivered?: boolean;
+  stateChanged?: boolean;
   outcome?: string;
   source?: string;
   at: number;
@@ -67,7 +71,8 @@ export function parseJevTrace(data: Record<string, unknown>, id: string): JevTra
     id,
     pack,
     gate: asGate(data.gate),
-    applied: Boolean(data.applied),
+    applied: data.stage === "effect" && asGate(data.gate) === "enforce"
+      && (data.state_changed === true || data.advice_delivered === true),
     transport: asTransport(data.transport),
     latencyMs: Number.isFinite(Number(data.latency_ms)) ? Math.max(0, Number(data.latency_ms)) : 0,
     action: String(data.action || "noop").slice(0, 80),
@@ -75,6 +80,10 @@ export function parseJevTrace(data: Record<string, unknown>, id: string): JevTra
     reason: String(data.reason || "").slice(0, 200),
     answers: asAnswers(data.answers),
     impact: String(data.impact || "").slice(0, 200),
+    stage: String(data.stage || (data.kind === "outcome" ? "outcome" : "legacy")),
+    evaluated: data.stage === "evaluation" && data.evaluated === true,
+    adviceDelivered: data.stage === "effect" && data.advice_delivered === true,
+    stateChanged: data.stage === "effect" && data.state_changed === true,
     ...(data.outcome ? { outcome: String(data.outcome).slice(0, 40) } : {}),
     ...(data.source ? { source: String(data.source).slice(0, 40) } : {}),
     at: Date.now(),
@@ -106,7 +115,7 @@ export function jevEmptyCopy(opts: {
 
 export function cardTone(trace: JevTrace): "applied" | "unavailable" | "deny" | "ask" {
   if (traceUnavailable(trace) || trace.gate === "off" || trace.reason === "disabled") return "unavailable";
-  if (trace.applied && trace.gate === "enforce") {
+  if (trace.stage === "effect" && trace.applied && trace.gate === "enforce") {
     if (trace.kind === "deny" || trace.action === "deny") return "deny";
     if (trace.kind === "ask" || trace.action === "ask") return "ask";
     return "applied";
@@ -177,6 +186,7 @@ export function formatContextAnswer(key: string, value: string | number | boolea
 }
 
 export function traceUnavailable(trace: JevTrace): boolean {
+  if (["effect", "sent", "outcome", "advice"].includes(trace.stage || "")) return false;
   return trace.transport === "unavailable" || /^(unavailable|error|timeout|budget_exhausted|provider_cooldown)(:|$)/.test(trace.reason);
 }
 
@@ -188,25 +198,15 @@ export function traceStatus(trace: JevTrace): { label: string; description: stri
     const why = trace.reason === "budget_exhausted" ? "本轮评估额度已用完" : trace.reason === "provider_cooldown" ? "评估服务暂时冷却" : "本次评估未能完成";
     return { label: "已回退", description: `${why}，任务继续按原流程处理。` };
   }
-  if (!trace.applied) return { label: "未采纳", description: "已评估，本次未应用建议；任务按原流程处理。" };
-  if (trace.pack === "context.resolve") {
-    const routed = trace.answers.routed_workspace;
-    if (typeof routed === "string" && routed) {
-      return { label: "已路由工作区", description: `会话已绑定到工作区「${routed}」，可在会话列表中调整归属。` };
-    }
-    return { label: "已提供建议", description: "已向主模型补充上下文建议；未切换工作区或修改文件。" };
+  if (trace.stage === "outcome") return { label: "结果记录", description: trace.impact };
+  if (trace.stage === "sent") return { label: "已发送", description: trace.impact };
+  if (trace.stage === "evaluation") return { label: "已评估", description: "评估完成，实际影响以随后的执行记录为准。" };
+  if (trace.stateChanged) return { label: "行为已改变", description: trace.impact };
+  if (trace.adviceDelivered) return { label: "建议已送达", description: "建议已送入主模型上下文，是否遵循及最终效果尚待确认。" };
+  if (!trace.stage || trace.stage === "legacy") {
+    return { label: "旧格式记录", description: "缺少执行阶段信息，无法据此确认建议已送达或行为已改变。" };
   }
-  if (trace.kind === "deny" || trace.action === "deny") return { label: "已拦截", description: "已拒绝这次高风险操作。" };
-  if (trace.kind === "ask" || trace.action === "ask") return { label: "交由审批", description: "这次操作仍需通过原有审批流程。" };
-  const descriptions: Record<string, string> = {
-    "exposure.turn": trace.impact.includes("已按") ? "已根据任务调整本轮可用工具。" : "已记录工具建议，本轮未缩减可用工具。",
-    "skill.pin": "已调整相关技能的展示顺序，不会自动调用技能。",
-    "observation.shape": "已应用结果整理策略，需要时可取回完整结果。",
-    "observation.prune": trace.action === "prune" ? "已收起旧结果，保留取回入口。" : "已保留历史结果。",
-    "loop.wrap": "已记录后续步骤建议，由主流程决定是否继续。",
-    "ui.surface": "已提交界面建议，是否切换由当前界面状态决定。",
-  };
-  return { label: "已应用", description: descriptions[trace.pack] || "已应用本次评估建议。" };
+  return { label: "已记录", description: "尚无建议送达或行为改变的执行记录。" };
 }
 
 export function traceActionLabel(trace: JevTrace): string {
@@ -214,7 +214,7 @@ export function traceActionLabel(trace: JevTrace): string {
   if (traceUnavailable(trace)) return "继续原流程";
   if (trace.pack === "context.resolve") return formatContextAnswer("next", trace.action);
   const labels: Record<string, string> = {
-    minimal: "无需工作区工具", full: "保留完整工具", inspect: "建议读取工具", edit: "建议编辑工具", file_code: "建议文件与代码工具", web: "建议联网工具",
+    minimal: "沿用核心工具", full: "无额外预加载", inspect: "建议读取工具", edit: "建议编辑工具", file_code: "建议文件与代码工具", web: "建议联网工具",
     keep: "保持现状", none: "无需调整", noop: "无需调整", auto: "建议放行", allow: "建议放行", ask: "建议询问", deny: "建议拒绝",
     truncate: "精简长结果", spill: "保存完整结果", pointer: "保留取回入口", prune: "收起旧结果",
     continue: "建议继续", stop: "建议停止", wrap: "建议收尾", finish: "建议完成", clarify: "补充必要信息", inspect_target: "先读取目标", inspect_candidate: "先读取建议范围",
@@ -234,11 +234,13 @@ export function traceNeedsAttention(trace: JevTrace): boolean {
 }
 
 export function summarizeTraces(traces: readonly JevTrace[]) {
-  const evaluated = traces.filter((trace) => trace.gate !== "off" && trace.reason !== "disabled" && !traceUnavailable(trace));
-  const measured = traces.filter((trace) => Number.isFinite(trace.latencyMs) && trace.latencyMs > 0);
+  const evaluated = traces.filter((trace) => trace.evaluated && ["evaluation", "legacy"].includes(trace.stage || "legacy") && trace.gate !== "off" && trace.reason !== "disabled" && !traceUnavailable(trace));
+  const effects = traces.filter((trace) => trace.stage === "effect" && trace.gate === "enforce");
+  const measured = evaluated.filter((trace) => Number.isFinite(trace.latencyMs) && trace.latencyMs > 0);
   return {
     evaluated: evaluated.length,
-    applied: evaluated.filter((trace) => trace.applied && trace.gate === "enforce").length,
+    applied: effects.filter((trace) => trace.stateChanged).length,
+    delivered: effects.filter((trace) => trace.adviceDelivered).length,
     attention: traces.filter(traceNeedsAttention).length,
     meanMs: measured.length ? measured.reduce((sum, trace) => sum + trace.latencyMs, 0) / measured.length : 0,
   };

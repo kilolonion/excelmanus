@@ -623,79 +623,65 @@ class ApprovalManager:
         if not record.changes:
             return f"记录 `{approval_id}` 没有可回滚的文件变更。"
 
-        restored = self._restore_revision_before(record)
-        record.undoable = False
-        self._persist_undoable_flag(record)
+        from excelmanus.workbook_commit import CommitError
+
+        try:
+            restored = self._restore_revision_before(record)
+        except (CommitError, ValueError, OSError) as exc:
+            logger.warning("approval undo failed: %s", approval_id, exc_info=True)
+            return f"未回滚 `{approval_id}`：{exc}。请检查文件版本后重试。"
         if restored:
+            record.undoable = False
+            self._persist_undoable_flag(record)
             names = ", ".join(restored)
             return (
                 f"已回滚 `{approval_id}`：已 restore {len(restored)} 个文件到 beforeEdit"
                 f"（{names}）。"
             )
         return (
-            f"已回滚标记 `{approval_id}`：审批快照不再写回磁盘。"
+            f"未回滚 `{approval_id}`：找不到与本次操作完整对应的编辑前后快照。"
             "文件回退请用 manage_spreadsheet_versions restore。"
         )
 
     def _restore_revision_before(self, record: AppliedApprovalRecord) -> list[str]:
-        from excelmanus.workbook_commit import CommitError
+        from excelmanus.workspace.file_service import TargetSpec, WorkspaceFileService
         from excelmanus.workspace.revisions import RevisionStore
 
         store = RevisionStore(self.workspace_root)
-        restored: list[str] = []
+        targets: list[TargetSpec] = []
         for change in record.changes:
             rel = str(change.path or "").replace("\\", "/").removeprefix("./").strip()
-            if not rel:
-                continue
+            if not rel or not change.before_exists or not change.after_exists:
+                return []
             after_hash = str(change.after_hash or "").replace("sha256:", "")
+            before_hash = str(change.before_hash or "").replace("sha256:", "")
+            if not after_hash or not before_hash:
+                return []
             records = store.list(rel)
-            after_rec = None
-            if after_hash:
-                after_rec = next(
-                    (
-                        rec
-                        for rec in reversed(records)
-                        if rec.reason == "afterEdit" and rec.sha256 == after_hash
-                    ),
-                    None,
-                )
-            if after_rec is None:
-                after_rec = next(
-                    (rec for rec in reversed(records) if rec.reason == "afterEdit"),
-                    None,
-                )
-            if after_rec is None:
-                continue
+            matching_transactions = {
+                rec.transaction_id for rec in records
+                if rec.reason == "afterEdit" and rec.sha256 == after_hash
+            }
             before = next(
                 (
                     rec
-                    for rec in records
-                    if rec.transaction_id == after_rec.transaction_id
-                    and rec.reason == "beforeEdit"
+                    for rec in reversed(records)
+                    if rec.transaction_id in matching_transactions
+                    and rec.reason == "beforeEdit" and rec.sha256 == before_hash
                 ),
                 None,
             )
             if before is None:
-                continue
-            blob = store.read_blob(rel, before.sha256)
-            if blob is None:
-                continue
-            dest = self.workspace_root / rel
-            if not dest.is_file():
-                continue
-            expected = f"sha256:{after_rec.sha256}"
-            try:
-                from excelmanus.workspace.file_service import WorkspaceFileService
-
-                WorkspaceFileService(self.workspace_root).restore(
-                    rel,
-                    before.id,
-                    expected_version=expected,
-                )
-                restored.append(rel)
-            except (CommitError, ValueError, OSError):
-                logger.debug("approval undo restore failed: %s", rel, exc_info=True)
-        return restored
+                return []
+            targets.append(TargetSpec(op="restore", path=rel, restore_revision_id=before.id,
+                                      expected_version=f"sha256:{after_hash}"))
+        if not targets:
+            return []
+        # Validate every file under the same transaction lock before publishing.
+        # A newer edit to any target must prevent undoing the other targets too.
+        service = WorkspaceFileService(self.workspace_root)
+        service.raise_if_failed(service.apply_batch(targets))
+        return [target.path for target in targets]
 
     def _new_approval_id(self) -> str:
         now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

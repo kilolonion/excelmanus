@@ -5,6 +5,7 @@ import { isHiddenAssistantChrome } from "@/lib/assistant-chrome";
 import { ThinkingBlock } from "../ThinkingBlock";
 import { ToolCallCard, ToolCallCancelButton } from "../ToolCallCard";
 import { AskUserCard } from "../AskUserCard";
+import { WorkbookPresentationCard } from "../WorkbookPresentationCard";
 import { SubagentBlock } from "../SubagentBlock";
 import { TaskList } from "../TaskList";
 import VerificationCard from "../VerificationCard";
@@ -69,6 +70,7 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
       return <MemoizedMarkdown content={block.content} isStreamingText={isStreamingText} defaultExpanded={defaultExpanded} />;
     }
     case "tool_call": {
+      if (block.name === "show_workbook" && block.status === "success") return <WorkbookPresentationCard result={block.result} />;
       if (block.name === "ask_user" || block.name === "suggest_mode_switch") {
         return (
           <><AskUserCard

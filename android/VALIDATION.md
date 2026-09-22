@@ -28,7 +28,7 @@
 - `outputs/android/compat-landscape.png` 与 `compat-landscape-bottom.png`：200% 字体横屏及滚动到底部。
 - `outputs/android/compat-camera-denied.png`：实际拒绝相机权限后的恢复入口。
 
-当前安装包：`outputs/android/excelmanus-android-1.8.0-compat-preview.apk`，2,903,874 字节，包名 `com.excelmanus.android.debug`，versionCode 3。SHA-256：`c6df855fe5661a07b7b29ea52dcfd7032dbf42b193f7347e4fa8695131b921f4`。
+当前安装包：`outputs/android/excelmanus-android-1.8.0-compat-preview.apk`，3,483,338 字节，包名 `com.excelmanus.android.debug`，versionCode 3。SHA-256：`ece382ca68e37e7e467f2ce09159ad54d6fa9f16078d168d3aa743822aac1470`。
 
 ## 真实使用仍需确认的边界
 

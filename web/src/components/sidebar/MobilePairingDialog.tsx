@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { Check, ClipboardPaste, Eye, EyeOff, KeyRound, Loader2, MonitorSmartphone, RefreshCw, ShieldCheck, Smartphone, Wifi } from "lucide-react";
+import { ArrowUpRight, Check, ClipboardPaste, Download, Eye, EyeOff, KeyRound, Loader2, MonitorSmartphone, RefreshCw, ShieldCheck, Smartphone, Wifi } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { getManageToken, setManageToken } from "@/lib/api";
 import { mobilePairing, type MobilePairingAction, type MobilePairingStatus } from "@/lib/mobile-pairing";
+import { ANDROID_DOWNLOAD_PAGE_URL } from "@/lib/product-links";
 
 export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [status, setStatus] = useState<MobilePairingStatus | null>(null);
@@ -98,6 +99,12 @@ export function MobilePairingDialog({ open, onOpenChange }: { open: boolean; onO
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><MonitorSmartphone className="h-5 w-5 text-[var(--em-primary)]" />扫码连接手机</DialogTitle>
           <DialogDescription>把 Android 手机连到这台电脑，继续对话、上传表格并保存结果。</DialogDescription>
+          <Button asChild variant="link" size="sm" className="h-auto w-fit self-center px-0 py-0 text-[var(--em-primary)] sm:self-start">
+            <a href={ANDROID_DOWNLOAD_PAGE_URL} target="_blank" rel="noopener noreferrer">
+              <Download className="h-3.5 w-3.5" />还没安装？下载 Android 手机端<ArrowUpRight className="h-3.5 w-3.5" />
+              <span className="sr-only">（在新窗口打开）</span>
+            </a>
+          </Button>
         </DialogHeader>
         <div className="grid grid-cols-3 gap-2 text-xs" aria-label="绑定进度">
           {["连接同一网络", "手机扫码", "确认绑定"].map((label, index) => <div key={label} className={`flex items-center gap-2 rounded-lg px-2 py-3 ${step >= index + 1 ? "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]" : "bg-muted text-muted-foreground"}`}><span className="font-semibold">{step > index + 1 ? <Check className="h-3.5 w-3.5" /> : index + 1}</span>{label}</div>)}

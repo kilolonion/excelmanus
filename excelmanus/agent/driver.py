@@ -444,11 +444,6 @@ class Driver:
                 last_result = await self.step(prepared)
             await self.turn_stopping()
             if ran_loop and last_result is not None:
-                engine._finalize_driver_turn(
-                    last_result,
-                    on_event=self._on_event,
-                    chat_start=turn_started,
-                )
                 try:
                     from excelmanus.system_one.host import maybe_emit_ui_hint
 
@@ -459,6 +454,11 @@ class Driver:
                     )
                 except Exception:
                     logger.debug("ui_hint hook failed; continuing turn", exc_info=True)
+                engine._finalize_driver_turn(
+                    last_result,
+                    on_event=self._on_event,
+                    chat_start=turn_started,
+                )
             if self._turn_record is not None:
                 self._turn_record["status"] = "truncated" if getattr(last_result, "truncated", False) else "completed"
         except TurnBudgetExceeded as exc:
@@ -521,6 +521,12 @@ class Driver:
             # 失败也要把 durable 状态保存给恢复路径；不吞异常。
             raise
         finally:
+            from excelmanus.system_one.host import clear_turn_exposure
+
+            jev_budget = getattr(engine, "_jev_turn_budget", None)
+            if self._turn_record is not None and jev_budget is not None:
+                self._turn_record["jev_budget"] = jev_budget.snapshot()
+            clear_turn_exposure(engine)
             if self._turn_record is not None:
                 self._turn_record["finished_at"] = time.time()
             engine._turn_deadline_mono = None

@@ -172,6 +172,7 @@ class TestCrossVersionUpgrade:
         for col in (
             "thinking_mode", "model_family",
             "custom_extra_body", "custom_extra_headers",
+            "canonical_model",
         ):
             assert db._sqlite_column_exists("model_profiles", col), f"缺少列: {col}"
         for col in ("hysteresis_delta", "min_dwell_seconds", "breaker_open_seconds"):
@@ -213,7 +214,7 @@ class TestCrossVersionUpgrade:
         """当前形态 model_profiles 含 thinking / 自定义列。"""
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
-        for col in ("thinking_mode", "model_family", "custom_extra_body", "custom_extra_headers"):
+        for col in ("thinking_mode", "model_family", "custom_extra_body", "custom_extra_headers", "canonical_model"):
             assert db._sqlite_column_exists("model_profiles", col), f"缺少列: {col}"
         db.close()
 

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.concurrency import run_in_threadpool
 
 from excelmanus.api_app_state import (
     get_config,
@@ -79,8 +81,20 @@ def _workspace_root(session_id: str | None = None, workspace_id: str | None = No
     if cfg is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
     manager = get_session_manager()
+    if (session_id or workspace_id) and manager is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if session_id and manager is not None:
-        return Path(manager.workspace_path_for_session(session_id)).expanduser().resolve()
+        if not manager.session_exists(session_id):
+            raise HTTPException(status_code=404, detail="会话不存在，无法确定历史文件所属工作区")
+        session_root = Path(manager.workspace_path_for_session(session_id)).expanduser().resolve()
+        if workspace_id:
+            try:
+                path, _ = manager.resolve_workspace_binding(workspace_id, None)
+            except WorkspacePathError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if Path(path).expanduser().resolve() != session_root:
+                raise HTTPException(status_code=409, detail="会话与文件工作区不一致，请重新打开文件历史")
+        return session_root
     if workspace_id and manager is not None:
         try:
             path, _ = manager.resolve_workspace_binding(workspace_id, None)
@@ -96,6 +110,10 @@ async def list_revisions(
     path: str, session_id: str | None = None, workspace_id: str | None = None,
     limit: int = 100,
 ) -> JSONResponse:
+    return await run_in_threadpool(_list_revisions, path, session_id, workspace_id, limit)
+
+
+def _list_revisions(path: str, session_id: str | None, workspace_id: str | None, limit: int) -> JSONResponse:
     """Revision timeline for one identity. Restore requires current content_version."""
     root = _workspace_root(session_id, workspace_id)
     try:
@@ -112,6 +130,7 @@ async def list_revisions(
         "path": ident.public,
         "content_version": current,
         "revisions": items,
+        "total": len(history),
     })
 
 
@@ -141,11 +160,12 @@ async def restore_revision(request: RevisionRestoreRequest) -> JSONResponse:
         raise HTTPException(status_code=400, detail="restore 必须提供 expected_version")
     svc = WorkspaceFileService(root)
     try:
-        receipt = svc.restore(
+        receipt = await run_in_threadpool(
+            svc.restore,
             ident.relative,
             request.revision_id,
             expected_version=expected or None,
-            restore_missing=not live,
+            restore_missing=not live and not expected,
             event_context={"source": "user", "session_id": request.session_id,
                            "summary": f"用户恢复了整个文件到历史版本 {request.revision_id}，请重新读取。"}
             if dest.suffix.lower() in {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv"} else None,
@@ -164,7 +184,7 @@ async def restore_revision(request: RevisionRestoreRequest) -> JSONResponse:
             "fields": exc.fields,
         })
     try:
-        session_manager.drain_workspace_events()
+        await run_in_threadpool(session_manager.drain_workspace_events)
     except Exception:
         logger.warning("历史版本已恢复，改动通知等待重试", exc_info=True)
     return JSONResponse(content={
@@ -179,6 +199,10 @@ async def restore_revision(request: RevisionRestoreRequest) -> JSONResponse:
 
 @router.post("/api/v1/revisions/delete")
 async def delete_revision(request: RevisionDeleteRequest) -> JSONResponse:
+    return await run_in_threadpool(_delete_revision, request)
+
+
+def _delete_revision(request: RevisionDeleteRequest) -> JSONResponse:
     root = _workspace_root(request.session_id, request.workspace_id)
     try:
         ident = resolve_canonical(root, request.path)
@@ -189,6 +213,8 @@ async def delete_revision(request: RevisionDeleteRequest) -> JSONResponse:
     except CommitError as exc:
         status = 404 if exc.code == "NOT_FOUND" else 400
         raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except RevisionIntegrityError as exc:
+        raise HTTPException(status_code=404, detail="检查点不存在或已损坏") from exc
     return JSONResponse(content={"status": "ok", "path": ident.public, "deleted_revision": request.revision_id})
 
 
@@ -196,6 +222,10 @@ async def delete_revision(request: RevisionDeleteRequest) -> JSONResponse:
 async def read_revision_content(
     path: str, revision_id: str, session_id: str | None = None, workspace_id: str | None = None,
 ) -> StreamingResponse:
+    return await run_in_threadpool(_read_revision_content, path, revision_id, session_id, workspace_id)
+
+
+def _read_revision_content(path: str, revision_id: str, session_id: str | None, workspace_id: str | None) -> StreamingResponse:
     root = _workspace_root(session_id, workspace_id)
     try:
         ident = resolve_canonical(root, path)
@@ -206,15 +236,17 @@ async def read_revision_content(
         raise HTTPException(status_code=404, detail="历史版本不存在或已损坏") from exc
     media_type = "application/octet-stream"
     suffix = Path(ident.relative).suffix.lower()
-    if suffix in {".xlsx", ".xlsm"}:
+    if suffix == ".xlsx":
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    elif suffix == ".xlsm":
+        media_type = "application/vnd.ms-excel.sheet.macroEnabled.12"
     elif suffix == ".docx":
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     from excelmanus.workspace.identity import display_name_for
     return StreamingResponse(
         iter((data,)),
         media_type=media_type,
-        headers={"Content-Disposition": f'inline; filename="{display_name_for(ident.relative)}"', "X-Revision-Id": rec.id},
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(display_name_for(ident.relative), safe='')}", "X-Revision-Id": rec.id},
     )
 
 
@@ -223,13 +255,26 @@ async def preview_revision(
     path: str, revision_id: str, session_id: str | None = None, workspace_id: str | None = None,
     sheet: str | None = None, rect: str = "A1:Z50",
 ) -> JSONResponse:
+    return await run_in_threadpool(_preview_revision, path, revision_id, session_id, workspace_id, sheet, rect)
+
+
+def _preview_revision(
+    path: str, revision_id: str, session_id: str | None, workspace_id: str | None,
+    sheet: str | None, rect: str,
+) -> JSONResponse:
     """Project an immutable revision into the same bounded workbook view as the live file."""
     from excelmanus.workbook.refs import InvalidRefError, parse_rect
     from excelmanus.workbook.snapshot import SnapshotError, open_snapshot_bytes, project_view
     from excelmanus.workspace.refs import WorkspaceRef
+    from zipfile import BadZipFile
+    from xml.etree.ElementTree import ParseError
+    from lxml.etree import XMLSyntaxError
 
     root = _workspace_root(session_id, workspace_id)
     try:
+        base = parse_rect(rect, default_sheet=sheet)
+        if (base.max_row - base.min_row + 1) * (base.max_col - base.min_col + 1) > 20_000:
+            raise HTTPException(status_code=400, detail={"code": "VIEW_TOO_LARGE", "message": "单次历史预览最多读取 20000 个单元格"})
         ident = resolve_canonical(root, path)
         rec, data = WorkspaceFileService(root).read_history(ident.relative, revision_id)
         suffix = Path(ident.relative).suffix.lower()
@@ -237,10 +282,11 @@ async def preview_revision(
             import tempfile
             from excelmanus.api_routes_files import _build_word_snapshot
 
-            with tempfile.NamedTemporaryFile(suffix=".docx") as handle:
-                handle.write(data)
-                handle.flush()
-                payload = _build_word_snapshot(handle.name, max_paragraphs=100)
+            # Close the writer before python-docx opens it (Windows file sharing).
+            with tempfile.TemporaryDirectory(prefix="excelmanus-revision-") as directory:
+                source = Path(directory) / "preview.docx"
+                source.write_bytes(data)
+                payload = _build_word_snapshot(str(source), max_paragraphs=100)
             payload.update({
                 "file": ident.public,
                 "content_version": rec.to_public_dict()["content_version"],
@@ -257,7 +303,6 @@ async def preview_revision(
             workspace=WorkspaceRef.from_root(root, workspace_id=workspace_id),
             suffix=Path(ident.relative).suffix.lower(),
         )
-        base = parse_rect(rect, default_sheet=sheet)
         view = project_view(snapshot, [base], with_styles=True, active_sheet_default=True)
         view["revision_id"] = rec.id
         view["revision_reason"] = rec.reason
@@ -271,3 +316,5 @@ async def preview_revision(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except SnapshotError as exc:
         raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc), **exc.fields}) from exc
+    except (BadZipFile, ParseError, XMLSyntaxError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="历史文件无法解析，请下载原始版本检查文件内容") from exc

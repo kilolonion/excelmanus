@@ -20,7 +20,14 @@ import {
   type DeltaBatcher as DeltaBatcherInterface,
 } from "./sse-event-handler";
 import { resolveFailureActions } from "./failure-recovery";
-import { buildJevSheetContext } from "./jev-context";
+import { prepareWorkbookRequest, assertWorkbookRequestCurrent, type PreparedWorkbookRequest } from "./workbook-conversation";
+import type { WorkbookSheetContext, WorkbookMessageContext } from "./workbook-context";
+import { extractTypedFileMentions, findMissingFileMentions, shouldBlockMissingFileMentions } from "./mention-existence";
+import { workspaceKeyForSessionId } from "./workspace-file-ref";
+import { handleWorkbookMessageSent } from "./workbook-chat-navigation";
+import { acknowledgedSelectionVersion } from "./excel-cell-edit";
+import { normalizeRelativePath } from "./workspace-file-ref";
+import { prepareWorkbookMergeSources } from "./workbook-group-actions";
 
 type ChatImagePayload = {
   media_type: string;
@@ -336,11 +343,113 @@ export function resumeAfterInteraction(sessionId: string, response: { resume_req
   });
 }
 
-export async function sendMessage(
+let preparingSubmission = false;
+
+function reportWorkbookSubmissionError(error: unknown, sessionId: string) {
+  if (getActiveSessionId() !== sessionId) return;
+  const store = useChatStore.getState();
+  const assistant = [...store.messages].reverse().find((message) => message.role === "assistant");
+  const id = assistant?.id ?? uuid();
+  if (!assistant) store.addAssistantMessage(id);
+  store.appendBlock(id, _buildClientFailureGuidance({
+    code: "workbook_context_error", title: "请先处理表格状态", retryable: true,
+    message: error instanceof Error ? error.message : "表格尚未保存，请稍后重试",
+  }));
+}
+
+async function prepareResubmission(text: string, sessionId: string, action?: PreparedWorkbookRequest["workbookAction"], context?: WorkbookMessageContext): Promise<PreparedWorkbookRequest | null> {
+  try {
+    const workspaceKey = workspaceKeyForSessionId(sessionId);
+    if (action && (action.workspace_id !== workspaceIdForSession(sessionId)
+      || extractTypedFileMentions(text).some((path) => normalizeRelativePath(path) !== normalizeRelativePath(action.path)))) {
+      throw new Error("操作参数属于原表格，请从目标表格重新生成方案");
+    }
+    const request = action?.operation === "conflict-replan"
+      ? { text, sessionId, workspaceKey } as PreparedWorkbookRequest
+      : await prepareWorkbookRequest(text, sessionId, context);
+    assertWorkbookRequestCurrent(request);
+    if (action) {
+      const version = action.operation === "conflict-replan" ? action.observed_version
+        : acknowledgedSelectionVersion({ workspaceKey, relative: action.path }, action.observed_version);
+      request.chatMode = "plan";
+      request.workbookAction = { ...action, observed_version: version };
+      if (action.operation === "merge-workbooks") {
+        const sources = await prepareWorkbookMergeSources(action.parameters.sources, sessionId, {
+          relative: normalizeRelativePath(action.path), workspaceKey, workspaceId: action.workspace_id,
+        });
+        request.workbookAction.parameters = { ...action.parameters, sources };
+        assertWorkbookRequestCurrent(request);
+      }
+    }
+    return request;
+  } catch (error) {
+    reportWorkbookSubmissionError(error, sessionId);
+    return null;
+  }
+}
+
+function startMessageStream(...args: Parameters<typeof streamMessage>) {
+  const completion = streamMessage(...args);
+  const controller = useChatStore.getState().abortController;
+  void completion.catch((error: unknown) => {
+    const store = useChatStore.getState();
+    if (getActiveSessionId() !== args[2] || store.abortController !== controller) return;
+    const assistant = [...store.messages].reverse().find((message) => message.role === "assistant");
+    if (assistant) store.appendBlock(assistant.id, _buildClientFailureGuidance({
+      code: "request_failed", title: "发送失败", retryable: true,
+      message: error instanceof Error ? error.message : "消息未能发送，请重试",
+    }));
+    store.setPipelineStatus(null);
+    store.setStreaming(false);
+    store.setAbortController(null);
+    useJevStore.getState().finishTurn();
+  });
+}
+
+/** Resolves once accepted; callers keep their draft when preflight rejects. */
+export async function sendMessage(text: string, files?: AttachedFile[], sessionId?: string | null, displayText?: string,
+  prepared?: PreparedWorkbookRequest): Promise<boolean> {
+  if (useChatStore.getState().isStreaming || preparingSubmission || (!text.trim() && !files?.length)) return false;
+  const sid = sessionId || getActiveSessionId();
+  if (sid !== getActiveSessionId()) throw new Error("已切换对话，请确认后重新发送");
+  if (files?.some((file) => file.workspaceKey && file.workspaceKey !== workspaceKeyForSessionId(sid))) {
+    throw new Error("附件属于另一个工作区，请在当前工作区重新选择");
+  }
+  if (useUIStore.getState().configReady !== true || text.trimStart().startsWith("/")) {
+    startMessageStream(text, files, sid, displayText);
+    return true;
+  }
+  preparingSubmission = true;
+  try {
+    const request = prepared ?? await prepareWorkbookRequest(text, sid);
+    if (extractTypedFileMentions(request.text).length) {
+      await useExcelStore.getState().refreshWorkspaceFiles(sid, { cached: true }).catch(() => {});
+      const excel = useExcelStore.getState();
+      if (excel.workspaceFilesSessionId === sid && !excel.workspaceFilesError && !excel.workspaceFilesTruncated) {
+        const paths = excel.workspaceFiles.map((file) => file.path);
+        const missing = findMissingFileMentions(request.text, paths);
+        if (shouldBlockMissingFileMentions(paths, missing)) throw new Error(`找不到引用的文件：${missing[0]}，请检查后重试`);
+      }
+    }
+    assertWorkbookRequestCurrent(request);
+    if (useChatStore.getState().isStreaming) return false;
+    if (request.chatMode) useUIStore.getState().setChatMode(request.chatMode);
+    startMessageStream(request.text, files, sid, displayText, request.sheetContext, request.workbookAction, request.chatMode, request.sheetContexts);
+    return true;
+  } finally {
+    preparingSubmission = false;
+  }
+}
+
+async function streamMessage(
   text: string,
   files?: AttachedFile[],
   sessionId?: string | null,
   displayText?: string,
+  sheetContext?: WorkbookSheetContext,
+  workbookAction?: PreparedWorkbookRequest["workbookAction"],
+  requestedChatMode = useUIStore.getState().chatMode,
+  sheetContexts?: WorkbookSheetContext[],
 ) {
   const store = useChatStore.getState();
   const sessionStore = useSessionStore.getState();
@@ -408,7 +517,7 @@ export async function sendMessage(
   }
 
   const effectiveSessionId = sessionId || getActiveSessionId();
-  const sheetContext = buildJevSheetContext(effectiveSessionId);
+  handleWorkbookMessageSent(effectiveSessionId);
 
   // 选中态只写 session-store。bindLoadedSession 避免 SessionSync 在消息占位后误切会话清空。
   if (effectiveSessionId && sessionStore.activeSessionId !== effectiveSessionId) {
@@ -423,7 +532,9 @@ export async function sendMessage(
   store.addUserMessage(
     userMsgId,
     displayText ?? text,
-    fileUploadResults.length > 0 ? fileUploadResults : undefined
+    fileUploadResults.length > 0 ? fileUploadResults : undefined,
+    workbookAction,
+    sheetContexts && sheetContexts.length > 1 ? { sheet_context: sheetContext, sheet_contexts: sheetContexts } : undefined,
   );
 
   const assistantMsgId = uuid();
@@ -482,6 +593,12 @@ export async function sendMessage(
         message: (imageAdmitError as Error).message || "图片未能完成准入，请重试。",
         retryable: true,
       }));
+      if (useChatStore.getState().abortController === abortController) {
+        useChatStore.getState().setPipelineStatus(null);
+        useChatStore.getState().setStreaming(false);
+        useChatStore.getState().setAbortController(null);
+        useJevStore.getState().finishTurn();
+      }
       return;
     }
     imageAttachments.push(...encodedImages);
@@ -558,8 +675,10 @@ export async function sendMessage(
       {
         message: messageContent,
         session_id: effectiveSessionId,
-        chat_mode: useUIStore.getState().chatMode,
+        chat_mode: requestedChatMode,
         sheet_context: sheetContext,
+        ...(sheetContexts?.length ? { sheet_contexts: sheetContexts } : {}),
+        ...(workbookAction ? { workbook_action: workbookAction } : {}),
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
@@ -855,9 +974,14 @@ export async function rollbackAndResend(
   if (!effectiveSessionId) return;
   const workspaceId = workspaceIdForSession(effectiveSessionId);
 
+  const prepared = await prepareResubmission(newContent, effectiveSessionId, messages[msgIndex].workbookAction, messages[msgIndex].workbookContext);
+  if (!prepared) return;
+
   // 璋冪敤鍚庣 rollback API锛坮esend_mode 浼氱Щ闄ょ洰鏍囩敤鎴锋秷鎭級
   try {
     const { rollbackChat } = await import("./api");
+    assertWorkbookRequestCurrent(prepared);
+    if (useChatStore.getState().isStreaming) return;
     await rollbackChat({
       sessionId: effectiveSessionId,
       turnIndex,
@@ -884,6 +1008,7 @@ export async function rollbackAndResend(
   }
 
   // 鍓嶇鎴柇鍒扮洰鏍囩敤鎴锋秷鎭箣鍓嶏紙涓庡悗绔?resend_mode 涓€鑷达級
+  if (getActiveSessionId() !== effectiveSessionId) return;
   const truncated = messages.slice(0, msgIndex);
   store.setMessages(truncated);
 
@@ -917,7 +1042,10 @@ export async function rollbackAndResend(
   const allAttached = [...retainedAttached, ...newAttached];
 
   // sendMessage 浼氬湪鍓嶅悗绔悇娣诲姞鐢ㄦ埛娑堟伅 + 瑙﹀彂娴佸紡鍥炲
-  await sendMessage(newContent, allAttached.length > 0 ? allAttached : undefined, effectiveSessionId);
+  if (getActiveSessionId() !== effectiveSessionId) return;
+  try {
+    await sendMessage(prepared.text, allAttached.length > 0 ? allAttached : undefined, effectiveSessionId, undefined, prepared);
+  } catch (error) { reportWorkbookSubmissionError(error, effectiveSessionId); }
 }
 
 /**
@@ -960,6 +1088,9 @@ export async function retryAssistantMessage(
   if (!effectiveSessionId) return;
   const workspaceId = workspaceIdForSession(effectiveSessionId);
 
+  const prepared = await prepareResubmission(userContent, effectiveSessionId, userMessage.workbookAction, userMessage.workbookContext);
+  if (!prepared) return;
+
   // 濡傛灉闇€瑕佸垏鎹㈡ā鍨嬶紝鍏堝垏鎹?
   if (switchToModel) {
     try {
@@ -976,6 +1107,8 @@ export async function retryAssistantMessage(
   // 璋冪敤鍚庣 rollback API
   try {
     const { rollbackChat } = await import("./api");
+    assertWorkbookRequestCurrent(prepared);
+    if (useChatStore.getState().isStreaming) return;
     await rollbackChat({
       sessionId: effectiveSessionId,
       turnIndex,
@@ -997,6 +1130,7 @@ export async function retryAssistantMessage(
   }
 
   // 鍓嶇鎴柇鍒?user 娑堟伅涔嬪墠
+  if (getActiveSessionId() !== effectiveSessionId) return;
   const truncated = messages.slice(0, userIdx);
   store.setMessages(truncated);
 
@@ -1027,7 +1161,10 @@ export async function retryAssistantMessage(
   }
 
   // 閲嶆柊鍙戦€侊紙鎼哄甫鍘熷闄勪欢淇℃伅锛?
-  await sendMessage(userContent, retainedAttached, effectiveSessionId);
+  if (getActiveSessionId() !== effectiveSessionId) return;
+  try {
+    await sendMessage(prepared.text, retainedAttached, effectiveSessionId, undefined, prepared);
+  } catch (error) { reportWorkbookSubmissionError(error, effectiveSessionId); }
 }
 
 export function stopGeneration() {

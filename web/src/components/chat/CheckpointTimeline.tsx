@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, type CSSProperties } from "react";
 import { Loader2, RotateCcw, AlertTriangle, CheckCircle2, History, Eye, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,8 +19,11 @@ import {
   deleteRevision,
   restoreRevision,
   type WorkbookRevisionItem,
+  type RevisionPreviewResponse,
 } from "@/lib/api";
 import { workspaceKeyFromSession } from "@/lib/workspace-file-ref";
+import { flushWorkbookEdits, hasPendingWorkbookEdits, isWorkbookEditPaused } from "@/lib/excel-cell-edit";
+import { RevisionWorkbookPreview } from "@/components/excel/RevisionWorkbookPreview";
 import { displayFilePath } from "@/lib/file-identity";
 import {
   fileBaseName,
@@ -31,11 +34,8 @@ import {
   shortContentVersion,
 } from "@/lib/revision-display";
 
-function refreshOpenDocument(path: string, contentVersion: string | null) {
+function refreshOpenDocument(path: string, workspaceKey: string, contentVersion: string | null) {
   const excel = useExcelStore.getState();
-  const session = useSessionStore.getState();
-  const active = session.sessions.find((item) => item.id === session.activeSessionId);
-  const workspaceKey = excel.activeWorkspaceKey ?? workspaceKeyFromSession(active);
   excel.notifyWorkbookChanged(path, workspaceKey, contentVersion || undefined, "refresh");
   excel.bumpWorkspaceFilesVersion();
   if (isWordDocumentPath(path)) {
@@ -50,16 +50,27 @@ function reasonTone(reason: string): string {
   return "text-muted-foreground";
 }
 
-export function RevisionTimelinePanel({
-  filePath,
-  workspaceId,
-  active = true,
-}: {
+interface RevisionTimelineProps {
   filePath: string | null;
   workspaceId?: string | null;
   active?: boolean;
-}) {
+}
+
+export function RevisionTimelinePanel(props: RevisionTimelineProps) {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const session = useSessionStore((s) => s.sessions.find((item) => item.id === activeSessionId));
+  const workspaceId = props.workspaceId ?? session?.workspaceId;
+  const sessionId = workspaceId && session?.workspaceId !== workspaceId ? null : activeSessionId;
+  const workspaceKey = workspaceId ? `id:${workspaceId}` : workspaceKeyFromSession(session);
+  // Async results from an old file/session cannot populate a newly selected file.
+  return <RevisionTimelineContent key={`${workspaceKey}|${sessionId}|${props.filePath}`} {...props}
+    workspaceId={workspaceId} activeSessionId={sessionId} workspaceKey={workspaceKey} />;
+}
+
+function RevisionTimelineContent({ filePath, workspaceId, active = true, activeSessionId, workspaceKey }: RevisionTimelineProps & {
+  activeSessionId: string | null;
+  workspaceKey: string;
+}) {
   const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
   const excelRefresh = useExcelStore((s) => s.refreshCounter);
   const wordRefresh = useWordStore((s) => s.refreshCounter);
@@ -73,20 +84,28 @@ export function RevisionTimelinePanel({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [preview, setPreview] = useState<{ revision: WorkbookRevisionItem; cells: { address: string; value: string }[] } | null>(null);
+  const [preview, setPreview] = useState<{ revision: WorkbookRevisionItem; data: RevisionPreviewResponse } | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const loadGeneration = useRef(0);
   const loadAbort = useRef<AbortController | null>(null);
+  const previewAbort = useRef<AbortController | null>(null);
+  const alive = useRef(true);
+  const actionPending = useRef(false);
+  const restoreVersion = useRef<string | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const [historyLimit, setHistoryLimit] = useState(100);
+  const [total, setTotal] = useState(0);
 
   useEffect(() => {
-    setRevisions([]);
-    setCurrentVersion(null);
-    setLastResult(null);
-    setExpandedId(null);
-    setLoadError(null);
-    setTarget(null);
-    setConfirmOpen(false);
-  }, [filePath, workspaceId, activeSessionId]);
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      loadGeneration.current++;
+      loadAbort.current?.abort();
+      previewAbort.current?.abort();
+    };
+  }, []);
 
   const load = useCallback(async () => {
     const generation = ++loadGeneration.current;
@@ -104,25 +123,29 @@ export function RevisionTimelinePanel({
       const data = await fetchRevisions(filePath, {
         sessionId: activeSessionId ?? undefined,
         workspaceId,
-        limit: 100,
+        limit: historyLimit,
         signal: controller.signal,
       });
-      if (generation !== loadGeneration.current) return;
+      if (controller.signal.aborted || !alive.current || generation !== loadGeneration.current) return;
       setRevisions(data.revisions);
+      setTotal(data.total ?? data.revisions.length);
       setCurrentVersion(data.content_version);
       setLoadError(null);
     } catch (err) {
       if (controller.signal.aborted || generation !== loadGeneration.current) return;
-      setRevisions([]);
-      setCurrentVersion(null);
       setLoadError(err instanceof Error ? err.message : "无法读取文件版本");
     } finally {
       if (generation === loadGeneration.current) setLoading(false);
     }
-  }, [filePath, activeSessionId, workspaceId]);
+  }, [filePath, activeSessionId, workspaceId, historyLimit]);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active) {
+      previewAbort.current?.abort();
+      setPreview(null);
+      setConfirmOpen(false);
+      return;
+    }
     load();
     const id = setInterval(load, 10000);
     return () => {
@@ -132,7 +155,14 @@ export function RevisionTimelinePanel({
   }, [active, load, workspaceFilesVersion, excelRefresh, wordRefresh]);
 
   const handleConfirm = async () => {
-    if (!filePath || !target) return;
+    if (!filePath || !target || actionPending.current) return;
+    const file = { workspaceKey, relative: filePath };
+    if (hasPendingWorkbookEdits(file) || isWorkbookEditPaused(file)) {
+      setConfirmOpen(false);
+      setLastResult({ ok: false, message: "仍有未保存的编辑，请保存或处理冲突后再恢复。" });
+      return;
+    }
+    actionPending.current = true;
     setConfirmOpen(false);
     setRestoring(true);
     setLastResult(null);
@@ -140,38 +170,62 @@ export function RevisionTimelinePanel({
       const res = await restoreRevision({
         path: filePath,
         revisionId: target.revision_id,
-        expectedVersion: currentVersion,
+        expectedVersion: restoreVersion.current,
         sessionId: activeSessionId,
         workspaceId,
       });
+      refreshOpenDocument(filePath, workspaceKey, res.content_version);
+      if (!alive.current) return;
       const label = revisionReasonLabel(target.reason, target.label);
       setLastResult({
         ok: true,
         message: `已恢复到「${label}」`,
       });
-      refreshOpenDocument(filePath, res.content_version);
       await load();
     } catch (err) {
+      if (!alive.current) return;
       setLastResult({
         ok: false,
         message: err instanceof Error ? err.message : "恢复失败（需要当前版本）",
       });
     } finally {
-      setRestoring(false);
-      setTarget(null);
+      actionPending.current = false;
+      if (alive.current) { setRestoring(false); setTarget(null); }
     }
   };
 
   const groups = groupRevisions(revisions);
   const fileName = fileBaseName(filePath);
 
-  const askRestore = (rec: WorkbookRevisionItem) => {
-    setTarget(rec);
-    setConfirmOpen(true);
+  const askRestore = async (rec: WorkbookRevisionItem) => {
+    if (!filePath || actionPending.current) return;
+    actionPending.current = true;
+    setRestoring(true);
+    try {
+      const file = { workspaceKey, relative: filePath };
+      await flushWorkbookEdits(file);
+      if (!alive.current) return;
+      if (hasPendingWorkbookEdits(file) || isWorkbookEditPaused(file)) throw new Error("仍有未保存的编辑，请保存或处理冲突后再恢复。");
+      const latest = await fetchRevisions(filePath, { sessionId: activeSessionId ?? undefined, workspaceId, limit: 1 });
+      if (!alive.current || !activeRef.current) return;
+      // Capture the version the user confirms. Polling must never silently
+      // authorize overwriting an edit made while the confirmation is open.
+      restoreVersion.current = latest.content_version;
+      setTarget(rec);
+      setConfirmOpen(true);
+    } catch (err) {
+      if (alive.current) setLastResult({ ok: false, message: err instanceof Error ? err.message : "无法准备恢复" });
+    } finally {
+      actionPending.current = false;
+      if (alive.current) setRestoring(false);
+    }
   };
 
-  const showPreview = async (rec: WorkbookRevisionItem) => {
+  const showPreview = async (rec: WorkbookRevisionItem, sheet?: string) => {
     if (!filePath) return;
+    previewAbort.current?.abort();
+    const controller = new AbortController();
+    previewAbort.current = controller;
     setPreviewLoading(true);
     try {
       const data = await fetchRevisionPreview({
@@ -179,37 +233,34 @@ export function RevisionTimelinePanel({
         revisionId: rec.revision_id,
         sessionId: activeSessionId,
         workspaceId,
+        sheet,
+        signal: controller.signal,
       });
-      const cells: { address: string; value: string }[] = [];
-      for (const [index, paragraph] of (data.paragraphs ?? []).entries()) {
-        if (paragraph.text) cells.push({ address: `P${index + 1}`, value: paragraph.text });
-        if (cells.length >= 100) break;
-      }
-      for (const [address, cell] of Object.entries(data.windows?.[0]?.cells ?? {})) {
-        const value = cell.f ? `公式: ${cell.f}` : cell.v == null ? "" : String(cell.v);
-        if (value) cells.push({ address, value });
-        if (cells.length >= 100) break;
-      }
-      setPreview({ revision: rec, cells });
+      if (controller.signal.aborted || !alive.current) return;
+      setPreview({ revision: rec, data });
     } catch (err) {
+      if (controller.signal.aborted || !alive.current) return;
       setLastResult({ ok: false, message: err instanceof Error ? err.message : "历史版本预览失败" });
     } finally {
-      setPreviewLoading(false);
+      if (alive.current && previewAbort.current === controller) setPreviewLoading(false);
     }
   };
 
   const removeCheckpoint = async (rec: WorkbookRevisionItem) => {
-    if (!filePath || rec.reason !== "checkpoint") return;
+    if (!filePath || rec.reason !== "checkpoint" || actionPending.current) return;
     if (typeof window !== "undefined" && !window.confirm(`删除检查点「${revisionReasonLabel(rec.reason, rec.label)}」？此操作不会删除自动历史。`)) return;
+    actionPending.current = true;
     setRestoring(true);
     try {
       await deleteRevision({ path: filePath, revisionId: rec.revision_id, sessionId: activeSessionId, workspaceId });
+      if (!alive.current) return;
       setLastResult({ ok: true, message: "检查点已删除" });
       await load();
     } catch (err) {
-      setLastResult({ ok: false, message: err instanceof Error ? err.message : "检查点删除失败" });
+      if (alive.current) setLastResult({ ok: false, message: err instanceof Error ? err.message : "检查点删除失败" });
     } finally {
-      setRestoring(false);
+      actionPending.current = false;
+      if (alive.current) setRestoring(false);
     }
   };
 
@@ -321,9 +372,9 @@ export function RevisionTimelinePanel({
                                     </p>
                                   )}
                                 </button>
-                                {current ? (
+                                {current && (
                                   <span className="text-[10px] text-muted-foreground shrink-0">正在使用</span>
-                                ) : (
+                                )}
                                   <div className="flex items-center gap-1">
                                     <Button
                                       variant="ghost"
@@ -338,8 +389,8 @@ export function RevisionTimelinePanel({
                                       variant="outline"
                                       size="sm"
                                       className="h-7 text-[11px] px-2"
-                                      disabled={restoring}
-                                      onClick={() => askRestore(rec)}
+                                      disabled={restoring || current}
+                                      onClick={() => void askRestore(rec)}
                                     >
                                       <RotateCcw className="h-3 w-3 mr-1" />恢复
                                     </Button>
@@ -356,7 +407,6 @@ export function RevisionTimelinePanel({
                                       </Button>
                                     )}
                                   </div>
-                                )}
                               </div>
                             </div>
                           );
@@ -374,6 +424,10 @@ export function RevisionTimelinePanel({
               {lastResult.message}
             </div>
           )}
+          {total > revisions.length && <div className="text-xs text-muted-foreground">
+            已显示最近 {revisions.length} / {total} 个快照。
+            {historyLimit < 500 && <Button variant="ghost" disabled={loading} onClick={() => setHistoryLimit((n) => Math.min(500, n + 100))}>加载更早版本</Button>}
+          </div>}
         </div>
       </div>
       <OverlayCard open={confirmOpen} onOpenChange={setConfirmOpen} size="sm" tone="warning">
@@ -388,23 +442,21 @@ export function RevisionTimelinePanel({
         />
         <OverlayCardFooter>
           <OverlayCardAction action="ghost" onClick={() => setConfirmOpen(false)}>取消</OverlayCardAction>
-          <OverlayCardAction action="destructive" onClick={() => void handleConfirm()}>
+          <OverlayCardAction action="destructive" disabled={restoring} onClick={() => void handleConfirm()}>
             {isMobile ? "恢复" : "确认恢复"}
           </OverlayCardAction>
         </OverlayCardFooter>
       </OverlayCard>
-      <OverlayCard open={Boolean(preview)} onOpenChange={(open) => { if (!open) setPreview(null); }} size="md">
+      <OverlayCard open={Boolean(preview)} onOpenChange={(open) => { if (!open) { previewAbort.current?.abort(); setPreview(null); } }} size="lg" style={{ "--overlay-card-width": "min(1000px, 95vw)" } as CSSProperties}>
         <OverlayCardHeader
           title={preview ? `历史预览 · ${revisionReasonLabel(preview.revision.reason, preview.revision.label)}` : "历史预览"}
-          description={preview ? `revision ${preview.revision.revision_id}` : ""}
-          onClose={() => setPreview(null)}
+          description={preview ? `${fileName} · ${formatRelativeTime(preview.revision.created_at)}` : ""}
+          onClose={() => { previewAbort.current?.abort(); setPreview(null); }}
         />
         <div className="max-h-[50vh] overflow-auto px-4 pb-3">
-          {preview?.cells.length ? (
-            <div className="grid grid-cols-[90px_1fr] gap-x-3 gap-y-1 text-xs">
-              {preview.cells.map((cell) => <Fragment key={cell.address}><span className="font-mono text-muted-foreground">{cell.address}</span><span className="break-all">{cell.value}</span></Fragment>)}
-            </div>
-          ) : <p className="text-xs text-muted-foreground">该窗口没有非空单元格。</p>}
+          {preview?.data.windows?.length ? <RevisionWorkbookPreview data={preview.data} loading={previewLoading} onSheet={(sheet) => void showPreview(preview.revision, sheet)} />
+            : preview?.data.paragraphs?.length ? <div className="space-y-2 text-sm">{preview.data.paragraphs.map((p, i) => <p key={i}>{p.text}</p>)}</div>
+            : <p className="text-xs text-muted-foreground">该窗口没有内容。</p>}
         </div>
       </OverlayCard>
     </>

@@ -9,20 +9,20 @@ const { chromium } = require("playwright");
 const { createServer } = await import("vite");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const server = await createServer({
-  root, configFile: false,
+  root, configFile: false, cacheDir: path.join(root, "node_modules/.vite-workbook-loading"),
   resolve: { alias: [
     { find: "@/lib/univer-modules", replacement: path.join(root, "src/__tests__/fixtures/univer-modules-browser.ts") },
     { find: "@", replacement: path.join(root, "src") },
   ] },
   esbuild: { jsx: "automatic" },
-  optimizeDeps: { include: ["react", "react-dom/client", "react-dom", "react/jsx-dev-runtime", "zustand", "zustand/middleware", "lucide-react", "@univerjs/core", "@univerjs/presets", "@univerjs/preset-sheets-core", "@univerjs/preset-sheets-core/locales/zh-CN"] },
+  optimizeDeps: { include: ["react", "react-dom/client", "react-dom", "react/jsx-dev-runtime", "zustand", "zustand/middleware", "lucide-react", "clsx", "tailwind-merge", "@univerjs/core", "@univerjs/presets", "@univerjs/preset-sheets-core", "@univerjs/preset-sheets-core/locales/zh-CN", "@univerjs/sheets-ui"] },
   define: { "process.env.NODE_ENV": JSON.stringify("development") },
   server: { host: "127.0.0.1", port: 0 },
 });
 let browser;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, ...(process.env.WORKBOOK_BROWSER_CHANNEL ? { channel: process.env.WORKBOOK_BROWSER_CHANNEL } : {}) });
   const page = await browser.newPage({ viewport: { width: Number(process.env.WORKBOOK_TEST_WIDTH || 1280), height: 800 } });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -122,6 +122,7 @@ try {
   if (process.env.WORKBOOK_SCREENSHOT) await page.screenshot({ path: process.env.WORKBOOK_SCREENSHOT.replace(/\.png$/, ".ready.png") });
   assert.equal(requests.filter((r) => !r.sheet && r.with_styles === "0").length, 1);
   assert.equal(await page.evaluate(() => window.workbookCounters.created), 1);
+  if (!process.env.WORKBOOK_INTERACTIONS_ONLY) {
   const requestsBeforeRender = requests.length;
   for (let i=0;i<5;i++) await page.getByText("Parent render").click();
   await page.waitForTimeout(400);
@@ -148,13 +149,17 @@ try {
   assert.equal(await page.evaluate(() => window.workbookCounters.created), 1);
   writeDelay = 0;
 
+  const beforeRemoteRefresh = await page.evaluate(() => window.workbookCounters.created);
   delete cells["5,3"]; delete cells["1,2"]; version++;
   await page.evaluate((v) => window.excelStore.getState().notifyWorkbookChanged("book.xlsx", "id:browser-ws", v), `v${version}`);
   await page.waitForFunction(() => {
     const s=window.workbookAPI.getActiveWorkbook().getActiveSheet();
     return s.getRange("C5").getValue() == null && s.getRange("B1").getCellData()?.f == null;
   });
-  assert.equal(await page.evaluate(() => window.workbookCounters.created), 1);
+  // An external version replaces the snapshot and its undo history; local saves above do not.
+  assert.equal(await page.evaluate(() => window.workbookCounters.created), beforeRemoteRefresh + 1);
+  await ready();
+  await page.waitForTimeout(600); // Finish the styled window and adjacent-page prefetch before measuring idle reads.
   const countBeforeOther = requests.length;
   await page.evaluate(() => window.excelStore.getState().notifyWorkbookChanged("unrelated.xlsx", "id:browser-ws", "v9"));
   await page.waitForTimeout(400);
@@ -175,7 +180,7 @@ try {
   await page.getByText("Toggle visibility").click();
   await page.waitForTimeout(700);
   assert(requests.length > countBeforeHidden);
-  assert.equal(await page.evaluate(() => window.workbookCounters.created), 1);
+  assert.equal(await page.evaluate(() => window.workbookCounters.created), beforeRemoteRefresh + 2);
 
   // A stale local edit remains visible and stops the file's write queue.
   await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().scrollToCell(0, 0));
@@ -193,25 +198,119 @@ try {
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "重新加载" }).click();
   await page.waitForFunction(() => !document.querySelector('[role="alert"]') && window.workbookAPI.getActiveWorkbook().getActiveSheet().getRange("F5").getValue() == null);
-  assert.equal(await page.evaluate(() => window.workbookCounters.created), 1);
+  assert.equal(await page.evaluate(() => window.workbookCounters.created), beforeRemoteRefresh + 3);
 
-  // Sheet deletion is the exceptional structural rebuild path.
+  // Sheet deletion also replaces the snapshot and drops obsolete sheets.
   sheets = ["Main"]; version++;
   await page.evaluate((v) => window.excelStore.getState().notifyWorkbookChanged("book.xlsx", "id:browser-ws", v), `v${version}`);
   await page.waitForFunction(() => window.workbookAPI.getActiveWorkbook().getSheets().length === 1);
   await ready();
-  assert.equal(await page.evaluate(() => window.workbookCounters.created), 2);
+  assert.equal(await page.evaluate(() => window.workbookCounters.created), beforeRemoteRefresh + 4);
   await page.getByText("Switch file").click();
   await page.waitForTimeout(100);
   await page.getByText("Switch file").click();
-  await page.waitForFunction(() => window.workbookCounters.created === 4);
+  await page.waitForFunction((expected) => window.workbookCounters.created === expected, beforeRemoteRefresh + 6);
   await ready();
   await page.waitForTimeout(500);
   assert.equal(await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().getRange("A1").getValue()), "original");
   assert.equal(await page.locator("[data-univer-container]").isVisible(), true);
+  }
+  // Exercise range presentation and the actual selection -> HTTP answer path.
+  const interactionVersion = `v${version}`;
+  const writesBeforeInteraction = writes.length;
+  await page.evaluate((v) => {
+    const sheet = window.workbookAPI.getActiveWorkbook().getActiveSheet();
+    window.beforeHighlightCells = JSON.stringify(sheet.getSheet().getSnapshot().cellData);
+    window.overlayStats = { created: 0, disposed: 0 };
+    const proto = Object.getPrototypeOf(sheet);
+    const highlight = proto.highlightRanges;
+    proto.highlightRanges = function (...args) {
+      window.overlayStats.created++;
+      const overlay = highlight.apply(this, args);
+      return { dispose: () => { window.overlayStats.disposed++; overlay.dispose(); } };
+    };
+    window.interactionTarget = { file_path: "book.xlsx", workspace_id: "browser-ws", sheet: "Main", ranges: ["A1:B2"], content_version: v };
+    window.showWorkbookPresentation({ kind: "workbook_presentation", target: window.interactionTarget, stage: "planned", summary: "准备整理这些单元格" }, "browser");
+  }, interactionVersion);
+  await page.getByText("准备修改的区域", { exact: true }).waitFor();
+  await page.waitForFunction(() => window.overlayStats.created > 0);
+  // The breathing window updates live native controls, without rebuilding marks.
+  const focusSnapshot = () => page.evaluate(() => [...window.workbookMarks.getShapeMap().values()].map((shape) => ({
+    style: shape.selection.style,
+    rendered: { stroke: shape.control?.currentStyle.stroke, fill: shape.control?.currentStyle.fill },
+  })));
+  const firstFocus = await focusSnapshot();
+  assert.equal(firstFocus.length, 2);
+  await page.waitForTimeout(400);
+  const breathingFocus = await focusSnapshot();
+  assert.notDeepEqual(breathingFocus, firstFocus);
+  breathingFocus.forEach(({ style, rendered }) => assert.deepEqual(rendered, { stroke: style.stroke, fill: style.fill }));
+  assert.equal(await page.evaluate(() => window.overlayStats.created), 2);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForFunction(() => [...window.workbookMarks.getShapeMap().values()].some((shape) => shape.selection.style.stroke === "rgba(245,158,11,0.790)"));
+  const steadyFocus = await focusSnapshot();
+  await page.waitForTimeout(200);
+  assert.deepEqual(await focusSnapshot(), steadyFocus);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().zoom(1.25));
+  await page.waitForTimeout(150);
+  const zoomedFocus = await focusSnapshot();
+  assert.equal(zoomedFocus.length, 2);
+  zoomedFocus.forEach(({ style, rendered }) => assert.deepEqual(rendered, { stroke: style.stroke, fill: style.fill }));
+  await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().zoom(1));
+  if (process.env.WORKBOOK_SCREENSHOT) {
+    const screenshot = path.parse(process.env.WORKBOOK_SCREENSHOT);
+    await page.screenshot({ path: path.join(screenshot.dir, `${screenshot.name}-planned${screenshot.ext}`) });
+  }
+  assert.equal(await page.evaluate(() => JSON.stringify(window.workbookAPI.getActiveWorkbook().getActiveSheet().getSheet().getSnapshot().cellData) === window.beforeHighlightCells), true);
+  const answers = [];
+  await page.route("**/api/v1/chat/browser/answer", async (route) => {
+    answers.push(route.request().postDataJSON());
+    await route.fulfill({ json: { status: "answered" } });
+  });
+  await page.evaluate(() => {
+    window.chatStore.getState().setPendingQuestion({ id: "browser-question", header: "范围", text: "请选择范围", options: [], multiSelect: false, selection: window.interactionTarget, sessionId: "browser" });
+    window.openWorkbookQuestion("browser-question", window.interactionTarget, "browser");
+  });
+  await page.getByText("请选区并确认", { exact: true }).waitFor();
+  await page.evaluate(() => {
+    const sheet = window.workbookAPI.getActiveWorkbook().getActiveSheet();
+    sheet.setActiveRange(sheet.getRange("A1:B2"));
+    try { sheet.getRange("A1").setValue("must not write during question"); } catch {}
+  });
+  await page.waitForFunction(() => window.excelStore.getState().draftRange?.range === "A1:B2");
+  // Univer reports the intentional blocked edit in its own modal.
+  const protectedRangeDialog = page.getByRole("button", { name: "确定", exact: true });
+  if (await protectedRangeDialog.isVisible()) await protectedRangeDialog.click();
+  assert.equal(await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().getRange("A1").getValue()), "original");
+  assert.equal(answers.length, 0);
+  await page.getByRole("button", { name: "确认此区域" }).click({ timeout: 5000 }).catch(async (error) => {
+    console.error(JSON.stringify(await page.evaluate(() => ({ text: document.body.innerText.slice(-1800),
+      pending: window.chatStore.getState().pendingQuestion, mode: window.excelStore.getState().selectionMode,
+      draft: window.excelStore.getState().draftRange }))));
+    if (process.env.WORKBOOK_SCREENSHOT) await page.screenshot({ path: process.env.WORKBOOK_SCREENSHOT });
+    throw error;
+  });
+  await page.waitForFunction(() => !window.chatStore.getState().pendingQuestion);
+  assert.equal(answers.length, 1);
+  assert.deepEqual(answers[0].selection.ranges, ["A1:B2"]);
+  assert.equal(answers[0].selection.content_version, interactionVersion);
+  assert.equal(writes.length, writesBeforeInteraction);
+  assert.ok(await page.evaluate(() => window.overlayStats.disposed > 0));
+  const overlaysBeforeChange = await page.evaluate(() => window.overlayStats.created);
+  version++;
+  cells["3,8"] = { t: "s", v: "agent change", cached: "yes" };
+  await page.evaluate((v) => {
+    window.excelStore.getState().notifyWorkbookChanged("book.xlsx", "id:browser-ws", v);
+    window.showWorkbookPresentation({ kind: "workbook_presentation", target: { ...window.interactionTarget, ranges: ["H3"], content_version: v }, stage: "changed", summary: "已更新此单元格" }, "browser");
+  }, `v${version}`);
+  await page.getByText("已修改的区域", { exact: true }).waitFor();
+  await page.waitForFunction((count) => window.overlayStats.created > count, overlaysBeforeChange);
+  assert.equal(await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().getRange("H3").getValue()), "agent change");
+  assert.equal(writes.length, writesBeforeInteraction);
   if (process.env.WORKBOOK_SCREENSHOT) await page.screenshot({ path: process.env.WORKBOOK_SCREENSHOT });
   assert.deepEqual(errors, []);
-  console.log(JSON.stringify({ status: "passed", scenarios: ["native loading shell", "stable shell geometry", "no edits before data", "first paint", "stable parent render", "local edit", "queued edits", "remote delete", "file scope", "sheet switch", "viewport boundary", "hidden refresh", "conflict retention", "conflict reload", "sheet deletion", "late file response"], requests: requests.length, writes: writes.length, nonStructuralWorkbookCreates: 1, afterStructuralChange: 2, afterFileSwitch: 4, loadingLayout }));
+  console.log(JSON.stringify({ status: "passed", mode: process.env.WORKBOOK_INTERACTIONS_ONLY ? "interactions" : "all", scenarios: [...(process.env.WORKBOOK_INTERACTIONS_ONLY ? [] : ["stable parent render", "local edit", "queued edits", "remote delete", "file scope", "sheet switch", "viewport boundary", "hidden refresh", "conflict retention", "conflict reload", "sheet deletion", "late file response"]), "native loading shell", "stable shell geometry", "no edits before data", "first paint", "breathing without mark recreation", "live reduced motion", "zoomed focus", "planned overlay without style writes", "selection confirmation HTTP", "selection read-only", "overlay cleanup"], requests: requests.length, writes: writes.length, loadingLayout }));
 } finally {
   await browser?.close();
   await server.close();
