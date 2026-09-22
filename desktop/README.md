@@ -131,7 +131,6 @@ The first measures the upstream copy path; `--fast` measures the destination-loc
 move path against the same payload. Results go to unique `.build/install-profile`
 directories. Run them sequentially without other builds for comparable timings.
 They measure file operations, not upgrade removal, registry writes or shortcuts.
-See [Windows installation measurements](../docs/windows-install-performance-20260920.md).
 
 ## Validate the packaged runtime
 
