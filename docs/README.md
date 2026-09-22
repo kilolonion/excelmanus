@@ -35,9 +35,9 @@ The running service exposes its request and response schemas at [the local API r
 
 ## 文档状态 · Document status
 
-以上页面是当前使用与维护入口。`docs/design/`、带日期的审计与改造报告、`bench/reports/` 和 `RELEASE_v*.md` 保留各自时间点的方案、发现或发布记录。其中的计划、测试数字和完成判断不自动代表当前版本状态。
+以上页面是当前使用与维护入口。
 
-The pages above are the current usage and maintenance entry points. Design documents, dated audits, benchmark reports, and historical release notes retain their original scope and evidence. Their plans and results do not automatically apply to the current version.
+The pages above are the current usage and maintenance entry points.
 
 这些历史文件仍可能被 Git 跟踪；文档分类和 `.gitignore` 都不会自动将已跟踪文件排除出源码发布。准备公开源码时，应另行核对实际提交清单。运行时使用的 `excelmanus/prompts/` 和 `excelmanus/skillpacks/` 随 Python 包分发，属于行为指令，应按相应契约维护。
 

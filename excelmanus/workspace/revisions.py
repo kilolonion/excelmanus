@@ -1,8 +1,6 @@
 """RevisionStore — hidden history under ``.excelmanus/revisions/``.
 
-规则：
-
-    若开历史且文件已存在：beforeEdit → AtomicPublish → afterEdit → prune
+写入顺序：若开历史且文件已存在：beforeEdit → AtomicPublish → afterEdit → prune
     新建：beforeEdit 可空；afterEdit 仍记
     失败：discard 该 transactionId；失败事务的记录不得出现在 list
 

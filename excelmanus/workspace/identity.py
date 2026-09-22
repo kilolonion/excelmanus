@@ -1,8 +1,6 @@
 """Canonical workspace file identity.
 
-规则：
-
-    CanonicalPath：工作区相对、``/`` 规范化、经 realpath。
+CanonicalPath 规则：工作区相对、``/`` 规范化、经 realpath。
     展示名可以不同（上传原名）。锁、CAS、事件只认它。
 
     解析 ``resolve()`` 与 ``catalog()`` 拒绝第一段为 ``.excelmanus`` 的路径

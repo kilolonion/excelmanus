@@ -76,7 +76,6 @@ logs/
 # ==============================
 *.png
 !docs/images/*.png
-!docs/design/**/*.png
 !assets/*.png
 !android/app/src/main/res/drawable-nodpi/
 !android/app/src/main/res/drawable-nodpi/ic_launcher.png
@@ -95,9 +94,27 @@ tasks/
 dev-docs/
 docs/plans/
 docs/research/
-# 审计报告随源码保留；原始运行日志和本机数据留在已忽略目录。
-# docs/audit_*.md
-docs/agent-architecture-review.md
+# 内部开发文档不入库：设计稿、审计/改造报告、评测报告与历史发布说明。
+# 保留 docs/ 下的对外文档（README 导航、配置参考、运维手册、Skillpack 协议、
+# 隐私政策、用户服务协议、提示词分层、服务器登录保护、技能装载）及其 _en 版本。
+docs/design/
+docs/agent-*.md
+docs/architecture-*.md
+docs/audit_*.md
+docs/baseline-*.md
+docs/bench-*.md
+docs/capability-*.md
+docs/desktop-*.md
+docs/excelmanus-*.md
+docs/excelmanus_*.md
+docs/native-tool-*.md
+docs/prompt-harness-*.md
+docs/tool-contract-*.md
+docs/windows-*.md
+docs/word-*.md
+docs/workspace-runtime-*.md
+docs/android-apk-*.md
+bench/reports/
 RELEASE_*.md
 !RELEASE_v1.8.0.md
 !README.md

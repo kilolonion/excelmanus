@@ -1,7 +1,4 @@
-"""Workbook publish entry: CanonicalPath + AtomicPublish.
-
-Publish path: CanonicalPath + AtomicPublish.
-"""
+"""Workbook publish entry: CanonicalPath + AtomicPublish."""
 
 from __future__ import annotations
 

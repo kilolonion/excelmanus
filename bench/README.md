@@ -75,7 +75,7 @@ uv run python -m excelmanus.bench --help
 - **正确性**：由 error 级过程断言和 `output_checks` 判定。断言范围外的文件保真、界面体验等仍需单独检查。
 - **效率**：`max_*` 预算默认产生 warning，不改变正确性结论；`--strict-efficiency` 或 PowerShell `-Strict` 会将超限纳入失败。
 - **体验套件**：`scoring: none`，按 `review_focus` 人工阅读回复、操作和交付内容；不能将运行结束等同于业务通过。
-- **历史报告**：`reports/` 中的结果只适用于所记录的代码、模型、配置和夹具，不能直接用作新版本通过证明。
+- **结果解释**：单次运行结果只适用于所记录的代码、模型、配置和夹具，不能直接用作新版本通过证明。
 
 办公套件通过 `@answers:key` 引用 `fixtures/realistic/answers.json`。标准答案由评测器读取；Agent 不应读取答案或套件定义来完成任务。完整字段与反绕过规则见 [套件文档](cases/README.md)。
 
@@ -87,7 +87,6 @@ uv run python -m excelmanus.bench --help
 | `conversations/{case_id}.json` | 模拟前端 transcript、会话记录和引擎记忆 |
 | `run_*.json` | 完整执行记录，包括模型请求与 usage |
 | `workfiles/{suite}/{case_id}/` | 用例独立工作区 |
-| `bench/reports/` | 已保存的阶段分析与历史报告 |
 
 默认 CLI 产物目录为 `outputs/bench`。PowerShell 入口默认按套件和 wave 组织到 `outputs/`。`analyze_run.py` 与 `summarize_runs.py` 用于复盘和指标汇总。
 
