@@ -559,8 +559,13 @@ class SessionManager:
         workspace_id: str | None = None,
         workspace_path: str | None = None,
         title: str = "新对话",
+        reuse_blank: bool = True,
     ) -> dict[str, Any]:
-        """Create a blank session or reuse the unused one for this folder. No engine."""
+        """Create a blank session, optionally reusing the folder's blank one.
+
+        ``reuse_blank`` keeps the landing-page bootstrap idempotent while allowing
+        an explicit "new chat" action to always create a distinct conversation.
+        """
         if workspace_id or workspace_path:
             path, ws_id = self.resolve_workspace_binding(workspace_id, workspace_path)
         else:
@@ -568,7 +573,7 @@ class SessionManager:
         display = (title or "").strip() or "新对话"
         async with self._lock:
             if self._chat_history is not None:
-                existing = self._chat_history.find_blank_session(path)
+                existing = self._chat_history.find_blank_session(path) if reuse_blank else None
                 if existing is not None:
                     existing_id = str(existing.get("id") or "")
                     if existing_id:
@@ -1859,9 +1864,13 @@ class SessionManager:
         return results
 
     async def get_session_detail(
-        self, session_id: str, *, user_id: str | None = None
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        include_messages: bool = True,
     ) -> dict:
-        """获取会话详情含消息历史。
+        """获取会话详情，可选择跳过消息历史序列化。
 
         性能优化：锁内仅做快速引用捕获（微秒级），
         所有序列化工作在锁外执行，避免阻塞并发 acquire/release。
@@ -1879,7 +1888,7 @@ class SessionManager:
         # ── 锁外：序列化（可能耗时但不阻塞其他会话） ──
         if engine is not None:
             messages = []
-            if hasattr(engine, "raw_messages"):
+            if include_messages and hasattr(engine, "raw_messages"):
                 raw_messages = list(engine.raw_messages)
                 for idx, message in enumerate(raw_messages):
                     if isinstance(message, dict):
@@ -1942,7 +1951,7 @@ class SessionManager:
             )
             return {
                 "id": session_id,
-                "message_count": len(messages),
+                "message_count": len(engine.raw_messages) if hasattr(engine, "raw_messages") else 0,
                 "in_flight": in_flight,
                 "messages": messages,
                 "full_access_enabled": engine.full_access_enabled,
@@ -1960,14 +1969,19 @@ class SessionManager:
         if self._chat_history is not None:
             if not self._chat_history.session_exists(session_id):
                 raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
-            messages = self._chat_history.load_messages(session_id)
+            messages = self._chat_history.load_messages(session_id) if include_messages else []
+            message_count = (
+                len(messages)
+                if include_messages
+                else self._chat_history.get_message_count(session_id)
+            )
             _fa = False
             _uc = self._resolve_user_config_store()
             if _uc is not None and hasattr(_uc, "get_full_access"):
                 _fa = _uc.get_full_access()
             return {
                 "id": session_id,
-                "message_count": len(messages),
+                "message_count": message_count,
                 "in_flight": False,
                 "messages": messages,
                 "full_access_enabled": _fa,
@@ -1983,6 +1997,18 @@ class SessionManager:
                 "last_route": None,
             }
         raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
+
+    async def get_session_message_count(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> int:
+        """Return the count without restoring or serializing the transcript."""
+        async with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry is not None and hasattr(entry.engine, "raw_messages"):
+                return len(entry.engine.raw_messages)
+        if self._chat_history is not None and self._chat_history.session_exists(session_id):
+            return self._chat_history.get_message_count(session_id)
+        return 0
 
     async def rollback_session(
         self,
@@ -2037,6 +2063,7 @@ class SessionManager:
         session_id: str,
         limit: int = 50,
         offset: int = 0,
+        tail: bool = False,
         *,
         user_id: str | None = None,
     ) -> list[dict]:
@@ -2046,7 +2073,8 @@ class SessionManager:
             if entry is not None:
                 engine = entry.engine
                 raw_messages = list(engine.raw_messages)
-                page = raw_messages[offset: offset + limit]
+                start = max(0, len(raw_messages) - limit) if tail else offset
+                page = raw_messages[start: start + limit]
                 normalized: list[dict] = []
                 for idx, message in enumerate(page):
                     if isinstance(message, dict):
@@ -2054,12 +2082,14 @@ class SessionManager:
                     else:
                         item = {"role": "unknown", "content": str(message)}
                     if not item.get("message_id"):
-                        item["message_id"] = f"volatile:{session_id}:{offset + idx}"
+                        item["message_id"] = f"volatile:{session_id}:{start + idx}"
                     normalized.append(item)
                 return normalized
 
         if self._chat_history is not None:
             if not self._chat_history.session_exists(session_id):
                 return []
+            if tail:
+                return self._chat_history.load_messages_tail(session_id, limit=limit)
             return self._chat_history.load_messages(session_id, limit=limit, offset=offset)
         return []

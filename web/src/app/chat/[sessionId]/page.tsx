@@ -11,11 +11,15 @@ import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
+import { ChatHistoryStatus } from "@/components/chat/ChatHistoryStatus";
 
 function ChatPage() {
   const params = useParams();
   const sessionId = params.sessionId as string;
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const messageOrder = useChatStore((s) => s.messageOrder);
+  const messageLoadError = useChatStore((s) => s.messageLoadError);
+  const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const compareMode = useExcelStore((s) => s.compareMode);
   const cmdResult = useCommandResult();
@@ -32,18 +36,22 @@ function ChatPage() {
   return (
     <div className="flex flex-col h-full">
       <WorkspaceViewHost>
-        <MessageStream
-          isStreaming={isStreaming}
-          onEditAndResend={(messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
-            rollbackAndResend(messageId, newContent, sessionId, files, retainedFiles);
-          }}
-          onRetry={(assistantMessageId: string) => {
-            retryAssistantMessage(assistantMessageId, sessionId);
-          }}
-          onRetryWithModel={(assistantMessageId: string, modelName: string) => {
-            retryAssistantMessage(assistantMessageId, sessionId, modelName);
-          }}
-        />
+        {messageOrder.length === 0 ? (
+          <ChatHistoryStatus sessionId={sessionId} empty={isLoadingMessages || Boolean(messageLoadError)} />
+        ) : (
+          <MessageStream
+            isStreaming={isStreaming}
+            onEditAndResend={(messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
+              rollbackAndResend(messageId, newContent, sessionId, files, retainedFiles);
+            }}
+            onRetry={(assistantMessageId: string) => {
+              retryAssistantMessage(assistantMessageId, sessionId);
+            }}
+            onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+              retryAssistantMessage(assistantMessageId, sessionId, modelName);
+            }}
+          />
+        )}
       </WorkspaceViewHost>
 
       {!compareMode && (

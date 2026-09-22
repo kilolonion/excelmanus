@@ -75,6 +75,10 @@ MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
     {
         "run_shell",
         "delete_file",
+        # Skill installation/uninstallation changes the session's executable
+        # surface and must use the same approval gate as other destructive
+        # capabilities.  action=list is narrowed to read-only below.
+        "manage_skills",
     }
 )
 
@@ -108,6 +112,8 @@ if READ_ONLY_SAFE_TOOLS & MUTATING_ALL_TOOLS:
 # 同一工具内按 action 覆盖 write_effect。未列出的 action 沿用 ToolDef 声明。
 READONLY_TOOL_ACTIONS: dict[str, frozenset[str]] = {
     "manage_spreadsheet_versions": frozenset({"list"}),
+    # 技能目录查询只读；install/uninstall 沿用宿主 ToolDef 的写效应。
+    "manage_skills": frozenset({"list"}),
 }
 
 
@@ -226,7 +232,7 @@ def is_concurrency_safe(
 
 
 _PATH_RULED_TOOLS = set(AUDIT_TARGET_ARG_RULES_ALL) | set(AUDIT_TARGET_ARG_RULES_FIRST)
-_EXPECTED_PATH_RULED_TOOLS = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell"}
+_EXPECTED_PATH_RULED_TOOLS = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell", "manage_skills"}
 if _PATH_RULED_TOOLS != _EXPECTED_PATH_RULED_TOOLS:
     missing = sorted(_EXPECTED_PATH_RULED_TOOLS - _PATH_RULED_TOOLS)
     extra = sorted(_PATH_RULED_TOOLS - _EXPECTED_PATH_RULED_TOOLS)

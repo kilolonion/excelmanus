@@ -9,8 +9,12 @@ from __future__ import annotations
 import copy
 import json
 import asyncio
+import os
+import signal
+import subprocess
 import threading
 import uuid
+import time
 from contextvars import ContextVar
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -32,6 +36,162 @@ from excelmanus.logger import get_logger
 from excelmanus.tools.policy import is_concurrency_safe as policy_is_concurrency_safe
 
 logger = get_logger("tools.runtime")
+
+
+# 子进程由宿主持有，而不是由不可终止的线程池线程持有。run_code/run_shell
+# 在启动 Popen 后注册到这里；取消时按 execution_id 杀掉整棵进程树，线程只
+# 负责收集已终止的 stdout/stderr，不会继续向 workspace 发布 pending 写入。
+_PROCESS_LOCK = threading.RLock()
+_ACTIVE_PROCESSES: dict[str, set[subprocess.Popen[Any]]] = {}
+_WINDOWS_JOB_HANDLES: dict[int, int] = {}
+
+
+def _attach_windows_job(process: subprocess.Popen[Any]) -> None:
+    """Attach a child to a kill-on-close Job Object when running on Windows."""
+    if (
+        os.name != "nt"
+        or not getattr(process, "pid", None)
+        or os.environ.get("EXCELMANUS_WINDOWS_JOB_OBJECT", "0").strip().lower()
+        not in {"1", "true", "yes", "on"}
+    ):
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        job = kernel.CreateJobObjectW(None, None)
+        if not job:
+            return
+        # JOBOBJECT_EXTENDED_LIMIT_INFORMATION starts with a basic limit
+        # structure (40 bytes on Windows); the final LimitFlags field is at
+        # offset 32.  KILL_ON_JOB_CLOSE = 0x2000.
+        class _Info(ctypes.Structure):
+            _fields_ = [("padding", ctypes.c_byte * 32), ("limit_flags", wintypes.DWORD), ("rest", ctypes.c_byte * 144)]
+
+        info = _Info()
+        info.limit_flags = 0x2000
+        if not kernel.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            kernel.CloseHandle(job)
+            return
+        handle = kernel.OpenProcess(0x0200 | 0x0800 | 0x0400, False, int(process.pid))
+        if not handle or not kernel.AssignProcessToJobObject(job, handle):
+            if handle:
+                kernel.CloseHandle(handle)
+            kernel.CloseHandle(job)
+            return
+        kernel.CloseHandle(handle)
+        with _PROCESS_LOCK:
+            _WINDOWS_JOB_HANDLES[id(process)] = int(job)
+    except Exception:
+        logger.debug("Windows Job Object attach failed", exc_info=True)
+
+
+def _close_windows_job(process: subprocess.Popen[Any]) -> None:
+    handle = None
+    with _PROCESS_LOCK:
+        handle = _WINDOWS_JOB_HANDLES.pop(id(process), None)
+    if handle and os.name == "nt":
+        try:
+            import ctypes
+            ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
+        except Exception:
+            pass
+
+
+def register_killable_process(execution_id: str | None, process: subprocess.Popen[Any]) -> None:
+    if not execution_id:
+        return
+    with _PROCESS_LOCK:
+        _ACTIVE_PROCESSES.setdefault(str(execution_id), set()).add(process)
+    _attach_windows_job(process)
+
+
+def unregister_killable_process(execution_id: str | None, process: subprocess.Popen[Any]) -> None:
+    if not execution_id:
+        return
+    with _PROCESS_LOCK:
+        active = _ACTIVE_PROCESSES.get(str(execution_id))
+        if not active:
+            return
+        active.discard(process)
+        _close_windows_job(process)
+        if not active:
+            _ACTIVE_PROCESSES.pop(str(execution_id), None)
+
+
+def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
+    """终止单个子进程及其新会话中的后代（best effort）。"""
+    if process.poll() is not None:
+        return
+    pid = int(getattr(process, "pid", 0) or 0)
+    try:
+        with _PROCESS_LOCK:
+            job_handle = _WINDOWS_JOB_HANDLES.get(id(process))
+        if job_handle and os.name == "nt":
+            import ctypes
+            ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(job_handle)
+            with _PROCESS_LOCK:
+                _WINDOWS_JOB_HANDLES.pop(id(process), None)
+            process.wait(timeout=3)
+            return
+        if os.name == "nt" and pid:
+            # CREATE_NEW_PROCESS_GROUP / shell wrapper 下，/T 才能避免孙进程
+            # 留在后台继续写文件。taskkill 失败时回退到直接 kill。
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=3,
+            )
+        elif pid:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                process.terminate()
+        else:
+            process.terminate()
+    except (OSError, subprocess.SubprocessError):
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=3)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=3)
+        except (subprocess.TimeoutExpired, OSError):
+            logger.warning("进程终止未在期限内完成: pid=%s", pid)
+
+
+def terminate_killable_processes(execution_id: str | None) -> int:
+    """终止 execution 下登记的所有子进程，返回尝试终止的数量。"""
+    if not execution_id:
+        return 0
+    with _PROCESS_LOCK:
+        processes = list(_ACTIVE_PROCESSES.get(str(execution_id), ()))
+    for process in processes:
+        _terminate_process_tree(process)
+    return len(processes)
+
+
+def terminate_killable_processes_async(execution_id: str | None) -> None:
+    """在后台线程终止进程树，不阻塞取消请求所在的 event loop。"""
+    if not execution_id:
+        return
+    threading.Thread(
+        target=terminate_killable_processes,
+        args=(execution_id,),
+        name=f"excelmanus-kill-{str(execution_id)[:8]}",
+        daemon=True,
+    ).start()
 
 
 @dataclass
@@ -138,6 +298,13 @@ class ToolRuntime:
         self._post_hooks: list[PostExecuteHook] = []
         self._token_seq = 0
         self._calls: dict[str, _ToolExecution] = {}
+        # A synchronous legacy tool can own a Python thread that cannot be
+        # force-killed.  Cancellation still has a hard user-visible deadline;
+        # the call is marked abandoned after this budget and its late result is
+        # discarded by the runtime/dispatcher.
+        self.cancel_drain_timeout = float(
+            getattr(getattr(engine, "config", None), "cancel_drain_timeout_seconds", 5.0) or 5.0
+        )
 
     def prepare_call(self, tc: Any, on_event: Any, iteration: int, *, retain: bool = False) -> _ToolExecution:
         existing = self._calls.get(getattr(tc, "_execution_id", ""))
@@ -186,6 +353,13 @@ class ToolRuntime:
             session = getattr(self.engine, "_active_code_mode_session", None)
             if session is not None and getattr(session, "root_call_id", None) == row.call_id:
                 session.stop()
+        if row.name in {"run_code", "run_shell"}:
+            terminate_killable_processes_async(row.execution_id)
+            logger.info(
+                "取消工具时异步终止子进程: tool=%s execution_id=%s",
+                row.name,
+                row.execution_id,
+            )
         if was_queued:
             row.queued_result = self._cancelled_result(row)
             self._finish_call(row, row.queued_result)
@@ -329,13 +503,18 @@ class ToolRuntime:
                 row.task.cancel()
             # 取消排空等待按 cancel_drain 记入空闲细分；CancelledError 传播不变。
             with idle_segment(self.engine, "cancel_drain"):
-                # Repeated stop requests cannot detach a still-running sync thread.
-                while not row.task.done():
+                deadline = time.monotonic() + max(0.1, self.cancel_drain_timeout)
+                # Repeated stop requests cannot detach a still-running sync
+                # thread.  Bound the drain so cancellation cannot hang the
+                # actor forever; killable subprocesses are terminated above.
+                while not row.task.done() and time.monotonic() < deadline:
                     try:
-                        await asyncio.shield(row.task)
+                        await asyncio.wait_for(asyncio.shield(row.task), timeout=max(0.05, deadline - time.monotonic()))
                     except asyncio.CancelledError:
                         parent_cancelled = parent_cancelled or parent_stopping()
                         continue
+                    except asyncio.TimeoutError:
+                        break
                     except Exception:
                         break
                 # A stopped SDK bridge can return before a non-cooperative child
@@ -343,11 +522,13 @@ class ToolRuntime:
                 child_tasks = [child.task for child in self._calls.values()
                                if child.parent_execution_id == row.execution_id and child.task is not None]
                 for task in child_tasks:
-                    while not task.done():
+                    while not task.done() and time.monotonic() < deadline:
                         try:
-                            await asyncio.shield(task)
+                            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.05, deadline - time.monotonic()))
                         except asyncio.CancelledError:
                             parent_cancelled = parent_cancelled or parent_stopping()
+                        except asyncio.TimeoutError:
+                            break
                         except Exception:
                             break
                 for task in [row.task, *child_tasks]:

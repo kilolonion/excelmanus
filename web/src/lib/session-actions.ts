@@ -37,10 +37,13 @@ export async function createOrReuseSession(opts?: {
   workspaceId?: string | null;
   workspacePath?: string | null;
   activate?: boolean;
+  /** Set false for an explicit user-triggered new conversation. */
+  reuseBlank?: boolean;
 }): Promise<Session> {
   const created = mapCreatedSession(await createSession({
     workspaceId: opts?.workspaceId,
     workspacePath: opts?.workspacePath,
+    reuseBlank: opts?.reuseBlank,
   }));
   const store = useSessionStore.getState();
   if (!store.sessions.some((s) => s.id === created.id)) {
@@ -68,6 +71,7 @@ export async function newChatInPreferredWorkspace(): Promise<Session> {
     return createOrReuseSession({
       workspaceId: active.workspaceId,
       workspacePath: active.workspacePath,
+      reuseBlank: false,
     });
   }
   let workspaces: WorkspaceFolder[] = [];
@@ -83,7 +87,7 @@ export async function newChatInPreferredWorkspace(): Promise<Session> {
     lastWorkspacePath: store.lastWorkspacePath,
     lastOpenedSessionId: store.activeSessionId,
   });
-  return createOrReuseSession(preferred);
+  return createOrReuseSession({ ...preferred, reuseBlank: false });
 }
 
 let landingInFlight: Promise<Session | null> | null = null;

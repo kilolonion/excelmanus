@@ -125,4 +125,13 @@ describe("createOrReuseSession", () => {
     expect(state.lastWorkspaceId).toBe("ws-a");
     expect(state.lastWorkspacePath).toBe("/data/a");
   });
+
+  it("passes through the explicit new-chat no-reuse flag", async () => {
+    await createOrReuseSession({ workspaceId: "ws-a", reuseBlank: false });
+    expect(createSession).toHaveBeenCalledWith({
+      workspaceId: "ws-a",
+      workspacePath: undefined,
+      reuseBlank: false,
+    });
+  });
 });

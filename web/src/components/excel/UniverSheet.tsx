@@ -86,6 +86,10 @@ function createPreviewWorkbookId(): string {
 }
 
 const LOADING_SHEET_ID = "__excelmanus_loading__";
+// The first request only needs enough cells to paint the opening viewport.
+// The actual visible window is fetched after Univer knows the container size;
+// asking for the legacy 10k-cell default here made large workbooks feel frozen.
+const INITIAL_VIEW_RECT = "A1:Z80";
 
 function loadingFileKey(file: WorkspaceFileRef | null | undefined, path: string) {
   return `${file?.workspaceKey || "_"}|${path.replace(/^\.\//, "")}`;
@@ -705,7 +709,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
               sessionId: sessionId ?? undefined,
               workspaceId: fileRef?.workspaceId,
               sheet: preferredSheet === null ? undefined : preferredSheet || initialSheetRef.current,
-              rect: position ? pageForCell(position.startRow, position.startColumn).address : undefined,
+              rect: position ? pageForCell(position.startRow, position.startColumn).address : INITIAL_VIEW_RECT,
               withStyles: false,
               viewGeneration: generation,
               signal: controller.signal,

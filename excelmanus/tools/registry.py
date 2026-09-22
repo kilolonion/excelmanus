@@ -51,6 +51,35 @@ WriteEffect = Literal[
 ]
 ToolVisibility = Literal["always", "hide_in_read"]
 ToolConsistency = Literal["local_commit", "external_unverified", "none"]
+ApprovalMode = Literal["none", "audit", "confirm"]
+
+
+@dataclass(frozen=True)
+class ToolCapability:
+    """一次工具调用的副作用合同。
+
+    ``ToolDef`` 仍保留旧字段以兼容插件，但运行时策略应读取这个派生
+    合同。这样审批、审计、撤销、幂等与超时不会再由多个静态集合各自
+    猜测。插件可通过 ``ToolDef(capability=...)`` 显式声明；未声明时由
+    ``ToolDef.effective_capability`` 根据写效应和动作表生成保守默认值。
+    """
+
+    effect: WriteEffect = "unknown"
+    approval: ApprovalMode = "confirm"
+    audit: bool = True
+    undoable: bool = False
+    idempotent: bool = False
+    timeout_seconds: float | None = None
+    consistency: ToolConsistency = "external_unverified"
+    compensation: str | None = None
+
+    @property
+    def is_read_only(self) -> bool:
+        return self.effect == "none"
+
+    @property
+    def is_external(self) -> bool:
+        return self.effect == "external_write" or self.consistency == "external_unverified"
 
 # 内置工具模块清单（单一事实源）：
 # 1) 该顺序即注册顺序；
@@ -260,7 +289,7 @@ class ToolDef:
     max_result_chars: int = 3000
     truncate_head_chars: int | None = None
     truncate_tail_chars: int = 0
-    # 写入语义声明（用于写入追踪，不用于审批/审计策略判定）
+    # 写入语义声明（宿主审批、审计、缓存和写入追踪的能力来源）
     write_effect: WriteEffect = "unknown"
     visibility: ToolVisibility = "always"
     consistency: ToolConsistency = "local_commit"
@@ -268,6 +297,73 @@ class ToolDef:
     # OUTPUT_CONTRACTS declaration; undeclared external tools remain unknown.
     output_schema: dict[str, Any] | None = None
     actions: dict[str, Any] = field(default_factory=dict)
+    # Optional unified capability contract.  Kept at the end so third-party
+    # ToolDef constructors using the historical positional fields keep working.
+    capability: ToolCapability | None = None
+    cache_ttl_seconds: float | None = None
+    timeout_seconds: float | None = None
+
+    def effective_capability(self, arguments: dict[str, Any] | None = None) -> ToolCapability:
+        """Return the single capability contract used by policy/runtime layers."""
+        if self.capability is not None:
+            # Explicit provider/host declarations are authoritative.  Never
+            # re-infer an MCP capability from a remote name or argument key.
+            return self.capability
+
+        from excelmanus.tools.policy import (
+            MUTATING_CONFIRM_TOOLS,
+            MUTATING_AUDIT_ONLY_TOOLS,
+            normalize_write_effect,
+            write_effect_for_call,
+        )
+
+        effect = normalize_write_effect(self.write_effect)
+        if arguments:
+            effect = write_effect_for_call(
+                self.name, arguments, declared=effect, actions=self.actions,
+            )
+        if effect == "none":
+            return ToolCapability(
+                effect="none", approval="none", audit=False, undoable=False,
+                idempotent=True, timeout_seconds=self._default_timeout(),
+                consistency="none",
+            )
+        if effect == "workspace_write":
+            approval: ApprovalMode = (
+                "confirm" if self.name in MUTATING_CONFIRM_TOOLS else "audit"
+            )
+            # A declared workspace mutation is undoable only when it has a
+            # local commit path. Dynamic action descriptors can explicitly
+            # opt out (for example a destructive irreversible action).
+            undoable = bool(self.actions.get("undoable", True))
+            if self.name in {"run_code", "run_shell"}:
+                undoable = False
+            return ToolCapability(
+                effect="workspace_write", approval=approval, audit=True,
+                undoable=undoable, idempotent=bool(self.actions.get("idempotent", False)),
+                timeout_seconds=self._default_timeout(), consistency=self.consistency,
+                compensation=self.actions.get("compensation"),
+            )
+        # External, dynamic and unknown effects fail closed.  They retain a
+        # durable audit record and never claim automatic undo.
+        return ToolCapability(
+            effect=effect, approval="confirm", audit=True, undoable=False,
+            idempotent=False, timeout_seconds=self._default_timeout(),
+            consistency=("external_unverified" if effect == "external_write" else self.consistency),
+            compensation=self.actions.get("compensation"),
+        )
+
+    def _default_timeout(self) -> float | None:
+        if self.timeout_seconds is not None:
+            try:
+                return float(self.timeout_seconds)
+            except (TypeError, ValueError):
+                return None
+        value = self.actions.get("timeout_seconds") if isinstance(self.actions, dict) else None
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
 
     def truncate_result(self, text: str) -> str:
         """若文本超过 max_result_chars 则截断并附加提示。

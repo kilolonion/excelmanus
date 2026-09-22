@@ -249,7 +249,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                                         );
                                         if (entry) {
                                           await updateFileGroupMembers(g.id, { add: [{ file_id: entry.id }], sessionId });
-                                          useExcelStore.getState().loadFileGroups();
+                                          void useExcelStore.getState().loadFileGroups({ force: true });
                                         }
                                       }
                                     } catch { /* silent */ }

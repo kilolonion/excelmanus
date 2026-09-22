@@ -191,12 +191,16 @@ export async function apiGet<T = unknown>(
   try {
     res = await doFetch();
   } catch (err) {
-    if (!_isTransientError(err)) throw err;
+    // An intentional cancellation (tab switch/unmount) must not enter the
+    // retry path and keep a dead request alive for another second.
+    if (opts?.signal?.aborted || !_isTransientError(err)) throw err;
     await new Promise((r) => setTimeout(r, 1000));
+    if (opts?.signal?.aborted) throw err;
     res = await doFetch();
   }
-  if (res.status >= 500) {
+  if (res.status >= 500 && !opts?.signal?.aborted) {
     await new Promise((r) => setTimeout(r, 1000));
+    if (opts?.signal?.aborted) throw new DOMException("请求已取消", "AbortError");
     res = await doFetch();
   }
   if (!res.ok) return handleAuthError(res);
@@ -262,8 +266,11 @@ export async function apiDelete<T = void>(path: string, opts?: { direct?: boolea
   return await res.json().catch(() => undefined) as T;
 }
 
-export async function fetchSessions(): Promise<unknown[]> {
-  const res: { sessions?: unknown[] } = await apiGet("/sessions");
+export async function fetchSessions(opts?: { signal?: AbortSignal }): Promise<unknown[]> {
+  const res: { sessions?: unknown[] } = await apiGet("/sessions", {
+    cache: "no-store",
+    signal: opts?.signal,
+  });
   return res.sessions ?? [];
 }
 
@@ -310,6 +317,8 @@ export async function createSession(opts?: {
   workspaceId?: string | null;
   workspacePath?: string | null;
   title?: string;
+  /** Explicit new-chat actions must not reuse the landing blank session. */
+  reuseBlank?: boolean;
 }): Promise<{
   id: string;
   title: string;
@@ -325,6 +334,7 @@ export async function createSession(opts?: {
     workspace_id: opts?.workspaceId || undefined,
     workspace_path: opts?.workspacePath || undefined,
     title: opts?.title || undefined,
+    ...(opts?.reuseBlank === undefined ? {} : { reuse_blank: opts.reuseBlank }),
   });
 }
 
@@ -362,11 +372,16 @@ export async function deleteWorkspaceFolder(workspaceId: string): Promise<void> 
 }
 
 export async function fetchSessionDetail(
-  sessionId: string
+  sessionId: string,
+  opts?: { includeMessages?: boolean; signal?: AbortSignal },
 ): Promise<SessionDetail | null> {
-  const res = await apiFetch(buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}`), {
+  const params = opts?.includeMessages === undefined
+    ? ""
+    : `?include_messages=${opts.includeMessages ? "true" : "false"}`;
+  const res = await apiFetch(buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}${params}`), {
     headers: { ...getAuthHeaders() },
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+    cache: "no-store",
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS, opts?.signal),
   });
   if (res.status === 404) {
     return null;
@@ -466,12 +481,44 @@ export async function updateSessionTitle(
 export async function fetchSessionMessages(
   sessionId: string,
   limit = 50,
-  offset = 0
-): Promise<unknown[]> {
-  const res: { messages?: unknown[] } = await apiGet(
-    `/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}&offset=${offset}`
+  offset = 0,
+  opts?: { tail?: boolean; withMeta?: boolean; signal?: AbortSignal },
+): Promise<unknown[] | import("@/lib/types").SessionMessagesPage> {
+  const page = await fetchSessionMessagesPage(sessionId, {
+    limit,
+    offset,
+    tail: opts?.tail,
+    signal: opts?.signal,
+  });
+  return opts?.withMeta ? page : page.messages;
+}
+
+export async function fetchSessionMessagesPage(
+  sessionId: string,
+  opts?: { limit?: number; offset?: number; tail?: boolean; signal?: AbortSignal },
+): Promise<import("@/lib/types").SessionMessagesPage> {
+  const params = new URLSearchParams({
+    limit: String(opts?.limit ?? 100),
+    offset: String(opts?.offset ?? 0),
+  });
+  if (opts?.tail) params.set("tail", "true");
+  const res: {
+    messages?: unknown[];
+    total?: number;
+    offset?: number;
+    limit?: number;
+    has_more?: boolean;
+  } = await apiGet(
+    `/sessions/${encodeURIComponent(sessionId)}/messages?${params.toString()}`,
+    { cache: "no-store", signal: opts?.signal },
   );
-  return res.messages ?? [];
+  return {
+    messages: res.messages ?? [],
+    total: typeof res.total === "number" ? res.total : (res.messages?.length ?? 0),
+    offset: typeof res.offset === "number" ? res.offset : (opts?.offset ?? 0),
+    limit: typeof res.limit === "number" ? res.limit : (opts?.limit ?? 100),
+    hasMore: Boolean(res.has_more),
+  };
 }
 
 export interface PersistedExcelDiff {

@@ -24,8 +24,13 @@ cd "$PROJECT_ROOT"
 
 if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
   PY="${PROJECT_ROOT}/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="$(command -v python3)"
+elif command -v python >/dev/null 2>&1; then
+  PY="$(command -v python)"
 else
-  PY="python3"
+  echo "未找到 Python。请先创建 .venv，或安装 Python 3.11+。" >&2
+  exit 1
 fi
 
 ARGS=()
@@ -52,7 +57,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$ROLLBACK" == true ]]; then
-  latest="$("$PY" -m excelmanus.upgrade --list-backups --project-root "$PROJECT_ROOT" | awk 'NR==1{print $1}')"
+  latest="$("$PY" -m excelmanus.upgrade --list-backups --project-root "$PROJECT_ROOT" 2>/dev/null \
+    | awk 'NF && $1 != "暂无备份" {print $1; exit}')"
   if [[ -z "$latest" || "$latest" == "暂无备份" ]]; then
     echo "未找到任何备份" >&2
     exit 1

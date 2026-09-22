@@ -63,6 +63,14 @@ export interface SessionDetail {
   lastRoute: { routeMode: string; skillsUsed: string[]; toolScope: string[] } | null;
 }
 
+export interface SessionMessagesPage {
+  messages: unknown[];
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+}
+
 export interface SubagentToolCall {
   index: number;
   name: string;

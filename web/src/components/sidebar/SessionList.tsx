@@ -14,6 +14,7 @@ import {
   FileText,
   FileJson,
   FolderPlus,
+  LoaderCircle,
   ChevronDown,
   Plus,
 } from "lucide-react";
@@ -100,6 +101,7 @@ export const SessionList = memo(function SessionList() {
   const [editValue, setEditValue] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
   const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceFolder[]>([]);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [addFolderOpen, setAddFolderOpen] = useState(false);
@@ -157,10 +159,12 @@ export const SessionList = memo(function SessionList() {
   const handleNewSession = useCallback(async (workspaceId?: string | null, workspacePath?: string | null) => {
     if (creating) return;
     setCreating(true);
+    setCreateError(null);
     try {
-      await createOrReuseSession({ workspaceId, workspacePath });
+      await createOrReuseSession({ workspaceId, workspacePath, reuseBlank: false });
     } catch (err) {
       console.error("新建对话失败:", err);
+      setCreateError(err instanceof Error ? err.message : "新建对话失败，请检查后端服务后重试");
     } finally {
       setCreating(false);
     }
@@ -446,40 +450,64 @@ export const SessionList = memo(function SessionList() {
   };
 
   const searchRow = (
-    <div className="em-session-tools flex flex-col px-1 pt-2 pb-2 flex-shrink-0">
-      <div className="flex items-center gap-2">
-      <div className="relative flex-1 min-w-0">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50 pointer-events-none" />
-        <input
-          type="text"
-          placeholder="搜索对话…"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          className={`w-full h-9 pl-8 text-[12px] rounded-xl border border-[var(--em-line)] bg-card/80 outline-none placeholder:text-muted-foreground/50 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200 ${searchQuery ? "pr-8" : "pr-3"}`}
-        />
-        {searchQuery ? (
-          <button
-            onClick={() => setSearchQuery("")}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground transition-colors touch-compact"
-          >
-            <X className="h-3 w-3" />
-          </button>
-        ) : null}
-      </div>
+    <div className="em-session-tools flex flex-col px-1 pt-3 pb-2 flex-shrink-0">
       <Button
-        className="shrink-0 text-white rounded-xl shadow-sm"
-        size="icon-sm"
-        style={{ backgroundColor: "var(--em-primary)" }}
-        onClick={() => {
-          setEditingWorkspace(null);
-          setAddFolderOpen(true);
-        }}
-        title="添加工作区"
-        aria-label="添加工作区"
+        className="em-new-session-button group w-full justify-between rounded-xl px-3.5 text-white shadow-sm"
+        onClick={() => void handleNewSession()}
+        disabled={creating}
+        aria-busy={creating}
       >
-        <FolderPlus className="h-4 w-4" />
+        <span className="flex items-center gap-2">
+          <span className="em-new-session-icon flex h-6 w-6 items-center justify-center rounded-lg bg-white/15">
+            {creating ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+          </span>
+          <span className="text-[12px] font-semibold tracking-wide">新建对话</span>
+        </span>
+        <span className="em-new-session-hint text-[10px] font-medium text-white/65">开始工作</span>
       </Button>
+      <div className="mt-2 flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50 pointer-events-none" />
+          <input
+            type="text"
+            placeholder="搜索对话…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className={`em-session-search w-full h-9 pl-8 text-[12px] rounded-xl border border-[var(--em-line)] bg-card/80 outline-none placeholder:text-muted-foreground/50 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200 ${searchQuery ? "pr-8" : "pr-3"}`}
+          />
+          {searchQuery ? (
+            <button
+              onClick={() => setSearchQuery("")}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground transition-colors touch-compact"
+              aria-label="清除搜索"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          ) : null}
+        </div>
+        <Button
+          className="em-add-workspace-button shrink-0 rounded-xl shadow-sm"
+          size="icon-sm"
+          onClick={() => {
+            setEditingWorkspace(null);
+            setAddFolderOpen(true);
+          }}
+          title="添加工作区"
+          aria-label="添加工作区"
+        >
+          <FolderPlus className="h-4 w-4" />
+        </Button>
       </div>
+      <div className="em-session-summary mt-2 flex items-center justify-between px-1 text-[10px] font-medium tracking-wide text-muted-foreground/65">
+        <span>{searchQuery ? "搜索结果" : "最近对话"}</span>
+        <span>{filteredSessions.length} 个对话</span>
+      </div>
+      {createError ? (
+        <div role="alert" className="mt-1.5 flex items-start gap-1.5 px-2 text-[11px] leading-4 text-destructive">
+          <span className="min-w-0 flex-1">{createError}</span>
+          <button type="button" className="shrink-0 underline underline-offset-2" onClick={() => setCreateError(null)}>关闭</button>
+        </div>
+      ) : null}
     </div>
   );
 
@@ -562,6 +590,9 @@ export const SessionList = memo(function SessionList() {
                             <span className="min-w-0 truncate text-[12px] font-medium tracking-wide text-current" title={group.path || group.title}>
                               {group.title}
                             </span>
+                            <span className="em-workspace-count" aria-label={`${group.sessions.length} 个对话`}>
+                              {group.sessions.length}
+                            </span>
                             {group.isDefault ? (
                               <span
                                 className="inline-flex shrink-0 items-center rounded-full bg-[var(--em-primary-alpha-12)] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[var(--em-primary)]"
@@ -642,10 +673,11 @@ export const SessionList = memo(function SessionList() {
                               )}
                               title={`在「${group.title}」新建对话`}
                               aria-label={`在「${group.title}」新建对话`}
+                              aria-busy={creating}
                               disabled={creating}
                               onClick={() => void handleNewSession(group.workspaceId, group.path)}
                             >
-                              <Plus className="h-3.5 w-3.5 text-current" />
+                              {creating ? <LoaderCircle className="h-3.5 w-3.5 animate-spin text-current" /> : <Plus className="h-3.5 w-3.5 text-current" />}
                             </Button>
                           ) : null}
                         </div>
@@ -692,6 +724,8 @@ export const SessionList = memo(function SessionList() {
                                 ? "bg-black/[0.055] dark:bg-white/[0.09]"
                                 : "hover:bg-black/[0.035] dark:hover:bg-white/[0.06]",
                         )}
+                        data-active={isActive || undefined}
+                        data-status={statusTone || undefined}
                         tabIndex={0}
                         role="button"
                         draggable={!isEditing}

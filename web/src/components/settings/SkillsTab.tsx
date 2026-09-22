@@ -350,8 +350,6 @@ export function SkillsTab() {
 
   return (
     <div className="space-y-3">
-      <RuntimeSettingsPanel groups={SKILL_SETTING_GROUPS} />
-
       <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex min-w-0 items-start gap-2">
@@ -657,6 +655,8 @@ export function SkillsTab() {
           );
         })}
       </section>
+
+      <RuntimeSettingsPanel groups={SKILL_SETTING_GROUPS} />
     </div>
   );
 }

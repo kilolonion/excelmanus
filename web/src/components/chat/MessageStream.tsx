@@ -83,9 +83,13 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
   const prevMessageCountRef = useRef(0);
   // 定位期间屏蔽 handleScroll，防止 scroll 事件触发 setState 风暴
   const positioningRef = useRef(false);
+  const prependAnchorRef = useRef<{ top: number; height: number } | null>(null);
 
   const loadedSessionId = useChatStore((s) => s.loadedSessionId);
   const messageOrder = useChatStore((s) => s.messageOrder);
+  const hasMoreMessages = useChatStore((s) => s.hasMoreMessages);
+  const isLoadingOlderMessages = useChatStore((s) => s.isLoadingOlderMessages);
+  const loadOlderMessages = useChatStore((s) => s.loadOlderMessages);
   // 最新一条消息放在虚拟列表外的文档流里。绝对定位 + 估高会把打字机增量裁掉，
   // 看起来就像刷新后才出现完整回复。
   const pinnedId = messageOrder.length > 0 ? messageOrder[messageOrder.length - 1] : null;
@@ -102,6 +106,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
   useEffect(() => {
     renderedIdsRef.current = new Set<string>();
     sizeCacheRef.current = new Map();
+    prependAnchorRef.current = null;
     autoScrollRef.current = true;
     lastScrollTopRef.current = 0;
     setAutoScroll(true);
@@ -274,6 +279,19 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
     virtualizer.measure();
   }, [pinnedId, virtualCount, virtualizer]);
 
+  // 保持用户正在阅读的位置：向上加载历史会增加 scrollHeight，不能把
+  // 当前视口突然推开。
+  useIsomorphicLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    if (!anchor || isLoadingOlderMessages) return;
+    const viewport = viewportRef.current;
+    if (viewport) {
+      viewport.scrollTop = anchor.top + (viewport.scrollHeight - anchor.height);
+      lastScrollTopRef.current = viewport.scrollTop;
+    }
+    prependAnchorRef.current = null;
+  }, [messageOrder.length, isLoadingOlderMessages]);
+
   const handleScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     // 定位期间屏蔽，防止 scroll 事件触发 setAutoScroll → re-render 风暴
     if (positioningRef.current) return;
@@ -286,7 +304,18 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
     lastScrollTopRef.current = scrollTop;
     autoScrollRef.current = shouldAutoScroll;
     setAutoScroll(shouldAutoScroll);
-  }, []);
+    if (
+      scrollTop < 180
+      && hasMoreMessages
+      && !isLoadingOlderMessages
+      && !prependAnchorRef.current
+    ) {
+      prependAnchorRef.current = { top: scrollTop, height: container.scrollHeight };
+      void loadOlderMessages().catch(() => {
+        prependAnchorRef.current = null;
+      });
+    }
+  }, [hasMoreMessages, isLoadingOlderMessages, loadOlderMessages]);
 
   const handleEditAndResend = useCallback(
     (messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
@@ -426,6 +455,16 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
         viewportRef={viewportRef}
         onViewportScroll={handleScroll}
       >
+        {(hasMoreMessages || isLoadingOlderMessages) && (
+          <div
+            className="pointer-events-none sticky top-1 z-10 flex h-0 justify-center overflow-visible"
+            aria-live="polite"
+          >
+            <span className="rounded-full border border-border/60 bg-background/90 px-3 py-1 text-[11px] text-muted-foreground shadow-sm">
+              {isLoadingOlderMessages ? "正在加载更早消息…" : "上滑加载更早消息"}
+            </span>
+          </div>
+        )}
         <div
           style={{
             height: virtualizer.getTotalSize(),

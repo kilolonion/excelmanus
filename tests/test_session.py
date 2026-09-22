@@ -402,6 +402,17 @@ class TestSessionDetail:
         )
 
     @pytest.mark.asyncio
+    async def test_get_session_detail_can_skip_message_serialization(
+        self, manager: SessionManager
+    ) -> None:
+        sid, _ = await _create_session(manager, "detail-lightweight")
+
+        detail = await manager.get_session_detail(sid, include_messages=False)
+
+        assert detail["messages"] == []
+        assert detail["message_count"] == len(manager._sessions[sid].engine.raw_messages)
+
+    @pytest.mark.asyncio
     async def test_get_session_detail_sqlite_fallback_has_default_mode_and_model_state(
         self, config: ExcelManusConfig, registry: ToolRegistry
     ) -> None:

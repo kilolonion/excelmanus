@@ -165,6 +165,10 @@ export function Sidebar() {
                 unoptimized
                 className="em-brand-logo"
               />
+              <span className="em-brand-status" aria-label="ExcelManus 已就绪">
+                <span className="em-brand-status-dot" />
+                <span>工作台</span>
+              </span>
             </div>
             <Button
               variant="ghost"
@@ -182,9 +186,10 @@ export function Sidebar() {
             {tabs.map(({ key, label, icon: Icon }) => (
               <button
                 key={key}
-                className="relative flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-md cursor-pointer transition-colors duration-150 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)]"
+                className={`em-sidebar-tab relative flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-md cursor-pointer transition-colors duration-150 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)] ${activeTab === key ? "is-active" : ""}`}
                 style={activeTab === key ? { color: "var(--em-primary)" } : { color: "var(--muted-foreground)" }}
                 onClick={() => setActiveTab(key)}
+                aria-pressed={activeTab === key}
               >
                 {activeTab === key && (
                   <motion.div

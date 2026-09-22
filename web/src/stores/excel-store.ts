@@ -29,7 +29,17 @@ import { fileRefFromSession } from "@/lib/workspace-file-ref";
 import type { WorkbookViewLayout } from "@/lib/workspace-surface";
 import { useWorkbookWorkspaceStore, workbookWorkspaceKey } from "@/stores/workbook-workspace-store";
 
-let workspaceFilesRequest: { sessionId: string | null; workspaceId: string | null; version: number; promise: Promise<void> } | null = null;
+interface WorkspaceFilesRequest {
+  sessionId: string | null;
+  workspaceId: string | null;
+  version: number;
+  promise: Promise<void>;
+}
+
+// Keep one request per scope/version. A single global slot allowed an old
+// session scan to cancel out a newer one even though both can run safely.
+const workspaceFilesRequests = new Map<string, WorkspaceFilesRequest>();
+let fileGroupsRequest: { scope: string; promise: Promise<void> } | null = null;
 let operationHistoryRequest = 0;
 const undoRequests = new Set<string>();
 
@@ -252,6 +262,8 @@ interface ExcelState {
   // 工作区文件列表缓存（避免每次挂载组件都重新加载）
   workspaceFiles: { path: string; filename: string; is_dir?: boolean }[];
   wsFilesLoaded: boolean;
+  /** 当前作用域正在扫描；重新验证时保留旧行，避免列表闪空。 */
+  workspaceFilesLoading: boolean;
   workspaceFilesSessionId: string | null | undefined;
   /** 与 workspaceFilesSessionId 一起标记已加载列表的工作区作用域 */
   workspaceFilesWorkspaceId: string | null;
@@ -280,6 +292,7 @@ interface ExcelState {
   // 文件组
   fileGroups: FileGroup[];
   fileGroupsLoaded: boolean;
+  fileGroupsScope: string | null;
   activeGroupId: string | null;
   groupViewMode: boolean;
 
@@ -319,7 +332,11 @@ interface ExcelState {
   removeRecentFile: (path: string) => void;
   removeRecentFiles: (paths: string[]) => void;
   clearAllRecentFiles: () => void;
-  mergeRecentFiles: (files: { path: string; filename: string; modifiedAt?: number }[], workspaceKey?: string) => void;
+  mergeRecentFiles: (
+    files: { path: string; filename: string; modifiedAt?: number }[],
+    workspaceKey?: string,
+    options?: { pruneMissing?: boolean },
+  ) => void;
   /** Evict a cached entry the backend reported missing. 不写 dismissedPaths，文件重建后仍可重新出现。 */
   evictRecentFile: (path: string, workspaceKey?: string | null) => void;
   openFullView: (path: string, sheet?: string, layout?: WorkbookViewLayout) => void;
@@ -348,7 +365,7 @@ interface ExcelState {
   fetchOperationHistory: (sessionId: string) => Promise<void>;
   undoOperationById: (sessionId: string, approvalId: string) => Promise<boolean>;
   appendOperation: (op: OperationRecord) => void;
-  loadFileGroups: () => Promise<void>;
+  loadFileGroups: (options?: { force?: boolean }) => Promise<void>;
   createGroupFromSelected: (name: string, fileIds: string[]) => Promise<string | null>;
   deleteGroup: (groupId: string) => Promise<void>;
   setActiveGroup: (groupId: string | null) => void;
@@ -398,6 +415,7 @@ export const useExcelStore = create<ExcelState>()(
   workspaceFilesVersion: 0,
   workspaceFiles: [],
   wsFilesLoaded: false,
+  workspaceFilesLoading: false,
   workspaceFilesSessionId: undefined,
   workspaceFilesWorkspaceId: null,
   workspaceFilesLoadedVersion: -1,
@@ -415,6 +433,7 @@ export const useExcelStore = create<ExcelState>()(
 
   fileGroups: [],
   fileGroupsLoaded: false,
+  fileGroupsScope: null,
   activeGroupId: null,
   groupViewMode: false,
 
@@ -512,6 +531,7 @@ export const useExcelStore = create<ExcelState>()(
         viewGeneration: state.viewGeneration + 1,
         workspaceFiles: [],
         wsFilesLoaded: false,
+        workspaceFilesLoading: false,
         workspaceFilesSessionId: undefined,
         workspaceFilesWorkspaceId: null,
         workspaceFilesLoadedVersion: -1,
@@ -520,6 +540,7 @@ export const useExcelStore = create<ExcelState>()(
         workspaceFilesTruncated: false,
         fileGroups: [],
         fileGroupsLoaded: false,
+        fileGroupsScope: null,
         workbookChanges: {},
         contentVersions,
         fullViewPath: null,
@@ -699,13 +720,14 @@ export const useExcelStore = create<ExcelState>()(
       return { recentFiles: filtered };
     }),
 
-  mergeRecentFiles: (files, explicitWorkspaceKey) =>
+  mergeRecentFiles: (files, explicitWorkspaceKey, options) =>
     set((state) => {
       const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
       const map = new Map<string, ExcelFileRef>();
       for (const f of sanitizeRecentFiles(state.recentFiles)) {
         map.set(`${f.workspaceKey}|${normalizeExcelPath(f.path)}`, f);
       }
+      const present = new Set<string>();
       if (isScopedWorkspaceKey(workspaceKey)) {
         for (const f of files) {
           if (
@@ -713,6 +735,7 @@ export const useExcelStore = create<ExcelState>()(
             || !isSpreadsheetFile(displayFileName(f.path) || f.filename)
           ) continue;
           const key = `${workspaceKey}|${normalizeExcelPath(f.path)}`;
+          present.add(normalizeExcelPath(f.path));
           if (!map.has(key) && !state.dismissedPaths.has(f.path)) {
             map.set(key, {
               path: f.path,
@@ -722,11 +745,28 @@ export const useExcelStore = create<ExcelState>()(
             });
           }
         }
+        // A complete scan is authoritative. Drop deleted/renamed entries from
+        // the recent bucket so the history picker does not offer dead paths.
+        if (options?.pruneMissing) {
+          for (const key of map.keys()) {
+            if (key.startsWith(`${workspaceKey}|`) && !present.has(key.slice(workspaceKey.length + 1))) {
+              map.delete(key);
+            }
+          }
+        }
       }
       const merged = Array.from(map.values())
         .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
         .slice(0, MAX_RECENT_FILES);
-      return { recentFiles: merged };
+      const unchanged = merged.length === state.recentFiles.length
+        && merged.every((file, index) => {
+          const previous = state.recentFiles[index];
+          return previous?.path === file.path
+            && previous.filename === file.filename
+            && previous.lastUsedAt === file.lastUsedAt
+            && previous.workspaceKey === file.workspaceKey;
+        });
+      return unchanged ? state : { recentFiles: merged };
     }),
 
   openFullView: (path, sheet, layout = "embedded") => {
@@ -869,7 +909,14 @@ export const useExcelStore = create<ExcelState>()(
 
   refreshWorkspaceFiles: (sessionId, options) => {
     const sid = sessionId === undefined ? activeSessionId() : sessionId;
-    const wid = options?.workspaceId ?? null;
+    const session = sid == null
+      ? undefined
+      : useSessionStore.getState().sessions?.find((item) => item.id === sid);
+    // Callers usually know the session but not its workspace id. Resolve it
+    // here so a session rebind cannot reuse a snapshot from the old folder.
+    const wid = options?.workspaceId === undefined
+      ? session?.workspaceId ?? null
+      : options.workspaceId ?? null;
     const state = get();
     const version = state.workspaceFilesVersion;
     if (options?.cached && state.wsFilesLoaded && !state.workspaceFilesError && state.workspaceFilesSessionId === sid
@@ -877,40 +924,59 @@ export const useExcelStore = create<ExcelState>()(
       && state.workspaceFilesLoadedVersion === version && Date.now() - state.workspaceFilesLoadedAt < 30_000) {
       return Promise.resolve();
     }
-    if (workspaceFilesRequest?.sessionId === sid && workspaceFilesRequest.workspaceId === wid
-      && workspaceFilesRequest.version === version) {
-      return workspaceFilesRequest.promise;
+    if (state.workspaceFilesSessionId !== sid || state.workspaceFilesWorkspaceId !== wid) {
+      set({ workspaceFiles: [], wsFilesLoaded: false, workspaceFilesSessionId: sid, workspaceFilesWorkspaceId: wid,
+        workspaceFilesLoadedVersion: -1, workspaceFilesLoadedAt: 0, workspaceFilesLoading: false,
+        fileGroups: [], fileGroupsLoaded: false, fileGroupsScope: null, workspaceFilesTruncated: false });
+    }
+    const requestKey = `${sid ?? "_"}|${wid ?? "_"}|${version}`;
+    const existingRequest = workspaceFilesRequests.get(requestKey);
+    if (existingRequest) {
+      if (!get().workspaceFilesLoading) set({ workspaceFilesLoading: true });
+      return existingRequest.promise;
     }
     if (state.workspaceFilesError) set({ workspaceFilesError: null });
-    if (state.workspaceFilesSessionId !== sid) {
-      set({ workspaceFiles: [], wsFilesLoaded: false, workspaceFilesSessionId: sid, workspaceFilesWorkspaceId: wid,
-        fileGroups: [], fileGroupsLoaded: false, workspaceFilesTruncated: false });
-    }
-    const request = { sessionId: sid, workspaceId: wid, version, promise: Promise.resolve() };
-    workspaceFilesRequest = request;
+    const request: WorkspaceFilesRequest = { sessionId: sid, workspaceId: wid, version, promise: Promise.resolve() };
+    workspaceFilesRequests.set(requestKey, request);
+    set({ workspaceFilesLoading: true });
     request.promise = (async () => {
       try {
-        const { files, truncated } = await fetchWorkspaceFiles(sid, options?.workspaceId);
-        // An older scan must not replace a newer scan or another session's files.
-        if (workspaceFilesRequest !== request || activeSessionId() !== sid) return;
+        const { files, truncated } = await fetchWorkspaceFiles(sid, wid);
+        // An older scan must not replace a newer scan or another scope's files.
+        const current = get();
+        const currentScope = current.workspaceFilesSessionId === sid
+          && current.workspaceFilesWorkspaceId === wid;
+        const currentKey = `${sid ?? "_"}|${wid ?? "_"}|${current.workspaceFilesVersion}`;
+        if (workspaceFilesRequests.get(requestKey) !== request || activeSessionId() !== sid
+          || current.workspaceFilesVersion !== version || !currentScope) {
+          if (currentScope && !workspaceFilesRequests.has(currentKey)) set({ workspaceFilesLoading: false });
+          return;
+        }
         const next = files.map((f) => ({ path: f.path, filename: f.filename, is_dir: f.is_dir }));
-        const previous = get().workspaceFiles;
+        const previous = current.workspaceFiles;
         const unchanged = previous.length === next.length && previous.every((file, index) =>
           file.path === next[index].path && file.filename === next[index].filename && file.is_dir === next[index].is_dir);
         set({ workspaceFiles: unchanged ? previous : next, wsFilesLoaded: true, workspaceFilesSessionId: sid,
-          workspaceFilesWorkspaceId: wid,
+          workspaceFilesWorkspaceId: wid, workspaceFilesLoading: false,
           workspaceFilesLoadedVersion: version, workspaceFilesLoadedAt: Date.now(), workspaceFilesTruncated: truncated });
         // Reuse the same scan for recent workbooks instead of walking the workspace twice.
         get().mergeRecentFiles(files.filter((file) => !file.is_dir && isSpreadsheetFile(file.filename)).map((file) => ({
           path: file.path, filename: file.filename, modifiedAt: (file.modified_at || 0) * 1000,
-        })), workspaceKeyForSessionId(sid));
+        })), workspaceKeyForSessionId(sid), { pruneMissing: !truncated });
       } catch (error) {
         // Keep the previous snapshot; a failed scan is not an empty workspace.
-        if (workspaceFilesRequest === request && activeSessionId() === sid) {
-          set({ workspaceFilesError: error instanceof Error ? error.message : "文件列表加载失败" });
+        const current = get();
+        const currentScope = current.workspaceFilesSessionId === sid
+          && current.workspaceFilesWorkspaceId === wid;
+        const currentKey = `${sid ?? "_"}|${wid ?? "_"}|${current.workspaceFilesVersion}`;
+        if (workspaceFilesRequests.get(requestKey) === request && activeSessionId() === sid
+          && current.workspaceFilesVersion === version && currentScope) {
+          set({ workspaceFilesLoading: false, workspaceFilesError: error instanceof Error ? error.message : "文件列表加载失败" });
+        } else if (currentScope && !workspaceFilesRequests.has(currentKey)) {
+          set({ workspaceFilesLoading: false });
         }
       } finally {
-        if (workspaceFilesRequest === request) workspaceFilesRequest = null;
+        if (workspaceFilesRequests.get(requestKey) === request) workspaceFilesRequests.delete(requestKey);
       }
     })();
     return request.promise;
@@ -988,13 +1054,37 @@ export const useExcelStore = create<ExcelState>()(
       return { operations: [op, ...state.operations] };
     }),
 
-  loadFileGroups: async () => {
-    try {
-      const data = await fetchFileGroups(activeSessionId());
-      set({ fileGroups: data.groups, fileGroupsLoaded: true });
-    } catch {
-      set({ fileGroupsLoaded: true });
-    }
+  loadFileGroups: async (options) => {
+    const sessionId = activeSessionId();
+    const session = sessionId == null
+      ? undefined
+      : useSessionStore.getState().sessions?.find((item) => item.id === sessionId);
+    const scope = `${sessionId ?? "_"}|${session?.workspaceId ?? ""}`;
+    if (fileGroupsRequest?.scope === scope) return fileGroupsRequest.promise;
+    if (get().fileGroupsLoaded && get().fileGroupsScope === scope && !options?.force) return;
+
+    const request = { scope, promise: Promise.resolve() };
+    fileGroupsRequest = request;
+    request.promise = (async () => {
+      try {
+        const data = await fetchFileGroups(sessionId);
+        const currentSessionId = activeSessionId();
+        const currentSession = currentSessionId == null
+          ? undefined
+          : useSessionStore.getState().sessions?.find((item) => item.id === currentSessionId);
+        const currentScope = `${currentSessionId ?? "_"}|${currentSession?.workspaceId ?? ""}`;
+        if (fileGroupsRequest === request && currentScope === scope) {
+          set({ fileGroups: data.groups, fileGroupsLoaded: true, fileGroupsScope: scope });
+        }
+      } catch {
+        if (fileGroupsRequest === request && activeSessionId() === sessionId) {
+          set({ fileGroupsLoaded: true, fileGroupsScope: scope });
+        }
+      } finally {
+        if (fileGroupsRequest === request) fileGroupsRequest = null;
+      }
+    })();
+    return request.promise;
   },
 
   createGroupFromSelected: async (name, fileIds) => {
@@ -1085,6 +1175,7 @@ export const useExcelStore = create<ExcelState>()(
     set({
       workspaceFiles: [],
       wsFilesLoaded: false,
+      workspaceFilesLoading: false,
       workspaceFilesSessionId: undefined,
       workspaceFilesWorkspaceId: null,
       workspaceFilesLoadedVersion: -1,
@@ -1114,6 +1205,7 @@ export const useExcelStore = create<ExcelState>()(
       historySubview: "revisions",
       fileGroups: [],
       fileGroupsLoaded: false,
+      fileGroupsScope: null,
       activeGroupId: null,
       compareMode: false,
       compareReturnPath: null,

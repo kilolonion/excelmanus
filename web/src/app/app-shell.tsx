@@ -191,9 +191,15 @@ export function AppShell({ children }: { children: ReactNode }) {
     const lock = () => setAccess((state) => state ? { ...state, auth_required: true, authenticated: false } : null);
     // Refresh on focus and periodically so logout/configuration in another tab
     // and idle session expiry also unmount the private workspace.
+    let refreshing = false;
+    const controller = new AbortController();
     const refreshAccess = () => {
-      if (document.hidden || !ready) return;
-      void fetchAccessStatus().then(setAccess).catch(() => {});
+      if (document.hidden || !ready || refreshing) return;
+      refreshing = true;
+      void fetchAccessStatus({ signal: controller.signal })
+        .then(setAccess)
+        .catch(() => {})
+        .finally(() => { refreshing = false; });
     };
     window.addEventListener(AUTH_REQUIRED_EVENT, lock);
     window.addEventListener("focus", refreshAccess);
@@ -202,6 +208,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       window.removeEventListener(AUTH_REQUIRED_EVENT, lock);
       window.removeEventListener("focus", refreshAccess);
       clearInterval(timer);
+      controller.abort();
     };
   }, [ready]);
 

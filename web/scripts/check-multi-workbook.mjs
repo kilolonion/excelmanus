@@ -93,7 +93,7 @@ try {
   await page.keyboard.press("Control+y");
   await page.waitForFunction(() => window.excelStore.getState().getContentVersion("库存.xlsx", "id:multi-ws") === "v4");
   assert.equal(writes.length, 5);
-  await page.getByRole("button", { name: "联动定位", exact: true }).click();
+  await page.getByRole("button", { name: "同步定位", exact: true }).click();
   await page.evaluate(() => {
     const api = window.multiWorkbookAPIs.find((api) => api.getActiveWorkbook()?.getActiveSheet()?.getRange("A1").getValue() === "库存.xlsx");
     const sheet = api.getActiveWorkbook().getActiveSheet(); sheet.setActiveRange(sheet.getRange("C4:D6"));
@@ -101,7 +101,8 @@ try {
   await page.waitForFunction(() => Object.values(window.workbookConversations.getState().views).filter((view) => view.range === "C4:D6").length === 3);
   assert.equal(writes.length, 5, "linked navigation must not save any file");
   assert.equal(await page.evaluate(() => window.excelStore.getState().activeFilePath), "库存.xlsx");
-  await page.getByRole("button", { name: "与主表对比", exact: true }).click();
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: /与主表对比/ }).click();
   await page.waitForFunction(() => document.querySelector('[data-workspace-surface="compare"]'));
   await page.getByRole("button", { name: "返回表格", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-workspace-surface="excel"]'));
@@ -128,13 +129,15 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= 390), true);
   await painted();
   await page.screenshot({ path: path.join(output, "mobile.png") });
-  await page.getByRole("button", { name: /^主表\s*库存\.xlsx$/ }).click();
+  await page.locator('[role="tab"]').filter({ hasText: "库存.xlsx" }).click();
   await page.waitForFunction(() => document.querySelector("[data-workbook-pane]")?.getAttribute("data-workbook-pane") === "库存.xlsx");
-  await page.getByRole("button", { name: "合并方案", exact: true }).click();
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: /生成合并方案/ }).click();
   await page.getByRole("dialog").waitFor();
   assert.equal(await page.getByRole("dialog").getByText("主表：库存.xlsx", { exact: true }).count(), 1);
   await page.getByRole("button", { name: "取消", exact: true }).click();
-  await page.getByRole("button", { name: "引用可见表格", exact: true }).click();
+  await page.getByRole("button", { name: "更多操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: /引用同屏表格/ }).click();
   await page.waitForFunction(() => document.querySelector('[data-workspace-surface="chat"]'));
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ result: "passed", saves: writes.length, scenarios: ["three independent panes", "primary/focus context", "isolated saves", "keyboard undo/redo isolation", "linked selection", "compare return", "chat layout", "promote", "fourth workbook", "responsive layout", "mobile merge/reference"], screenshots: output }));

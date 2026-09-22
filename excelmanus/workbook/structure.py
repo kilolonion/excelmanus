@@ -1,5 +1,8 @@
 """Shared structure-edit boundary for tools and the workbook UI."""
 from typing import Any
+import re
+
+from openpyxl.utils.cell import coordinate_to_tuple, column_index_from_string
 
 
 def _formula_mentions_sheet(formula: str, name: str) -> bool:
@@ -83,8 +86,82 @@ def _assert_delete_supported(wb: Any, action: str, target: str) -> None:
         )
 
 
-def assert_structure_supported(wb: Any, action: str, target_sheet: str | None = None) -> None:
+_CELL_REF_RE = re.compile(
+    r"(?:(?:'([^']|'')+'|([A-Za-z_][^!]*))!)?\$?([A-Z]{1,3})\$?(\d+)"
+)
+
+
+def _assert_shift_supported(
+    wb: Any, action: str, target: str, *, axis: str, at: int, count: int,
+) -> None:
+    """Reject only formulas/objects whose dependency range is affected.
+
+    The old guard rejected a row/column edit when *any* formula existed in the
+    workbook.  This scope-aware check permits unrelated sheets and ranges while
+    retaining a conservative refusal for formulas in the moved region or
+    formulas that explicitly point into the shifted region.
+    """
+    ws_target = wb[target]
+    blockers: list[str] = []
+    end = at + max(1, count) - 1
+
+    def hit(sheet: str, col: int, row: int) -> bool:
+        if sheet != target:
+            return False
+        return (axis == "row" and row >= at) or (axis == "column" and col >= at)
+
+    for ws in wb.worksheets:
+        for row_cells in ws.iter_rows():
+            for cell in row_cells:
+                value = cell.value
+                if not (isinstance(value, str) and value.startswith("=")):
+                    continue
+                if ws.title == target and (
+                    (axis == "row" and cell.row >= at)
+                    or (axis == "column" and cell.column >= at)
+                ):
+                    blockers.append(f"公式 {ws.title}!{cell.coordinate} 位于移动区域")
+                    continue
+                for match in _CELL_REF_RE.finditer(value.replace("'", "")):
+                    sheet = (match.group(1) or match.group(2) or ws.title).replace("''", "'")
+                    col = column_index_from_string(match.group(3))
+                    ref_row = int(match.group(4))
+                    if hit(sheet, col, ref_row):
+                        blockers.append(f"公式 {ws.title}!{cell.coordinate} 引用 {target}!{match.group(3)}{ref_row}")
+                        break
+                if len(blockers) >= 20:
+                    break
+            if len(blockers) >= 20:
+                break
+        if len(blockers) >= 20:
+            break
+
+    # Objects anchored inside the shifted area move with the cells; chart
+    # series and tables need reference rewriting that openpyxl cannot promise.
+    for obj in getattr(ws_target, "_charts", None) or []:
+        anchor = getattr(getattr(obj, "anchor", None), "_from", None)
+        if anchor is not None and ((axis == "row" and anchor.row + 1 >= at) or (axis == "column" and anchor.col + 1 >= at)):
+            blockers.append("目标区域含图表锚点")
+    if blockers:
+        raise ValueError(
+            f"{action} 只支持没有受影响依赖的范围；目标 {target} {axis}@{at}x{count}："
+            + "、".join(blockers[:20])
+        )
+
+
+def assert_structure_supported(
+    wb: Any,
+    action: str,
+    target_sheet: str | None = None,
+    *,
+    axis: str | None = None,
+    at: int | None = None,
+    count: int = 1,
+) -> None:
     if target_sheet is not None:
+        if axis in {"row", "column"} and at is not None:
+            _assert_shift_supported(wb, action, target_sheet, axis=axis, at=at, count=count)
+            return
         _assert_delete_supported(wb, action, target_sheet)
         return
     formulas = sum(1 for ws in wb.worksheets for row in ws.iter_rows() for c in row

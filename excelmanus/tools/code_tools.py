@@ -686,6 +686,8 @@ def _pack_run_code_result(payload: dict[str, Any]) -> ToolResult:
             error=ToolError(code=code, message=message, fields=payload),
         )
 
+    if status_l == "cancelled":
+        return _fail("CANCELLED", "代码执行已取消，子进程及其待发布写入已终止。")
     if status_l in {"timed_out", "timeout"}:
         message = str(
             payload.get("recovery_hint") or payload.get("stderr_tail") or status or "timed_out"
@@ -885,7 +887,8 @@ def run_code(
     timeout_seconds: int = 900,
     python_command: str = "auto",
     tail_lines: int = 80,
-    require_excel_deps: bool = True,
+    require_excel_deps: bool = False,
+    dependency_profile: str | None = None,
     stdout_file: str | None = None,
     stderr_file: str | None = None,
     sandbox_tier: str = "RED",
@@ -903,6 +906,17 @@ def run_code(
     - 可通过 ``os.environ.get("EXCELMANUS_WORKDIR")`` 获取当前工作目录。
     - 推荐使用绝对路径或相对于工作区的相对路径（如 ``./outputs/file.txt``）。
     """
+    # ``dependency_profile`` separates pure Python/basic file work from the
+    # optional spreadsheet runtime.  ``require_excel_deps`` remains a wire
+    # compatibility alias for older callers.
+    profile = str(dependency_profile or "").strip().lower()
+    if profile:
+        if profile not in {"pure_python", "basic_files", "excel"}:
+            raise ValueError("dependency_profile 必须是 pure_python、basic_files 或 excel")
+        require_excel_deps = profile == "excel"
+    else:
+        profile = "excel" if require_excel_deps else "basic_files"
+
     # ── 参数规范化：空字符串 / 纯空白视为未传 ──
     # LLM 生成 JSON 时常传 "" 或 "  "，在互斥校验前统一转为 None
     code = None if not code or not code.strip() else code
@@ -983,6 +997,7 @@ def run_code(
                 pass
 
     payload = dict(result.value) if isinstance(result.value, dict) else {}
+    payload["dependency_profile"] = profile
     if truncation_warnings:
         payload["truncation_warning"] = " ".join(truncation_warnings)
     try:
@@ -1083,9 +1098,19 @@ def _execute_script(
 
     started = time.time()
     timed_out = False
+    cancelled = False
     return_code = 1
     stdout = ""
     stderr = ""
+
+    from excelmanus.tools.runtime import (
+        current_execution,
+        register_killable_process,
+        terminate_killable_processes,
+        unregister_killable_process,
+    )
+    execution = current_execution()
+    execution_id = getattr(execution, "execution_id", None)
 
     try:
         run_kwargs: dict[str, Any] = {
@@ -1102,29 +1127,59 @@ def _execute_script(
             "start_new_session": True,
         }
         if os.name == "nt":
-            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            run_kwargs["creationflags"] = (
+                subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            )
         if preexec_fn is not None:
             run_kwargs["preexec_fn"] = preexec_fn
-        completed = subprocess.run(
-            command,
-            **run_kwargs,
-        )
-        return_code = completed.returncode
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-    except subprocess.TimeoutExpired as exc:
+        timeout = run_kwargs.pop("timeout")
+        run_kwargs.pop("check")
+        if run_kwargs.pop("capture_output", False):
+            run_kwargs["stdout"] = subprocess.PIPE
+            run_kwargs["stderr"] = subprocess.PIPE
+        process = subprocess.Popen(command, **run_kwargs)
+        register_killable_process(execution_id, process)
+        try:
+            if execution is not None and execution.cancel_requested:
+                cancelled = True
+                terminate_killable_processes(execution_id)
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                if execution_id:
+                    terminate_killable_processes(execution_id)
+                else:
+                    try:
+                        process.kill()
+                        process.wait(timeout=3)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                stdout, stderr = process.communicate()
+                if not stdout:
+                    stdout = (
+                        exc.stdout.decode(errors="replace")
+                        if isinstance(exc.stdout, bytes)
+                        else exc.stdout
+                    ) or ""
+                return_code = 124
+                if not stderr:
+                    stderr = (
+                        exc.stderr.decode(errors="replace")
+                        if isinstance(exc.stderr, bytes)
+                        else exc.stderr
+                    ) or ""
+            if not timed_out:
+                return_code = process.returncode
+            if execution is not None and execution.cancel_requested:
+                cancelled = True
+        finally:
+            unregister_killable_process(execution_id, process)
+    except subprocess.TimeoutExpired:
+        # Popen.communicate 的超时分支已负责终止并收集输出；保留兜底，
+        # 兼容极少数自定义 Popen 实现。
         timed_out = True
         return_code = 124
-        stdout = (
-            exc.stdout.decode(errors="replace")
-            if isinstance(exc.stdout, bytes)
-            else exc.stdout
-        ) or ""
-        stderr = (
-            exc.stderr.decode(errors="replace")
-            if isinstance(exc.stderr, bytes)
-            else exc.stderr
-        ) or ""
 
     stdout_saved: str | None = None
     stderr_saved: str | None = None
@@ -1143,14 +1198,16 @@ def _execute_script(
     published: list[dict[str, Any]] = []
     discarded_writes = 0
 
-    if timed_out:
+    if cancelled:
+        status = "cancelled"
+    elif timed_out:
         status = "timed_out"
     elif return_code == 0:
         status = "success"
     else:
         status = "failed"
 
-    if readonly_exec or timed_out:
+    if readonly_exec or timed_out or cancelled:
         discarded_writes = discard_pending_run_dir(guard.workspace_root, pending_run_id)
         pending_discarded = True
         if stdout_file:
@@ -1199,12 +1256,23 @@ def _execute_script(
                     stdout_saved = target.path
                 elif role == "stderr":
                     stderr_saved = target.path
-        published = publish_pending_writes(
-            guard.workspace_root,
-            stderr,
-            run_id=pending_run_id,
-            expected_versions=export_seen_versions(),
-        )
+        if execution is not None and execution.cancel_requested:
+            cancelled = True
+            discarded_writes += discard_pending_run_dir(
+                guard.workspace_root,
+                pending_run_id,
+            )
+            pending_discarded = True
+            published = []
+        else:
+            published = publish_pending_writes(
+                guard.workspace_root,
+                stderr,
+                run_id=pending_run_id,
+                expected_versions=export_seen_versions(),
+            )
+    if cancelled:
+        status = "cancelled"
     save_versions: dict[str, str] = {}
     for item in published:
         path = str(item.get("path") or "").strip()
@@ -1223,6 +1291,7 @@ def _execute_script(
         "script": str(script_safe.relative_to(guard.workspace_root)),
         "workdir": str(workdir_safe.relative_to(guard.workspace_root)),
         "timed_out": timed_out,
+        "cancelled": cancelled,
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
         "save_versions": save_versions,
@@ -1425,10 +1494,16 @@ def get_tools() -> list[ToolDef]:
                         "default": 80,
                         "minimum": 0,
                     },
-                    "require_excel_deps": {
+                "require_excel_deps": {
                         "type": "boolean",
                         "description": "是否要求 pandas/openpyxl",
-                        "default": True,
+                        "default": False,
+                    },
+                    "dependency_profile": {
+                        "type": "string",
+                        "enum": ["pure_python", "basic_files", "excel"],
+                        "description": "运行时档位：纯 Python、基础文件处理或 Excel 依赖；传入后覆盖 require_excel_deps",
+                        "default": "basic_files",
                     },
                     "stdout_file": {
                         "type": "string",

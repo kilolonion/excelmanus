@@ -69,7 +69,7 @@ export function FileGroupListView({ onClickFile, query = "" }: FileGroupListView
       if (!name) return;
       try {
         await updateFileGroup(groupId, { name });
-        loadFileGroups();
+        void loadFileGroups({ force: true });
       } catch {
         // silent
       }

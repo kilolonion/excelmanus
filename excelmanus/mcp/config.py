@@ -68,6 +68,11 @@ class MCPServerConfig:
     timeout: int = 30  # 工具调用超时（秒）
     auto_approve: list[str] = field(default_factory=list)  # 自动批准的工具名列表（白名单）
     scope: str = "always"  # MCP 工具暴露范围：always(始终)|search(搜索意图)|dev_docs(开发文档)|自定义标签
+    # Provider-authoritative per-tool capability declarations.  Keys are the
+    # remote tool names; values may contain effect/approval/audit/undoable,
+    # idempotent, timeout_seconds and consistency.  Empty means legacy
+    # discovery fallback and is surfaced as unverified by the host.
+    capabilities: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class MCPConfigLoader:
@@ -341,6 +346,9 @@ class MCPConfigLoader:
             return None
         auto_approve = MCPConfigLoader._parse_auto_approve(name, effective_entry)
         scope = MCPConfigLoader._parse_scope(name, effective_entry)
+        capabilities = MCPConfigLoader._parse_capabilities(name, effective_entry)
+        if capabilities is None:
+            return None
         state_dir = MCPConfigLoader._parse_optional_str(
             name,
             effective_entry,
@@ -396,6 +404,7 @@ class MCPConfigLoader:
                 auto_approve=auto_approve,
                 state_dir=state_dir,
                 scope=scope,
+                capabilities=capabilities,
             )
 
         url = effective_entry.get("url")
@@ -420,6 +429,7 @@ class MCPConfigLoader:
                 auto_approve=auto_approve,
                 state_dir=state_dir,
                 scope=scope,
+                capabilities=capabilities,
             )
 
         return MCPServerConfig(
@@ -431,7 +441,48 @@ class MCPConfigLoader:
             auto_approve=auto_approve,
             state_dir=state_dir,
             scope=scope,
+            capabilities=capabilities,
         )
+
+    @staticmethod
+    def _parse_capabilities(name: str, entry: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
+        """Validate provider capability declarations without inferring them."""
+        raw = entry.get("capabilities", entry.get("toolCapabilities", {}))
+        if raw in (None, ""):
+            return {}
+        if not isinstance(raw, dict):
+            logger.warning("MCP Server '%s' 的 capabilities 必须为对象，跳过", name)
+            return None
+        allowed_effects = {"none", "workspace_write", "external_write", "dynamic", "unknown"}
+        allowed_approval = {"none", "audit", "confirm"}
+        allowed_consistency = {"local_commit", "external_unverified", "none"}
+        result: dict[str, dict[str, Any]] = {}
+        for tool_name, declaration in raw.items():
+            if not isinstance(tool_name, str) or not tool_name.strip() or not isinstance(declaration, dict):
+                logger.warning("MCP Server '%s' 的 capability 条目无效: %r", name, tool_name)
+                return None
+            row = dict(declaration)
+            effect = row.get("effect", row.get("write_effect"))
+            if effect is not None and str(effect) not in allowed_effects:
+                logger.warning("MCP Server '%s' 工具 '%s' 的 effect 无效: %r", name, tool_name, effect)
+                return None
+            approval = row.get("approval")
+            if approval is not None and str(approval) not in allowed_approval:
+                logger.warning("MCP Server '%s' 工具 '%s' 的 approval 无效: %r", name, tool_name, approval)
+                return None
+            consistency = row.get("consistency")
+            if consistency is not None and str(consistency) not in allowed_consistency:
+                logger.warning("MCP Server '%s' 工具 '%s' 的 consistency 无效: %r", name, tool_name, consistency)
+                return None
+            if "timeout_seconds" in row:
+                try:
+                    if float(row["timeout_seconds"]) <= 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    logger.warning("MCP Server '%s' 工具 '%s' 的 timeout_seconds 无效", name, tool_name)
+                    return None
+            result[tool_name.strip()] = row
+        return result
 
     @staticmethod
     def _parse_optional_str(

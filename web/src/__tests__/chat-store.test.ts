@@ -59,6 +59,8 @@ vi.mock("@/lib/session-title", () => ({
 }));
 
 import { useChatStore } from "@/stores/chat-store";
+import { fetchSessionMessages } from "@/lib/api";
+import { refreshSessionMessagesFromBackend } from "@/stores/chat-store";
 import type { Message, AssistantBlock, SubagentRun } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
@@ -174,6 +176,54 @@ describe("background task reconciliation", () => {
 describe("chat-store", () => {
   beforeEach(() => {
     resetStore();
+    vi.mocked(fetchSessionMessages).mockReset().mockResolvedValue([]);
+  });
+
+  it("loads the newest page first and prepends older pages on demand", async () => {
+    const fetchMessages = vi.mocked(fetchSessionMessages);
+    fetchMessages
+      .mockResolvedValueOnce({
+        messages: [
+          { role: "user", content: "new-1", message_id: "m-new-1" },
+          { role: "assistant", content: "new-2", message_id: "m-new-2" },
+        ],
+        total: 4,
+        offset: 2,
+        hasMore: true,
+      } as never)
+      .mockResolvedValueOnce({
+        messages: [
+          { role: "user", content: "old-1", message_id: "m-old-1" },
+          { role: "assistant", content: "old-2", message_id: "m-old-2" },
+        ],
+        total: 4,
+        offset: 0,
+        hasMore: false,
+      } as never);
+    useChatStore.setState({ loadedSessionId: "progressive-session" });
+
+    await refreshSessionMessagesFromBackend("progressive-session");
+    expect(useChatStore.getState().messages.map((message) => message.id)).toEqual(["m-new-1", "m-new-2"]);
+    expect(useChatStore.getState().hasMoreMessages).toBe(true);
+
+    await useChatStore.getState().loadOlderMessages();
+    expect(useChatStore.getState().messages.map((message) => message.id)).toEqual([
+      "m-old-1", "m-old-2", "m-new-1", "m-new-2",
+    ]);
+    expect(useChatStore.getState().hasMoreMessages).toBe(false);
+  });
+
+  it("deduplicates concurrent history refreshes for one session", async () => {
+    const fetchMessages = vi.mocked(fetchSessionMessages);
+    let resolve: ((value: unknown) => void) | undefined;
+    fetchMessages.mockImplementationOnce(() => new Promise((done) => { resolve = done; }) as never);
+    useChatStore.setState({ loadedSessionId: "dedupe-session" });
+
+    const first = refreshSessionMessagesFromBackend("dedupe-session");
+    const second = refreshSessionMessagesFromBackend("dedupe-session");
+    expect(fetchMessages).toHaveBeenCalledOnce();
+    resolve?.({ messages: [], total: 0, offset: 0, hasMore: false });
+    await Promise.all([first, second]);
   });
 
   // ── setMessages（快照恢复 → _buildMessageEntities）──────────

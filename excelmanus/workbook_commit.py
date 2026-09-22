@@ -9,6 +9,9 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -132,6 +135,65 @@ def content_version_of_file(path: Path) -> str | None:
     if not path.is_file():
         return None
     return content_version_of(path.read_bytes())
+
+
+def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[bytes, dict[str, Any]]:
+    """Recalculate an OOXML workbook when a local spreadsheet engine exists.
+
+    openpyxl writes formula text but never evaluates it.  This helper uses a
+    headless LibreOffice/soffice installation when available, otherwise keeps
+    the bytes unchanged and reports ``unavailable`` explicitly.  It is
+    intentionally best-effort and bounded; callers can expose the status in
+    their result contract instead of pretending cached values are fresh.
+    """
+    if os.environ.get("EXCELMANUS_FORMULA_RECALC", "auto").strip().lower() in {"0", "false", "off", "never"}:
+        return data, {"status": "disabled", "engine": None, "errors": []}
+    executable = shutil.which("soffice") or shutil.which("libreoffice")
+    if not executable:
+        return data, {"status": "unavailable", "engine": None, "errors": []}
+    ext = suffix if str(suffix).lower() in {".xlsx", ".xlsm", ".xltx", ".xltm"} else ".xlsx"
+    with tempfile.TemporaryDirectory(prefix="excelmanus-recalc-") as raw_dir:
+        root = Path(raw_dir)
+        source = root / f"input{ext}"
+        out_dir = root / "out"
+        out_dir.mkdir()
+        source.write_bytes(data)
+        try:
+            completed = subprocess.run(
+                [executable, "--headless", "--convert-to", "xlsx", "--outdir", str(out_dir), str(source)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=30, check=False,
+                creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return data, {"status": "failed", "engine": executable, "errors": [str(exc)]}
+        converted = out_dir / "input.xlsx"
+        if completed.returncode != 0 or not converted.is_file():
+            detail = (completed.stderr or completed.stdout or "LibreOffice conversion failed").strip()
+            return data, {"status": "failed", "engine": executable, "errors": [detail[:500]]}
+        result = converted.read_bytes()
+        errors: list[str] = []
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(converted, data_only=True, read_only=True)
+            try:
+                for ws in wb.worksheets:
+                    for row in ws.iter_rows():
+                        for cell in row:
+                            value = cell.value
+                            if isinstance(value, str) and value.startswith("#"):
+                                errors.append(f"{ws.title}!{cell.coordinate}:{value}")
+                                if len(errors) >= 100:
+                                    break
+                        if len(errors) >= 100:
+                            break
+                    if len(errors) >= 100:
+                        break
+            finally:
+                wb.close()
+        except Exception as exc:
+            errors.append(f"verification: {exc}")
+        return result, {"status": "recalculated", "engine": executable, "errors": errors}
 
 
 def lock_path_for(dest: Path) -> Path:
@@ -372,6 +434,7 @@ def commit_workbook(
         raise CommitError("PATH_INVALID", str(exc)) from exc
     rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
     suffix = dest.suffix.lower()
+    recalc_info: dict[str, Any] = {"status": "not_needed", "engine": None, "errors": []}
 
     def builder(before: bytes | None) -> bytes:
         fresh_default_sheets: list[str] = []
@@ -391,7 +454,20 @@ def commit_workbook(
                     del wb[name]
         buf = BytesIO()
         wb.save(buf)
-        return buf.getvalue()
+        data = buf.getvalue()
+        has_formula = any(
+            isinstance(cell.value, str) and cell.value.startswith("=")
+            for sheet in wb.worksheets
+            for row in sheet.iter_rows()
+            for cell in row
+        )
+        if has_formula:
+            if suffix in {".xlsx", ".xltx"}:
+                nonlocal recalc_info
+                data, recalc_info = recalculate_workbook_bytes(data, suffix=suffix)
+            else:
+                recalc_info = {"status": "unsupported_format", "engine": None, "errors": []}
+        return data
 
     try:
         receipt = service_for_guard(guard).update_with_builder(
@@ -404,10 +480,71 @@ def commit_workbook(
         )
         live = dest if dest.is_file() else (Path(guard.workspace_root) / receipt.primary_path())
         data_len = live.stat().st_size if live.is_file() else 0
-        return receipt_to_commit_result(receipt, bytes_written=data_len)
+        result = receipt_to_commit_result(receipt, bytes_written=data_len)
+        extra = dict(result.extra)
+        extra["formula_recalculation"] = recalc_info
+        return CommitResult(
+            path=result.path,
+            content_version=result.content_version,
+            previous_version=result.previous_version,
+            status=result.status,
+            warnings=result.warnings,
+            bytes_written=result.bytes_written,
+            extra=extra,
+        )
     except CommitError as exc:
         if exc.code == "NOT_FOUND":
             raise CommitError("PATH_INVALID", exc.message, fields=exc.fields) from exc
         raise
     except Exception as exc:
         raise CommitError("SAVE_FAILED", f"写入 {rel} 失败：{exc}") from exc
+
+
+def commit_workbook_batch(
+    *,
+    guard: FileAccessGuard,
+    workbooks: list[dict[str, Any]],
+    operation_id: str | None = None,
+) -> list[CommitResult]:
+    """Atomically commit several workbook builders under one workspace lock.
+
+    Each item contains ``file_path``, ``mutate_fn`` and optional
+    ``expected_version``/``create``.  This is the cross-file transaction entry
+    for join/transform workflows; all builders run before any publication and
+    a stale dependency aborts the complete batch.
+    """
+    from io import BytesIO
+    from excelmanus.workspace.file_service import TargetSpec, receipt_to_commit_result, service_for_guard
+
+    if not workbooks:
+        raise CommitError("INVALID_ARGS", "workbooks 不能为空")
+    specs: list[TargetSpec] = []
+    for item in workbooks:
+        raw_path = str(item.get("file_path") or "")
+        dest = guard.resolve_and_validate(raw_path)
+        rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
+        mutate_fn = item.get("mutate_fn")
+        if not callable(mutate_fn):
+            raise CommitError("INVALID_ARGS", f"{rel} 缺少 mutate_fn")
+        expected = item.get("expected_version")
+        create = bool(item.get("create"))
+
+        def builder(before: bytes | None, *, _fn=mutate_fn, _suffix=dest.suffix.lower()) -> bytes:
+            from openpyxl import Workbook, load_workbook
+            if before is None:
+                wb = Workbook()
+            else:
+                wb = load_workbook(BytesIO(before), keep_vba=_suffix == ".xlsm")
+            _fn(wb)
+            out = BytesIO()
+            wb.save(out)
+            return out.getvalue()
+
+        if dest.is_file() or not create:
+            specs.append(TargetSpec(op="update", path=rel, builder=builder, expected_version=expected))
+        else:
+            specs.append(TargetSpec(op="create", path=rel, builder=builder))
+    receipt = service_for_guard(guard).apply_batch(specs, operation_id=operation_id)
+    if receipt.state != "committed":
+        raise CommitError(receipt.error_code or "SAVE_FAILED", receipt.message or receipt.state)
+    return [receipt_to_commit_result(receipt) for _ in specs]

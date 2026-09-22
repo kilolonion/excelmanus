@@ -32,6 +32,8 @@ from excelmanus.tools.policy import (
     WORKSPACE_SCAN_EXCLUDE_PREFIXES,
     WORKSPACE_SCAN_MAX_FILES,
     WORKSPACE_SCAN_MAX_HASH_BYTES,
+    normalize_write_effect,
+    write_effect_for_call as policy_write_effect_for_call,
 )
 
 
@@ -149,6 +151,63 @@ class ApprovalManager:
         self._confirm_tools: set[str] = set(self._CONFIRM_TOOLS)
         self._audit_only_tools: set[str] = set(self._AUDIT_ONLY_TOOLS)
         self._mutating_tools: set[str] = set(self._MUTATING_TOOLS)
+        # ToolDef 是运行时副作用能力的唯一来源。静态集合保留作未注册工具的
+        # 兼容回退，但已注册工具一律通过这里的快照参与审批、审计和撤销判定。
+        self._tool_definitions: dict[str, Any] = {}
+
+    def bind_tool_definitions(self, tools: Sequence[Any]) -> None:
+        """绑定当前 registry 的 ToolDef 快照。
+
+        MCP 不需要增加任何 provider 字段；其现有 ToolDef（含宿主启发式
+        ``write_effect``）在这里统一进入审批/审计判定。
+        """
+        self._tool_definitions = {
+            str(tool.name): tool
+            for tool in tools
+            if getattr(tool, "name", None)
+        }
+
+    def _tool_definition(self, tool_name: str) -> Any | None:
+        return self._tool_definitions.get(str(tool_name))
+
+    def write_effect_for_call(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> str:
+        tool = self._tool_definition(tool_name)
+        if tool is None:
+            # 未绑定 registry 时保持旧的静态策略行为；一旦绑定，未知声明
+            # 仍回退 unknown，交给外部一致性/审计兜底。
+            if tool_name in self._confirm_tools or tool_name in self._audit_only_tools:
+                return "workspace_write"
+            return "unknown"
+        effective = getattr(tool, "effective_capability", None)
+        if callable(effective):
+            try:
+                effect = str(effective(arguments or {}).effect)
+                # 第三方/旧版 ToolDef 常省略 write_effect。会话实例可能
+                # 已通过 confirm/audit 覆盖其等级，此时不能让 unknown 的
+                # 保守默认吞掉本地文件工具的 undo/快照语义。
+                if effect == "unknown" and tool_name in (
+                    self._confirm_tools | self._audit_only_tools
+                ):
+                    return "workspace_write"
+                return effect
+            except Exception:
+                logger.debug("ToolCapability 派生失败，回退旧策略: %s", tool_name, exc_info=True)
+        declared = normalize_write_effect(getattr(tool, "write_effect", "unknown"))
+        # 第三方/测试 registry 可能仍使用旧 ToolDef（缺省 unknown）。
+        # 对宿主已知的本地写工具保留原静态能力，避免升级时意外失去 undo。
+        if declared == "unknown" and tool_name in (self._confirm_tools | self._audit_only_tools):
+            declared = "workspace_write"
+        actions = getattr(tool, "actions", None)
+        return policy_write_effect_for_call(
+            tool_name,
+            arguments,
+            declared=declared,
+            actions=actions if isinstance(actions, dict) else None,
+        )
 
     def register_mcp_auto_approve(self, prefixed_names: Sequence[str]) -> None:
         """注册 MCP 工具白名单（自动批准，无需用户确认）。
@@ -204,17 +263,96 @@ class ApprovalManager:
     def is_read_only_safe_tool(self, tool_name: str) -> bool:
         return tool_name in self._read_only_safe_tools
 
-    def is_audit_only_tool(self, tool_name: str) -> bool:
+    def is_audit_only_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> bool:
+        if tool_name in self._confirm_tools and tool_name != "manage_skills":
+            return False
+        if self.is_mcp_tool(tool_name):
+            tool = self._tool_definition(tool_name)
+            if tool is None:
+                return False
+        effect = self.write_effect_for_call(tool_name, arguments)
+        tool = self._tool_definition(tool_name)
+        if tool is not None:
+            capability = getattr(tool, "effective_capability", None)
+            if callable(capability):
+                try:
+                    cap = capability(arguments or {})
+                    if not (
+                        cap.effect == "unknown"
+                        and tool_name in (self._confirm_tools | self._audit_only_tools)
+                    ):
+                        if tool_name == "memory_save" and cap.effect == "external_write":
+                            return True
+                        if tool_name == "manage_skills":
+                            # It is both auditable and confirmation-gated;
+                            # the dispatcher asks the high-risk handler first
+                            # when capability.approval == confirm.
+                            return bool(cap.audit)
+                        return cap.audit and cap.approval == "audit"
+                except Exception:
+                    pass
+        if effect == "none" and self._tool_definition(tool_name) is not None:
+            return False
+        if effect in {"workspace_write", "external_write"}:
+            return tool_name not in {"run_code", "run_shell"}
         return tool_name in self._audit_only_tools
 
-    def is_mutating_tool(self, tool_name: str) -> bool:
+    def is_mutating_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> bool:
+        tool = self._tool_definition(tool_name)
+        if tool is not None:
+            capability = getattr(tool, "effective_capability", None)
+            if callable(capability):
+                try:
+                    cap = capability(arguments or {})
+                    if not (
+                        cap.effect == "unknown"
+                        and tool_name in (self._confirm_tools | self._audit_only_tools)
+                    ):
+                        return not cap.is_read_only
+                except Exception:
+                    pass
+        effect = self.write_effect_for_call(tool_name, arguments)
+        if effect == "none" and self._tool_definition(tool_name) is not None:
+            return False
+        if effect in {"workspace_write", "external_write", "dynamic", "unknown"}:
+            return True
         return tool_name in self._mutating_tools
 
     def is_confirm_required_tool(self, tool_name: str) -> bool:
         if self.is_read_only_safe_tool(tool_name):
             return False
+        if tool_name in self._confirm_tools:
+            return True
+        tool = self._tool_definition(tool_name)
+        if tool is not None:
+            capability = getattr(tool, "effective_capability", None)
+            if callable(capability):
+                try:
+                    cap = capability({})
+                    if cap.effect == "unknown" and tool_name not in self._confirm_tools:
+                        # 兼容旧的第三方普通工具：unknown 宿主工具维持
+                        # 默认直通；MCP unknown 则由 fail-closed 分支确认。
+                        return self.is_mcp_tool(tool_name)
+                    if not (
+                        cap.effect == "unknown"
+                        and tool_name in (self._confirm_tools | self._audit_only_tools)
+                    ):
+                        if tool_name == "memory_save" and cap.effect == "external_write":
+                            return False
+                        return cap.approval == "confirm"
+                except Exception:
+                    pass
         if self.is_mcp_tool(tool_name):
-            # MCP 默认允许调用。autoApprove 是显式信任名单，不是确认门。
+            # 未绑定声明时保持兼容；绑定后的 MCP ToolDef 走上面的
+            # ToolCapability，unknown/external 会 fail-closed。
             return False
         if self.is_audit_only_tool(tool_name):
             return False
@@ -223,11 +361,33 @@ class ApprovalManager:
     def is_high_risk_tool(self, tool_name: str) -> bool:
         return self.is_confirm_required_tool(tool_name)
 
-    def is_undoable_tool(self, tool_name: str) -> bool:
+    def is_undoable_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> bool:
         """判断工具执行结果是否支持自动回滚。"""
         if self.is_read_only_safe_tool(tool_name):
             return False
         if tool_name in {"run_code", "run_shell"}:
+            return False
+        tool = self._tool_definition(tool_name)
+        if tool is not None:
+            capability = getattr(tool, "effective_capability", None)
+            if callable(capability):
+                try:
+                    cap = capability(arguments or {})
+                    if not (
+                        cap.effect == "unknown"
+                        and tool_name in (self._confirm_tools | self._audit_only_tools)
+                    ):
+                        return bool(cap.undoable)
+                except Exception:
+                    pass
+        effect = self.write_effect_for_call(tool_name, arguments)
+        if effect == "none" and self._tool_definition(tool_name) is not None:
+            return False
+        if self.is_mcp_tool(tool_name) or effect in {"external_write", "dynamic", "unknown"}:
             return False
         return True
 
@@ -423,7 +583,14 @@ class ApprovalManager:
         audit_dir.mkdir(parents=True, exist_ok=True)
 
         targets = self._resolve_target_paths(tool_name, arguments)
-        use_workspace_scan = (not targets) and self.is_mutating_tool(tool_name)
+        # 只有本地工作区/动态宿主写入需要扫描无显式目标的全局变更。外部
+        # 写入、MCP unknown 和技能管理没有可靠的本地目标，不能把整个
+        # workspace 当作假想目标；它们仍会留下统一的外部审计记录。
+        effect = self.write_effect_for_call(tool_name, arguments)
+        use_workspace_scan = (not targets) and (
+            effect in {"workspace_write", "dynamic"}
+            or (effect == "unknown" and not self.is_mcp_tool(tool_name))
+        )
 
         before_partial = False
         after_partial = False
@@ -574,6 +741,81 @@ class ApprovalManager:
             raise execute_error
         return result_payload, record
 
+    def record_completed_call(
+        self,
+        *,
+        approval_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: Sequence[str] | None,
+        result: Any,
+        undoable: bool = False,
+        created_at_utc: str | None = None,
+        session_turn: int | None = None,
+        session_id: str | None = None,
+    ) -> AppliedApprovalRecord:
+        """为已由专用 handler 完成的副作用写入统一审计记录。
+
+        ``manage_skills`` 等工具必须保留专用异步 handler，不能把 handler
+        本身递归塞回 registry；该入口让它们和普通/已批准执行共享同一份
+        manifest/DB 审计格式，同时不伪造不存在的本地文件快照。
+        """
+        existing = self.get_applied(approval_id)
+        if existing is not None:
+            return existing
+
+        audit_dir = self.audit_root / approval_id
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        from excelmanus.engine_core.tool_result import (
+            ToolResult as _ToolResult,
+            coerce_legacy_result,
+        )
+
+        structured_result = result if isinstance(result, _ToolResult) else coerce_legacy_result(result)
+        result_text = structured_result.model_text
+        execution_status = "success" if structured_result.success else "failed"
+        error_type = structured_result.error.code if structured_result.error is not None else None
+        error_message = structured_result.error.message if structured_result.error is not None else None
+
+        # 外部/技能变更没有可验证的 before/after 文件快照，但仍记录当前
+        # repo 状态，便于排查宿主侧发生了什么。
+        repo_diff = self._git_diff_text()
+        repo_before_file = audit_dir / "repo_diff_before.txt"
+        repo_after_file = audit_dir / "repo_diff_after.txt"
+        repo_before_file.write_text("", encoding="utf-8")
+        repo_after_file.write_text(repo_diff, encoding="utf-8")
+        record = AppliedApprovalRecord(
+            approval_id=approval_id,
+            tool_name=tool_name,
+            arguments=dict(arguments),
+            tool_scope=list(tool_scope) if tool_scope is not None else [],
+            created_at_utc=created_at_utc or self._utc_now(),
+            applied_at_utc=self._utc_now(),
+            undoable=bool(undoable),
+            manifest_file=str((audit_dir / "manifest.json").relative_to(self.workspace_root)),
+            audit_dir=str(audit_dir.relative_to(self.workspace_root)),
+            result_preview=self._shorten(result_text, 300),
+            execution_status=execution_status,
+            error_type=error_type,
+            error_message=error_message,
+            repo_diff_before_file=str(repo_before_file.relative_to(self.workspace_root)),
+            repo_diff_after_file=str(repo_after_file.relative_to(self.workspace_root)),
+            session_turn=session_turn,
+            session_id=session_id or self._session_id,
+        )
+        manifest = self._build_manifest_v2(record)
+        (audit_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, default=em_json_default),
+            encoding="utf-8",
+        )
+        self._applied[approval_id] = record
+        if self._db_store is not None:
+            try:
+                self._db_store.save(record.to_dict())
+            except Exception:
+                logger.warning("副作用审计记录写入 DB 失败: %s", approval_id, exc_info=True)
+        return record
+
     def mark_non_undoable_for_paths(self, rel_paths: set[str]) -> int:
         """将涉及指定路径的审批记录标记为不可回滚。
 
@@ -651,11 +893,29 @@ class ApprovalManager:
         targets: list[TargetSpec] = []
         for change in record.changes:
             rel = str(change.path or "").replace("\\", "/").removeprefix("./").strip()
-            if not rel or not change.before_exists or not change.after_exists:
+            if not rel or not change.after_exists:
                 return []
             after_hash = str(change.after_hash or "").replace("sha256:", "")
+            if not after_hash:
+                return []
+
+            # 创建文件没有 beforeEdit 快照。只要当前版本仍然精确等于本次
+            # afterEdit，就用同一个受版本保护的事务入口删除它；任何后续
+            # 修改都会触发 VERSION_CONFLICT，避免误删用户的新内容。
+            if not change.before_exists:
+                targets.append(
+                    TargetSpec(
+                        op="delete",
+                        path=rel,
+                        expected_version=f"sha256:{after_hash}",
+                    )
+                )
+                continue
+
+            if not change.after_exists:
+                return []
             before_hash = str(change.before_hash or "").replace("sha256:", "")
-            if not after_hash or not before_hash:
+            if not before_hash:
                 return []
             records = store.list(rel)
             matching_transactions = {

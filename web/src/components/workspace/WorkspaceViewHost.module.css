@@ -6,11 +6,14 @@
 .word { grid-area: 1 / 1; min-height: 0; min-width: 0; }
 .inactive { position: absolute; inset: 0; visibility: hidden; opacity: 0; pointer-events: none; }
 .chatHeading { display: none; }
+.chatHeadingTitle { display: inline-flex; align-items: center; gap: 7px; color: var(--em-ink); font-weight: 650; }
+.chatHeadingTitle svg { color: var(--em-primary); }
+.chatHeadingHint { color: var(--em-muted); font-size: 11px; }
 @media (min-width: 768px) {
   .split { grid-template-columns: minmax(0, 1fr) minmax(320px, 34%); }
   .split .chat { grid-area: 1 / 2; border-left: 1px solid var(--border); }
   .split .composer { grid-area: 2 / 2; border-left: 1px solid var(--border); }
-  .split .chatHeading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .split .chatHeading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
   .split .composer :global(.em-composer-dock) { padding-top: 12px; margin-top: 0; }
   .split .composer :global(.em-chat-input-shell) { border-radius: 14px; }
 }

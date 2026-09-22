@@ -153,7 +153,8 @@ def test_undo_command_with_id_performs_undo(tmp_path: Path) -> None:
 
     handler = CommandHandler(engine)
     result = handler._handle_undo_command(["/undo", aid])
-    assert "未回滚" in result  # No revision pair: do not report a successful file undo.
+    assert "已回滚" in result
+    assert not (tmp_path / "undo_me.txt").exists()
 
 
 def test_undo_command_empty_history(tmp_path: Path) -> None:

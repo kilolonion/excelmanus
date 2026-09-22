@@ -101,6 +101,9 @@ export function WorkbookPanelButton() {
       compareMode: s.compareMode,
     })),
   );
+  const workbookCount = useWorkbookWorkspaceStore((state) =>
+    state.workspaces[workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session))]?.files.length ?? 0,
+  );
 
   const targetPath = activeWorkspaceKey === workspaceKeyFromSession(session)
     ? resolveWorkbookPanelPath(activeFilePath, recentFiles, activeWorkspaceKey) : undefined;
@@ -115,13 +118,14 @@ export function WorkbookPanelButton() {
         ? "切换到表格"
         : "打开表格"
     : "工作表";
+  const desktopLabel = workbookCount > 1 ? `表格 ${workbookCount}` : "表格";
   const sheetUnavailable = isMobile && !mobileSheetActive && !targetPath;
 
   const button = (
     <Button
       variant="ghost"
-      size="icon"
-      className={`h-8 w-8 rounded-full p-0 transition-colors ${buttonActive ? "bg-[var(--em-primary-alpha-12)] text-[var(--em-primary)]" : "text-muted-foreground"}`}
+      size={isMobile ? "icon-sm" : "sm"}
+      className={`rounded-full transition-colors ${isMobile ? "w-8 p-0" : "px-2.5"} ${buttonActive ? "bg-[var(--em-primary-alpha-12)] text-[var(--em-primary)]" : "text-muted-foreground"}`}
       title={buttonLabel}
       aria-label={buttonLabel}
       aria-pressed={buttonActive}
@@ -135,6 +139,7 @@ export function WorkbookPanelButton() {
       ) : (
         <TableProperties className="h-[18px] w-[18px]" />
       )}
+      {!isMobile && <span className="text-xs font-semibold">{desktopLabel}</span>}
     </Button>
   );
 

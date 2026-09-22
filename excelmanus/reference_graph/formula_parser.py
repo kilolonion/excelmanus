@@ -16,6 +16,9 @@ _EXTERNAL_RE = re.compile(
 _QUOTED_SHEET_RE = re.compile(
     rf"'(?P<sheet>[^']+)'!(?P<range>{_RANGE_ADDR}|{_COL_RANGE})"
 )
+_THREED_SHEET_RE = re.compile(
+    rf"(?P<start>'[^']+'|[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*)\s*:\s*(?P<end>'[^']+'|[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*)!(?P<range>{_RANGE_ADDR}|{_COL_RANGE})"
+)
 
 _SHEET_RE = re.compile(
     rf"(?<![A-Za-z0-9_'\]])(?P<sheet>[A-Za-z_\u4e00-\u9fff][\w\u4e00-\u9fff]*)!(?P<range>{_RANGE_ADDR}|{_COL_RANGE})"
@@ -93,6 +96,22 @@ class FormulaRefExtractor:
             addr, abs_row, abs_col = _strip_absolute(m.group("range"))
             ref = CellRef(
                 sheet_name=m.group("sheet"),
+                cell_or_range=addr,
+                is_absolute_row=abs_row,
+                is_absolute_col=abs_col,
+            )
+            key = ref.display()
+            if key not in seen:
+                seen.add(key)
+                results.append(ref)
+            remaining = remaining.replace(m.group(0), " ", 1)
+
+        for m in _THREED_SHEET_RE.finditer(remaining):
+            addr, abs_row, abs_col = _strip_absolute(m.group("range"))
+            start = m.group("start").strip("'").replace("''", "'")
+            end = m.group("end").strip("'").replace("''", "'")
+            ref = CellRef(
+                sheet_name=f"{start}:{end}",
                 cell_or_range=addr,
                 is_absolute_row=abs_row,
                 is_absolute_col=abs_col,

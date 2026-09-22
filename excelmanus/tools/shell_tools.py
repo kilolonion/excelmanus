@@ -17,6 +17,85 @@ from excelmanus.security import FileAccessGuard, SecurityViolationError
 from excelmanus.tools.context import bind_workspace, require_guard
 from excelmanus.tools.registry import ToolDef
 
+_ORIGINAL_SUBPROCESS_RUN = subprocess.run
+
+
+def _run_killable_process(
+    command: Any,
+    *,
+    execution: Any,
+    execution_id: str | None,
+    **kwargs: Any,
+) -> tuple[int, str, str, bool]:
+    """运行单个 shell 子进程，并把取消/超时传播到整棵进程树。"""
+    from excelmanus.tools.runtime import (
+        register_killable_process,
+        terminate_killable_processes,
+        unregister_killable_process,
+    )
+
+    timeout = kwargs.pop("timeout")
+    kwargs.pop("check", None)
+    if execution is None or subprocess.run is not _ORIGINAL_SUBPROCESS_RUN:
+        # 直接调用保持 subprocess.run 的可测试/兼容行为；受 ToolRuntime
+        # 管理的调用才需要 Popen 句柄与进程树终止。
+        completed = subprocess.run(
+            command,
+            timeout=timeout,
+            check=False,
+            **kwargs,
+        )
+        return (
+            completed.returncode,
+            completed.stdout or "",
+            completed.stderr or "",
+            False,
+        )
+    if kwargs.pop("capture_output", False):
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+    if os.name == "nt":
+        kwargs["creationflags"] = (
+            kwargs.get("creationflags", 0)
+            | subprocess.CREATE_NO_WINDOW
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+    process = subprocess.Popen(command, **kwargs)
+    register_killable_process(execution_id, process)
+    cancelled = False
+    try:
+        if execution is not None and execution.cancel_requested:
+            cancelled = True
+            terminate_killable_processes(execution_id)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            terminate_killable_processes(execution_id)
+            stdout, stderr = process.communicate()
+            if not stdout:
+                stdout = (
+                    exc.stdout.decode(errors="replace")
+                    if isinstance(exc.stdout, bytes)
+                    else exc.stdout
+                ) or ""
+            if not stderr:
+                stderr = (
+                    exc.stderr.decode(errors="replace")
+                    if isinstance(exc.stderr, bytes)
+                    else exc.stderr
+                ) or ""
+            raise subprocess.TimeoutExpired(
+                command,
+                timeout,
+                output=stdout,
+                stderr=stderr,
+            )
+        if execution is not None and execution.cancel_requested:
+            cancelled = True
+        return process.returncode, stdout or "", stderr or "", cancelled
+    finally:
+        unregister_killable_process(execution_id, process)
+
 
 def _get_guard() -> FileAccessGuard:
     return require_guard()
@@ -529,14 +608,21 @@ def run_shell(
 
     started = time.time()
     timed_out = False
+    cancelled = False
     return_code = 1
     stdout = ""
     stderr = ""
+    from excelmanus.tools.runtime import current_execution
+
+    execution = current_execution()
+    execution_id = getattr(execution, "execution_id", None)
 
     try:
         if unrestricted:
-            completed = subprocess.run(
+            return_code, stdout, stderr, cancelled = _run_killable_process(
                 command,
+                execution=execution,
+                execution_id=execution_id,
                 cwd=workdir_safe,
                 capture_output=True,
                 text=True,
@@ -549,12 +635,10 @@ def run_shell(
                 close_fds=True,
                 start_new_session=True,
                 shell=True,
-                **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
             )
-            return_code = completed.returncode
-            stdout = completed.stdout or ""
-            stderr = completed.stderr or ""
         for chain_idx, (seg_text, chain_op) in enumerate(chain_segments):
+            if cancelled:
+                break
             # 链式运算符语义
             if chain_idx > 0:
                 if chain_op == "&&" and return_code != 0:
@@ -571,8 +655,10 @@ def run_shell(
             if len(segments) == 1:
                 # 单命令，直接执行
                 tokens = _split_command(segments[0].strip())
-                completed = subprocess.run(
+                return_code, seg_stdout, seg_stderr, cancelled = _run_killable_process(
                     tokens,
+                    execution=execution,
+                    execution_id=execution_id,
                     cwd=workdir_safe,
                     capture_output=True,
                     text=True,
@@ -585,11 +671,9 @@ def run_shell(
                     close_fds=True,
                     start_new_session=True,
                     shell=False,
-                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
                 )
-                return_code = completed.returncode
-                seg_stdout = completed.stdout or ""
-                seg_stderr = completed.stderr or ""
+                if cancelled:
+                    break
             else:
                 # 管道链：用 subprocess.PIPE 连接
                 procs: list[subprocess.Popen[str]] = []
@@ -609,8 +693,19 @@ def run_shell(
                         env=sandbox_env,
                         close_fds=True,
                         start_new_session=True,
-                        **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+                        **(
+                            {
+                                "creationflags": (
+                                    subprocess.CREATE_NO_WINDOW
+                                    | subprocess.CREATE_NEW_PROCESS_GROUP
+                                )
+                            }
+                            if os.name == "nt"
+                            else {}
+                        ),
                     )
+                    from excelmanus.tools.runtime import register_killable_process
+                    register_killable_process(execution_id, p)
                     # 关闭上一个进程的 stdout（已被当前进程接管）
                     if idx > 0 and prev_stdout is not None:
                         prev_stdout.close()
@@ -620,18 +715,30 @@ def run_shell(
                 # 等待最后一个进程完成
                 last = procs[-1]
                 try:
+                    if execution is not None and execution.cancel_requested:
+                        cancelled = True
+                        from excelmanus.tools.runtime import terminate_killable_processes
+                        terminate_killable_processes(execution_id)
                     out, err = last.communicate(timeout=timeout_seconds)
                     seg_stdout = out or ""
                     seg_stderr = err or ""
                     return_code = last.returncode
+                    if execution is not None and execution.cancel_requested:
+                        cancelled = True
                 finally:
                     # 清理所有进程
+                    from excelmanus.tools.runtime import (
+                        terminate_killable_processes,
+                        unregister_killable_process,
+                    )
+                    terminate_killable_processes(execution_id)
                     for p in procs:
                         try:
                             p.kill()
                         except OSError:
                             pass
                         p.wait()
+                        unregister_killable_process(execution_id, p)
 
             # 累积输出
             if seg_stdout:
@@ -668,7 +775,9 @@ def run_shell(
             fields={"command": command},
         )
 
-    if timed_out:
+    if cancelled:
+        status = "cancelled"
+    elif timed_out:
         status = "timed_out"
     elif return_code == 0:
         status = "success"
@@ -679,12 +788,17 @@ def run_shell(
         "status": status,
         "return_code": return_code,
         "timed_out": timed_out,
+        "cancelled": cancelled,
         "duration_seconds": round(time.time() - started, 3),
         "command": command,
         "workdir": str(workdir_safe.relative_to(guard.workspace_root)),
         "stdout_tail": _tail(stdout, tail_lines),
         "stderr_tail": _tail(stderr, tail_lines),
     }
+    if cancelled:
+        result["ok"] = False
+        result["error"] = "CANCELLED"
+        result["message"] = "命令执行已取消，子进程及其后代已终止。"
     return from_payload(result)
 
 

@@ -108,8 +108,8 @@ def _join_param_schema() -> dict[str, Any]:
     return {
         "type": ["object", "string"],
         "description": (
-            "aggregate/pivot 跨表左连接（VLOOKUP 语义：左连接、右表按键去重首值）；"
-            "连接键为单列名，暂不支持多列键数组。"
+            "aggregate/pivot 跨表连接；支持单列或等长度多列键、left/inner/right/outer/left_anti/right_anti。"
+            "left 连接保持 VLOOKUP 首匹配语义，其余连接保留键重复。"
             "连接列可参与 group_by/aggregations/conditions。也接受 JSON 字符串。"
         ),
         "additionalProperties": False,
@@ -118,9 +118,9 @@ def _join_param_schema() -> dict[str, Any]:
             "sheet_name": {"type": "string", "description": "sheet 的别名"},
             "file_path": {"type": "string", "description": "另一文件的工作区相对路径"},
             "path": {"type": "string", "description": "file_path 的别名"},
-            "on": {"type": "string", "description": "同名连接键：单列名"},
-            "left_on": {"type": "string", "description": "左表键：单列名"},
-            "right_on": {"type": "string", "description": "右表键：单列名"},
+            "on": {"type": ["string", "array"], "items": {"type": "string"}, "description": "同名连接键：列名或列名数组"},
+            "left_on": {"type": ["string", "array"], "items": {"type": "string"}, "description": "左表键：列名或列名数组"},
+            "right_on": {"type": ["string", "array"], "items": {"type": "string"}, "description": "右表键：列名或列名数组"},
             "leftOn": {"type": "string", "description": "left_on 的别名"},
             "rightOn": {"type": "string", "description": "right_on 的别名"},
             "columns": {
@@ -135,8 +135,8 @@ def _join_param_schema() -> dict[str, Any]:
             "expected_version": {"type": "string", "description": "可选的右工作簿版本；同簿只读连接自动使用左侧观察版本。"},
             "how": {
                 "type": "string",
-                "enum": ["left"],
-                "description": "仅支持 left（VLOOKUP 语义）",
+                "enum": ["left", "inner", "right", "outer", "left_anti", "right_anti"],
+                "description": "连接类型；left 以左表为基准，anti 只返回未匹配行",
             },
         },
     }
@@ -621,7 +621,8 @@ _EDIT_KIND_FIELDS = {
     "delete_columns": "sheet sheet_name at row column count",
     "sheet": "sheet sheet_name action new_name newName",
     "copy": "sheet sheet_name source_sheet sourceSheet source_range sourceRange target_sheet targetSheet target_start targetStart",
-    "pivot": "sheet sheet_name target_sheet new_name index columns pivot_columns values pivot_values group_by aggfunc header_row join column operator value conditions logic margins margins_name totals totals_name grand_total overwrite",
+    "pivot": "sheet sheet_name target_sheet new_name index columns pivot_columns values pivot_values group_by aggfunc header_row join column operator value conditions logic margins margins_name totals totals_name grand_total overwrite refresh",
+    "pivot_refresh": "target_sheet new_name overwrite",
     "transform": "sheet sheet_name header_row action transform key_columns key_normalizers keep order_by column delimiter sep new_columns into",
 }
 
@@ -635,7 +636,7 @@ _FORMAT_KIND_FIELDS = {
     "data_validation": "range rule remove",
 }
 
-_CHART_FIELDS = "kind action sheet chart_type data_range categories_range target_cell target_sheet title x_title y_title style width height from_rows"
+_CHART_FIELDS = "kind action sheet sheet_name chart_type data_range categories_range target_cell target_sheet title old_title index chart_index x_title y_title style width height from_rows"
 
 
 def _reject_operation_fields(op: dict[str, Any], label: str, fields: str) -> None:
@@ -1324,11 +1325,22 @@ def _count_sheet_formulas_and_charts(ws: Any) -> tuple[int, int]:
     return formulas, charts
 
 
-def _refuse_unmaintained_structure(ws: Any, action: str, target_sheet: str | None = None) -> None:
+def _refuse_unmaintained_structure(
+    ws: Any,
+    action: str,
+    target_sheet: str | None = None,
+    *,
+    axis: str | None = None,
+    at: int | None = None,
+    count: int = 1,
+) -> None:
     from excelmanus.workbook.structure import assert_structure_supported
 
     try:
-        assert_structure_supported(ws.parent, action, target_sheet=target_sheet)
+        assert_structure_supported(
+            ws.parent, action, target_sheet=target_sheet,
+            axis=axis, at=at, count=count,
+        )
     except ValueError as exc:
         raise MutationAborted(_invalid(str(exc))) from exc
 
@@ -1446,8 +1458,12 @@ def _apply_insert(wb: Any, op: dict[str, Any]) -> str:
     axis = str(_op_get(op, "axis") or "")
     at, count = _parse_at_count(op, "insert")
     ws = _worksheet(wb, sheet)
-    _refuse_unmaintained_structure(ws, "insert")
     axis_norm = axis.lower()
+    _refuse_unmaintained_structure(
+        ws, "insert", target_sheet=str(sheet),
+        axis=("column" if axis_norm in {"column", "columns", "col", "cols"} else "row"),
+        at=at, count=count,
+    )
     if axis_norm in {"row", "rows"}:
         ws.insert_rows(at, amount=count)
         return f"rows@{at}+{count}"
@@ -1461,7 +1477,10 @@ def _apply_delete_rows(wb: Any, op: dict[str, Any]) -> str:
     sel = parse_bound_selection(_op_get(op, "selection"))
     if sel is not None:
         ws = _worksheet(wb, sel.sheet)
-        _refuse_unmaintained_structure(ws, "delete_rows")
+        _refuse_unmaintained_structure(
+            ws, "delete_rows", target_sheet=sel.sheet, axis="row",
+            at=min(rows), count=len(rows),
+        )
         rows = sorted({int(r) for r in sel.rows}, reverse=True)
         for row in rows:
             ws.delete_rows(row, amount=1)
@@ -1470,7 +1489,9 @@ def _apply_delete_rows(wb: Any, op: dict[str, Any]) -> str:
     sheet = _op_get(op, "sheet", "sheet_name")
     at, count = _parse_at_count(op, "delete_rows")
     ws = _worksheet(wb, sheet)
-    _refuse_unmaintained_structure(ws, "delete_rows")
+    _refuse_unmaintained_structure(
+        ws, "delete_rows", target_sheet=str(sheet), axis="row", at=at, count=count,
+    )
     ws.delete_rows(at, amount=count)
     return f"delete_rows@{at}x{count}"
 
@@ -1480,7 +1501,9 @@ def _apply_delete_columns(wb: Any, op: dict[str, Any]) -> str:
     sheet = _op_get(op, "sheet", "sheet_name")
     at, count = _parse_at_count(op, "delete_columns")
     ws = _worksheet(wb, sheet)
-    _refuse_unmaintained_structure(ws, "delete_columns")
+    _refuse_unmaintained_structure(
+        ws, "delete_columns", target_sheet=str(sheet), axis="column", at=at, count=count,
+    )
     ws.delete_cols(at, amount=count)
     return f"delete_columns@{at}x{count}"
 
@@ -1502,6 +1525,28 @@ def _apply_pivot(
         dataframe_from_worksheet,
         write_dataframe_to_worksheet,
     )
+
+    # ``pivot_refresh`` and ``pivot(refresh=true)`` replay the recorded source
+    # contract instead of treating the current matrix as a new source.
+    if str(_op_get(op, "kind") or "") == "pivot_refresh" or bool(_op_get(op, "refresh")):
+        target_name = str(_op_get(op, "target_sheet", "new_name") or "")
+        meta_ws = wb["__excelmanus_pivot_meta"] if "__excelmanus_pivot_meta" in wb.sheetnames else None
+        stored = None
+        if meta_ws is not None:
+            for row in meta_ws.iter_rows(min_row=2, values_only=True):
+                if str(row[0] or "") == target_name:
+                    try:
+                        stored = json.loads(str(row[1] or ""))
+                    except (TypeError, json.JSONDecodeError):
+                        stored = None
+                    break
+        if not isinstance(stored, dict):
+            raise MutationAborted(_invalid(f"找不到目标表 {target_name!r} 的可刷新透视定义", code="NOT_FOUND"))
+        replay = dict(stored)
+        replay["target_sheet"] = target_name
+        replay["overwrite"] = True
+        replay.pop("refresh", None)
+        op = replay
 
     _require_explicit_sheet(op, "pivot", wb=wb)
     source = str(_op_get(op, "sheet", "sheet_name") or "")
@@ -1597,12 +1642,34 @@ def _apply_pivot(
     if existing_target is None:
         wb.create_sheet(title=target)
     elif warnings is not None:
-        warnings.append(
-            f"已按 overwrite=true 替换整张目标表 {target} 的值；结果是静态透视矩阵，不是可刷新的 PivotTable。"
-        )
+        warnings.append(f"已按 overwrite=true 替换整张目标表 {target} 的值。")
     dest = _worksheet(wb, target)
     write_dataframe_to_worksheet(dest, table)
-    return f"pivot:{target}:{len(table)}"
+    # Persist a compact, refreshable source definition in a hidden sheet.  The
+    # output matrix remains ordinary cells for compatibility, while refresh is
+    # deterministic and uses the same CAS transaction as the original edit.
+    meta_name = "__excelmanus_pivot_meta"
+    if meta_name not in wb.sheetnames:
+        meta_ws = wb.create_sheet(meta_name)
+        meta_ws.sheet_state = "hidden"
+        meta_ws.append(["target_sheet", "definition"])
+    else:
+        meta_ws = wb[meta_name]
+    definition = dict(op)
+    definition.pop("kind", None)
+    definition["file_path"] = file_path
+    definition["target_sheet"] = target
+    definition["overwrite"] = True
+    found_row = None
+    for row in range(2, meta_ws.max_row + 1):
+        if str(meta_ws.cell(row=row, column=1).value or "") == target:
+            found_row = row
+            break
+    if found_row is None:
+        found_row = meta_ws.max_row + 1
+    meta_ws.cell(row=found_row, column=1, value=target)
+    meta_ws.cell(row=found_row, column=2, value=json.dumps(definition, ensure_ascii=False, default=str, sort_keys=True))
+    return f"pivot:{target}:{len(table)}:refreshable"
 
 
 def _apply_transform(
@@ -2411,6 +2478,8 @@ def edit_spreadsheet(
             data, summary = compile_workbook_spec_to_bytes(spec)
         except Exception as exc:
             return _invalid(f"规格编译失败: {exc}", code="COMPILE_FAILED")
+        from excelmanus.workbook_commit import recalculate_workbook_bytes
+        data, formula_recalculation = recalculate_workbook_bytes(data, suffix=dest.suffix.lower() or ".xlsx")
         rel = workspace_relpath(guard, dest)
         try:
             from excelmanus.tools.context import operation_id_for
@@ -2436,6 +2505,7 @@ def edit_spreadsheet(
                 "uncertainties": [item.model_dump() for item in spec.uncertainties],
                 "build_summary": summary,
                 "verification": verification,
+                "formula_recalculation": formula_recalculation,
             }
         )
     if not operations:
@@ -2498,7 +2568,7 @@ def edit_spreadsheet(
                     applied.append(_apply_delete_rows(wb, raw))
                 elif kind == "delete_columns":
                     applied.append(_apply_delete_columns(wb, raw))
-                elif kind == "pivot":
+                elif kind in {"pivot", "pivot_refresh"}:
                     applied.append(_apply_pivot(wb, raw, file_path, mutation_warnings))
                 elif kind == "transform":
                     applied.append(_apply_transform(wb, raw, mutation_warnings))
@@ -2529,6 +2599,17 @@ def edit_spreadsheet(
             "warnings": list(getattr(cr, "warnings", ()) or ()),
             "applied": applied,
         }
+    formula_status = (getattr(cr, "extra", {}) or {}).get("formula_recalculation")
+    if formula_status is not None:
+        payload["formula_recalculation"] = formula_status
+        if formula_status.get("status") == "unavailable":
+            payload["warnings"].append(
+                "公式已写入但当前环境没有可用的重算引擎；缓存值可能仍为旧值。"
+            )
+        elif formula_status.get("errors"):
+            payload["warnings"].append(
+                f"公式重算后发现 {len(formula_status['errors'])} 个错误值，请检查 formula_recalculation.errors。"
+            )
     if mutation_warnings:
         payload["warnings"] = sorted(set(payload["warnings"] + mutation_warnings))
     return _success(payload)
@@ -3262,7 +3343,11 @@ def manage_spreadsheet_objects(
         return ops
     if not target or not ops:
         return _invalid("需要 file_path 与 operations")
-    from excelmanus.workbook.charts import add_chart_to_workbook, normalize_chart_args
+    from excelmanus.workbook.charts import (
+        add_chart_to_workbook,
+        delete_chart_from_workbook,
+        normalize_chart_args,
+    )
 
     prepared_ops: list[dict[str, Any]] = []
     for index, raw in enumerate(ops):
@@ -3273,14 +3358,14 @@ def manage_spreadsheet_objects(
         except MutationAborted as exc:
             return exc.result
         kind = str(_op_get(raw, "kind", "action") or "chart")
-        if kind not in {"chart", "create_chart"}:
+        if kind not in {"chart", "create_chart", "update_chart", "delete_chart"}:
             return _invalid(
                 f"不支持的 object.kind={kind}。当前仅支持 chart；"
                 "合并单元格请用 format_spreadsheet",
             )
         chart_type = str(_op_get(raw, "chart_type", "chartType") or "")
         data_range = str(_op_get(raw, "data_range", "dataRange") or "")
-        if not chart_type or not data_range:
+        if kind in {"chart", "create_chart", "update_chart"} and (not chart_type or not data_range):
             return _invalid("chart 需要 chart_type 与 data_range")
         prepared_ops.append(raw)
 
@@ -3291,17 +3376,37 @@ def manage_spreadsheet_objects(
     def mutate(wb: Any) -> None:
         for index, raw in enumerate(prepared_ops):
             try:
-                _require_explicit_sheet(
-                    raw,
-                    "chart",
-                    "data_range",
-                    "dataRange",
-                    "categories_range",
-                    "categoriesRange",
-                    wb=wb,
-                )
+                if kind in {"chart", "create_chart", "update_chart"}:
+                    _require_explicit_sheet(
+                        raw, "chart", "data_range", "dataRange",
+                        "categories_range", "categoriesRange", wb=wb,
+                    )
             except MutationAborted as exc:
                 _abort_operation(exc, index, str(raw.get("kind") or "chart"))
+            if kind == "delete_chart":
+                sheet = _op_get(raw, "sheet", "sheet_name")
+                meta = delete_chart_from_workbook(
+                    wb,
+                    sheet_name=str(sheet) if sheet else None,
+                    index=_op_get(raw, "index", "chart_index"),
+                    target_cell=_op_get(raw, "target_cell", "targetCell"),
+                    title=_op_get(raw, "title"),
+                )
+                last_meta.update(meta)
+                objects.append(meta)
+                applied.append(f"delete_chart:{meta.get('target_sheet')}:{meta.get('deleted_index')}")
+                continue
+
+            if kind == "update_chart":
+                sheet = str(_op_get(raw, "sheet", "sheet_name") or "")
+                ws = _worksheet(wb, sheet)
+                old = delete_chart_from_workbook(
+                    wb, sheet_name=sheet,
+                    index=_op_get(raw, "index", "chart_index"),
+                    target_cell=_op_get(raw, "target_cell", "targetCell"),
+                    title=_op_get(raw, "old_title"),
+                )
+
             spec = normalize_chart_args(
                 chart_type=str(_op_get(raw, "chart_type", "chartType") or ""),
                 data_range=str(_op_get(raw, "data_range", "dataRange") or ""),
@@ -4384,8 +4489,8 @@ def get_tools() -> list[ToolDef]:
                             "properties": {
                                 "kind": {
                                     "type": "string",
-                                    "enum": ["chart", "create_chart"],
-                                    "description": "当前仅 chart",
+                                    "enum": ["chart", "create_chart", "update_chart", "delete_chart"],
+                                    "description": "创建、更新或删除原生图表；update/delete 通过 index、target_cell 或 title 定位",
                                 },
                                 "action": {"type": "string", "enum": ["chart", "create_chart"]},
                                 "sheet": {"type": "string"},
@@ -4418,6 +4523,9 @@ def get_tools() -> list[ToolDef]:
                                 "targetCell": {"type": "string", "description": "target_cell 的别名"},
                                 "target_sheet": {"type": "string"},
                                 "targetSheet": {"type": "string", "description": "target_sheet 的别名"},
+                                "index": {"type": "integer", "description": "图表在目标工作表中的 0-based 索引"},
+                                "chart_index": {"type": "integer", "description": "index 的别名"},
+                                "old_title": {"type": "string", "description": "update_chart 定位用的旧标题"},
                                 "title": {"type": "string"},
                                 "x_title": {"type": "string"},
                                 "y_title": {"type": "string"},

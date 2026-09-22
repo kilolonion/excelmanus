@@ -27,6 +27,7 @@ _WHOLE_ROW_TOKEN = re.compile(
 _R1C1_TOKEN = re.compile(
     r"^[Rr](?:\[-?\d+\]|\d+)?[Cc](?:\[-?\d+\]|\d+)?$"
 )
+_R1C1_PART = re.compile(r"^[Rr](?:(?P<rrel>\[-?\d+\])|(?P<rabs>\d+))?[Cc](?:(?P<crel>\[-?\d+\])|(?P<cabs>\d+))?$")
 _CELL_LIKE_LEADING_ZERO = re.compile(
     r"^\$?[A-Za-z]{1,3}\$?0[0-9]*$"
 )
@@ -53,7 +54,7 @@ _SCHEMA_HINT = (
     "含空格的表名必须用单引号：'My Sheet'!A1；"
     "表名中的单引号写成两个：'O''Brien'!A1；"
     "并集用英文逗号，不要用分号、中文逗号或空格；"
-    "不要写 R1C1（请改 A1）；不要前置等号。"
+    "parse_ref 使用 A1；需要相对地址时用 parse_r1c1(text, base_row, base_col)；不要前置等号。"
 )
 
 
@@ -324,6 +325,30 @@ def parse_rect(text: str, *, default_sheet: str | None = None) -> RectRef:
     return item
 
 
+def parse_r1c1(
+    text: str,
+    *,
+    base_row: int = 1,
+    base_col: int = 1,
+    default_sheet: str | None = None,
+) -> CellRef:
+    """Parse an R1C1 cell using a 1-based origin for relative references."""
+    raw = str(text or "").strip()
+    match = _R1C1_PART.fullmatch(raw)
+    if not match:
+        raise InvalidRefError(
+            f"无法解析 R1C1 引用 {raw!r}。正确写法示例：R1C1、R[-1]C[2]。"
+        )
+    if base_row < 1 or base_col < 1:
+        raise InvalidRefError("R1C1 基准单元格必须从第 1 行第 1 列开始")
+    rrel, crel = match.group("rrel"), match.group("crel")
+    row = int(match.group("rabs") or 0) if match.group("rabs") else base_row + int(rrel[1:-1])
+    col = int(match.group("cabs") or 0) if match.group("cabs") else base_col + int(crel[1:-1])
+    if row < 1 or col < 1:
+        raise InvalidRefError(f"R1C1 引用越界: {raw!r}")
+    return CellRef(sheet=default_sheet, row=row, col=col)
+
+
 def describe_for_schema() -> dict[str, str]:
     """供后续单元生成工具 schema / 错误提示。键与文案保持稳定。"""
     return {
@@ -336,7 +361,7 @@ def describe_for_schema() -> dict[str, str]:
             "多区域：A1:B2,C3:D4 或 Sheet1!A1,Sheet2!B1（英文逗号）；"
             "命名区域：MyName（需工作簿定义）；"
             "表引用：Table1[列]、Table1[#All]（需表对象）。"
-            "不支持 R1C1、三维引用 Sheet1:Sheet2!A1、外部工作簿 [Book.xlsx]Sheet1!A1。"
+            "parse_ref 不直接绑定 R1C1、三维引用或外部工作簿；R1C1 请先用 parse_r1c1 转换并显式绑定外部依赖。"
         ),
         "examples": "、".join(_REFERENCE_EXAMPLES),
         "common_errors": _SCHEMA_HINT,

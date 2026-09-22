@@ -21,7 +21,7 @@ from excelmanus.mcp.processes import (
     terminate_workspace_mcp_processes,
 )
 from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
-from excelmanus.tools.registry import ToolDef
+from excelmanus.tools.registry import ToolCapability, ToolDef
 
 if TYPE_CHECKING:
     from excelmanus.config import ExcelManusConfig as Config
@@ -462,6 +462,7 @@ def make_tool_def(
     *,
     auto_approved: bool = False,
     scope: str = "",
+    capability: dict[str, Any] | None = None,
 ) -> ToolDef:
     """将 MCP 工具定义转换为 ToolDef。
 
@@ -507,12 +508,42 @@ def make_tool_def(
         workspace_root,
     )
 
-    write_effect = infer_mcp_write_effect(
-        original_name=original_name,
-        description=description,
-        input_schema=input_schema,
-        auto_approved=auto_approved,
-        scope=scope,
+    declared = dict(capability or {})
+    # A provider declaration is authoritative.  Without one we retain the
+    # legacy readonly scope inference only for discovery/search tools; every
+    # other remote operation stays unknown and therefore fail-closed.
+    write_effect = str(declared.get("effect", declared.get("write_effect", "")) or "")
+    if not write_effect:
+        write_effect = infer_mcp_write_effect(
+            original_name=original_name,
+            description=description,
+            input_schema=input_schema,
+            auto_approved=auto_approved,
+            scope=scope,
+        )
+    approval = str(declared.get("approval") or ("none" if write_effect == "none" else "confirm"))
+    consistency = str(declared.get("consistency") or ("none" if write_effect == "none" else "external_unverified"))
+    if approval not in {"none", "audit", "confirm"}:
+        approval = "confirm"
+    if consistency not in {"local_commit", "external_unverified", "none"}:
+        consistency = "external_unverified"
+    try:
+        timeout_seconds = float(declared["timeout_seconds"]) if "timeout_seconds" in declared else float(timeout)
+    except (TypeError, ValueError):
+        timeout_seconds = float(timeout)
+    try:
+        cache_ttl = float(declared["cache_ttl_seconds"]) if "cache_ttl_seconds" in declared else None
+    except (TypeError, ValueError):
+        cache_ttl = None
+    cap = ToolCapability(
+        effect=write_effect,  # type: ignore[arg-type]
+        approval=approval,  # type: ignore[arg-type]
+        audit=bool(declared.get("audit", write_effect != "none")),
+        undoable=bool(declared.get("undoable", False)),
+        idempotent=bool(declared.get("idempotent", False)),
+        timeout_seconds=timeout_seconds,
+        consistency=consistency,  # type: ignore[arg-type]
+        compensation=(str(declared["compensation"]) if declared.get("compensation") else None),
     )
 
     return ToolDef(
@@ -524,7 +555,16 @@ def make_tool_def(
         async_func=async_func,
         max_result_chars=5000,
         write_effect=write_effect,  # type: ignore[arg-type]
-        consistency="external_unverified",
+        consistency=consistency,  # type: ignore[arg-type]
+        capability=cap,
+        timeout_seconds=timeout_seconds,
+        cache_ttl_seconds=cache_ttl,
+        actions={
+            "provider": server_name,
+            "remote_name": original_name,
+            "query_tool": declared.get("query_tool"),
+            "compensation": declared.get("compensation"),
+        },
     )
 
 
@@ -898,6 +938,7 @@ class MCPManager:
                 workspace_root=self._workspace_root,
                 auto_approved=auto_approved_flag,
                 scope=cfg.scope,
+                capability=(getattr(cfg, "capabilities", {}) or {}).get(original_name),
             )
             if tool_def.name in existing_names:
                 logger.warning(

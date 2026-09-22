@@ -610,12 +610,14 @@ def test_run_suites_warning_only_passes_by_default_but_fails_strict(tmp_path: Pa
 
 
 def test_strict_efficiency_flag_parsed() -> None:
-    """--strict-efficiency 正确解析进执行计划。"""
+    """效率门禁默认开启，可显式降级为 warn-only。"""
     args = bench._build_parser().parse_args(["--suite", "x.json", "--strict-efficiency"])
     plan = bench._resolve_run_mode(args)
     assert plan.strict_efficiency is True
     args2 = bench._build_parser().parse_args(["--suite", "x.json"])
-    assert bench._resolve_run_mode(args2).strict_efficiency is False
+    assert bench._resolve_run_mode(args2).strict_efficiency is True
+    args3 = bench._build_parser().parse_args(["--suite", "x.json", "--no-strict-efficiency"])
+    assert bench._resolve_run_mode(args3).strict_efficiency is False
 
 
 def test_run_suites_global_summary_has_suite_details(tmp_path: Path) -> None:

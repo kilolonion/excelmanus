@@ -13,11 +13,13 @@ import { ensureLandingSession } from "@/lib/session-actions";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
 import { OpenWorkbookDialog } from "@/components/excel/OpenWorkbookDialog";
 import { WorkbookConversationWelcome, useWorkbookConversation } from "@/components/excel/WorkbookConversation";
+import { ChatHistoryStatus } from "@/components/chat/ChatHistoryStatus";
 
 export default function Home() {
   const messageOrder = useChatStore((s) => s.messageOrder);
   const isStreaming = useChatStore((s) => s.isStreaming);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
+  const messageLoadError = useChatStore((s) => s.messageLoadError);
   const loadedSessionId = useChatStore((s) => s.loadedSessionId);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const { target: workbookTarget } = useWorkbookConversation();
@@ -65,6 +67,7 @@ export default function Home() {
           </div>
         </div>
       }>
+        <ChatHistoryStatus sessionId={activeSessionId} empty={!hasMessages && (isRestoringSession || Boolean(messageLoadError))} />
         {hasMessages ? (
           <MessageStream
             isStreaming={isStreaming}
@@ -80,8 +83,8 @@ export default function Home() {
           />
         ) : workbookTarget ? (
           <WorkbookConversationWelcome onSuggestion={handleSuggestionClick} />
-        ) : isRestoringSession ? (
-          <div className="flex-1" />
+        ) : isRestoringSession || messageLoadError ? (
+          null
         ) : (
           <WelcomePage onSuggestionClick={handleSuggestionClick} />
         )}

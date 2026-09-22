@@ -39,10 +39,11 @@ web = [
     "python-multipart>=0.0.6",
 ]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.24,<1",
     # [tool.pytest.ini_options] 配置了 timeout=60，必须声明该插件，否则 pytest 直接报错退出。
     "pytest-timeout>=2.0.0",
+    "pytest-qt>=4.4,<5",
     "httpx>=0.24.0",
     "hypothesis>=6.0.0",
     "pyright>=1.1.400",
@@ -90,9 +91,10 @@ desktop-runtime = [
 
 [tool.uv]
 dev-dependencies = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.24,<1",
     "pytest-timeout>=2.0.0",
+    "pytest-qt>=4.4,<5",
     "httpx>=0.24.0",
     "hypothesis>=6.0.0",
     "pyright>=1.1.400",

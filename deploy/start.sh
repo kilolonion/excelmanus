@@ -133,14 +133,26 @@ while [[ $# -gt 0 ]]; do
     --production|--prod)    PRODUCTION=true ;;
     --backend-only)         BACKEND_ONLY=true ;;
     --frontend-only)        FRONTEND_ONLY=true ;;
-    --backend-port)         BACKEND_PORT="$2"; shift ;;
-    --frontend-port)        FRONTEND_PORT="$2"; shift ;;
-    --host)                 BACKEND_HOST="$2"; shift ;;
-    --workers)              WORKERS="$2"; shift ;;
+    --backend-port)
+      [[ $# -ge 2 && "$2" != -* ]] || { error "--backend-port 需要端口值"; exit 2; }
+      BACKEND_PORT="$2"; shift ;;
+    --frontend-port)
+      [[ $# -ge 2 && "$2" != -* ]] || { error "--frontend-port 需要端口值"; exit 2; }
+      FRONTEND_PORT="$2"; shift ;;
+    --host)
+      [[ $# -ge 2 && "$2" != -* ]] || { error "--host 需要地址值"; exit 2; }
+      BACKEND_HOST="$2"; shift ;;
+    --workers)
+      [[ $# -ge 2 && "$2" != -* ]] || { error "--workers 需要数量"; exit 2; }
+      WORKERS="$2"; shift ;;
     --skip-deps)            SKIP_DEPS=true ;;
     --no-open)              AUTO_OPEN=false ;;
-    --log-dir)              LOG_DIR="$2"; shift ;;
-    --health-timeout)       HEALTH_TIMEOUT="$2"; shift ;;
+    --log-dir)
+      [[ $# -ge 2 && "$2" != -* ]] || { error "--log-dir 需要目录值"; exit 2; }
+      LOG_DIR="$2"; shift ;;
+    --health-timeout)
+      [[ $# -ge 2 && "$2" != -* ]] || { error "--health-timeout 需要秒数"; exit 2; }
+      HEALTH_TIMEOUT="$2"; shift ;;
     --no-kill-ports)        NO_KILL_PORTS=true ;;
     --update)               DO_UPDATE=true ;;
     --check-update)         DO_CHECK_UPDATE=true ;;
@@ -191,6 +203,13 @@ fi
 # ── 端口（命令行优先，其次已有进程环境）──
 BACKEND_PORT="${EXCELMANUS_BACKEND_PORT:-$BACKEND_PORT}"
 FRONTEND_PORT="${EXCELMANUS_FRONTEND_PORT:-$FRONTEND_PORT}"
+
+# Fail before killing anything if a malformed value was supplied. This also
+# prevents accidental expansion of a shell expression into a command line.
+[[ "$BACKEND_PORT" =~ ^[0-9]+$ && "$BACKEND_PORT" -ge 1 && "$BACKEND_PORT" -le 65535 ]] || { error "后端端口无效: $BACKEND_PORT"; exit 2; }
+[[ "$FRONTEND_PORT" =~ ^[0-9]+$ && "$FRONTEND_PORT" -ge 1 && "$FRONTEND_PORT" -le 65535 ]] || { error "前端端口无效: $FRONTEND_PORT"; exit 2; }
+[[ "$WORKERS" =~ ^[0-9]+$ && "$WORKERS" -ge 1 ]] || { error "workers 必须是正整数: $WORKERS"; exit 2; }
+[[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ && "$HEALTH_TIMEOUT" -ge 1 ]] || { error "health-timeout 必须是正整数: $HEALTH_TIMEOUT"; exit 2; }
 
 # ── 初始化日志文件 ──
 if [[ -n "$LOG_DIR" ]]; then
@@ -305,9 +324,11 @@ _check_deps() {
         error "自动创建虚拟环境失败，请手动运行: uv sync --all-extras"
         ok=false
       }
-    elif command -v python3 &>/dev/null; then
+    elif command -v python3 &>/dev/null || command -v python &>/dev/null; then
       warn "未找到 .venv 虚拟环境，尝试用 python3 -m venv 创建..."
-      python3 -m venv .venv && _pip_install -e '.[all]' || {
+      local system_python="python3"
+      command -v python3 &>/dev/null || system_python="python"
+      "$system_python" -m venv .venv && _pip_install -e '.[all]' || {
         error "自动创建虚拟环境失败，请手动运行: python3 -m venv .venv && .venv/bin/pip install -e '.[all]'"
         ok=false
       }
@@ -431,8 +452,13 @@ _excelmanus_home() {
 _python_bin() {
   if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
     echo "${PROJECT_ROOT}/.venv/bin/python"
+  elif command -v python3 &>/dev/null; then
+    command -v python3
+  elif command -v python &>/dev/null; then
+    command -v python
   else
-    echo "python3"
+    error "未找到 Python。请先创建 .venv，或安装 Python 3.11+。"
+    return 1
   fi
 }
 
@@ -538,7 +564,9 @@ _find_pids_on_port() {
   local pids=""
   # 方法 1: lsof（macOS 原生，Linux 需安装）
   if command -v lsof &>/dev/null; then
-    pids=$(lsof -ti :"$port" 2>/dev/null || true)
+    # Only listeners are owned by the service. A plain `lsof -ti :PORT` also
+    # returns unrelated client sockets and can terminate a user's browser.
+    pids=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)
   fi
   # 方法 2: ss + awk（Linux 原生，无需额外安装）
   if [[ -z "$pids" ]] && command -v ss &>/dev/null; then
@@ -557,7 +585,7 @@ _kill_port() {
   local pids
   pids=$(_find_pids_on_port "$port")
   if [[ -n "$pids" ]]; then
-    warn "端口 $port 被占用 (PID $pids)，正在清理..."
+    warn "端口 $port 被占用 (PID $(echo "$pids" | tr '\n' ' ' | sed 's/[[:space:]]*$//'))，正在清理..."
     # 先 SIGTERM 优雅退出，等 2 秒后 SIGKILL
     echo "$pids" | xargs kill -15 2>/dev/null || true
     sleep 2
@@ -588,9 +616,16 @@ cleanup() {
   [[ -n "$FRONTEND_PID" ]] && pids+=("$FRONTEND_PID")
   [[ -n "$BACKEND_PID" ]]  && pids+=("$BACKEND_PID")
 
-  # 第一阶段：SIGTERM（优雅关闭）
+  # 第一阶段：SIGTERM（优雅关闭）。npm/cmd 可能留下子进程，先通知子树。
   for pid in "${pids[@]}"; do
-    kill -15 "$pid" 2>/dev/null || true
+    if [[ "$OS_TYPE" == "windows" ]] && command -v taskkill &>/dev/null; then
+      taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
+    elif command -v pkill &>/dev/null; then
+      pkill -TERM -P "$pid" 2>/dev/null || true
+      kill -15 "$pid" 2>/dev/null || true
+    else
+      kill -15 "$pid" 2>/dev/null || true
+    fi
   done
 
   # 等待最多 5 秒
@@ -612,7 +647,12 @@ cleanup() {
   for pid in "${pids[@]}"; do
     if kill -0 "$pid" 2>/dev/null; then
       debug "进程 $pid 未响应 SIGTERM，强制终止"
-      kill -9 "$pid" 2>/dev/null || true
+      if [[ "$OS_TYPE" == "windows" ]] && command -v taskkill &>/dev/null; then
+        taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
+      else
+        pkill -KILL -P "$pid" 2>/dev/null || true
+        kill -9 "$pid" 2>/dev/null || true
+      fi
     fi
   done
 
@@ -630,7 +670,9 @@ _start_backend() {
     warn "检测到 ${WORKERS} 个 uvicorn worker。会话引擎是进程内存态，同一 session_id 落到不同 worker 会从 SQLite 重建信封；MCP 未连上或技能快照丢失时 tools/system 前缀不等值，将静默打满 prompt cache miss。单机请保持 workers=1；多实例扩容请在反代层按 session_id 粘性路由。"
   fi
 
-  local backend_cmd=(.venv/bin/python -c 'from excelmanus.api import main; main()'
+  local python_bin
+  python_bin="$(_python_bin)"
+  local backend_cmd=("$python_bin" -c 'from excelmanus.api import main; main()'
     --host "$BACKEND_HOST" --port "$BACKEND_PORT" --workers "$WORKERS")
   if [[ -n "$LOG_DIR" ]]; then
     "${backend_cmd[@]}" >> "${LOG_DIR}/backend.log" 2>&1 &
@@ -695,16 +737,16 @@ _start_frontend() {
 }
 
 # ── 主流程 ──
+# Wait for the API before starting Next.js. Starting both processes at once
+# makes the first browser requests race the backend startup and produces
+# avoidable ECONNRESET/socket hang-up messages in the Next proxy.
 if [[ "$FRONTEND_ONLY" != true ]]; then
   _start_backend
+  _wait_backend
 fi
 
 if [[ "$BACKEND_ONLY" != true ]]; then
   _start_frontend
-fi
-
-if [[ "$FRONTEND_ONLY" != true ]]; then
-  _wait_backend
 fi
 
 # 等待前端启动

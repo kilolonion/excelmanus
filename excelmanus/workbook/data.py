@@ -3444,15 +3444,24 @@ def _normalize_join(
             {"error": "join 需要连接键：on（同名列）或 left_on+right_on（异名列）"},
             code="INVALID_ARGS",
         )
-    if str(left_on) not in df.columns:
+    left_keys = [str(item) for item in left_on] if isinstance(left_on, (list, tuple)) else [str(left_on)]
+    right_keys = [str(item) for item in right_on] if isinstance(right_on, (list, tuple)) else [str(right_on)]
+    if len(left_keys) != len(right_keys) or not left_keys or any(not item for item in left_keys + right_keys):
         return None, _error_payload_result(
-            {"error": f"连接列 {left_on!r} 不在左表，可用列: {[str(c) for c in df.columns]}"},
+            {"error": "join 连接键必须是同长度的非空列名或列名数组"}, code="INVALID_ARGS",
+        )
+    missing_left = [key for key in left_keys if key not in df.columns]
+    if missing_left:
+        return None, _error_payload_result(
+            {"error": f"连接列 {missing_left!r} 不在左表，可用列: {[str(c) for c in df.columns]}"},
             code="NOT_FOUND",
         )
-    how = str(join.get("how") or "left")
-    if how != "left":
+    how = str(join.get("how") or "left").strip().lower().replace("-", "_")
+    aliases = {"full": "outer", "full_outer": "outer", "anti": "left_anti", "leftanti": "left_anti", "rightanti": "right_anti"}
+    how = aliases.get(how, how)
+    if how not in {"left", "inner", "right", "outer", "left_anti", "right_anti"}:
         return None, _error_payload_result(
-            {"error": f"join 仅支持 how='left'（VLOOKUP 语义），收到 {how!r}"},
+            {"error": "join.how 支持 left/inner/right/outer/left_anti/right_anti"},
             code="INVALID_ARGS",
         )
     columns = _maybe_json(join.get("columns"))
@@ -3466,8 +3475,9 @@ def _normalize_join(
         "right_sheet": join.get("sheet") or join.get("sheet_name"),
         "right_header": join.get("header_row"),
         "expected_version": join.get("expected_version"),
-        "left_on": str(left_on),
-        "right_on": str(right_on),
+        "left_on": left_keys,
+        "right_on": right_keys,
+        "how": how,
         "columns": [str(c) for c in columns] if columns else None,
     }, None
 
@@ -3493,10 +3503,12 @@ def _apply_join(
     else:
         right = right_frame
         spec["source"] = {"file_path": default_file, "sheet": spec["right_sheet"], "version_scope": "same_atomic_operations"}
-    right_on = spec["right_on"]
-    if right_on not in right.columns:
+    right_keys = list(spec["right_on"])
+    left_keys = list(spec["left_on"])
+    missing_right = [key for key in right_keys if key not in right.columns]
+    if missing_right:
         return None, 0, _error_payload_result(
-            {"error": f"连接列 {right_on!r} 不在右表，可用列: {[str(c) for c in right.columns]}"},
+            {"error": f"连接列 {missing_right!r} 不在右表，可用列: {[str(c) for c in right.columns]}"},
             code="NOT_FOUND",
         )
     bring = spec["columns"]
@@ -3507,21 +3519,38 @@ def _apply_join(
                 {"error": f"join.columns {missing} 不在右表，可用列: {[str(c) for c in right.columns]}"},
                 code="NOT_FOUND",
             )
-        keep = [right_on] + [c for c in bring if c != right_on]
+        keep = right_keys + [c for c in bring if c not in right_keys]
     else:
-        keep = [right_on] + [c for c in right.columns if c != right_on]
-    # VLOOKUP 语义：键重复时取首行；列名撞左表时右列加 __lookup 后缀。
-    right = right[keep].drop_duplicates(subset=[right_on], keep="first")
+        keep = right_keys + [c for c in right.columns if c not in right_keys]
+    # Preserve legacy VLOOKUP first-match behavior only for left joins.  Other
+    # join types retain multiplicity, as pandas/SQL users expect.
+    how = str(spec.get("how") or "left")
+    if how == "left":
+        right = right[keep].drop_duplicates(subset=right_keys, keep="first")
+    else:
+        right = right[keep]
+    indicator_name = "__excelmanus_merge__"
+    pandas_how = "left" if how == "left_anti" else "outer" if how == "right_anti" else how
     merged = df.merge(
         right,
-        how="left",
-        left_on=spec["left_on"],
-        right_on=right_on,
+        how=pandas_how,
+        left_on=left_keys,
+        right_on=right_keys,
         suffixes=("", "__lookup"),
-        indicator=True,
+        indicator=indicator_name,
     )
-    unmatched = int(merged["_merge"].eq("left_only").sum())
-    merged = merged.drop(columns=["_merge"])
+    if how == "left_anti":
+        unmatched = int(merged[indicator_name].eq("left_only").sum())
+        merged = merged.loc[merged[indicator_name].eq("left_only"), df.columns]
+    elif how == "right_anti":
+        unmatched = int(merged[indicator_name].eq("right_only").sum())
+        right_only = merged[indicator_name].eq("right_only")
+        # Right anti returns the right relation with its join columns and
+        # projected columns; remove left-only columns where pandas created NaN.
+        merged = merged.loc[right_only]
+    else:
+        unmatched = int(merged[indicator_name].eq("left_only").sum())
+        merged = merged.drop(columns=[indicator_name])
     return merged, unmatched, None
 
 

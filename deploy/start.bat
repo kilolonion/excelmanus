@@ -23,16 +23,17 @@ REM    --backend-port PORT  Backend port (default 8000)
 REM    --frontend-port PORT Frontend port (default 3000)
 REM    --skip-deps          Skip dependency check
 REM    --no-open            Do not open browser
+REM    --no-kill-ports      Do not terminate existing listeners
 REM    --help               Show help
 REM =======================================================================
 
 setlocal enabledelayedexpansion
 
 REM -- Fast path for help so it does not trigger clone --
-for %%A in (%*) do (
-    if /i "%%~A"=="--help" goto :show_help
-    if /i "%%~A"=="-h" goto :show_help
-)
+REM Keep this as direct %~1 checks. A FOR block with GOTO can leave
+REM partially parsed argument text behind in older CMD builds.
+if /i "%~1"=="--help" goto :show_help
+if /i "%~1"=="-h" goto :show_help
 
 REM -- Locate project root --
 set "SCRIPT_DIR=%~dp0"
@@ -83,6 +84,8 @@ set "SKIP_DEPS=0"
 set "AUTO_OPEN=1"
 set "BACKEND_PID="
 set "FRONTEND_PID="
+set "SERVICES_STARTED=0"
+set "NO_KILL_PORTS=0"
 
 REM -- Parse arguments --
 :parse_args
@@ -95,6 +98,7 @@ if /i "%~1"=="--backend-port"   goto :arg_backend_port
 if /i "%~1"=="--frontend-port"  goto :arg_frontend_port
 if /i "%~1"=="--skip-deps"      ( set "SKIP_DEPS=1"    & shift & goto :parse_args )
 if /i "%~1"=="--no-open"        ( set "AUTO_OPEN=0"    & shift & goto :parse_args )
+if /i "%~1"=="--no-kill-ports"  ( set "NO_KILL_PORTS=1" & shift & goto :parse_args )
 if /i "%~1"=="--help"           ( goto :show_help )
 if /i "%~1"=="-h"               ( goto :show_help )
 echo [XX] 未知参数: %~1 [使用 --help 查看帮助]
@@ -135,6 +139,16 @@ if "%BACKEND_ONLY%"=="1" if "%FRONTEND_ONLY%"=="1" (
 REM -- Env vars override ports --
 if "%BACKEND_PORT_FROM_ARG%"=="0" if defined EXCELMANUS_BACKEND_PORT  set "BACKEND_PORT=%EXCELMANUS_BACKEND_PORT%"
 if "%FRONTEND_PORT_FROM_ARG%"=="0" if defined EXCELMANUS_FRONTEND_PORT set "FRONTEND_PORT=%EXCELMANUS_FRONTEND_PORT%"
+
+REM -- Validate ports before terminating an existing service --
+for /f "delims=0123456789" %%A in ("%BACKEND_PORT%") do if not "%%A"=="" goto :invalid_backend_port
+for /f "delims=0123456789" %%A in ("%FRONTEND_PORT%") do if not "%%A"=="" goto :invalid_frontend_port
+set /a _backend_port_num=%BACKEND_PORT% >nul 2>&1
+set /a _frontend_port_num=%FRONTEND_PORT% >nul 2>&1
+if %_backend_port_num% LSS 1 goto :invalid_backend_port
+if %_backend_port_num% GTR 65535 goto :invalid_backend_port
+if %_frontend_port_num% LSS 1 goto :invalid_frontend_port
+if %_frontend_port_num% GTR 65535 goto :invalid_frontend_port
 
 REM -- Find Python interpreter --
 set "PYTHON_BIN="
@@ -265,8 +279,10 @@ if "%FRONTEND_ONLY%"=="0" if "%PYTHON_BIN%"=="" (
 )
 
 REM -- Kill leftover ports --
-if "%FRONTEND_ONLY%"=="0" call :kill_port %BACKEND_PORT%
-if "%BACKEND_ONLY%"=="0"  call :kill_port %FRONTEND_PORT%
+if "%NO_KILL_PORTS%"=="0" (
+    if "%FRONTEND_ONLY%"=="0" call :kill_port %BACKEND_PORT%
+    if "%BACKEND_ONLY%"=="0"  call :kill_port %FRONTEND_PORT%
+)
 
 REM -- Startup info --
 echo.
@@ -279,13 +295,14 @@ if "%FRONTEND_ONLY%"=="1" goto :skip_backend
 
 echo [--] 启动 FastAPI 后端 [127.0.0.1:%BACKEND_PORT%]...
 start "" /b "%PYTHON_BIN%" -c "from excelmanus.api import main; main()" --host 127.0.0.1 --port %BACKEND_PORT%
+set "SERVICES_STARTED=1"
 
 REM Wait for backend ready
 set "BACKEND_READY=0"
 set "WAIT_COUNT=0"
 :wait_backend
 if %WAIT_COUNT% geq 30 goto :backend_timeout
-curl -s "http://localhost:%BACKEND_PORT%/api/v1/health" >nul 2>&1
+curl -sf "http://localhost:%BACKEND_PORT%/api/v1/health" >nul 2>&1
 if not errorlevel 1 (
     echo [OK] 后端已就绪
     set "BACKEND_READY=1"
@@ -315,13 +332,14 @@ if "%PRODUCTION%"=="1" (
     echo [--] 启动 Next.js 前端 [dev] [端口 %FRONTEND_PORT%]...
     start "" /b cmd /c "cd /d %PROJECT_ROOT%\web && npm run dev -- -p %FRONTEND_PORT%"
 )
+set "SERVICES_STARTED=1"
 
 REM Wait for frontend ready
 set "FE_READY=0"
 set "FE_WAIT=0"
 :wait_frontend
 if %FE_WAIT% geq 30 goto :frontend_timeout
-curl -s -o nul -w "" "http://localhost:%FRONTEND_PORT%/" >nul 2>&1
+curl -sf -o nul "http://localhost:%FRONTEND_PORT%/" >nul 2>&1
 if not errorlevel 1 (
     echo [OK] 前端已就绪
     set "FE_READY=1"
@@ -369,12 +387,27 @@ endlocal
 exit /b 0
 
 :exit_with_pause
+if "%SERVICES_STARTED%"=="1" (
+    echo [--] 正在清理已启动的服务...
+    if "%NO_KILL_PORTS%"=="0" (
+        if "%FRONTEND_ONLY%"=="0" call :kill_port %BACKEND_PORT%
+        if "%BACKEND_ONLY%"=="0"  call :kill_port %FRONTEND_PORT%
+    )
+)
 echo.
 echo   按任意键退出...
 pause >nul
 popd
 endlocal
 exit /b 1
+
+:invalid_backend_port
+echo [XX] 后端端口无效: %BACKEND_PORT%（必须为 1-65535）
+goto :exit_with_pause
+
+:invalid_frontend_port
+echo [XX] 前端端口无效: %FRONTEND_PORT%（必须为 1-65535）
+goto :exit_with_pause
 
 REM ===============================================================
 REM  Subroutines
@@ -396,7 +429,7 @@ set "_port=%~1"
 for /f "tokens=5" %%p in ('netstat -ano 2^>nul ^| findstr /R ":%_port%[^0-9]" ^| findstr "LISTENING"') do (
     if not "%%p"=="0" (
         echo [!!] 端口 %_port% 被占用 [PID %%p], 正在清理...
-        taskkill /PID %%p /F >nul 2>&1
+        taskkill /PID %%p /T /F >nul 2>&1
     )
 )
 exit /b 0
@@ -415,6 +448,7 @@ echo     --backend-port PORT  后端端口 [默认 8000]
 echo     --frontend-port PORT 前端端口 [默认 3000]
 echo     --skip-deps          跳过依赖检查
 echo     --no-open            不自动打开浏览器
+echo     --no-kill-ports      不清理残留端口
 echo     --help               显示帮助
 echo.
 echo   示例:

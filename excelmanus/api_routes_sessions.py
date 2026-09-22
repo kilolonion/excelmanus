@@ -563,12 +563,19 @@ async def create_session_api(request: Request) -> JSONResponse:
     workspace_id = (body.get("workspace_id") or "").strip() or None
     workspace_path = (body.get("workspace_path") or "").strip() or None
     title = (body.get("title") or "").strip() or "新对话"
+    # Landing/bootstrap calls keep the historical reuse behavior. Explicit UI
+    # "new chat" calls send reuse_blank=false so clicking + cannot silently
+    # select the same empty session again.
+    reuse_blank = body.get("reuse_blank", True)
+    if not isinstance(reuse_blank, bool):
+        reuse_blank = True
     from excelmanus.stores.workspace_store import WorkspacePathError
     try:
         session = await session_manager.create_or_reuse_session(
             workspace_id=workspace_id,
             workspace_path=workspace_path,
             title=title,
+            reuse_blank=reuse_blank,
         )
     except WorkspacePathError as exc:
         return _error_json_response(400, str(exc))
@@ -602,10 +609,13 @@ async def get_session_messages(session_id: str, request: Request) -> JSONRespons
         offset = max(0, int(request.query_params.get("offset", "0")))
     except (ValueError, TypeError):
         return JSONResponse(status_code=400, content={"detail": "limit/offset 必须为整数"})
+    tail = request.query_params.get("tail", "0").lower() in {"1", "true", "yes"}
     messages = await session_manager.get_session_messages(
-        session_id, limit=limit, offset=offset
+        session_id, limit=limit, offset=offset, tail=tail
     )
     normalized_messages: list[dict[str, Any]] = []
+    total = await session_manager.get_session_message_count(session_id)
+    page_offset = max(0, total - len(messages)) if tail else offset
     for idx, message in enumerate(messages):
         if isinstance(message, dict):
             normalized = dict(message)
@@ -618,10 +628,17 @@ async def get_session_messages(session_id: str, request: Request) -> JSONRespons
                 normalized = {"role": "assistant", "content": str(message)}
 
         if not normalized.get("message_id"):
-            normalized["message_id"] = f"volatile:{session_id}:{offset + idx}"
+            normalized["message_id"] = f"volatile:{session_id}:{page_offset + idx}"
         normalized_messages.append(normalized)
 
-    return JSONResponse(content={"messages": normalized_messages, "session_id": session_id})
+    return JSONResponse(content={
+        "messages": normalized_messages,
+        "session_id": session_id,
+        "total": total,
+        "offset": page_offset,
+        "limit": limit,
+        "has_more": page_offset > 0,
+    })
 
 
 @router.get("/api/v1/sessions/{session_id}/excel-events")
@@ -977,14 +994,22 @@ async def toggle_auto_approve(session_id: str, request: Request) -> JSONResponse
 
 @router.get("/api/v1/sessions/{session_id}")
 async def get_session(session_id: str, request: Request) -> JSONResponse:
-    """获取会话详情含消息历史。"""
+    """获取会话详情；轮询可通过 include_messages=false 跳过历史消息。"""
     session_manager = get_session_manager()
     if session_manager is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
-    # 当前会话冷恢复后才能展示可继续提交的交互；读取不启动 Driver。
-    await session_manager.get_or_restore_engine(session_id)
+    include_messages = request.query_params.get("include_messages", "true").lower() not in {
+        "0", "false", "no",
+    }
+    # Full detail is used when opening a conversation and may need the engine
+    # to restore pending interaction state. Lightweight polling can read the
+    # persisted metadata directly and must not cold-start an engine.
+    if include_messages:
+        await session_manager.get_or_restore_engine(session_id)
     try:
-        detail = await session_manager.get_session_detail(session_id)
+        detail = await session_manager.get_session_detail(
+            session_id, include_messages=include_messages,
+        )
     except SessionNotFoundError:
         # 会话可能尚未在后端创建（前端 local-first 乐观创建），返回空默认值。
         return JSONResponse(content={

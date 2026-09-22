@@ -191,15 +191,42 @@ if ($BackendOnly -and $FrontendOnly) {
 
 if ($BackendPort -eq 0) {
     $envPort = [System.Environment]::GetEnvironmentVariable("EXCELMANUS_BACKEND_PORT")
-    $BackendPort = if ($envPort) { [int]$envPort } else { 8000 }
+    $parsedPort = 0
+    if ($envPort -and -not [int]::TryParse([string]$envPort, [ref]$parsedPort)) {
+        Write-Err "环境变量 EXCELMANUS_BACKEND_PORT 无效: $envPort"
+        exit 2
+    }
+    $BackendPort = if ($envPort) { $parsedPort } else { 8000 }
 }
 if ($FrontendPort -eq 0) {
     $envPort = [System.Environment]::GetEnvironmentVariable("EXCELMANUS_FRONTEND_PORT")
-    $FrontendPort = if ($envPort) { [int]$envPort } else { 3000 }
+    $parsedPort = 0
+    if ($envPort -and -not [int]::TryParse([string]$envPort, [ref]$parsedPort)) {
+        Write-Err "环境变量 EXCELMANUS_FRONTEND_PORT 无效: $envPort"
+        exit 2
+    }
+    $FrontendPort = if ($envPort) { $parsedPort } else { 3000 }
 }
 if (-not $ListenHost) { $ListenHost = "127.0.0.1" }
 if ($Workers -eq 0)   { $Workers = 1 }
 if ($HealthTimeout -eq 0) { $HealthTimeout = 30 }
+
+if ($BackendPort -lt 1 -or $BackendPort -gt 65535) {
+    Write-Err "后端端口无效: $BackendPort（必须为 1-65535）"
+    exit 2
+}
+if ($FrontendPort -lt 1 -or $FrontendPort -gt 65535) {
+    Write-Err "前端端口无效: $FrontendPort（必须为 1-65535）"
+    exit 2
+}
+if ($Workers -lt 1) {
+    Write-Err "Workers 必须是正整数: $Workers"
+    exit 2
+}
+if ($HealthTimeout -lt 1) {
+    Write-Err "HealthTimeout 必须是正整数: $HealthTimeout"
+    exit 2
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  初始化日志文件
@@ -572,7 +599,7 @@ Write-Host ""
 function Stop-PortProcess {
     param([int]$Port)
     try {
-        $connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
+        $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
         if ($connections) {
             $pids = $connections | Select-Object -ExpandProperty OwningProcess -Unique
             foreach ($procId in $pids) {
@@ -580,10 +607,11 @@ function Stop-PortProcess {
                     $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
                     if ($proc) {
                         Write-Warn "端口 $Port 被占用 (PID $procId - $($proc.ProcessName))，正在清理..."
-                        # 优雅关闭
+                        # 端口只清理监听者，避免误杀浏览器等连接客户端。
                         $proc.CloseMainWindow() | Out-Null
                         if (-not $proc.WaitForExit(3000)) {
-                            # 强制终止
+                            # npm/cmd 可能带有子进程，优先按进程树终止。
+                            & taskkill.exe /PID $procId /T /F 2>$null | Out-Null
                             Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
                         }
                     }
@@ -594,7 +622,7 @@ function Stop-PortProcess {
     } catch {
         # Get-NetTCPConnection 在某些环境不可用，fallback 到 netstat
         try {
-            $lines = netstat -ano | Select-String ":$Port\s"
+            $lines = netstat -ano | Select-String ":$Port\s+.*LISTENING\s+"
             foreach ($line in $lines) {
                 if ($line -match '\s(\d+)$') {
                     $procId = [int]$Matches[1]
@@ -765,6 +793,7 @@ function Stop-AllServices {
             $proc.CloseMainWindow() | Out-Null
             # 发送 Ctrl+C 信号
             if (-not $proc.HasExited) {
+                & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
                 Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
             }
         } catch {}
@@ -792,9 +821,10 @@ function Stop-AllServices {
     # 清理子进程（npm 会产生 node 子进程）
     foreach ($port in @($BackendPort, $FrontendPort)) {
         try {
-            $conns = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
+            $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
             foreach ($conn in $conns) {
                 if ($conn.OwningProcess -and $conn.OwningProcess -ne 0) {
+                    & taskkill.exe /PID $conn.OwningProcess /T /F 2>$null | Out-Null
                     Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
                 }
             }
@@ -818,14 +848,11 @@ try {
 
 if (-not $FrontendOnly) {
     Start-Backend
+    Wait-BackendHealth -Proc $Script:BackendProcess
 }
 
 if (-not $BackendOnly) {
     Start-Frontend
-}
-
-if (-not $FrontendOnly) {
-    Wait-BackendHealth -Proc $Script:BackendProcess
 }
 
 # 等待前端启动（轮询健康检查）

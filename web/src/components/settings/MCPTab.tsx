@@ -736,9 +736,6 @@ export function MCPTab() {
 
   return (
     <div className="space-y-3">
-      {/* Built-in search engines */}
-      <BuiltinSearchSection />
-
       <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
@@ -1115,6 +1112,9 @@ export function MCPTab() {
           ))}
       </div>
       </section>
+
+      {/* Built-in search engines */}
+      <BuiltinSearchSection />
     </div>
   );
 }

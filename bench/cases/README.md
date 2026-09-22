@@ -32,12 +32,11 @@
 - 常开护栏：`no_cheat_read`（suite 显式声明，realistic 已开）——工具参数触碰
   `answers.json` / `suite_*.json` / `bench/fixtures` 即判作弊 fail
 
-## 效率预算为 warn-only
+## 效率预算默认是发布门禁
 
 `max_iterations` / `max_llm_calls` / `max_tool_calls` / `max_tool_failures` /
-`max_tokens` / `max_duration_seconds` 超限只记 `severity: warning`：复盘可见，
-默认不判 fail、不影响退出码（见 `bench_validator.EFFICIENCY_RULES`）。
-显式使用 CLI `--strict-efficiency` 或 PowerShell `-Strict` 时，效率超限也会判为失败。
+`max_tokens` / `max_duration_seconds` 超限默认判为失败并影响退出码，避免性能
+回归被 warning 淹没。体验运行可显式使用 `--no-strict-efficiency` 降级为 warning。
 正确性由 `output_checks` 与 error 级断言判定。调预算先看
 `summarize_runs.py` 的 P90 分布，以实际分布为依据，并保留调整前后的结果。
 

@@ -174,6 +174,7 @@ def _convert_xls(
     font_list = xls_wb.font_list
     format_map = xls_wb.format_map
 
+    style_failures = 0
     for si in range(xls_wb.nsheets):
         xls_ws = xls_wb.sheet_by_index(si)
         xlsx_ws = xlsx_wb.create_sheet(title=xls_ws.name)
@@ -214,8 +215,12 @@ def _convert_xls(
                         xlsx_cell, xf_idx,
                         xf_list, font_list, format_map, xls_wb,
                     )
-                except Exception:
-                    pass  # 样式迁移失败静默跳过
+                except Exception as exc:
+                    style_failures += 1
+                    logger.warning(
+                        "XLS 样式迁移失败，已保留单元格值但未保留样式: sheet=%s row=%d col=%d error=%s",
+                        xls_ws.name, row_idx + 1, col_idx + 1, exc,
+                    )
 
         # 合并单元格
         for crange in xls_ws.merged_cells:
@@ -256,6 +261,15 @@ def _convert_xls(
                 pass
 
     dst = _save_converted_workbook(xlsx_wb, dst, workspace_root=workspace_root)
+    if style_failures:
+        logger.warning(
+            "XLS → XLSX 存在 %d 个样式迁移失败；图表、宏、条件格式、验证、超链接和图片不在转换保真范围内",
+            style_failures,
+        )
+    else:
+        logger.warning(
+            "XLS → XLSX 转换会丢失图表、宏、条件格式、验证、超链接和图片；请核对转换报告",
+        )
     logger.info("XLS → XLSX 转换完成: %s → %s (%d sheets)", src.name, dst.name, xls_wb.nsheets)
     return dst
 
@@ -390,6 +404,9 @@ def _convert_xlsb(
         xlsx_wb.create_sheet(title="Sheet1")
 
     dst = _save_converted_workbook(xlsx_wb, dst, workspace_root=workspace_root)
+    logger.warning(
+        "XLSB → XLSX 仅保留数据与工作表结构；样式、图表、宏、条件格式、验证、链接和图片不会迁移",
+    )
     logger.info("XLSB → XLSX 转换完成: %s → %s", src.name, dst.name)
     return dst
 

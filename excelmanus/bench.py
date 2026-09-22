@@ -2454,7 +2454,7 @@ class _RunPlan:
     turn_timeout: float = 0.0
     case_ids: list[str] = field(default_factory=list)
     wave: str = ""
-    strict_efficiency: bool = False
+    strict_efficiency: bool = True
 
 
 def _positive_int(raw: str) -> int:
@@ -2554,11 +2554,19 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="只运行带 wave-N 标签的用例",
     )
-    parser.add_argument(
+    efficiency_group = parser.add_mutually_exclusive_group()
+    efficiency_group.add_argument(
         "--strict-efficiency",
         action="store_true",
-        help="严格模式：效率预算（max_llm_calls 等 warn-only 项）超限也判 fail。"
-        "默认关闭（只告警）；nightly 回归收紧时可用。",
+        dest="strict_efficiency",
+        default=True,
+        help="效率预算超限判 fail（默认开启）。",
+    )
+    efficiency_group.add_argument(
+        "--no-strict-efficiency",
+        action="store_false",
+        dest="strict_efficiency",
+        help="兼容体验运行：效率预算只告警，不影响退出码。",
     )
     trace_group = parser.add_mutually_exclusive_group()
     trace_group.add_argument(
@@ -2596,7 +2604,7 @@ def _resolve_run_mode(args: argparse.Namespace) -> _RunPlan:
             if str(item).strip()
         ],
         "wave": str(getattr(args, "wave", "") or "").strip(),
-        "strict_efficiency": bool(getattr(args, "strict_efficiency", False)),
+        "strict_efficiency": bool(getattr(args, "strict_efficiency", True)),
     }
     import_env = getattr(args, "import_env", None)
     if import_env is not None:

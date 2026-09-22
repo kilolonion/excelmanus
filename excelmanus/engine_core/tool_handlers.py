@@ -514,7 +514,14 @@ class AuditOnlyHandler(BaseToolHandler):
     """处理 audit-only 工具（低风险但需审计）。"""
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
-        return self._engine.approval.is_audit_only_tool(tool_name)
+        arguments = kwargs.get("arguments")
+        args = arguments if isinstance(arguments, dict) else None
+        approval = self._engine.approval
+        # A capability may be both auditable and confirmation-gated (skill
+        # install/uninstall). Let HighRiskApprovalHandler own the gate.
+        if approval.is_confirm_required_tool(tool_name):
+            return False
+        return approval.is_audit_only_tool(tool_name, args)
 
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
@@ -523,7 +530,7 @@ class AuditOnlyHandler(BaseToolHandler):
         result_value, audit_record = await e.execute_tool_with_audit(
             tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
             approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
-            undoable=e.approval.is_undoable_tool(tool_name),
+            undoable=e.approval.is_undoable_tool(tool_name, arguments),
         )
         structured = self._dispatcher._coerce_tool_result(result_value)
         result_str = structured.model_text
@@ -554,6 +561,7 @@ class HighRiskApprovalHandler(BaseToolHandler):
     """
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
+        arguments = kwargs.get("arguments")
         return self._engine.approval.is_high_risk_tool(tool_name)
 
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None, skip_high_risk_approval_by_hook=False):
@@ -612,7 +620,7 @@ class HighRiskApprovalHandler(BaseToolHandler):
         result_value, audit_record = await e.execute_tool_with_audit(
             tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
             approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
-            undoable=e.approval.is_undoable_tool(tool_name),
+            undoable=e.approval.is_undoable_tool(tool_name, arguments),
         )
         structured = self._dispatcher._coerce_tool_result(result_value)
         result_str = structured.model_text

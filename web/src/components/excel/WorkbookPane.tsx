@@ -2,7 +2,7 @@
 
 import { useCallback, useState, useSyncExternalStore } from "react";
 import dynamic from "next/dynamic";
-import { Check, X, Star } from "lucide-react";
+import { Check, FileSpreadsheet, Maximize2, Star, X } from "lucide-react";
 import { buildExcelFileUrl, downloadFile } from "@/lib/api";
 import { fileBaseName } from "@/lib/revision-display";
 import { fileRefFromSession, normalizeRelativePath } from "@/lib/workspace-file-ref";
@@ -19,6 +19,7 @@ import { ExcelRibbonChrome } from "./ExcelRibbonChrome";
 import { HistoryPaneOverlay } from "./HistoryPaneOverlay";
 import { ExcelWriteConflictBar } from "./ExcelWriteConflictBar";
 import { WorkbookInteractionBar, useWorkbookQuestionRequest } from "./WorkbookInteractionBar";
+import styles from "./WorkbookWorkspace.module.css";
 
 const UniverSheet = dynamic(() => import("./UniverSheet").then((module) => module.UniverSheet), {
   ssr: false, loading: () => <div role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">正在准备表格…</div>,
@@ -67,17 +68,39 @@ export function WorkbookPane({ path, active, focused, onClose, onExpand, expandT
   }, [path]);
   const filename = fileBaseName(path);
   const navigation = workspace.linkSelection && !focused && workspace.navigation?.source !== path ? workspace.navigation : undefined;
+  const saveState = editStatus || (sheet ? "已同步" : "读取中");
+  const saveStateKind = editStatus === "保存需要处理" ? "error" : editStatus ? "pending" : sheet ? "ready" : "loading";
 
-  return <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background" data-workbook-pane={path}
+  return <section className={styles.pane} data-workbook-pane={path} data-focused={focused}
     aria-label={`${primary ? "主表" : "参考表"}：${filename}`} onPointerDownCapture={focus} onFocusCapture={focus}>
-    <div className={`flex shrink-0 items-center gap-2 border-b px-2 py-1 text-xs ${focused ? "bg-[var(--em-primary-alpha-08)]" : "bg-muted/30"}`}>
-      <span className="shrink-0 text-[var(--em-primary)]">{primary ? "主表" : "参考表"}</span>
-      <span className="min-w-0 flex-1 truncate" title={path}>{filename}</span>
-      {editStatus && <span role="status" className="shrink-0 text-muted-foreground">{editStatus}</span>}
-      {!primary && <button type="button" onClick={() => useExcelStore.getState().setPrimaryWorkbook(path)} title="设为主表" aria-label={`将 ${filename} 设为主表`} className="rounded p-1 hover:bg-muted"><Star className="h-3.5 w-3.5" /></button>}
-      <button type="button" onClick={onClose} aria-label={`关闭 ${filename}`} className="rounded p-1 hover:bg-muted"><X className="h-3.5 w-3.5" /></button>
+    <div className={styles.paneHeader}>
+      <div className={styles.paneIdentity}>
+        <div className={styles.paneIcon} aria-hidden="true"><FileSpreadsheet size={15} /></div>
+        <div className={styles.paneTitleStack}>
+          <div className={styles.paneRole} data-primary={primary}>
+            <span>{primary ? "主表" : "参考表"}</span>
+            {focused && <span className={styles.focusedMark}>当前聚焦</span>}
+          </div>
+          <div className={styles.paneFileName} title={path}>{filename}</div>
+          <div className={styles.paneSheet}>{sheet ? `${sheet} 工作表` : "正在读取工作表…"}</div>
+        </div>
+      </div>
+      <div className={styles.paneActions}>
+        <span className={styles.saveState} data-state={saveStateKind} role="status">
+          <span className={styles.saveStateDot} aria-hidden="true" />{saveState}
+        </span>
+        {!primary && <button type="button" onClick={() => useExcelStore.getState().setPrimaryWorkbook(path)} title="设为主表" aria-label={`将 ${filename} 设为主表`} className={styles.paneAction}>
+          <Star className="h-3.5 w-3.5" />
+        </button>}
+        <button type="button" onClick={onExpand} title={expandTitle} aria-label={expandTitle} className={styles.paneAction}>
+          <Maximize2 className="h-3.5 w-3.5" />
+        </button>
+        <button type="button" onClick={onClose} aria-label={`关闭 ${filename}`} title="关闭此表格" className={`${styles.paneAction} ${styles.paneClose}`}>
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </div>
-    <div className="relative min-h-0 flex-1 overflow-hidden">
+    <div className={styles.paneBody}>
       <UniverSheet fitContainer active={active && !historyActive} focused={focused} fileUrl={buildExcelFileUrl(path, session?.id, session?.workspaceId)}
         fileRef={file} sessionId={session?.id} viewGeneration={generation} initialSheet={sheet}
         selectionMode={selectionMode} readOnly={Boolean(question && selectionMode)} onRangeSelected={handleRange}
@@ -97,13 +120,13 @@ export function WorkbookPane({ path, active, focused, onClose, onExpand, expandT
     </div>
     {(conflict || writeError) && <ExcelWriteConflictBar filePath={path} onReload={reloadAfterConflict} error={conflict ? null : writeError} />}
     <WorkbookInteractionBar filePath={path} />
-    {selectionMode && ownDraft && !question && <div className="flex shrink-0 items-center gap-2 border-t bg-muted/40 px-3 py-2 text-xs">
-      <span className="min-w-0 flex-1 truncate">{filename} · {ownDraft.sheet}!{ownDraft.range}</span>
-      <button type="button" className="flex items-center gap-1 rounded bg-[var(--em-primary)] px-2 py-1 text-white" onClick={() => {
+    {selectionMode && ownDraft && !question && <div className={styles.selectionBar}>
+      <span className={styles.selectionText}>{filename} · {ownDraft.sheet}!{ownDraft.range}</span>
+      <button type="button" className={styles.selectionConfirm} onClick={() => {
         useExcelStore.getState().confirmSelection({ filePath: path, sheet: ownDraft.sheet, range: ownDraft.range, contentVersion: ownDraft.contentVersion });
         if (isMobile) useExcelStore.getState().closeFullView();
       }}><Check className="h-3 w-3" />引用到对话</button>
-      <button type="button" onClick={() => useExcelStore.getState().exitSelectionMode()}>取消</button>
+      <button type="button" className={styles.selectionCancel} onClick={() => useExcelStore.getState().exitSelectionMode()}>取消</button>
     </div>}
   </section>;
 }

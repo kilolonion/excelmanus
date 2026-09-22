@@ -634,6 +634,14 @@ class TestProperty14SessionDeletion:
         assert "current_model" in detail
         assert "current_model_name" in detail
 
+        lightweight_resp = await client.get(
+            f"/api/v1/sessions/{sid}", params={"include_messages": "false"}
+        )
+        assert lightweight_resp.status_code == 200
+        lightweight = lightweight_resp.json()
+        assert lightweight["messages"] == []
+        assert lightweight["message_count"] == detail["message_count"]
+
     @pytest.mark.asyncio
     async def test_get_session_detail_includes_pending_approval(
         self, client: AsyncClient

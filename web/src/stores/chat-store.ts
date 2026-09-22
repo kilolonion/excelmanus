@@ -31,6 +31,9 @@ import {
 
 // 内存快速缓存（扩展 IndexedDB）
 const _sessionMessages = new Map<string, Message[]>();
+const _sessionMessageMeta = new Map<string, { total: number; offset: number; hasMore: boolean }>();
+const _messageRefreshes = new Map<string, Promise<void>>();
+const MESSAGE_PAGE_SIZE = 100;
 
 // F5：switchSession 取消息令牌 —— 递归版本号，当 loadAndSwitch 检测到版本号变化后放送更新
 let _switchSessionVersion = 0;
@@ -623,6 +626,33 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
   };
 }
 
+/** Merge two chronological UI pages without duplicating overlap rows. */
+function _mergeMessagePages(older: Message[], newer: Message[]): Message[] {
+  const merged = [...older];
+  const indexById = new Map(merged.map((message, index) => [message.id, index]));
+  for (const message of newer) {
+    const existingIndex = indexById.get(message.id);
+    if (existingIndex !== undefined) {
+      // The newer page has the authoritative tool-call status/result.
+      merged[existingIndex] = message;
+      continue;
+    }
+    const previous = merged[merged.length - 1];
+    if (previous?.role === "assistant" && message.role === "assistant") {
+      merged[merged.length - 1] = {
+        ...previous,
+        blocks: [...previous.blocks, ...message.blocks],
+        affectedFiles: mergeAffectedFiles(previous.affectedFiles ?? [], message.affectedFiles ?? []),
+      };
+      indexById.set(message.id, merged.length - 1);
+      continue;
+    }
+    indexById.set(message.id, merged.length);
+    merged.push(message);
+  }
+  return merged;
+}
+
 function _mergeRecoveredExcelState(
   recoveredDiffs: ExcelDiffEntry[],
   recoveredFilePaths: string[],
@@ -769,11 +799,6 @@ function _restoreAffectedFilesOnMessages(
 /**
  * 寮傛鍔犺浇锛氫紭鍏?IDB锛屽洖閫€鍒板悗绔?API銆備粎褰撲細璇濅粛涓哄綋鍓嶄細璇濇椂鏇存柊 store銆?
  */
-async function _loadMessagesAsync(sessionId: string): Promise<void> {
-  const opts: LoadMessagesOptions = {};
-  return _loadMessagesAsyncWithOptions(sessionId, opts);
-}
-
 async function _loadMessagesAsyncWithOptions(
   sessionId: string,
   opts: LoadMessagesOptions,
@@ -816,8 +841,37 @@ async function _loadMessagesAsyncWithOptions(
 
   // 鍥為€€鍒板悗绔?API
   try {
-    const raw = await fetchSessionMessages(sessionId, 200, 0);
-    if (raw.length === 0) return;
+    const result = await fetchSessionMessages(sessionId, MESSAGE_PAGE_SIZE, 0, {
+      tail: true,
+      withMeta: true,
+    });
+    const page = Array.isArray(result)
+      ? { messages: result, total: result.length, offset: 0, hasMore: false }
+      : result;
+    const raw = page.messages;
+    _sessionMessageMeta.set(sessionId, {
+      total: page.total,
+      offset: page.offset,
+      hasMore: page.hasMore,
+    });
+    if (raw.length === 0) {
+      // An empty response is a valid blank conversation. When this is a
+      // revalidation, clear a stale local cache instead of leaving the old
+      // transcript visible forever.
+      if (shouldReplaceVisibleMessages) {
+        const current = useChatStore.getState();
+        if (current.loadedSessionId === sessionId && !current.abortController) {
+          _sessionMessages.set(sessionId, []);
+          _sessionMessageMeta.set(sessionId, { total: 0, offset: 0, hasMore: false });
+          saveCachedMessages(sessionId, []).catch(() => {});
+          current.setMessages([]);
+        }
+      }
+      if (useChatStore.getState().loadedSessionId === sessionId) {
+        useChatStore.setState({ messageLoadError: null });
+      }
+      return;
+    }
     const {
       messages,
       recoveredDiffs,
@@ -832,12 +886,34 @@ async function _loadMessagesAsyncWithOptions(
       && !store.isStreaming
       && !store.abortController
       && (store.messages.length === 0 || shouldReplaceVisibleMessages);
-    const finalMessages =
+    let finalMessages =
       shouldReplace && shouldReplaceVisibleMessages && store.messages.length > 0
         ? _preserveSseOnlyBlocks(store.messages, messages)
         : messages;
+    // A previous visit may have a complete transcript in memory/IndexedDB,
+    // while the revalidation intentionally fetched only the newest page. Keep
+    // the cached prefix when it can still fit the server total so the first
+    // background refresh does not make older visible messages disappear.
+    if (
+      shouldReplace
+      && shouldReplaceVisibleMessages
+      && page.total >= store.messages.length
+      && store.messages.length > messages.length
+    ) {
+      const freshIds = new Set(messages.map((message) => message.id));
+      const cachedPrefix = store.messages.filter((message) => !freshIds.has(message.id));
+      finalMessages = _mergeMessagePages(cachedPrefix, messages);
+    }
+    const visibleHasMore = page.hasMore;
+    _sessionMessageMeta.set(sessionId, {
+      total: page.total,
+      offset: visibleHasMore ? page.offset : 0,
+      hasMore: visibleHasMore,
+    });
     _sessionMessages.set(sessionId, finalMessages);
-    maybeBackfillTitle(finalMessages);
+    // A tail page may not contain the first user turn; deriving a title from
+    // it would rename an existing conversation to an unrelated recent prompt.
+    if (!visibleHasMore) maybeBackfillTitle(finalMessages);
     saveCachedMessages(sessionId, finalMessages).catch(() => {});
     if (shouldReplace) {
       // 鑻ュ悎骞剁粨鏋滀笌 store 褰撳墠鍐呭璇箟绛変环鍒欓伩鍏嶈瑙夐棯鐑併€?
@@ -871,21 +947,101 @@ async function _loadMessagesAsyncWithOptions(
       if (!equiv) {
         useChatStore.getState().setMessages(finalMessages);
       }
+      useChatStore.setState({
+        loadedMessageTotal: page.total,
+        hasMoreMessages: visibleHasMore,
+      });
+    }
+    if (useChatStore.getState().loadedSessionId === sessionId) {
+      useChatStore.setState({ messageLoadError: null });
     }
     // 娑堟伅宸插姞杞斤紝绔嬪嵆鎭㈠ Excel 浜嬩欢骞跺洖濉?affectedFiles
     _loadPersistedExcelEvents(sessionId).catch(() => {});
-  } catch {
-    // 闈欓粯蹇界暐
+  } catch (error) {
+    // Keep the cached/optimistic transcript visible, but expose the failure so
+    // the UI can tell the user why a refresh is taking time and offer retry.
+    const current = useChatStore.getState();
+    if (current.loadedSessionId === sessionId) {
+      const detail = error instanceof Error ? error.message : "网络请求失败";
+      useChatStore.setState({ messageLoadError: `历史消息加载失败：${detail}` });
+    }
   }
 }
 
 export async function refreshSessionMessagesFromBackend(
   sessionId: string,
 ): Promise<void> {
-  await _loadMessagesAsyncWithOptions(sessionId, {
-    preferCache: false,
-    replaceVisibleMessages: true,
-  });
+  const existing = _messageRefreshes.get(sessionId);
+  if (existing) return existing;
+
+  const refresh = (async () => {
+    const current = useChatStore.getState();
+    if (current.loadedSessionId === sessionId) {
+      useChatStore.setState({ isLoadingMessages: true, messageLoadError: null });
+    }
+    try {
+      await _loadMessagesAsyncWithOptions(sessionId, {
+        preferCache: false,
+        replaceVisibleMessages: true,
+      });
+    } finally {
+      const latest = useChatStore.getState();
+      if (latest.loadedSessionId === sessionId) {
+        useChatStore.setState({ isLoadingMessages: false });
+      }
+    }
+  })();
+  _messageRefreshes.set(sessionId, refresh);
+  try {
+    await refresh;
+  } finally {
+    if (_messageRefreshes.get(sessionId) === refresh) _messageRefreshes.delete(sessionId);
+  }
+}
+
+async function _loadOlderMessages(): Promise<void> {
+  const state = useChatStore.getState();
+  const sessionId = state.loadedSessionId;
+  const meta = sessionId ? _sessionMessageMeta.get(sessionId) : undefined;
+  if (!sessionId || !meta || !meta.hasMore || state.isLoadingOlderMessages) return;
+  if (meta.offset <= 0) {
+    useChatStore.setState({ hasMoreMessages: false });
+    _sessionMessageMeta.set(sessionId, { ...meta, hasMore: false });
+    return;
+  }
+
+  useChatStore.setState({ isLoadingOlderMessages: true });
+  try {
+    const nextLimit = Math.min(MESSAGE_PAGE_SIZE, meta.offset);
+    const nextOffset = Math.max(0, meta.offset - nextLimit);
+    const result = await fetchSessionMessages(sessionId, nextLimit, nextOffset, {
+      withMeta: true,
+    });
+    const page = Array.isArray(result)
+      ? { messages: result, total: result.length, offset: nextOffset, hasMore: nextOffset > 0 }
+      : result;
+    const latest = useChatStore.getState();
+    if (latest.loadedSessionId !== sessionId) return;
+    const converted = _convertBackendMessages(page.messages);
+    const merged = _mergeMessagePages(converted.messages, latest.messages);
+    _sessionMessages.set(sessionId, merged);
+    _sessionMessageMeta.set(sessionId, {
+      total: page.total,
+      offset: page.offset,
+      hasMore: page.hasMore,
+    });
+    useChatStore.setState({
+      ..._setMessagesSnapshot(merged),
+      loadedMessageTotal: page.total,
+      hasMoreMessages: page.hasMore,
+    });
+    saveCachedMessages(sessionId, merged).catch(() => {});
+    _mergeRecoveredExcelState(converted.recoveredDiffs, converted.recoveredFilePaths, sessionId);
+  } finally {
+    if (useChatStore.getState().loadedSessionId === sessionId) {
+      useChatStore.setState({ isLoadingOlderMessages: false });
+    }
+  }
 }
 
 export interface PipelineStatus {
@@ -922,6 +1078,11 @@ interface ChatState {
   batchProgress: BatchProgress | null;
   toolProgress: Record<string, { stage: string; message: string }>;
   isLoadingMessages: boolean;
+  loadedMessageTotal: number | null;
+  hasMoreMessages: boolean;
+  isLoadingOlderMessages: boolean;
+  /** Human-readable error from the latest history load/revalidation. */
+  messageLoadError: string | null;
 
   setMessages: (messages: Message[]) => void;
   updateAssistantMessage: (
@@ -965,6 +1126,7 @@ interface ChatState {
   clearAllHistory: () => Promise<void>;
   saveCurrentSession: () => void;
   bindLoadedSession: (sessionId: string | null) => void;
+  loadOlderMessages: () => Promise<void>;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -985,6 +1147,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   batchProgress: null,
   toolProgress: {},
   isLoadingMessages: false,
+  loadedMessageTotal: null,
+  hasMoreMessages: false,
+  isLoadingOlderMessages: false,
+  messageLoadError: null,
 
   setMessages: (messages) => set(() => _setMessagesSnapshot(messages)),
   updateAssistantMessage: (messageId, updater) =>
@@ -1005,6 +1171,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messageOrder: newOrder,
         messageIndexById: { ...state.messageIndexById, [id]: state.messageOrder.length },
         messagesById: newById,
+        loadedMessageTotal: state.loadedMessageTotal == null ? null : state.loadedMessageTotal + 1,
       };
     }),
   addAssistantMessage: (id) =>
@@ -1017,6 +1184,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messageOrder: newOrder,
         messageIndexById: { ...state.messageIndexById, [id]: state.messageOrder.length },
         messagesById: newById,
+        loadedMessageTotal: state.loadedMessageTotal == null ? null : state.loadedMessageTotal + 1,
       };
     }),
   appendBlock: (messageId, block) =>
@@ -1237,11 +1405,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const { loadedSessionId } = get();
     if (loadedSessionId) {
       _sessionMessages.delete(loadedSessionId);
+      _sessionMessageMeta.delete(loadedSessionId);
       deleteCachedMessages(loadedSessionId).catch(() => {});
     }
     set({
       ..._setMessagesSnapshot([]),
       isLoadingMessages: false,
+      loadedMessageTotal: 0,
+      hasMoreMessages: false,
+      isLoadingOlderMessages: false,
+      messageLoadError: null,
       pendingApproval: null,
       pendingQuestion: null,
       pipelineStatus: null,
@@ -1253,6 +1426,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   removeSessionCache: (sessionId) => {
     _sessionMessages.delete(sessionId);
+    _sessionMessageMeta.delete(sessionId);
     deleteCachedMessages(sessionId).catch(() => {});
 
     const state = get();
@@ -1261,6 +1435,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loadedSessionId: null,
         ..._setMessagesSnapshot([]),
         isLoadingMessages: false,
+        loadedMessageTotal: 0,
+        hasMoreMessages: false,
+        isLoadingOlderMessages: false,
+        messageLoadError: null,
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
@@ -1279,6 +1457,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     await clearAllSessions();
     _sessionMessages.clear();
+    _sessionMessageMeta.clear();
+    _messageRefreshes.clear();
     await clearAllCachedMessages();
     useSessionStore.getState().setSessions([]);
     useSessionStore.getState().setActiveSession(null);
@@ -1286,6 +1466,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       loadedSessionId: null,
       ..._setMessagesSnapshot([]),
       isLoadingMessages: false,
+      loadedMessageTotal: null,
+      hasMoreMessages: false,
+      isLoadingOlderMessages: false,
+      messageLoadError: null,
       pendingApproval: null,
       pendingQuestion: null,
       activeStreamId: null,
@@ -1312,12 +1496,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ loadedSessionId: sessionId });
   },
 
+  loadOlderMessages: _loadOlderMessages,
+
   switchSession: (sessionId) => {
     const state = get();
 
-    // 已绑定该会话：流式输出中跳过；已有消息则无需重拉。
+    // Do not bind a different session while an SSE stream is still writing to
+    // the current one. SessionSync retries the switch when the stream closes;
+    // changing loadedSessionId here would make that retry look like a no-op
+    // and could leave the old transcript attached to the new session.
+    if (state.abortController) {
+      if (state.isLoadingMessages) useChatStore.setState({ isLoadingMessages: false });
+      return;
+    }
+
+    // 已绑定该会话：流式输出中跳过；已有消息由 SessionSync 的显式
+    // revalidation 负责更新，避免每次轮询都重建历史。
     if (sessionId === state.loadedSessionId) {
-      if (state.abortController) return;
       if (!sessionId || state.messages.length > 0) return;
     }
 
@@ -1328,22 +1523,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     useJevStore.getState().reset();
 
+    const myVersion = ++_switchSessionVersion;
+
+    const finishLoad = () => {
+      if (_switchSessionVersion === myVersion && get().loadedSessionId === sessionId) {
+        useChatStore.setState({ isLoadingMessages: false });
+      }
+    };
+
+    // Cache is only the fast first paint. Always revalidate it from SQLite/API
+    // in the background so a stale tab cannot hide messages until the user
+    // sends another message or clicks another control.
+    const revalidateFromBackend = () => {
+      if (!sessionId || _switchSessionVersion !== myVersion) return;
+      if (get().abortController) {
+        finishLoad();
+        return;
+      }
+      _loadMessagesAsyncWithOptions(sessionId, {
+        preferCache: false,
+        replaceVisibleMessages: true,
+      }).finally(finishLoad);
+    };
+
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
-    if (memCached && memCached.length > 0) {
-      ++_switchSessionVersion;
+    if (sessionId && memCached && memCached.length > 0) {
       set({
         loadedSessionId: sessionId,
         ..._setMessagesSnapshot(memCached),
-        isLoadingMessages: false,
+        isLoadingMessages: true,
+        loadedMessageTotal: _sessionMessageMeta.get(sessionId)?.total ?? memCached.length,
+        hasMoreMessages: _sessionMessageMeta.get(sessionId)?.hasMore ?? false,
+        isLoadingOlderMessages: false,
+        messageLoadError: null,
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
         resumeFailedReason: null,
       });
+      _loadPersistedExcelEvents(sessionId).catch(() => {});
+      revalidateFromBackend();
       return;
     }
-
-    const myVersion = ++_switchSessionVersion;
 
     const loadAndSwitch = async () => {
       if (!sessionId) {
@@ -1351,6 +1572,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           loadedSessionId: null,
           ..._setMessagesSnapshot([]),
           isLoadingMessages: false,
+          loadedMessageTotal: 0,
+          hasMoreMessages: false,
+          isLoadingOlderMessages: false,
+          messageLoadError: null,
           pendingApproval: null,
           pendingQuestion: null,
           pipelineStatus: null,
@@ -1365,18 +1590,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const cached = await loadCachedMessages(sessionId);
         if (cached && cached.length > 0) {
           if (_switchSessionVersion !== myVersion) return;
-          if (get().abortController) return;
+          if (get().abortController) {
+            finishLoad();
+            return;
+          }
           _sessionMessages.set(sessionId, cached);
           set({
             loadedSessionId: sessionId,
             ..._setMessagesSnapshot(cached),
-            isLoadingMessages: false,
+            isLoadingMessages: true,
+            loadedMessageTotal: _sessionMessageMeta.get(sessionId)?.total ?? cached.length,
+            hasMoreMessages: _sessionMessageMeta.get(sessionId)?.hasMore ?? false,
+            isLoadingOlderMessages: false,
+            messageLoadError: null,
             pendingApproval: null,
             pendingQuestion: null,
             pipelineStatus: null,
             resumeFailedReason: null,
           });
           _loadPersistedExcelEvents(sessionId).catch(() => {});
+          revalidateFromBackend();
           return;
         }
       } catch {
@@ -1384,11 +1617,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
 
       if (_switchSessionVersion !== myVersion) return;
-      if (get().abortController) return;
+      if (get().abortController) {
+        finishLoad();
+        return;
+      }
 
       set({
         loadedSessionId: sessionId,
         ..._setMessagesSnapshot([]),
+        loadedMessageTotal: null,
+        hasMoreMessages: false,
+        isLoadingOlderMessages: false,
+        messageLoadError: null,
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
@@ -1396,11 +1636,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         latestSeq: 0,
         resumeFailedReason: null,
       });
-      _loadMessagesAsync(sessionId).catch(() => {}).finally(() => {
-        if (_switchSessionVersion === myVersion) {
-          useChatStore.setState({ isLoadingMessages: false });
-        }
-      });
+      _loadMessagesAsyncWithOptions(sessionId, { preferCache: false }).finally(finishLoad);
     };
 
     // 立即绑定 loadedSessionId，但保持当前消息直到新消息加载完成。
@@ -1408,12 +1644,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       loadedSessionId: sessionId,
       isLoadingMessages: true,
+      messageLoadError: null,
       pendingApproval: null,
       pendingQuestion: null,
       pipelineStatus: null,
       activeStreamId: null,
       latestSeq: 0,
       resumeFailedReason: null,
+      loadedMessageTotal: sessionId ? null : 0,
+      hasMoreMessages: false,
+      isLoadingOlderMessages: false,
     });
 
     loadAndSwitch();

@@ -189,6 +189,7 @@ class ToolDispatcher:
         self._last_repeat_error_message: str | None = None
         self._last_repeat_example: Any = None
         self._readonly_replay_cache: dict[tuple[str, str, str], ToolResult] = {}
+        self._readonly_replay_expiry: dict[tuple[str, str, str], float] = {}
 
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
@@ -230,6 +231,16 @@ class ToolDispatcher:
         _high_risk = HighRiskApprovalHandler(engine, self)
         _default = DefaultToolHandler(engine, self)
         self._generic_handlers = [_code_policy, _audit_only, _high_risk, _default]
+        # 从当前 registry 建立宿主侧副作用能力快照。MCP 仍使用已有
+        # ToolDef/名称启发式，不要求 provider 增加任何新字段。
+        approval_manager = getattr(engine, "approval", None)
+        if approval_manager is not None:
+            bind_defs = getattr(approval_manager, "bind_tool_definitions", None)
+            if callable(bind_defs):
+                try:
+                    bind_defs(self._registry.get_all_tools())
+                except Exception:
+                    logger.debug("绑定工具副作用能力失败，回退静态策略", exc_info=True)
 
     @property
     def _registry(self) -> Any:
@@ -458,6 +469,7 @@ class ToolDispatcher:
         self._call_count = 0
         self._call_budget_reason = reason
         self._readonly_replay_cache.clear()
+        self._readonly_replay_expiry.clear()
 
     def begin_nested_call_budget(self) -> tuple[int | None, int, str]:
         """run_code 内层预算：重置计数但不丢弃父消耗。"""
@@ -488,6 +500,13 @@ class ToolDispatcher:
         # Session settings/permissions can change without a file version bump.
         if tool_name == "inspect_agent":
             return None
+        # Provider state is not represented by workspace content_version. MCP
+        # unknown/写入工具因此不能重放；只有宿主现有 scope/描述启发式明确
+        # 推导为 none 的只读工具才保留普通 replay 行为，不增加 provider 字段。
+        if tool_name.startswith("mcp_"):
+            mcp_tool = self._registry.get_tool(tool_name)
+            if mcp_tool is None or getattr(mcp_tool, "write_effect", "unknown") != "none":
+                return None
         owner = getattr(self._engine, "_background_parent", None) or self._engine
         runtime = getattr(owner, "_subagent_runtime", None)
         if runtime is not None and runtime.has_active_runs:
@@ -512,8 +531,49 @@ class ToolDispatcher:
             mapping = getattr(state, "file_content_versions", None) if state is not None else None
             if isinstance(mapping, dict):
                 version = str(mapping.get(file_path) or "")
+        # A read without a local file version (search, provider state, time,
+        # network metadata) is not replayable unless the tool explicitly
+        # declares a finite TTL.  This prevents same-turn reuse of stale
+        # external observations.
+        if not file_path and getattr(tool, "cache_ttl_seconds", None) is None:
+            return None
         payload = json.dumps(folded, ensure_ascii=False, sort_keys=True, default=str)
         return (tool_name, payload, version)
+
+    def external_receipt(self, operation_id: str) -> dict[str, Any] | None:
+        """Read a durable provider-side commit receipt without replaying a call."""
+        from excelmanus.workspace.txlog import TxLog
+
+        return TxLog(self._workspace_root()).read_external_receipt(operation_id)
+
+    def resolve_external_receipt(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        result: str | None = None,
+    ) -> dict[str, Any]:
+        """Record an explicit provider query/compensation outcome.
+
+        Only terminal provider states are accepted.  The operation remains
+        blocked for automatic replay until a caller explicitly resolves it.
+        """
+        normalized = str(status or "").strip().lower()
+        if normalized not in {"committed", "rolled_back", "failed", "unknown"}:
+            raise ValueError("external receipt status must be committed/rolled_back/failed/unknown")
+        from excelmanus.workspace.txlog import TxLog
+
+        txlog = TxLog(self._workspace_root())
+        current = txlog.read_external_receipt(operation_id)
+        if current is None:
+            raise KeyError(operation_id)
+        updated = dict(current)
+        updated["status"] = normalized
+        if result is not None:
+            updated["result"] = str(result)
+        updated["resolved_at"] = time.time()
+        txlog.write_external_receipt(operation_id, updated)
+        return updated
 
     def consume_call_budget(self) -> bool:
         """消耗一次调用额度。超预算返回 False。"""
@@ -565,6 +625,7 @@ class ToolDispatcher:
         from excelmanus.tools.policy import write_effect_for_call
 
         registry = self._registry
+
         tool = registry.get_tool(tool_name) if registry is not None else None
         actions = getattr(tool, "actions", None) if tool is not None else None
         return write_effect_for_call(
@@ -665,6 +726,12 @@ class ToolDispatcher:
 
         replay_key = self._readonly_replay_key(tool_name, arguments)
         cached = self._readonly_replay_cache.get(replay_key) if replay_key else None
+        if replay_key and cached is not None:
+            expires = self._readonly_replay_expiry.get(replay_key, float("inf"))
+            if time.monotonic() >= expires:
+                self._readonly_replay_cache.pop(replay_key, None)
+                self._readonly_replay_expiry.pop(replay_key, None)
+                cached = None
         if cached is not None:
             return cached
 
@@ -676,12 +743,33 @@ class ToolDispatcher:
 
         registry = self._registry
 
+        # Approval replay of a specialized meta tool must execute the same
+        # handler as the normal dispatch path. Calling its stub ToolDef.func
+        # would otherwise bypass the SkillpackManager.
+        if tool_name == "manage_skills":
+            handler = self._specific_handlers.get(tool_name)
+            if handler is not None:
+                outcome = await handler.handle(
+                    tool_name, "", dict(arguments), tool_scope=tool_scope,
+                )
+                if isinstance(outcome, _ToolExecOutcome):
+                    return self._coerce_tool_result(outcome.structured or outcome.result_str)
+
         # 检测是否有异步快速路径（MCP 工具）
         tool_def = registry.get_tool(tool_name)
+        capability = None
+        if tool_def is not None:
+            try:
+                capability = tool_def.effective_capability(arguments)
+            except Exception:
+                capability = None
         external_op_id = None
         external_txlog = None
         external_intent_hash = None
-        if tool_def is not None and getattr(tool_def, "write_effect", "unknown") == "external_write":
+        if tool_def is not None and (
+            (capability is not None and capability.is_external)
+            or tool_name.startswith("mcp_")
+        ):
             import hashlib
             import json as _json
             from excelmanus.tools.context import operation_id_for
@@ -714,6 +802,8 @@ class ToolDispatcher:
                         "tool_name": tool_name,
                         "intent_hash": external_intent_hash,
                         "status": "pending",
+                        "query_tool": getattr(tool_def, "actions", {}).get("query_tool"),
+                        "compensation": getattr(capability, "compensation", None),
                     },
                 )
         _has_async = (
@@ -788,11 +878,13 @@ class ToolDispatcher:
                     "intent_hash": external_intent_hash,
                     "status": (
                         "committed"
-                        if tool_result.success and getattr(tool_def, "consistency", "external_unverified") == "local_commit"
-                        else "external_unverified" if tool_result.success else "failed"
+                        if tool_result.success and getattr(capability, "consistency", getattr(tool_def, "consistency", "external_unverified")) == "local_commit"
+                        else "external_unverified" if tool_result.success else "unknown"
                     ),
                     "result": tool_result.model_text,
-                    "consistency": getattr(tool_def, "consistency", "external_unverified"),
+                    "consistency": getattr(capability, "consistency", getattr(tool_def, "consistency", "external_unverified")),
+                    "query_tool": getattr(tool_def, "actions", {}).get("query_tool"),
+                    "compensation": getattr(capability, "compensation", None),
                 },
             )
         self._remember_tool_versions(tool_result)
@@ -814,8 +906,17 @@ class ToolDispatcher:
         effect = getattr(tool_def, "write_effect", "unknown") if tool_def is not None else "unknown"
         if is_mutating_write_effect(effect):
             self._readonly_replay_cache.clear()
+            self._readonly_replay_expiry.clear()
         elif replay_key and tool_result.success:
+            ttl = getattr(tool_def, "cache_ttl_seconds", None)
+            expiry = float("inf")
+            if ttl is not None:
+                try:
+                    expiry = time.monotonic() + max(0.0, float(ttl))
+                except (TypeError, ValueError):
+                    expiry = time.monotonic()
             self._readonly_replay_cache[replay_key] = tool_result
+            self._readonly_replay_expiry[replay_key] = expiry
 
         return tool_result
 
@@ -1761,7 +1862,7 @@ class ToolDispatcher:
             handler = self._specific_handlers.get(tool_name)
             if handler is None:
                 for candidate in self._generic_handlers:
-                    if candidate.can_handle(tool_name):
+                    if candidate.can_handle(tool_name, arguments=arguments):
                         handler = candidate
                         break
                 else:
@@ -1776,12 +1877,27 @@ class ToolDispatcher:
             if handler.__class__.__name__ == "HighRiskApprovalHandler":
                 handler_kwargs["skip_high_risk_approval_by_hook"] = skip_high_risk_approval_by_hook
 
-            return await handler.handle(
+            outcome = await handler.handle(
                 tool_name,
                 tool_call_id,
                 arguments,
                 **handler_kwargs,
             )
+            # 专用 handler（例如 manage_skills）必须保留自己的异步实现，
+            # 但不能因此绕过副作用审计。将无审计回执的 side effect 调用
+            # 在这里补成同一份 manifest/DB 记录；待审批状态不视为已执行。
+            if (
+                isinstance(outcome, _ToolExecOutcome)
+                and not outcome.pending_approval
+                and outcome.audit_record is None
+            ):
+                await self._attach_side_effect_audit(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    tool_scope=tool_scope,
+                    outcome=outcome,
+                )
+            return outcome
         except IdentityError as exc:
             from excelmanus.engine_core.tool_result import error_result
 
@@ -1836,6 +1952,61 @@ class ToolDispatcher:
                 error=str(root_exc),
                 audit_record=audit_record,
             )
+
+    async def _attach_side_effect_audit(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: Sequence[str] | None,
+        outcome: _ToolExecOutcome,
+    ) -> None:
+        """为专用/MCP 直通 handler 补齐宿主侧副作用审计。"""
+        if tool_name in {"run_code", "run_shell"}:
+            return  # 两者各自已有动态审计/审批路径。
+        effect = self._write_effect_of(tool_name, arguments)
+        if effect == "none":
+            return
+        # delegate/task 等编排工具的 dynamic effect 不是一次外部提交，
+        # 其子调用各自审计；MCP 和专用外部写路径必须留痕，unknown 宿主
+        # 工具继续使用既有 mtime 探针，避免给普通调用增加额外线程任务。
+        if effect == "dynamic" and tool_name not in {"manage_skills"}:
+            return
+        if (
+            tool_name.startswith("mcp_")
+            or tool_name == "manage_skills"
+            or effect == "external_write"
+        ):
+            approval = getattr(self._engine, "approval", None)
+            recorder = getattr(approval, "record_completed_call", None)
+            if not callable(recorder):
+                return
+            payload: Any = outcome.structured or outcome.result_str
+            try:
+                record = await asyncio.to_thread(
+                    recorder,
+                    approval_id=approval.new_approval_id(),
+                    tool_name=tool_name,
+                    arguments=dict(arguments),
+                    tool_scope=list(tool_scope) if tool_scope else None,
+                    result=payload,
+                    undoable=(
+                        False
+                        if tool_name == "manage_skills"
+                        else approval.is_undoable_tool(tool_name, arguments)
+                    ),
+                    created_at_utc=approval.utc_now(),
+                    session_turn=getattr(
+                        getattr(self._engine, "state", None),
+                        "session_turn",
+                        None,
+                    ),
+                    session_id=getattr(self._engine, "_session_id", None),
+                )
+            except Exception:
+                logger.warning("工具副作用审计补写失败: %s", tool_name, exc_info=True)
+                return
+            outcome.audit_record = record
 
     async def _postprocess_result(
         self,

@@ -24,6 +24,7 @@ class Tier1Scanner:
 
     def __init__(self) -> None:
         self._extractor = FormulaRefExtractor()
+        self._formula_index: dict[tuple[str, str], str] = {}
 
     def scan(self, file_path: str) -> WorkbookRefIndex:
         from openpyxl import load_workbook
@@ -39,6 +40,7 @@ class Tier1Scanner:
         edge_map: dict[tuple[str, str], dict[str, Any]] = {}
         external_refs: list[ExternalRef] = []
         named_ranges: dict[str, str] = {}
+        dynamic_refs: list[dict[str, str]] = []
 
         for dn in wb.defined_names.values():
             if dn.attr_text and not dn.attr_text.startswith("#"):
@@ -58,6 +60,9 @@ class Tier1Scanner:
                     if not isinstance(val, str) or not val.startswith("="):
                         continue
                     formula_count += 1
+                    upper = val.upper()
+                    if any(token in upper for token in ("INDIRECT(", "OFFSET(", "[", "#SPILL!")):
+                        dynamic_refs.append({"sheet": ws_name, "cell": str(cell.coordinate), "formula": val[:500]})
                     refs = self._extractor.extract(val)
                     funcs = self._extractor.extract_functions(val)
                     for f in funcs:
@@ -124,6 +129,8 @@ class Tier1Scanner:
             cross_sheet_edges=cross_sheet_edges,
             external_refs=external_refs,
             named_ranges=named_ranges,
+            dynamic_refs=dynamic_refs[:500],
+            coverage="partial" if dynamic_refs else "complete",
             built_at=time.time(),
         )
 
@@ -135,6 +142,7 @@ class Tier2Resolver:
 
     def __init__(self) -> None:
         self._extractor = FormulaRefExtractor()
+        self._formula_index: dict[tuple[str, str], str] = {}
 
     def resolve(
         self,
@@ -149,27 +157,29 @@ class Tier2Resolver:
 
         wb = load_workbook(file_path, data_only=False, read_only=True)
         try:
+            self._formula_index = self._index_formulas(wb)
             return self._resolve(wb, sheet_name, address, direction,
                                  min(depth, self._MAX_DEPTH))
         finally:
             wb.close()
 
+    @staticmethod
+    def _index_formulas(wb: Any) -> dict[tuple[str, str], str]:
+        index: dict[tuple[str, str], str] = {}
+        for name in wb.sheetnames:
+            ws = wb[name]
+            for row in ws.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and value.startswith("="):
+                        index[(name, str(cell.coordinate))] = value
+        return index
+
     # ------------------------------------------------------------------
 
     def _find_formula(self, wb: Any, sheet_name: str, address: str) -> str | None:
         """读取指定单元格的公式（无公式返回 None）。"""
-        if sheet_name not in wb.sheetnames:
-            return None
-        ws = wb[sheet_name]
-        for row in ws.iter_rows():
-            for cell in row:
-                coord = cell.coordinate if hasattr(cell, "coordinate") else ""
-                if coord == address:
-                    val = cell.value
-                    if isinstance(val, str) and val.startswith("="):
-                        return val
-                    return None
-        return None
+        return self._formula_index.get((sheet_name, address))
 
     def _resolve(
         self,
@@ -287,23 +297,16 @@ class Tier2Resolver:
         results: list[CellRef] = []
         seen: set[str] = set()
 
-        for ws_name in wb.sheetnames:
-            ws = wb[ws_name]
-            for row in ws.iter_rows():
-                for cell in row:
-                    val = cell.value
-                    if not isinstance(val, str) or not val.startswith("="):
-                        continue
-                    refs = self._extractor.extract(val)
-                    for ref in refs:
-                        ref_sheet = ref.sheet_name or ws_name
-                        if ref_sheet == sheet_name and address_in_ref(address, ref.cell_or_range):
-                            coord = cell.coordinate if hasattr(cell, "coordinate") else ""
-                            key = f"{ws_name}!{coord}"
-                            if coord and key not in seen:
-                                seen.add(key)
-                                results.append(CellRef(
-                                    sheet_name=ws_name if ws_name != sheet_name else None,
-                                    cell_or_range=coord,
-                                ))
+        for (ws_name, coord), val in self._formula_index.items():
+            refs = self._extractor.extract(val)
+            for ref in refs:
+                ref_sheet = ref.sheet_name or ws_name
+                if ref_sheet == sheet_name and address_in_ref(address, ref.cell_or_range):
+                    key = f"{ws_name}!{coord}"
+                    if key not in seen:
+                        seen.add(key)
+                        results.append(CellRef(
+                            sheet_name=ws_name if ws_name != sheet_name else None,
+                            cell_or_range=coord,
+                        ))
         return results

@@ -32,7 +32,15 @@ export function WorkbookStart() {
           request.current?.abort(); const controller = new AbortController(); request.current = controller;
           setOpening(file.path); setError(null);
           try { await openWorkbookForConversation(file.path, session, { signal: controller.signal }); }
-          catch (err) { if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "打开失败"); }
+          catch (err) {
+            if (!controller.signal.aborted) {
+              const message = err instanceof Error ? err.message : String(err ?? "");
+              if (/(?:\b404\b|not found|文件未找到|文件不存在|不存在)/i.test(message)) {
+                useExcelStore.getState().evictRecentFile(file.path, workspaceKeyFromSession(session));
+              }
+              setError(message || "打开失败");
+            }
+          }
           finally { if (request.current === controller) setOpening(null); }
         }}>{opening === file.path ? <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" /> : <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />}<span className="truncate">{file.filename}</span></button>)}
     </div>}

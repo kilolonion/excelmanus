@@ -93,6 +93,7 @@ export function SessionSync() {
   useEffect(() => {
     let cancelled = false;
     let syncing = false;
+    const controller = new AbortController();
 
     const syncSessions = async () => {
       if (cancelled || syncing || document.hidden) return;
@@ -100,7 +101,7 @@ export function SessionSync() {
       try {
         await waitForSessionHydration();
         if (cancelled) return;
-        const raw = await fetchSessions();
+        const raw = await fetchSessions({ signal: controller.signal });
         if (cancelled) return;
         const mapped: Session[] = (raw as Record<string, unknown>[]).map((s) => ({
           id: s.id as string,
@@ -173,6 +174,7 @@ export function SessionSync() {
 
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };
@@ -215,6 +217,7 @@ export function SessionSync() {
     if (activeSessionId.startsWith(DEMO_SESSION_PREFIX)) return;
 
     let cancelled = false;
+    const controller = new AbortController();
     const prevInFlightRef = { current: false };
     let snapshotValidated = false;
     let polling = false;
@@ -244,7 +247,11 @@ export function SessionSync() {
       polling = true;
       try {
         const modelProfileVersion = useUIStore.getState().modelProfileVersion;
-        const detail = await fetchSessionDetail(activeSessionId);
+        // 状态轮询不需要消息正文；历史由 chat-store 按页加载。
+        const detail = await fetchSessionDetail(activeSessionId, {
+          includeMessages: false,
+          signal: controller.signal,
+        });
         if (cancelled) {
           return;
         }
@@ -314,7 +321,10 @@ export function SessionSync() {
             if (latestChat.abortController === null && !latestChat.isStreaming
               && !latestChat.isLoadingMessages && latestChat.loadedSessionId === activeSessionId) {
               const remoteCount = Math.max(0, detail.messageCount ?? 0);
-              const localCount = latestChat.messageOrder.length;
+              // loadedMessageTotal tracks the server total even when only the
+              // newest page is present locally. Comparing against visible rows
+              // would otherwise re-fetch the tail on every poll.
+              const localCount = latestChat.loadedMessageTotal ?? latestChat.messageOrder.length;
               if (remoteCount !== localCount) {
                 await refreshSessionMessagesFromBackend(activeSessionId);
               }
@@ -410,6 +420,7 @@ export function SessionSync() {
 
     return () => {
       cancelled = true;
+      controller.abort();
       window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisible);
     };

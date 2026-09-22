@@ -432,6 +432,21 @@ class ChatHistoryStore:
             messages.append(message)
         return messages
 
+    def load_messages_tail(self, session_id: str, limit: int = 100) -> list[dict]:
+        """Load the newest message page while preserving chronological order."""
+        rows = self._conn.execute(
+            "SELECT id, content FROM messages WHERE session_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+        messages: list[dict] = []
+        for row in reversed(rows):
+            message = self._deserialize_message(row)
+            if not message.get("message_id"):
+                message["message_id"] = f"db:{row['id']}"  # type: ignore[index]
+            messages.append(message)
+        return messages
+
     def get_message_count(self, session_id: str) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?",

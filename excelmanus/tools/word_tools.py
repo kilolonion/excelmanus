@@ -592,6 +592,22 @@ def _fill_table_from_matrix(table: Any, matrix: list[list[Any]]) -> None:
             )
 
 
+def _fill_merged_table_from_matrix(table: Any, matrix: list[list[Any]]) -> None:
+    """Fill only merge anchors while preserving w:gridSpan/w:vMerge XML."""
+    tbl = table._tbl
+    for r_i, tr in enumerate(tbl.tr_lst):
+        col = 0
+        for tc in tr.tc_lst:
+            grid_span = int(getattr(tc, "grid_span", 1) or 1)
+            vmerge = getattr(tc, "vMerge", None)
+            vmerge_val = getattr(vmerge, "val", None) if vmerge is not None else None
+            if vmerge_val not in {"continue", "cont"} and r_i < len(matrix) and col < len(matrix[r_i]):
+                _set_cell_text_keep_format(
+                    _wrap_cell(table, tc), _cell_value_to_text(matrix[r_i][col])
+                )
+            col += grid_span
+
+
 def _note_formulas_uncached(
     warnings: list[str] | None,
     *,
@@ -627,9 +643,12 @@ def _apply_replace_table(
     if locate_err or table is None or table_idx is None:
         return None, locate_err or "replace_table: 未找到目标表格"
 
-    if _table_has_merged_cells(table):
+    merged_present = _table_has_merged_cells(table)
+    merged = merged_present and bool(op.get("allow_merged", False))
+    if merged_present and not merged:
         return None, (
-            f"表格 {table_idx} 含合并单元格，replace_table 暂不支持，请改用 run_code"
+            f"表格 {table_idx} 含合并单元格；如源数据尺寸与模板一致，传 allow_merged=true 保留合并结构，"
+            "否则请改用 run_code"
         )
 
     source_file = str(op.get("source_file") or "").strip()
@@ -644,11 +663,22 @@ def _apply_replace_table(
 
     target_rows = len(matrix)
     target_cols = len(matrix[0])
-    resize_err = _resize_table(table, target_rows, target_cols)
-    if resize_err:
-        return None, resize_err
-
-    _fill_table_from_matrix(table, matrix)
+    if merged:
+        current_rows = len(table._tbl.tr_lst)
+        current_cols = len(table._tbl.tblGrid.gridCol_lst)
+        if (target_rows, target_cols) != (current_rows, current_cols):
+            return None, (
+                f"replace_table: 含合并单元格的表格只能替换同样的 {current_rows}x{current_cols} 结构，"
+                f"源数据为 {target_rows}x{target_cols}；请先调整模板合并结构"
+            )
+        _fill_merged_table_from_matrix(table, matrix)
+        if warnings is not None:
+            warnings.append(f"replace_table table={table_idx}: 保留合并单元格结构，仅更新合并锚点")
+    else:
+        resize_err = _resize_table(table, target_rows, target_cols)
+        if resize_err:
+            return None, resize_err
+        _fill_table_from_matrix(table, matrix)
     sheet = str(meta.get("resolved_sheet") or "")
     rng = str(meta.get("resolved_range") or "")
     uncached = int(meta.get("formulas_uncached") or 0)
@@ -676,14 +706,33 @@ def _unique_extend(dst: list[str], items: list[str]) -> None:
             dst.append(item)
 
 
-def _iter_body_paragraphs(doc: Any):
-    """正文与表格内段落（不含页眉页脚）。"""
+def _iter_body_paragraphs(doc: Any, *, include_headers_footers: bool = False):
+    """正文/表格段落，并可包含所有 section 的页眉页脚。"""
     from docx.oxml.ns import qn
     from docx.text.paragraph import Paragraph
 
+    seen: set[int] = set()
     body = doc.element.body
     for p_el in body.iter(qn("w:p")):
+        seen.add(id(p_el))
         yield Paragraph(p_el, doc)
+    if include_headers_footers:
+        for section in doc.sections:
+            containers = (
+                section.header, section.first_page_header, section.even_page_header,
+                section.footer, section.first_page_footer, section.even_page_footer,
+            )
+            for container in containers:
+                for para in getattr(container, "paragraphs", []) or []:
+                    p_el = para._element
+                    if id(p_el) not in seen:
+                        seen.add(id(p_el))
+                        yield para
+                for table in getattr(container, "tables", []) or []:
+                    for para in table._element.iter(qn("w:p")):
+                        if id(para) not in seen:
+                            seen.add(id(para))
+                            yield Paragraph(para, table)
 
 
 def _paragraph_runs(para: Any) -> list[Any]:
@@ -983,7 +1032,8 @@ def _apply_fill_template(
     filled_keys: list[str] = []
     unfilled_keys: list[str] = []
 
-    for para in _iter_body_paragraphs(doc):
+    include_headers = bool(op.get("include_headers_footers", op.get("headers_footers", True)))
+    for para in _iter_body_paragraphs(doc, include_headers_footers=include_headers):
         n, keys, missing = _fill_placeholders_in_paragraph(para, values)
         filled_count += n
         _unique_extend(filled_keys, keys)
@@ -1010,7 +1060,7 @@ def _apply_fill_template(
         except Exception:
             extras["source_version"] = peek_seen_content_version(source_file)
     return (
-        f"fill_template filled={filled_count} keys={filled_keys}",
+        f"fill_template filled={filled_count} keys={filled_keys} headers_footers={include_headers}",
         None,
     )
 
@@ -1904,7 +1954,7 @@ def get_tools() -> list[ToolDef]:
                 "恰好其一锁定目标表；源为 source_file（.xlsx/.xlsm）及可选 source_sheet/"
                 "source_range（缺省 active sheet 的 used range）。"
                 "保留表格样式与单元格首选段格式，按源数据增删行列。"
-                "含合并单元格的表暂不支持，请改用 run_code。"
+                "replace_table 默认保护合并表结构；传 allow_merged=true 且源数据尺寸相同即可更新合并锚点。"
                 "fill_template 扫描正文与表格单元格（含单元格多段、跨 run）中的 {{列名}}，"
                 "并填充同名书签；值写入匹配起点所在 run，未命中 run 的格式保留。"
                 "值来源恰好其一：values 对象，或 source_file+source_row"
@@ -2005,6 +2055,16 @@ def get_tools() -> list[ToolDef]:
                                     "description": "fill_template 行源：表头行号，默认 1",
                                     "default": 1,
                                     "minimum": 1,
+                                },
+                                "include_headers_footers": {
+                                    "type": "boolean",
+                                    "description": "fill_template 是否扫描页眉页脚及其表格，默认 true",
+                                    "default": True,
+                                },
+                                "allow_merged": {
+                                    "type": "boolean",
+                                    "description": "replace_table 是否保留同尺寸的合并单元格结构，默认 false",
+                                    "default": False,
                                 },
                                 "target_file": {
                                     "type": "string",

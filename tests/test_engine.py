@@ -1893,7 +1893,7 @@ class TestApprovalFlow:
         assert captured_id is not None
         undo_reply = await engine.followup(f'/undo {captured_id}')
         assert '已回滚' in undo_reply.reply
-        assert (tmp_path / 'c.txt').exists()
+        assert not (tmp_path / 'c.txt').exists()
 
     @pytest.mark.asyncio
     async def test_failed_accept_still_writes_failed_manifest(self, tmp_path: Path) -> None:
@@ -1955,7 +1955,7 @@ class TestApprovalFlow:
         engine2 = AgentEngine(config, registry)
         undo_reply = await engine2.followup(f'/undo {captured_id}')
         assert '已回滚' in undo_reply.reply
-        assert (tmp_path / 'restart.txt').exists()
+        assert not (tmp_path / 'restart.txt').exists()
 
     @pytest.mark.asyncio
     async def test_fullaccess_bypass_accept(self, tmp_path: Path) -> None:

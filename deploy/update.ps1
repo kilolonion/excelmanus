@@ -41,7 +41,11 @@ function Get-PythonBin {
     foreach ($c in $candidates) {
         if (Test-Path $c) { return $c }
     }
-    return "python"
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) { return $python.Source }
+    $python3 = Get-Command python3 -ErrorAction SilentlyContinue
+    if ($python3) { return $python3.Source }
+    throw "未找到 Python。请先创建 .venv，或安装 Python 3.11+。"
 }
 
 if ($Force) {
@@ -63,9 +67,13 @@ if ($CheckOnly) {
 }
 
 if ($Rollback) {
-    $latest = & $py @argsList --list-backups | Select-Object -First 1
-    $name = ($latest -split '\s+')[0]
-    if (-not $name -or $name -eq "暂无备份") {
+    $backupLines = @(& $py @argsList --list-backups 2>$null)
+    $latest = $backupLines | Where-Object {
+        $line = ([string]$_).Trim()
+        $line -and $line -ne "暂无备份"
+    } | Select-Object -First 1
+    $name = if ($latest) { ([string]$latest -split '\s+')[0] } else { "" }
+    if (-not $name) {
         Write-Host "[XX] 未找到任何备份" -ForegroundColor Red
         exit 1
     }

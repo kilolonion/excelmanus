@@ -66,6 +66,17 @@ def test_load_messages_pagination(store):
     assert page2[0]["content"] == "msg3"
 
 
+def test_load_messages_tail_returns_newest_page_in_order(store):
+    store.create_session("s1", "测试")
+    store.save_turn_messages(
+        "s1", [{"role": "user", "content": f"msg{i}"} for i in range(10)], turn_number=1
+    )
+
+    page = store.load_messages_tail("s1", limit=3)
+
+    assert [item["content"] for item in page] == ["msg7", "msg8", "msg9"]
+
+
 def test_session_exists(store):
     assert not store.session_exists("nope")
     store.create_session("s1", "测试")

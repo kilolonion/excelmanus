@@ -1056,6 +1056,12 @@ class AgentEngine:
 
     def _invalidate_tool_catalog(self) -> None:
         """MCP / 目录变更后丢掉 tools 缓存与信封快照，下一封信封按新指纹重建。"""
+        bind_defs = getattr(self._approval, "bind_tool_definitions", None)
+        if callable(bind_defs):
+            try:
+                bind_defs(self._registry.get_all_tools())
+            except Exception:
+                logger.debug("MCP 工具能力快照刷新失败", exc_info=True)
         self._tools_cache = None
         self._tools_cache_key = None
         self._prompt_tool_snapshot = None
@@ -2542,6 +2548,7 @@ class AgentEngine:
             arguments,
             force_delete_confirm=force_delete_confirm,
         )
+        host_loop = asyncio.get_running_loop()
 
         def _execute(
             name: str,
@@ -2551,7 +2558,20 @@ class AgentEngine:
             from excelmanus.tools import memory_tools
 
             with memory_tools.bind_memory_context(self._persistent_memory):
-                return self._registry.call_tool(name, args, tool_scope=scope)
+                # 审批后的执行必须复用 dispatcher 的 registry 受控路径，
+                # 以保留 MCP 外部 TxLog、取消上下文、版本记忆和统一结果归一化。
+                # execute_and_audit 在工作线程运行，但 MCP client 绑定宿主
+                # event loop；通过 run_coroutine_threadsafe 回到原 loop，避免
+                # 为同一 client 创建第二个 loop。
+                future = asyncio.run_coroutine_threadsafe(
+                    self._tool_dispatcher.call_registry_tool(
+                        tool_name=name,
+                        arguments=args,
+                        tool_scope=scope,
+                    ),
+                    host_loop,
+                )
+                return future.result()
 
         execution = asyncio.create_task(asyncio.to_thread(
                 self._approval.execute_and_audit,
@@ -2768,7 +2788,9 @@ class AgentEngine:
                 tool_scope=list(pending.tool_scope) or None,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
-                undoable=self._approval.is_undoable_tool(pending.tool_name),
+                undoable=self._approval.is_undoable_tool(
+                    pending.tool_name, pending.arguments,
+                ),
                 force_delete_confirm=True,
             )
         except ToolNotAllowedError:

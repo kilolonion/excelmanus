@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
+import { MessageSquareText } from "lucide-react";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import {
@@ -51,7 +52,13 @@ export function WorkspaceViewHost({ children, composer }: { children: ReactNode;
         aria-hidden={!chatVisible}
         inert={!chatVisible ? true : undefined}
       >
-        <div className={styles.chatHeading}>关于这份表格</div>
+        <div className={styles.chatHeading}>
+          <div className={styles.chatHeadingTitle}>
+            <MessageSquareText size={15} aria-hidden="true" />
+            <span>{workspace.files.length > 1 ? "关于这些表格" : "关于这份表格"}</span>
+          </div>
+          <span className={styles.chatHeadingHint}>{workspace.files.length > 1 ? "边看多张表，边和助手讨论" : "边看数据，边和助手讨论"}</span>
+        </div>
         {children}
       </div>
       <div className={`${styles.composer} ${composerVisible ? "" : styles.inactive}`} aria-hidden={!composerVisible} inert={!composerVisible ? true : undefined}>

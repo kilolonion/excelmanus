@@ -189,6 +189,9 @@ async def test_create_or_reuse_blank_session(tmp_path: Path) -> None:
     )
     third = await manager.create_or_reuse_session()
     assert third["id"] != first["id"]
+    explicit = await manager.create_or_reuse_session(reuse_blank=False)
+    assert explicit["id"] != third["id"]
+    assert explicit["blank"] is True
     db.close()
 
 
@@ -308,6 +311,9 @@ async def test_sessions_and_workspaces_http(tmp_path: Path) -> None:
             sess_a = created.json()
             reused = await client.post("/api/v1/sessions", json={})
             assert reused.json()["id"] == sess_a["id"]
+            explicit = await client.post("/api/v1/sessions", json={"reuse_blank": False})
+            assert explicit.status_code == 200
+            assert explicit.json()["id"] != sess_a["id"]
             listed = await client.get("/api/v1/sessions")
             assert listed.status_code == 200
             row = listed.json()["sessions"][0]

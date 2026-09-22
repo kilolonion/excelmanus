@@ -237,8 +237,8 @@ def test_undo_can_load_record_from_manifest_after_restart(tmp_path: Path) -> Non
     # 模拟重启：使用全新 manager，从 manifest 重建记录。
     manager2 = ApprovalManager(str(tmp_path))
     msg = manager2.undo(approval_id)
-    assert "未回滚" in msg
-    assert target.exists()
+    assert "已回滚" in msg
+    assert not target.exists()
 
 
 def test_non_undoable_record_returns_message(tmp_path: Path) -> None:
@@ -351,6 +351,58 @@ def test_mcp_auto_approve_skips_confirm_not_readonly(tmp_path: Path) -> None:
     assert manager.is_mcp_auto_approved(tool_name) is True
     assert manager.is_high_risk_tool(tool_name) is False
     assert manager.is_read_only_safe_tool(tool_name) is False
+
+
+def test_registry_write_effects_drive_side_effect_policy_without_mcp_fields(tmp_path: Path) -> None:
+    """宿主从现有 ToolDef 推导副作用；MCP 不需要新增 provider 字段。"""
+    from excelmanus.tools.registry import ToolDef
+
+    manager = ApprovalManager(str(tmp_path))
+    manager.bind_tool_definitions([
+        ToolDef(
+            name="memory_save",
+            description="save memory",
+            input_schema={"type": "object"},
+            func=lambda **_: "ok",
+            write_effect="external_write",
+        ),
+        ToolDef(
+            name="manage_skills",
+            description="manage skills",
+            input_schema={"type": "object"},
+            func=lambda **_: "ok",
+            write_effect="workspace_write",
+        ),
+        ToolDef(
+            name="manage_spreadsheet_versions",
+            description="versions",
+            input_schema={"type": "object"},
+            func=lambda **_: "ok",
+            write_effect="workspace_write",
+        ),
+        ToolDef(
+            name="mcp_demo_mutate",
+            description="provider operation",
+            input_schema={"type": "object"},
+            func=lambda **_: "ok",
+            write_effect="unknown",
+            consistency="external_unverified",
+        ),
+    ])
+
+    assert manager.is_mutating_tool("memory_save")
+    assert manager.is_audit_only_tool("memory_save")
+    assert manager.is_undoable_tool("memory_save") is False
+    assert manager.is_audit_only_tool("manage_skills", {"action": "install"})
+    assert manager.is_audit_only_tool("manage_skills", {"action": "list"}) is False
+    assert manager.is_mutating_tool(
+        "manage_spreadsheet_versions", {"action": "list"}
+    ) is False
+    assert manager.is_mutating_tool("mcp_demo_mutate")
+    # 绑定到 registry 后，unknown MCP 使用宿主 fail-closed confirm；不要求
+    # provider 增加任何字段。未绑定的纯名称兼容行为仍由上方回归覆盖。
+    assert manager.is_high_risk_tool("mcp_demo_mutate") is True
+    assert manager.is_undoable_tool("mcp_demo_mutate") is False
 
 
 class TestSessionIdIsolation:

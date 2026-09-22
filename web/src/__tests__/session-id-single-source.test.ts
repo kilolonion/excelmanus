@@ -80,6 +80,7 @@ function resetStores() {
     toolProgress: {},
     isLoadingMessages: false,
     loadedSessionId: null,
+    messageLoadError: null,
   });
   useChatStore.getState().switchSession(null);
 }
@@ -111,5 +112,19 @@ describe("session id 单源", () => {
     useChatStore.getState().switchSession("s2");
     expect(useSessionStore.getState().activeSessionId).toBe("s2");
     expect("currentSessionId" in (useChatStore.getState() as object)).toBe(false);
+  });
+
+  it("流式输出期间不绑定新会话，流结束后允许 SessionSync 重试", () => {
+    useChatStore.setState({
+      loadedSessionId: "s1",
+      abortController: new AbortController(),
+    });
+
+    useChatStore.getState().switchSession("s2");
+    expect(useChatStore.getState().loadedSessionId).toBe("s1");
+
+    useChatStore.setState({ abortController: null });
+    useChatStore.getState().switchSession("s2");
+    expect(useChatStore.getState().loadedSessionId).toBe("s2");
   });
 });

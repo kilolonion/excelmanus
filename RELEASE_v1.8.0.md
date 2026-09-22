@@ -97,7 +97,7 @@ ExcelManus 1.8.0 是 1.7.2 之后的完整产品换代：从“多用户 + 渠�
 - pending 写入改为不可伪造的 per-run 目录 + manifest + 真实 CAS，宿主不再信任 stderr 协议。
 - 显式“跳过”模式自动放行 ToolRuntime / Hook 的 `ASK`，允许网络与子进程；普通模式保持拦截。
 
-### 3.3 工具目录（32 个内置）
+### 3.3 工具目录（33 个内置；由运行时 registry 自动枚举）
 
 表格意图（9）：`inspect_spreadsheet`、`analyze_spreadsheet`、`compare_spreadsheets`、`edit_spreadsheet`、`format_spreadsheet`、`split_spreadsheet`、`manage_spreadsheet_objects`、`trace_spreadsheet_formulas`、`manage_spreadsheet_versions`。
 
@@ -249,7 +249,7 @@ Word（4）：`read_word`、`inspect_word`、`search_word`、`write_word`。
 
 | 项目 | 结果 |
 | --- | --- |
-| Python 全量回归 | 5477 passed, 12 skipped |
+| Python 全量回归 | Windows 基线需由当前依赖环境重新生成；历史 macOS 数字不作为发布证据 |
 | 前端单元测试 | 74 files / 533 tests passed |
 | 前端生产构建 | `next build --webpack` 通过 |
 | TypeScript | `tsc --noEmit` 无错误 |

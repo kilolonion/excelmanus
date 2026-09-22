@@ -117,18 +117,12 @@ def normalize_chart_args(
         from openpyxl.utils.cell import range_boundaries as _rb
 
         bounds = _rb(data_range)
-        if None in bounds:
-            return error_result(
-                f"data_range 不支持整列/整行地址 {data_range!r}，请写 A1:B12。",
-                code="RANGE_INVALID",
-            )
+        if all(value is None for value in bounds):
+            return error_result(f"data_range 不是合法区域: {data_range!r}", code="RANGE_INVALID")
         if categories_range:
             cat_bounds = _rb(categories_range)
-            if None in cat_bounds:
-                return error_result(
-                    f"categories_range 不支持整列/整行地址 {categories_range!r}。",
-                    code="RANGE_INVALID",
-                )
+            if all(value is None for value in cat_bounds):
+                return error_result(f"categories_range 不是合法区域: {categories_range!r}", code="RANGE_INVALID")
         target_cell = top_left_cell(target_cell) or "A1"
     except InvalidRefError as exc:
         return error_result(str(exc), code="RANGE_INVALID")
@@ -169,6 +163,20 @@ def add_chart_to_workbook(wb: Any, spec: ChartSpec) -> dict[str, Any]:
     )
     from openpyxl.utils.cell import range_boundaries
 
+    def _bounds(address: str) -> tuple[int, int, int, int]:
+        raw = range_boundaries(address)
+        min_col, min_row, max_col, max_row = raw
+        # openpyxl leaves one axis open for A:A / 1:1.  Clip it to the used
+        # region so charts remain finite and portable across Excel engines.
+        min_col = int(min_col or 1)
+        min_row = int(min_row or 1)
+        max_col = int(max_col or ws.max_column or min_col)
+        max_row = int(max_row or ws.max_row or min_row)
+        if ":" not in address:
+            max_col = max_col or min_col
+            max_row = max_row or min_row
+        return min_col, min_row, max_col, max_row
+
     try:
         ws = get_worksheet(wb, spec.sheet_name)
     except ValueError as exc:
@@ -194,11 +202,11 @@ def add_chart_to_workbook(wb: Any, spec: ChartSpec) -> dict[str, Any]:
         if spec.y_title:
             chart.y_axis.title = spec.y_title
 
-    min_col, min_row, max_col, max_row = range_boundaries(spec.data_range)
+    min_col, min_row, max_col, max_row = _bounds(spec.data_range)
     data_ref = Reference(ws, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
     cats_ref = None
     if spec.categories_range:
-        c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(spec.categories_range)
+        c_min_col, c_min_row, c_max_col, c_max_row = _bounds(spec.categories_range)
         cats_ref = Reference(
             ws, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row
         )
@@ -239,6 +247,37 @@ def add_chart_to_workbook(wb: Any, spec: ChartSpec) -> dict[str, Any]:
         "chart_info": chart_info[-1] if chart_info else {},
         "total_charts": len(chart_info),
     }
+
+
+def _select_chart(ws: Any, *, index: int | None = None, target_cell: str | None = None, title: str | None = None) -> tuple[int, Any] | None:
+    charts = list(getattr(ws, "_charts", None) or [])
+    if index is not None:
+        if 0 <= int(index) < len(charts):
+            return int(index), charts[int(index)]
+        return None
+    for pos, chart in enumerate(charts):
+        if title and str(getattr(chart, "title", "") or "") == title:
+            return pos, chart
+        anchor = getattr(getattr(chart, "anchor", None), "_from", None)
+        if target_cell and anchor is not None:
+            from openpyxl.utils import get_column_letter
+            cell = f"{get_column_letter(anchor.col + 1)}{anchor.row + 1}"
+            if cell.upper() == str(target_cell).upper():
+                return pos, chart
+    return None
+
+
+def delete_chart_from_workbook(
+    wb: Any, *, sheet_name: str | None = None, index: int | None = None,
+    target_cell: str | None = None, title: str | None = None,
+) -> dict[str, Any]:
+    ws = get_worksheet(wb, sheet_name)
+    selected = _select_chart(ws, index=index, target_cell=target_cell, title=title)
+    if selected is None:
+        raise MutationAborted(error_result("未找到要删除的图表", code="NOT_FOUND"))
+    pos, chart = selected
+    ws._charts.remove(chart)
+    return {"deleted_index": pos, "target_sheet": ws.title, "remaining_charts": len(ws._charts)}
 
 
 def create_excel_chart(

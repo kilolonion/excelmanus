@@ -81,6 +81,8 @@ class WorkbookRefIndex:
     cross_sheet_edges: list[SheetRefEdge] = field(default_factory=list)
     external_refs: list[ExternalRef] = field(default_factory=list)
     named_ranges: dict[str, str] = field(default_factory=dict)
+    dynamic_refs: list[dict[str, str]] = field(default_factory=list)
+    coverage: str = "complete"
     built_at: float = field(default_factory=time.time)
 
     def render_summary(self) -> str:
@@ -107,6 +109,8 @@ class WorkbookRefIndex:
             lines.append(
                 f"[{ext.book_name}]{ext.sheet_name}!{ext.cell_or_range} → {ext.source_sheet}"
             )
+        if self.dynamic_refs:
+            lines.append(f"动态/结构化引用未完全展开: {len(self.dynamic_refs)} 处")
         return "\n".join(lines)
 
 

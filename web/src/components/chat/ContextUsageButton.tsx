@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -49,26 +49,58 @@ export function ContextUsageButton() {
   const [compactPhase, setCompactPhase] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const [compactHow, setCompactHow] = useState(false);
   const [lastCompactResult, setLastCompactResult] = useState<string | null>(null);
+  const pollingRef = useRef(false);
+  const requestRef = useRef<AbortController | null>(null);
 
   const poll = useCallback(async () => {
     if (!activeSessionId) {
       setCompaction(null);
       return;
     }
+    if (document.hidden || pollingRef.current) return;
+    pollingRef.current = true;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     try {
       const data = await apiGet<{ compaction: CompactionStatus }>(
         `/sessions/${activeSessionId}/status`,
+        { signal: controller.signal },
       );
       setCompaction(data.compaction);
     } catch {
       // 会话可能尚未在后端创建，静默忽略。
+    } finally {
+      if (requestRef.current === controller) {
+        pollingRef.current = false;
+        requestRef.current = null;
+      }
     }
   }, [activeSessionId]);
 
   useEffect(() => {
-    void poll();
-    const id = setInterval(() => void poll(), 8000);
-    return () => clearInterval(id);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (cancelled || document.hidden) return;
+      timer = setTimeout(async () => {
+        await poll();
+        schedule();
+      }, 8000);
+    };
+    const onVisible = () => {
+      if (document.hidden || cancelled) return;
+      void poll().finally(schedule);
+    };
+    void poll().finally(schedule);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+      pollingRef.current = false;
+      requestRef.current?.abort();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [poll]);
 
   useEffect(() => {
