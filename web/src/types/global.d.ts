@@ -8,13 +8,29 @@ interface ExcelManusDesktopPickedFile {
 
 interface ExcelManusDesktopBridge {
   checkUpdate?: () => Promise<ExcelManusDesktopUpdate>;
-  downloadUpdate?: () => Promise<void>;
+  downloadUpdate?: () => Promise<ExcelManusDesktopUpdateStatus | void>;
+  getUpdateStatus?: () => Promise<ExcelManusDesktopUpdateStatus>;
+  onUpdateStatus?: (callback: (status: ExcelManusDesktopUpdateStatus) => void) => () => void;
+  cancelUpdate?: () => Promise<void>;
+  installUpdate?: () => Promise<ExcelManusDesktopUpdateStatus>;
   mobilePairing?: (action: import("@/lib/mobile-pairing").MobilePairingAction, input?: { id?: string; address?: string }) => Promise<import("@/lib/mobile-pairing").MobilePairingStatus>;
   selectFolder: () => Promise<string | null>;
   pickChatFiles: () => Promise<{
     files: ExcelManusDesktopPickedFile[];
     skipped: string[];
   }>;
+}
+
+interface ExcelManusDesktopUpdateStatus {
+  revision: number;
+  phase: "idle" | "downloading" | "verifying" | "ready" | "installing" | "cancelled" | "error";
+  received: number;
+  total: number | null;
+  percent: number | null;
+  bytesPerSecond: number;
+  error: string;
+  latest?: string;
+  installerName?: string;
 }
 
 interface ExcelManusDesktopUpdate {

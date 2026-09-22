@@ -40,6 +40,9 @@ function loadPreload() {
           on(channel, listener) {
             listeners.set(channel, listener);
           },
+          removeListener(channel, listener) {
+            if (listeners.get(channel) === listener) listeners.delete(channel);
+          },
         },
       };
     },
@@ -57,13 +60,29 @@ test("preload exposes the native pickers", async () => {
   const { exposedName, exposedApi, invokedChannels } = loadPreload();
 
   assert.equal(exposedName, "excelManusDesktop");
-  assert.deepEqual(Object.keys(exposedApi), ["selectFolder", "pickChatFiles", "mobilePairing", "checkUpdate", "downloadUpdate"]);
+  assert.deepEqual(Object.keys(exposedApi), ["selectFolder", "pickChatFiles", "mobilePairing", "checkUpdate", "downloadUpdate",
+    "getUpdateStatus", "cancelUpdate", "installUpdate", "onUpdateStatus"]);
   assert.equal(await exposedApi.selectFolder(), "/tmp/example");
   assert.deepEqual(await exposedApi.pickChatFiles(), { files: [], skipped: [] });
   assert.deepEqual(invokedChannels, ["excelmanus:select-folder", "excelmanus:pick-chat-files"]);
   await exposedApi.checkUpdate();
   await exposedApi.downloadUpdate();
   assert.deepEqual(invokedChannels.slice(2), ["excelmanus:check-update", "excelmanus:download-update"]);
+});
+
+test("progress subscription strips native event and can be removed", async () => {
+  const { exposedApi, listeners, invokedChannels } = loadPreload();
+  const received = [];
+  const unsubscribe = exposedApi.onUpdateStatus((...args) => received.push(args));
+  const status = { phase: "downloading", percent: 25 };
+  listeners.get("excelmanus:update-status")({ sender: "privileged" }, status);
+  assert.deepEqual(received, [[status]]);
+  unsubscribe();
+  assert.equal(listeners.has("excelmanus:update-status"), false);
+  await exposedApi.getUpdateStatus();
+  await exposedApi.cancelUpdate();
+  await exposedApi.installUpdate();
+  assert.deepEqual(invokedChannels, ["excelmanus:update-status", "excelmanus:cancel-update", "excelmanus:install-update"]);
 });
 
 test("menu actions are forwarded to the page as DOM events", () => {

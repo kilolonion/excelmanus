@@ -348,11 +348,10 @@ def spawn_detached_helper(project_root: Path) -> None:
         )
     else:
         popen_kwargs["start_new_session"] = True
-    subprocess.Popen(**popen_kwargs)
     try:
+        subprocess.Popen(**popen_kwargs)
+    finally:
         log_f.close()
-    except OSError:
-        pass
     logger.info("升级 helper 已启动，日志: %s", log_path)
 
 
@@ -419,6 +418,7 @@ def run_helper(
 ) -> int:
     """读取 upgrade-request.json，停机 → 备份/恢复/apply → 再拉起。"""
     from excelmanus.updater import (
+        UpdateResult,
         UpgradeOutcome,
         backup_user_data,
         cleanup_old_backups,
@@ -449,73 +449,48 @@ def run_helper(
         write_upgrade_status({"request_id": request.get("request_id"), "action": action,
                               "ok": None, "phase": message, "progress": percent})
 
-    exit_code = 0
-    if not skip_stop:
-        _progress("正在停止当前服务", 5)
-        logger.info("停止当前服务...")
-        time.sleep(1.0)
-        stop_supervised(runtime, project_root=project_root)
-
-    if action == "restore":
-        name = str(request.get("backup_name") or "")
-        backup_dir = find_backup_dir(name, project_root)
-        if backup_dir is None:
-            logger.error("备份不存在: %s", name)
-            exit_code = 1
-            _finish(False, f"备份不存在: {name}", {
-                "outcome": UpgradeOutcome.RESTORE_FAILED.value,
-            })
-        else:
+    def _perform_action() -> UpdateResult:
+        if not skip_stop:
+            _progress("正在停止当前服务", 5)
+            logger.info("停止当前服务...")
+            time.sleep(1.0)
+            stop_supervised(runtime, project_root=project_root)
+        if action == "restore":
+            name = str(request.get("backup_name") or "")
+            backup_dir = find_backup_dir(name, project_root)
+            if backup_dir is None:
+                return UpdateResult(outcome=UpgradeOutcome.RESTORE_FAILED, error=f"备份不存在: {name}")
             ok = restore_from_backup(str(backup_dir), str(project_root))
-            if not ok:
-                logger.error("恢复失败")
-                exit_code = 1
-                _finish(False, "恢复失败", {
-                    "outcome": UpgradeOutcome.RESTORE_FAILED.value,
-                })
-            else:
-                _finish(True, "", {"outcome": UpgradeOutcome.RESTORE_OK.value})
-        clear_request()
-        if skip_start:
-            return exit_code
-        try:
-            exec_start(runtime, project_root)
-        except FileNotFoundError as exc:
-            logger.error("%s", exc)
-            return 1
-        return exit_code
-
-    skip_backup = bool(request.get("skip_backup"))
-    skip_deps = bool(request.get("skip_deps"))
-    use_mirror = bool(request.get("use_mirror"))
-    if not skip_backup:
-        _progress("正在备份 ExcelManus 设置和会话，用户文件保留原位", 10)
-        logger.info("备份用户数据...")
-        bk = backup_user_data(project_root)
-        if not bk.success:
-            logger.error("备份失败: %s", bk.error)
-            clear_request()
-            _finish(False, f"备份失败: {bk.error}", {
-                "outcome": UpgradeOutcome.BACKUP_FAILED.value,
-            })
-            if skip_start:
-                return 1
+            return UpdateResult(outcome=UpgradeOutcome.RESTORE_OK if ok else UpgradeOutcome.RESTORE_FAILED,
+                                error="" if ok else "恢复失败")
+        if action != "upgrade":
+            return UpdateResult(outcome=UpgradeOutcome.PRECHECK_FAILED, error=f"未知更新操作: {action}")
+        if not request.get("skip_backup"):
+            _progress("正在备份 ExcelManus 设置和会话，用户文件保留原位", 10)
             try:
-                exec_start(runtime, project_root)
-            except FileNotFoundError:
-                return 1
-            return 1
-        cleanup_old_backups(project_root, max_keep=2)
-
-    try:
-        result = apply_on_stopped_tree(
+                bk = backup_user_data(project_root)
+            except Exception as exc:
+                return UpdateResult(outcome=UpgradeOutcome.BACKUP_FAILED, error=f"备份失败: {exc}")
+            if not bk.success:
+                return UpdateResult(outcome=UpgradeOutcome.BACKUP_FAILED, error=f"备份失败: {bk.error}")
+            # Old backup cleanup is nonessential; a permission error must not
+            # strand a stopped server or invalidate the newly created backup.
+            try:
+                cleanup_old_backups(project_root, max_keep=2)
+            except OSError:
+                logger.warning("旧备份清理失败，保留备份并继续更新", exc_info=True)
+        return apply_on_stopped_tree(
             project_root,
-            skip_deps=skip_deps,
-            use_mirror=use_mirror,
+            skip_deps=bool(request.get("skip_deps")),
+            use_mirror=bool(request.get("use_mirror")),
             progress_cb=lambda message, percent: _progress(message, 15 + round(percent * .8)),
         )
+
+    # Every failure after shutdown (including backup/restore/status IO) must
+    # publish a terminal result, release the request and attempt recovery.
+    try:
+        result = _perform_action()
     except Exception as exc:
-        from excelmanus.updater import UpdateResult
         logger.exception("更新进程失败")
         result = UpdateResult(outcome=UpgradeOutcome.FAILED, error=str(exc))
     clear_request()
@@ -526,6 +501,7 @@ def run_helper(
         "steps_completed": result.steps_completed,
     }
     if result.success:
+        exit_code = 0
         _finish(True, result.error, extra)
     else:
         logger.error("更新失败: %s", result.error)

@@ -4,12 +4,16 @@ import { useState } from "react";
 import { Download, Loader2, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useDesktopUpdate } from "@/hooks/use-desktop-update";
+import { appRefreshBlocker } from "@/lib/app-refresh";
 
 export function DesktopUpdateCard({ current }: { current: string }) {
   const [update, setUpdate] = useState<ExcelManusDesktopUpdate | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const status = useDesktopUpdate();
+  const active = busy || ["downloading", "verifying", "installing"].includes(status?.phase || "");
   const canCheck = typeof window !== "undefined" && !!window.excelManusDesktop?.checkUpdate;
 
   async function check() {
@@ -27,11 +31,15 @@ export function DesktopUpdateCard({ current }: { current: string }) {
   }
 
   async function download() {
+    const blocked = appRefreshBlocker();
+    if (blocked) { setError(blocked); return; }
     setBusy(true);
     setError("");
     try {
       await window.excelManusDesktop!.downloadUpdate!();
-      setMessage("已在浏览器中开始下载安装包。下载完成后，保存工作并退出 ExcelManus，再运行安装包。");
+      if (!window.excelManusDesktop?.getUpdateStatus) {
+        setMessage("旧版桌面壳已打开浏览器下载。下载完成后，保存工作并退出 ExcelManus，再运行安装包；升级后支持应用内进度。");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "无法打开下载，请重试");
     } finally { setBusy(false); }
@@ -43,12 +51,12 @@ export function DesktopUpdateCard({ current }: { current: string }) {
       ExcelManus Desktop
       <Badge variant="secondary">v{update?.current || current}</Badge>
     </div>
-    <p className="text-sm text-muted-foreground">检查新版本并下载安装包。Windows 会识别已有安装并替换旧程序，避免新旧版本并存。</p>
+    <p className="text-sm text-muted-foreground">检查新版本并下载安装包，页面实时显示进度。下载校验完成后自动退出并打开安装包，请先保存工作。Windows 会识别已有安装并替换旧程序。</p>
     <div className="flex flex-wrap gap-2">
-      {canCheck && <Button variant="outline" size="sm" onClick={() => void check()} disabled={busy}>
+      {canCheck && <Button variant="outline" size="sm" onClick={() => void check()} disabled={active}>
         {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}检查更新
       </Button>}
-      {update?.hasUpdate && update.downloadUrl && <Button size="sm" onClick={() => void download()} disabled={busy}>
+      {update?.hasUpdate && update.downloadUrl && <Button size="sm" onClick={() => void download()} disabled={active}>
         <Download className="h-4 w-4" />下载 v{update.latest} 安装包
       </Button>}
       <a href="https://github.com/kilolonion/excelmanus/releases" target="_blank" rel="noopener noreferrer" className="inline-flex items-center text-sm text-[var(--em-primary)] underline underline-offset-4">查看发布页面</a>
@@ -60,7 +68,7 @@ export function DesktopUpdateCard({ current }: { current: string }) {
       <p className="flex items-center gap-1.5 font-medium"><ShieldCheck className="h-4 w-4" />仅处理 ExcelManus 程序，保留你的数据和文件</p>
       <p><strong>迁移数据安装（推荐）</strong>：替换旧程序，继续使用现有设置、会话和快捷方式。数据保留原位，无需移动工作区。</p>
       <p><strong>卸载后安装</strong>：移除旧程序后重新安装，重新创建快捷方式，同样保留设置和会话。</p>
-      <p>两种方式都不会删除、移动或修改工作区、表格、文档和其他用户文件。macOS 请将新版应用替换到原有位置。</p>
+      <p>两种方式都不会删除、移动或修改工作区、表格、文档和其他用户文件。macOS 会打开已下载的 DMG，请在 Finder 中将新版应用替换到原有位置。系统权限或安全确认仍需你操作。</p>
     </div>
     {update?.hasUpdate && update.releaseNotes && <details className="text-sm">
       <summary className="cursor-pointer">查看更新说明</summary>

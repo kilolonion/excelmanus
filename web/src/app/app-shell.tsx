@@ -6,6 +6,7 @@ import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { VersionUpdateToast } from "@/components/VersionUpdateToast";
 import { GlobalRestartOverlay } from "@/components/GlobalRestartOverlay";
+import { DesktopUpdateProgress } from "@/components/DesktopUpdateProgress";
 import { LoginGate } from "@/components/LoginGate";
 import { ensureHealthHubPolling, useHealthHubStore } from "@/stores/health-hub-store";
 import { pathnameStartsWith } from "@/lib/pathname";
@@ -245,6 +246,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         {children}
         {versionToast}
         <GlobalRestartOverlay />
+        <DesktopUpdateProgress />
       </>
     );
   }
@@ -258,6 +260,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <Layout>{children}</Layout>
       {versionToast}
       <GlobalRestartOverlay />
+      <DesktopUpdateProgress />
     </>
   );
 }

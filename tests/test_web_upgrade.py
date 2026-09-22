@@ -30,6 +30,7 @@ def managed(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "_get_project_root", lambda: root)
     monkeypatch.setattr("excelmanus.auth.access.access_enabled", lambda: False)
     monkeypatch.setattr("excelmanus.auth.access.authenticated", lambda r: False)
+    monkeypatch.setattr("excelmanus.upgrade.preflight.check_upgrade_environment", lambda root: None)
     state = AppRuntime(config=SimpleNamespace(is_server=False))
     token = bind_runtime(state)
     write_runtime({"project_root": str(root), "workers": 1})
@@ -94,6 +95,19 @@ async def test_spawn_failure_keeps_server_running(managed, monkeypatch):
     assert read_upgrade_status()["ok"] is False
 
 
+@pytest.mark.asyncio
+async def test_environment_failure_keeps_service_online(managed, monkeypatch):
+    routes, _, state = managed
+    monkeypatch.setattr("excelmanus.upgrade.preflight.check_upgrade_environment", lambda root: "Node.js is missing")
+    spawn = MagicMock()
+    monkeypatch.setattr("excelmanus.upgrade.helper.spawn_detached_helper", spawn)
+    response = await routes.version_upgrade(routes.UpgradeRequest(), request())
+    assert response.status_code == 409
+    assert "Node.js" in json.loads(response.body)["error"]
+    assert not state.draining and read_request() is None
+    spawn.assert_not_called()
+
+
 def test_helper_exception_publishes_matching_failure(managed, monkeypatch):
     from excelmanus.upgrade.helper import run_helper
     _, root, _ = managed
@@ -110,6 +124,57 @@ def test_helper_exception_publishes_matching_failure(managed, monkeypatch):
     assert read_upgrade_status()["ok"] is False
     assert "build exploded" in read_upgrade_status()["error"]
     assert read_request() is None
+
+
+@pytest.mark.parametrize("failure", ["backup", "restore", "stop"])
+def test_helper_recovers_services_from_pre_apply_exceptions(managed, monkeypatch, failure):
+    from excelmanus.upgrade.helper import run_helper
+    _, root, _ = managed
+    write_request({"action": "restore" if failure == "restore" else "upgrade", "request_id": "failure-test"})
+    start = MagicMock()
+    monkeypatch.setattr("excelmanus.upgrade.helper.exec_start", start)
+    monkeypatch.setattr("excelmanus.upgrade.helper.time.sleep", lambda _: None)
+    if failure == "backup":
+        monkeypatch.setattr("excelmanus.updater.backup_user_data", MagicMock(side_effect=PermissionError("read-only profile")))
+    elif failure == "restore":
+        monkeypatch.setattr("excelmanus.updater.find_backup_dir", MagicMock(side_effect=OSError("disk error")))
+    else:
+        monkeypatch.setattr("excelmanus.upgrade.helper.stop_supervised", MagicMock(side_effect=OSError("stop failed")))
+    assert run_helper(root, skip_stop=failure != "stop") == 1
+    assert read_upgrade_status()["ok"] is False
+    assert read_upgrade_status()["request_id"] == "failure-test"
+    assert read_request() is None
+    start.assert_called_once()
+
+
+def test_helper_records_restart_failure_after_backup_failure(managed, monkeypatch):
+    from excelmanus.upgrade.helper import run_helper
+    _, root, _ = managed
+    write_request({"action": "upgrade", "request_id": "restart-failure"})
+    monkeypatch.setattr("excelmanus.updater.backup_user_data", MagicMock(side_effect=PermissionError("backup denied")))
+    monkeypatch.setattr("excelmanus.upgrade.helper.exec_start", MagicMock(side_effect=OSError("missing interpreter")))
+    assert run_helper(root, skip_stop=True) == 1
+    assert "无法恢复服务" in read_upgrade_status()["error"]
+
+
+def test_check_carries_successfully_fetched_target(tmp_path, monkeypatch):
+    from excelmanus.updater import check_for_updates
+    (tmp_path / ".git").mkdir()
+    def command(cmd, **kwargs):
+        if cmd[:3] == ["git", "fetch", "origin"]:
+            return 1, "", "origin unavailable"
+        if "--abbrev-ref" in cmd:
+            return 0, "main", ""
+        if "--verify" in cmd:
+            return 0, "a" * 40, ""
+        if "rev-list" in cmd:
+            return 0, "1", ""
+        return 0, "", ""
+    monkeypatch.setattr("excelmanus.updater._run_cmd", command)
+    info = check_for_updates(tmp_path, force=True)
+    assert info.has_update and not info.check_failed
+    assert info.target_ref == "github/main"
+    assert info.target_commit == "a" * 40
 
 
 def test_backup_preserves_key_and_user_workbook(managed, monkeypatch):

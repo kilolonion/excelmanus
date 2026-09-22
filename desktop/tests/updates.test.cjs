@@ -29,18 +29,15 @@ test('checks share a request, expose missing assets, and invalidate failed downl
   let calls = 0;
   let result = release();
   let status = 200;
-  let opened;
   const service = createUpdateService({ current: '1.8.0', platform: 'win32', arch: 'x64',
     fetchImpl: async () => { calls++; return { ok: status === 200, status, json: async () => result }; },
-    openExternal: async url => { opened = url; },
   });
   await assert.rejects(service.download(), /先检查更新/);
   const [first, second] = await Promise.all([service.check(), service.check()]);
   assert.equal(calls, 1);
   assert.deepEqual(first, second);
   assert.equal(first.hasUpdate, true);
-  await service.download();
-  assert.equal(opened, asset().browser_download_url);
+  await assert.rejects(service.download(), /不支持自动更新/);
   result.assets = [];
   assert.equal((await service.check()).downloadUrl, null);
   await assert.rejects(service.download());
@@ -52,4 +49,10 @@ test('checks share a request, expose missing assets, and invalidate failed downl
   status = 200;
   result = { ...release(), prerelease: true };
   await assert.rejects(service.check(), /发布信息无效/);
+});
+
+test('installer names cannot escape the private download directory', () => {
+  for (const name of ['ExcelManus Setup ../../bad.exe', 'ExcelManus Setup bad\\evil.exe', 'ExcelManus Setup x:evil.exe']) {
+    assert.equal(selectInstaller([asset(name)], 'win32', 'x64'), undefined);
+  }
 });

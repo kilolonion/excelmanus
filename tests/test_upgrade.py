@@ -44,6 +44,29 @@ def _init_repo(path: Path) -> None:
 
 
 class TestApplyFfOnly:
+    def test_uses_fetched_mirror_commit_instead_of_stale_origin(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        old = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "update-ref", "refs/remotes/origin/main", old)
+        (repo / "README").write_text("mirror update\n")
+        _git(repo, "commit", "-am", "mirror update")
+        target = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "update-ref", "refs/remotes/github/main", target)
+        _git(repo, "reset", "--keep", old)
+        info = VersionInfo(current="1.0.0", latest="1.1.0", has_update=True,
+                           check_method="git", target_ref="github/main", target_commit=target)
+        with (
+            patch("excelmanus.upgrade.apply.check_for_updates", return_value=info),
+            patch("excelmanus.upgrade.apply._is_domestic_network", return_value=False),
+            patch("excelmanus.upgrade.apply._has_uv", return_value=False),
+            patch("excelmanus.upgrade.apply.verify_database_migration", return_value=(True, "ok")),
+        ):
+            result = apply_on_stopped_tree(repo, skip_deps=True)
+        assert result.success
+        assert _git(repo, "rev-parse", "HEAD") == target
+        assert _git(repo, "rev-parse", "origin/main") == old
+
     @pytest.mark.parametrize("dirty", [False, True])
     def test_update_keeps_untracked_and_modified_user_files(self, tmp_path: Path, dirty: bool) -> None:
         repo = tmp_path / "repo"
@@ -310,6 +333,40 @@ class TestCheckForUpdates:
 
 
 class TestApplyBuildRollback:
+    @pytest.mark.parametrize("domestic", [True, False])
+    def test_dependency_download_retries_the_other_registry(self, tmp_path: Path, domestic: bool) -> None:
+        import excelmanus.upgrade.apply as apply_mod
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "web").mkdir()
+        (repo / "web" / "package.json").write_text('{"name":"x"}')
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "web")
+        _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        original_run = apply_mod._run_cmd
+        backend_calls, frontend_calls = [], []
+        def wrapped(cmd, **kwargs):
+            if "pip" in cmd:
+                backend_calls.append(cmd)
+                return (1, "", "offline") if len(backend_calls) == 1 else (0, "", "")
+            if cmd[:2] == ["npm", "install"]:
+                frontend_calls.append(cmd)
+                return (1, "", "offline") if len(frontend_calls) == 1 else (0, "", "")
+            if cmd[:2] == ["npm", "run"]:
+                return 0, "", ""
+            return original_run(cmd, **kwargs)
+        with (
+            patch("excelmanus.upgrade.apply.check_for_updates", return_value=VersionInfo(has_update=True, check_method="git")),
+            patch("excelmanus.upgrade.apply._is_domestic_network", return_value=domestic),
+            patch("excelmanus.upgrade.apply._has_uv", return_value=False),
+            patch("excelmanus.upgrade.apply._run_cmd", side_effect=wrapped),
+            patch("excelmanus.upgrade.apply.verify_database_migration", return_value=(True, "ok")),
+        ):
+            assert apply_on_stopped_tree(repo).success
+        assert len(backend_calls) == len(frontend_calls) == 2
+        assert backend_calls[-1][-1] == ("https://pypi.org/simple" if domestic else "https://pypi.tuna.tsinghua.edu.cn/simple")
+        assert frontend_calls[-1][-1] == ("--registry=https://registry.npmjs.org" if domestic else "--registry=https://registry.npmmirror.com")
+
     def test_frontend_build_failure_rolls_back_git(self, tmp_path: Path) -> None:
         import excelmanus.upgrade.apply as apply_mod
 
@@ -604,4 +661,3 @@ class TestGitAndUv:
         assert cmd[:4] == ["uv", "pip", "install", "--python"]
         assert cmd[4] == str(py)
         assert "-e" in cmd
-

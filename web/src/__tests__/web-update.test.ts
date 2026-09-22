@@ -17,6 +17,16 @@ beforeEach(() => {
 afterEach(() => { useConnectionStore.getState().reset(); vi.useRealTimers(); });
 
 describe("web update completion", () => {
+  it("can retry the same request after a monitoring failure", async () => {
+    mocks.get.mockResolvedValueOnce({ request_id: "new", ok: false, error: "temporary failure" });
+    await useConnectionStore.getState().triggerRestart("update", { upgradeRequestId: "new" });
+    expect(useConnectionStore.getState().restartError).toBe("temporary failure");
+    mocks.get.mockImplementation(async (url: string) => url === "/health" ? { status: "ok" } : { request_id: "new", ok: true });
+    const retry = useConnectionStore.getState().triggerRestart("update", { upgradeRequestId: "new" });
+    await vi.advanceTimersByTimeAsync(1000);
+    await retry;
+    expect(mocks.refresh).toHaveBeenCalledOnce();
+  });
   it("does not accept a previous update's result", () => {
     expect(upgradeResultForRequest({ request_id: "old", ok: true }, "new")).toBe("pending");
   });

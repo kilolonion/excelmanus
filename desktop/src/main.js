@@ -9,6 +9,7 @@ const { readPickedFiles } = require("./picked-files");
 const { closeWindowsBeforeShutdown } = require("./window-lifecycle");
 const { allowPrivateNetwork } = require("./mobile-network");
 const { createUpdateService } = require("./updates");
+const { installDownloadedUpdate } = require("./update-install");
 
 const LOOPBACK = "127.0.0.1";
 const STARTUP_TIMEOUT_MS = 120_000;
@@ -17,7 +18,15 @@ const updates = createUpdateService({
   current: app.getVersion(),
   // Chromium 网络栈，自动使用系统代理，避免直连 api.github.com 失败
   fetchImpl: (url, init) => electronNet.fetch(url, init),
-  openExternal: url => shell.openExternal(url),
+  downloadDirectory: () => path.join(app.getPath("userData"), "updates"),
+  installImpl: installDesktopUpdate,
+  onStatus: status => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setProgressBar(status.phase === "downloading" ? (status.percent === null ? 2 : status.percent / 100) : -1);
+    if (frontendUrl && isAppUrl(mainWindow.webContents.getURL(), frontendUrl)) {
+      mainWindow.webContents.send("excelmanus:update-status", status);
+    }
+  },
 });
 
 let mainWindow = null;
@@ -350,6 +359,41 @@ ipcMain.handle("excelmanus:download-update", async event => {
   return updates.download();
 });
 
+for (const [action, handler] of [["update-status", () => updates.status()],
+  ["cancel-update", () => updates.cancel()], ["install-update", () => updates.install()]]) {
+  ipcMain.handle(`excelmanus:${action}`, async event => {
+    if (!isFrontendSender(event)) throw new Error("更新请求来自无效页面");
+    return handler();
+  });
+}
+
+async function installDesktopUpdate(filename) {
+  if (quitRequested || shuttingDown) throw new Error("应用正在退出，请稍后重试");
+  quitRequested = true;
+  try {
+    return await installDownloadedUpdate({
+      closeWindows: () => closeWindowsBeforeShutdown(BrowserWindow.getAllWindows()),
+      stopServices: stopAll,
+      // openPath honours OS security prompts/UAC and reports launch failures.
+      // Windows starts NSIS; macOS opens the DMG for replacement in Finder.
+      launch: () => shell.openPath(filename),
+      recover: async () => {
+        stopPromise = null;
+        shuttingDown = false;
+        // Finish any interrupted cleanup before opening another backend.
+        await stopAll();
+        stopPromise = null;
+        shuttingDown = false;
+        await boot();
+      },
+      exit: () => app.exit(0),
+    });
+  } catch (error) {
+    if (!mainWindow) dialog.showErrorBox("更新未完成", `${error.message}\n安装包和用户数据已保留，请重新打开应用或手动安装。`);
+    throw error;
+  } finally { quitRequested = false; }
+}
+
 async function checkUpdateFromMenu() {
   try {
     const info = await updates.check();
@@ -357,7 +401,7 @@ async function checkUpdateFromMenu() {
       type: "info", title: "检查 ExcelManus 更新",
       message: info.hasUpdate ? `发现新版本 ${info.latest}` : `当前版本 ${info.current} 已是最新正式版本`,
       detail: info.hasUpdate
-        ? `${info.downloadUrl ? "下载后退出应用，运行新版安装包。" : "该版本尚无适用的安装包，请稍后重试。"}\nWindows 安装时可选择迁移数据安装或卸载后安装。两种方式都保留设置、会话、工作区和用户文件，只替换 ExcelManus 程序。`
+        ? `${info.downloadUrl ? "应用内显示下载进度；下载并校验完成后退出并打开安装包。请先保存工作、等待任务完成。macOS 需在 Finder 中将新版替换到原位置。" : "该版本尚无适用的安装包，请稍后重试。"}\nWindows 安装时可选择迁移数据安装或卸载后安装。两种方式都保留设置、会话、工作区和用户文件，只替换 ExcelManus 程序。`
         : "检查完成，未修改应用或用户文件。",
       buttons: info.hasUpdate && info.downloadUrl ? ["下载安装包", "稍后"] : ["知道了"],
       defaultId: 0, cancelId: info.hasUpdate && info.downloadUrl ? 1 : 0,

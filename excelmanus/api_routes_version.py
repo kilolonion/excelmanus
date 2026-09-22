@@ -391,12 +391,16 @@ async def version_upgrade(body: UpgradeRequest, request: Request) -> JSONRespons
         sessions = await manager.list_sessions()
         if any(session.get("in_flight") for session in sessions):
             return _error(409, "还有任务正在运行，请等待完成后再更新")
+    from excelmanus.upgrade.preflight import check_upgrade_environment
+    root = _get_project_root()
+    environment_error = await asyncio.get_running_loop().run_in_executor(None, check_upgrade_environment, root)
+    if environment_error:
+        return _error(409, environment_error)
     # No await from this point through reservation/draining: other chat requests
     # on this single-worker event loop cannot enter between the final checks.
     if runtime.draining or any(not task.done() for task in runtime.active_chat_tasks.values()):
         return _error(409, "还有任务正在运行，请等待完成后再更新")
 
-    root = _get_project_root()
     return _schedule_helper_and_exit(root, {
         "action": "upgrade",
         "skip_backup": False,

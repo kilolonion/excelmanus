@@ -93,6 +93,10 @@ class VersionInfo:
     check_method: str = ""
     check_failed: bool = False
     error: str = ""
+    # The exact successfully fetched target; never infer it from existence of
+    # an old origin/* ref after failing over to a different remote.
+    target_ref: str = ""
+    target_commit: str = ""
 
 
 @dataclass
@@ -175,6 +179,10 @@ def _run_cmd(
     cmd: list[str], cwd: str | Path | None = None, timeout: int = 60,
 ) -> tuple[int, str, str]:
     try:
+        # Windows installs npm as npm.cmd, which CreateProcess cannot resolve
+        # from the bare 'npm' name. Resolve PATH without enabling shell=True.
+        if os.name == "nt" and cmd:
+            cmd = [shutil.which(cmd[0]) or cmd[0], *cmd[1:]]
         r = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None,
             capture_output=True, text=True, timeout=timeout,
@@ -302,8 +310,13 @@ def check_for_updates(
         # fetch 成功，比较版本
         _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
         branch = branch or "main"
+        if branch == "HEAD":
+            info.check_failed = True
+            info.latest = info.current
+            info.error = "当前源码处于 detached HEAD，请切换到要更新的分支后重试"
+            return info
         remote_ref = f"{git_remote}/{branch}"
-        rc_ref, _, ref_err = _run_cmd(
+        rc_ref, target_commit, ref_err = _run_cmd(
             ["git", "rev-parse", "--verify", remote_ref], cwd=project_root,
         )
         if rc_ref != 0:
@@ -313,6 +326,8 @@ def check_for_updates(
             _version_check_cache = info
             _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
             return info
+        info.target_ref = remote_ref
+        info.target_commit = target_commit
         rc_list, count_str, list_err = _run_cmd(
             ["git", "rev-list", "--count", f"HEAD..{remote_ref}"], cwd=project_root,
         )

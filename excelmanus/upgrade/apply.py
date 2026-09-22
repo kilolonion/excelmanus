@@ -12,7 +12,6 @@ from pathlib import Path
 from excelmanus.updater import (
     UpdateResult,
     UpgradeOutcome,
-    _ensure_github_remote,
     _has_uv,
     _invalidate_version_cache,
     _is_domestic_network,
@@ -97,19 +96,15 @@ def apply_on_stopped_tree(
     _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
     branch = branch or "main"
 
-    git_remote = "origin"
-    if vi.check_method == "git":
-        # check_for_updates 已 fetch；若 origin 当时失败会改用 github
-        rc_origin, _, _ = _run_cmd(
-            ["git", "rev-parse", "--verify", f"origin/{branch}"], cwd=project_root,
-        )
-        if rc_origin != 0:
-            git_remote = "github"
-            _ensure_github_remote(project_root)
+    if branch == "HEAD":
+        return _fail(result, UpgradeOutcome.PRECHECK_FAILED, "源码处于 detached HEAD，请切换到要更新的分支后重试")
+    # Pin the commit selected by the successful fetch, including mirror
+    # failover. A stale origin/main must never override that selection.
+    target = vi.target_commit or vi.target_ref or f"origin/{branch}"
 
     _p("正在拉取最新代码...", 30)
     rc, _, err = _run_cmd(
-        ["git", "merge", f"{git_remote}/{branch}", "--ff-only", "--no-overwrite-ignore"], cwd=project_root,
+        ["git", "merge", target, "--ff-only", "--no-overwrite-ignore"], cwd=project_root,
     )
     if rc != 0:
         return _fail(
@@ -137,9 +132,12 @@ def apply_on_stopped_tree(
                 _build_pip_cmd(project_root, domestic, use_uv),
                 cwd=project_root, timeout=300,
             )
-            if rc_be != 0 and not domestic:
+            if rc_be != 0:
+                fallback = _build_pip_cmd(project_root, not domestic, use_uv)
+                if domestic:
+                    fallback.extend(["--index-url", "https://pypi.org/simple"])
                 rc_be, _, err_be = _run_cmd(
-                    _build_pip_cmd(project_root, True, use_uv),
+                    fallback,
                     cwd=project_root, timeout=300,
                 )
             return rc_be == 0, err_be
@@ -154,8 +152,9 @@ def apply_on_stopped_tree(
             if domestic:
                 npm_args.append("--registry=https://registry.npmmirror.com")
             rc_fe, _, err_fe = _run_cmd(npm_args, cwd=web_dir, timeout=300)
-            if rc_fe != 0 and not domestic:
-                fallback = list(npm_cmd) + ["--registry=https://registry.npmmirror.com"]
+            if rc_fe != 0:
+                registry = "https://registry.npmjs.org" if domestic else "https://registry.npmmirror.com"
+                fallback = list(npm_cmd) + [f"--registry={registry}"]
                 rc_fe, _, err_fe = _run_cmd(fallback, cwd=web_dir, timeout=300)
             return rc_fe == 0, err_fe
 

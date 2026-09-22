@@ -127,7 +127,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
         upgradeRequestId = opts.upgradeRequestId;
         try { sessionStorage.setItem(WEB_UPGRADE_REQUEST_KEY, upgradeRequestId); } catch { /* storage may be disabled */ }
       }
-      if (get().status === "restarting" && (!opts?.upgradeRequestId || monitoredUpgradeId === opts.upgradeRequestId)) {
+      if (get().status === "restarting" && !get().restartTimeout && !get().restartError &&
+          (!opts?.upgradeRequestId || monitoredUpgradeId === opts.upgradeRequestId)) {
         if (reason) set({ restartReason: reason });
         return;
       }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useConnectionStore } from "@/stores/connection-store";
 import {
   Loader2,
@@ -115,10 +115,14 @@ export function VersionTab() {
   const [lastUpgrade, setLastUpgrade] = useState<VersionManifest["last_upgrade"]>(null);
   const [actionMsg, setActionMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const triggerRestart = useConnectionStore((s) => s.triggerRestart);
+  const messageTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (messageTimer.current) clearTimeout(messageTimer.current); }, []);
 
   const showMsg = (type: "ok" | "err", text: string) => {
+    if (messageTimer.current) clearTimeout(messageTimer.current);
     setActionMsg({ type, text });
-    setTimeout(() => setActionMsg(null), 3000);
+    // Keep actionable environment/update failures visible until the next action.
+    if (type === "ok") messageTimer.current = setTimeout(() => setActionMsg(null), 3000);
   };
 
   const fetchAll = useCallback(async () => {
@@ -131,8 +135,10 @@ export function VersionTab() {
       // installation registry. Do not invoke those endpoints from Desktop.
       if (window.excelManusDesktop || v.check_method === "desktop_installer") return;
       const [b, i, ds, manifest, capability] = await Promise.all([
-        apiGet<{ backups: BackupEntry[] }>("/version/backups"),
-        apiGet<{ installations: InstallationEntry[] }>("/version/installations"),
+        // Servers may allow upgrades but intentionally deny local backup and
+        // installation-management endpoints. Those must not hide capability.
+        apiGet<{ backups: BackupEntry[] }>("/version/backups").catch(() => ({ backups: [] })),
+        apiGet<{ installations: InstallationEntry[] }>("/version/installations").catch(() => ({ installations: [] })),
         fetchDeployStatus().catch(() => null),
         fetchVersionManifest().catch(() => null),
         apiGet<WebUpgradeCapability>("/version/upgrade/capability", { cache: "no-store" }).catch(() => null),

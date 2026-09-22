@@ -11,4 +11,12 @@ contextBridge.exposeInMainWorld("excelManusDesktop", {
   mobilePairing: (action, input) => ipcRenderer.invoke("excelmanus:mobile-pairing", action, input),
   checkUpdate: () => ipcRenderer.invoke("excelmanus:check-update"),
   downloadUpdate: () => ipcRenderer.invoke("excelmanus:download-update"),
+  getUpdateStatus: () => ipcRenderer.invoke("excelmanus:update-status"),
+  cancelUpdate: () => ipcRenderer.invoke("excelmanus:cancel-update"),
+  installUpdate: () => ipcRenderer.invoke("excelmanus:install-update"),
+  onUpdateStatus: callback => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on("excelmanus:update-status", listener);
+    return () => ipcRenderer.removeListener("excelmanus:update-status", listener);
+  },
 });
