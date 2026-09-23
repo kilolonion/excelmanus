@@ -663,7 +663,7 @@ class TestIntentSchemaCompat:
         })
         assert not bad, bad
 
-    # ── analyze_spreadsheet：join 单键 + JSON 兼容 ──
+    # ── analyze_spreadsheet：join 单/多键 + JSON 兼容 ──
 
     def test_join_single_key_and_header_row(self) -> None:
         bad = self._violations("analyze_spreadsheet", {
@@ -673,13 +673,26 @@ class TestIntentSchemaCompat:
         })
         assert not bad, bad
 
-    def test_join_multi_key_list_rejected(self) -> None:
-        # _normalize_join 只支持单键：schema 不得宣称数组键
+    def test_join_multi_key_list_matches_runtime(self) -> None:
+        import pandas as pd
+        from excelmanus.workbook.data import _normalize_join
+
+        join = {"sheet": "右表", "on": ["a", "b"]}
         bad = self._violations("analyze_spreadsheet", {
             "file_path": "a.xlsx", "mode": "aggregate", "aggregations": {"x": "sum"},
-            "join": {"on": ["a", "b"]},
+            "join": join,
         })
-        assert any("join.on" in m for m in bad)
+        assert not bad, bad
+        normalized, error = _normalize_join(join, pd.DataFrame({"a": [1], "b": [2]}))
+        assert error is None
+        assert normalized["left_on"] == normalized["right_on"] == ["a", "b"]
+
+    def test_join_keys_must_be_column_names(self) -> None:
+        bad = self._violations("analyze_spreadsheet", {
+            "file_path": "a.xlsx", "mode": "aggregate", "aggregations": {"x": "sum"},
+            "join": {"on": ["a", {"bad": "key"}]},
+        })
+        assert any("join.on" in message for message in bad)
 
     def test_join_json_string(self) -> None:
         bad = self._violations("analyze_spreadsheet", {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   collectHistoryAffectedFiles,
+  decodeUriEscapedPath,
   displayFileName,
   displayFilePath,
   mergeAffectedFiles,
@@ -13,8 +14,9 @@ describe("toPublicFileIdentity", () => {
     expect(toPublicFileIdentity("./sales.xlsx")).toBe("./sales.xlsx");
   });
 
-  it("extracts uploads/ from absolute paths", () => {
-    expect(toPublicFileIdentity("/tmp/ws/uploads/abcd1234_sales.xlsx")).toBe(
+  it("does not infer a workspace from an absolute path", () => {
+    expect(toPublicFileIdentity("/tmp/ws/uploads/abcd1234_sales.xlsx")).toBeNull();
+    expect(toPublicFileIdentity("/tmp/ws/uploads/abcd1234_sales.xlsx", "/tmp/ws")).toBe(
       "./uploads/abcd1234_sales.xlsx",
     );
   });
@@ -81,6 +83,21 @@ describe("displayFilePath", () => {
   it("keeps the directory and cleans only the leaf", () => {
     expect(displayFilePath("./uploads/abcd1234_sales.xlsx")).toBe("./uploads/sales.xlsx");
     expect(displayFilePath("outputs/backups/x_20260911T091344_abcd.csv")).toBe("outputs/backups/x.csv");
+  });
+});
+
+describe("decodeUriEscapedPath", () => {
+  it("decodes normalizeUri-encoded link hrefs back to workspace paths", () => {
+    expect(
+      decodeUriEscapedPath(
+        "./outputs/%E6%94%B6%E6%AC%BE%E6%94%B6%E6%8D%AE_%E5%B8%83%E5%B1%80%E8%BF%98%E5%8E%9F%E7%89%88.xlsx",
+      ),
+    ).toBe("./outputs/收款收据_布局还原版.xlsx");
+  });
+
+  it("keeps plain and malformed inputs untouched", () => {
+    expect(decodeUriEscapedPath("./outputs/sales.xlsx")).toBe("./outputs/sales.xlsx");
+    expect(decodeUriEscapedPath("./outputs/100%zz.xlsx")).toBe("./outputs/100%zz.xlsx");
   });
 });
 

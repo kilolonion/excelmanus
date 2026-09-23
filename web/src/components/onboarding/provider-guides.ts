@@ -32,7 +32,7 @@ type GuideCopy = Pick<ProviderGuide, "description" | "pricing" | "recommended" |
 // are owned by settings/model/constants.tsx. This file only owns onboarding copy.
 const GUIDE_COPY: Record<string, GuideCopy> = {
   openai: {
-    description: "GPT-6 Astra — 通用能力强、生态完善",
+    description: "GPT-4o — 通用能力强、生态完善",
     pricing: "按官方实时价格计费（请以 OpenAI 控制台为准）",
     recommended: true,
     steps: [
@@ -42,7 +42,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   anthropic: {
-    description: "Claude Sonnet 5 — 代码与推理能力一流",
+    description: "Claude Sonnet 4 — 代码与推理能力一流",
     pricing: "按官方实时价格计费（请以 Anthropic 控制台为准）",
     recommended: true,
     steps: [
@@ -52,7 +52,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   gemini: {
-    description: "Gemini 3.8 Flash — 速度快、性价比高",
+    description: "Gemini 2.5 Flash — 速度快、性价比高",
     pricing: "按官方实时价格计费（请以控制台为准）",
     steps: [
       { title: "1. 访问 Google AI Studio", description: "打开 aistudio.google.com/apikey，用 Google 账号登录后创建 API Key。Gemini 提供免费额度，无需预充值。" },
@@ -61,7 +61,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   deepseek: {
-    description: "DeepSeek-V4.1 Flash — 原生多模态，中文理解出色，性价比极高",
+    description: "DeepSeek-V3 — 中文理解出色，性价比极高",
     pricing: "按官方实时价格计费（新用户通常有试用额度）",
     recommended: true,
     steps: [
@@ -71,7 +71,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   qwen: {
-    description: "通义千问 Qwen3.8 Max — 原生多模态，国内直连",
+    description: "通义千问 Qwen-Plus — 国内直连",
     pricing: "按官方实时价格计费（新用户通常有试用额度）",
     recommended: true,
     steps: [
@@ -81,7 +81,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   zhipu: {
-    description: "GLM-5.3 — 国产大模型，国内直连",
+    description: "GLM-4.5 — 国产大模型，国内直连",
     pricing: "按官方实时价格计费（新用户通常有试用额度）",
     steps: [
       { title: "1. 注册智谱 AI 账号", description: "打开 open.bigmodel.cn，使用手机号注册并完成实名认证。" },
@@ -99,7 +99,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   kimi: {
-    description: "Kimi K3 — 超长上下文、中文理解出色",
+    description: "Kimi K2.6 — 长上下文、中文理解出色",
     pricing: "按官方实时价格计费（新用户通常有试用额度）",
     steps: [
       { title: "1. 注册 Moonshot 账号", description: "打开 platform.moonshot.cn，使用手机号注册并完成验证。" },
@@ -108,7 +108,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   minimax: {
-    description: "MiniMax M3 — 通用推理与多模态能力",
+    description: "MiniMax M2 — 通用推理能力",
     pricing: "按官方实时价格计费（请以 MiniMax 控制台为准）",
     steps: [
       { title: "1. 注册 MiniMax 账号", description: "打开 platform.minimax.io，注册并完成账号验证。" },
@@ -117,7 +117,7 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   xai: {
-    description: "Grok 4.6 — 强推理与实时信息能力",
+    description: "Grok 4 — 强推理与实时信息能力",
     pricing: "按官方实时价格计费（请以 xAI 控制台为准）",
     steps: [
       { title: "1. 注册 xAI 账号", description: "打开 console.x.ai，使用 X 账号登录并完成验证。" },
@@ -126,12 +126,21 @@ const GUIDE_COPY: Record<string, GuideCopy> = {
     ],
   },
   doubao: {
-    description: "Doubao Seed 2.1 Pro — 国内直连，中文任务表现稳定",
+    description: "Doubao Seed 1.6 — 国内直连，中文任务表现稳定",
     pricing: "按官方实时价格计费（新用户通常有试用额度）",
     steps: [
       { title: "1. 注册火山引擎账号", description: "打开火山引擎控制台，完成实名认证并进入方舟服务。" },
       { title: "2. 创建 API Key", description: "在方舟控制台创建 API Key，并开通对应模型的调用权限。" },
       { title: "3. 复制并使用", description: "将 API Key 粘贴到下方；模型部署 ID 也可以在方舟控制台中替换为实际 endpoint。" },
+    ],
+  },
+  mimo: {
+    description: "小米 MiMo V2.6 Flash — 全模态理解，国内直连",
+    pricing: "按官方实时价格计费（新用户通常有试用额度）",
+    steps: [
+      { title: "1. 注册小米 MiMo 开放平台账号", description: "打开 platform.xiaomimimo.com，使用小米账号或手机号注册登录。" },
+      { title: "2. 创建 API Key", description: "进入控制台 → API Keys 页面，创建新的 API Key（sk- 开头）。" },
+      { title: "3. 复制并使用", description: "复制 Key 粘贴到下方。MiMo API 国内直连，兼容 OpenAI / Anthropic 协议。" },
     ],
   },
   "openai-codex": {

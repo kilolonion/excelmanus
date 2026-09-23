@@ -13,6 +13,7 @@ import type { WorkbookViewLayout } from "@/lib/workspace-surface";
 import { useWorkbookFocusStore } from "@/stores/workbook-focus-store";
 import { fileRefFromSession, normalizeRelativePath } from "@/lib/workspace-file-ref";
 import { useWorkbookWorkspace } from "@/hooks/use-workbook-workspace";
+import { prefetchExcelView } from "@/lib/excel-view-prefetch";
 
 export type OpenWorkspaceFileIntent = "preview" | "full";
 
@@ -50,6 +51,15 @@ export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions)
   const preview = useFilePreviewStore.getState();
 
   if (kind === "spreadsheet") {
+    // Start the style-free opening read before changing the visible surface.
+    // This covers links, recent files, chat/view switches, and ribbon actions
+    // that all converge on this entry point.
+    try {
+      prefetchExcelView(path);
+    } catch {
+      // Prefetch is opportunistic. A reduced test/runtime bundle may not load
+      // the cache helpers, but opening the workbook must remain synchronous.
+    }
     preview.closeText();
     preview.closeImage();
     word.closePanel();

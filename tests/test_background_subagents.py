@@ -308,7 +308,7 @@ async def test_session_control_api_waits_and_cancels(monkeypatch, tmp_path):
     run_id = await runtime.start_background(SubagentStartRequest(task="API 子任务"))
     await asyncio.wait_for(entered.wait(), 2)
     monkeypatch.setattr(routes, "_has_session_access", AsyncMock(return_value=True))
-    manager = SimpleNamespace(get_or_restore_engine=AsyncMock(return_value=parent))
+    manager = SimpleNamespace(get_engine=lambda sid: parent, get_or_restore_engine=AsyncMock(return_value=parent))
     monkeypatch.setattr(routes, "get_session_manager", lambda: manager)
     app = FastAPI()
     app.include_router(routes.router)
@@ -333,7 +333,7 @@ async def test_session_task_list_api_returns_current_snapshot(monkeypatch, tmp_p
 
     parent = engine(tmp_path)
     monkeypatch.setattr(routes, "_has_session_access", AsyncMock(return_value=True))
-    manager = SimpleNamespace(get_or_restore_engine=AsyncMock(return_value=parent))
+    manager = SimpleNamespace(get_engine=lambda sid: parent, get_or_restore_engine=AsyncMock(return_value=parent))
     monkeypatch.setattr(routes, "get_session_manager", lambda: manager)
     app = FastAPI()
     app.include_router(routes.router)
@@ -350,6 +350,28 @@ async def test_session_task_list_api_returns_current_snapshot(monkeypatch, tmp_p
         assert payload["title"] == "补齐订单"
         assert [item["title"] for item in payload["items"]] == ["读取订单", "写入结果"]
         assert [item["status"] for item in payload["items"]] == ["in_progress", "pending"]
+
+
+@pytest.mark.asyncio
+async def test_blank_session_task_queries_do_not_restore_an_engine(monkeypatch):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    import excelmanus.api_routes_sessions as routes
+
+    restore = AsyncMock(side_effect=AssertionError("blank chat must stay lightweight"))
+    manager = SimpleNamespace(
+        get_engine=lambda sid: None,
+        get_or_restore_engine=restore,
+        chat_history=SimpleNamespace(get_session_meta=lambda sid: {"blank": 1, "message_count": 0}),
+    )
+    monkeypatch.setattr(routes, "_has_session_access", AsyncMock(return_value=True))
+    monkeypatch.setattr(routes, "get_session_manager", lambda: manager)
+    app = FastAPI()
+    app.include_router(routes.router)
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        assert (await client.get("/api/v1/sessions/blank/subagents")).json() == {"runs": []}
+        assert (await client.get("/api/v1/sessions/blank/task-list")).json() == {"task_list": None}
+    restore.assert_not_called()
 
 
 @pytest.mark.asyncio

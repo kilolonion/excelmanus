@@ -22,10 +22,11 @@ import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar"
 import { useWorkbookConversationStore, type WorkbookViewState } from "@/stores/workbook-conversation-store";
 import { WorkbookInteractionBar, useWorkbookQuestionRequest } from "./WorkbookInteractionBar";
 import { useWorkbookWorkspaceStore, workbookWorkspaceKey } from "@/stores/workbook-workspace-store";
+import { WorkbookLoadingState } from "./WorkbookLoadingState";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
-  { ssr: false, loading: () => <div role="status" className="flex items-center justify-center h-full text-sm text-muted-foreground">正在准备表格…</div> }
+  { ssr: false, loading: () => <WorkbookLoadingState /> }
 );
 
 export function ExcelSidePanel() {

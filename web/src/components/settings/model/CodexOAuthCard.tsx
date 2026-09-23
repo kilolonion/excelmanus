@@ -63,11 +63,11 @@ export function CodexOAuthCard({
   // Build a Set of existing codex profile names for quick lookup.
   // Map legacy short names and old defaults to current full openai-codex/xxx format.
   const _LEGACY_NAME_MAP: Record<string, string> = {
-    "Codex 5.3": "openai-codex/gpt-6-astra",
+    "Codex 5.3": "openai-codex/gpt-5.3-codex",
     "Codex Spark": "openai-codex/gpt-5.3-codex-spark",
-    "codex-oauth": "openai-codex/gpt-6-astra",
+    "codex-oauth": "openai-codex/gpt-5.2-codex",
     "codex-spark": "openai-codex/gpt-5.3-codex-spark",
-    "codex-5.3": "openai-codex/gpt-6-astra",
+    "codex-5.3": "openai-codex/gpt-5.3-codex",
     "codex-5.2": "openai-codex/gpt-5.2-codex",
     "codex-5.1": "openai-codex/gpt-5.1-codex",
     "codex-mini": "openai-codex/gpt-5.1-codex-mini",
@@ -75,8 +75,8 @@ export function CodexOAuthCard({
     "codex-mini-latest": "openai-codex/gpt-5-codex-mini",
     "codex-gpt-5.2": "openai-codex/gpt-5.2",
     "codex-gpt-5.1": "openai-codex/gpt-5.1",
-    "codex-gpt-6": "openai-codex/gpt-6-astra",
-    "codex-gpt-5.6": "openai-codex/gpt-5.6",
+    "codex-gpt-6": "openai-codex/gpt-5.2-codex",
+    "codex-gpt-5.6": "openai-codex/gpt-5.2",
   };
   const existingCodexProfiles = new Set<string>();
   for (const n of existingProfileNames) {

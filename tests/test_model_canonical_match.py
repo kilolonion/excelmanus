@@ -52,6 +52,16 @@ class TestMatchCanonicalModel:
         assert hit.canonical == "gpt-5.6-sol"
         assert hit.confidence >= CANONICAL_MATCH_THRESHOLD
 
+    @pytest.mark.parametrize("model", [
+        "xiaomi/mimo-v2.5",
+        "mimo/mimo-v2.5",
+    ])
+    def test_mimo_vendor_prefix_stripped(self, model: str) -> None:
+        hit = match_canonical_model(model)
+        assert hit is not None
+        assert hit.canonical == "mimo-v2.5"
+        assert hit.confidence >= CANONICAL_MATCH_THRESHOLD
+
     def test_bedrock_namespace(self) -> None:
         hit = match_canonical_model("us.anthropic.claude-sonnet-4-5")
         assert hit is not None
@@ -99,6 +109,7 @@ class TestInferModelFamily:
         ("kimi-k2.5", "moonshot"),
         ("grok-4", "grok"),
         ("minimax-m3", "minimax"),
+        ("mimo-v2.5", "mimo"),
         ("unknown-vendor-model", ""),
     ])
     def test_family(self, canonical: str, expected: str) -> None:

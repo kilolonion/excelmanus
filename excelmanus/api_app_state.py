@@ -5,15 +5,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from contextvars import ContextVar
@@ -89,7 +88,20 @@ class RuntimeMiddleware:
         finally:
             try:
                 manager = runtime.session_manager
-                if manager is not None and hasattr(manager, "drain_workspace_events"):
+                # Read-only polling and blank-session creation do not publish
+                # file mutations. Scanning every workspace here blocks the ASGI
+                # event loop (even response bodies already sent can be delayed).
+                # Writes retain immediate delivery; the manager also retries
+                # durable events during chat acquisition and periodic cleanup.
+                needs_file_events = (
+                    scope["type"] == "http"
+                    and scope.get("method") not in {"GET", "HEAD", "OPTIONS"}
+                    and not (
+                        scope.get("method") == "POST"
+                        and scope.get("path", "").rstrip("/") == "/api/v1/sessions"
+                    )
+                )
+                if needs_file_events and manager is not None and hasattr(manager, "drain_workspace_events"):
                     manager.drain_workspace_events()
             finally:
                 reset_runtime(token)
@@ -626,7 +638,20 @@ def resolve_workspace(
                     "code": "FILE_SCOPE_REQUIRED",
                 },
             )
-        return _open(manager.workspace_path_for_session(sid))
+        session_path = manager.workspace_path_for_session(sid)
+        if wid:
+            try:
+                workspace_path, _ = manager.resolve_workspace_binding(wid, None)
+            except WorkspacePathError as exc:
+                raise HTTPException(status_code=400, detail={
+                    "error": str(exc), "code": "FILE_SCOPE_REQUIRED",
+                }) from exc
+            if not paths_equal(session_path, workspace_path):
+                raise HTTPException(status_code=409, detail={
+                    "error": "会话与文件工作区不一致，请重新打开文件",
+                    "code": "FILE_SCOPE_MISMATCH",
+                })
+        return _open(session_path)
     if wid and manager is not None:
         try:
             path, _bound_id = manager.resolve_workspace_binding(wid, None)
@@ -690,12 +715,20 @@ def resolve_excel_path(
     if not ws_root:
         return None
     guard = FileAccessGuard(str(ws_root))
-    try:
-        resolved = guard.resolve_and_validate(path)
-    except (SecurityViolationError, OSError):
-        return None
-    if resolved.is_file():
-        return str(resolved)
+    candidates = [path]
+    # 前端 Markdown 链接经 URI 规范化后，非 ASCII 文件名以 %XX 形式到达；
+    # 字面量解析失败时按 URL 解码回退一次，仍走同一套越界校验。
+    if "%" in path:
+        decoded = unquote(path)
+        if decoded != path:
+            candidates.append(decoded)
+    for candidate in candidates:
+        try:
+            resolved = guard.resolve_and_validate(candidate)
+        except (SecurityViolationError, OSError, ValueError):
+            continue
+        if resolved.is_file():
+            return str(resolved)
     return None
 
 

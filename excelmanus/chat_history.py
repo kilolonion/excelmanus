@@ -64,6 +64,8 @@ class ChatHistoryStore:
     def _durable_payload(msg: dict) -> dict:
         """Persist refs only: drop request-only keys and migrate leftover data URIs."""
         payload = {k: v for k, v in msg.items() if not str(k).startswith("_")}
+        if msg.get("role") == "tool" and isinstance(msg.get("_tool_result_context"), dict):
+            payload["_tool_result_context"] = dict(msg["_tool_result_context"])
         # Compaction metadata describes durable history, not a request projection.
         # Preserve it in messages-table restores when session_events is disabled.
         if msg.get("_prompt_kind") in {"compaction", "jev_delivery_draft"}:
@@ -356,14 +358,14 @@ class ChatHistoryStore:
 
     def list_sessions(
         self,
-        limit: int = 100,
+        limit: int | None = 100,
         offset: int = 0,
         *,
         user_id: str | None = None,
     ) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM sessions ORDER BY updated_at DESC, created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            (-1 if limit is None else limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -504,14 +506,17 @@ class ChatHistoryStore:
         )
         self._conn.commit()
 
-    def load_excel_diffs(self, session_id: str) -> list[dict]:
+    def load_excel_diffs(self, session_id: str, *, limit: int | None = None, tool_call_ids: list[str] | None = None) -> list[dict]:
         if not self._has_excel_tables():
             return []
+        selection, params = self._excel_event_selection(session_id, limit, tool_call_ids)
         rows = self._conn.execute(
             "SELECT tool_call_id, file_path, sheet, affected_range, changes_json, created_at "
-            "FROM session_excel_diffs WHERE session_id = ? ORDER BY id ASC",
-            (session_id,),
+            f"FROM session_excel_diffs {selection}",
+            params,
         ).fetchall()
+        if limit is not None:
+            rows.reverse()
         result = []
         for r in rows:
             try:
@@ -528,14 +533,18 @@ class ChatHistoryStore:
             })
         return result
 
-    def load_affected_files(self, session_id: str) -> list[str]:
+    def load_affected_files(self, session_id: str, *, limit: int | None = None, tool_call_ids: list[str] | None = None) -> list[str]:
         if not self._has_excel_tables():
             return []
+        # This table is session-scoped and has no tool_call_id column. Only
+        # diffs/previews can be filtered by the currently visible tool calls.
+        selection, params = self._excel_event_selection(session_id, limit, None)
         rows = self._conn.execute(
-            "SELECT file_path FROM session_affected_files "
-            "WHERE session_id = ? ORDER BY id ASC",
-            (session_id,),
+            f"SELECT file_path FROM session_affected_files {selection}",
+            params,
         ).fetchall()
+        if limit is not None:
+            rows.reverse()
         return [r["file_path"] for r in rows]  # type: ignore[index]
 
     # ── Excel Preview 持久化 ─────────────────────────
@@ -579,15 +588,29 @@ class ChatHistoryStore:
         )
         self._conn.commit()
 
-    def load_excel_previews(self, session_id: str) -> list[dict]:
+    @staticmethod
+    def _excel_event_selection(session_id: str, limit: int | None, tool_call_ids: list[str] | None) -> tuple[str, list[Any]]:
+        clause = "WHERE session_id = ?"
+        params: list[Any] = [session_id]
+        if tool_call_ids is not None:
+            clause += " AND tool_call_id IN (" + ",".join("?" for _ in tool_call_ids) + ")"
+            params.extend(tool_call_ids)
+        if limit is not None:
+            return clause + " ORDER BY id DESC LIMIT ?", [*params, max(1, limit)]
+        return clause + " ORDER BY id ASC", params
+
+    def load_excel_previews(self, session_id: str, *, limit: int | None = None, tool_call_ids: list[str] | None = None) -> list[dict]:
         if not self._has_excel_tables():
             return []
+        selection, params = self._excel_event_selection(session_id, limit, tool_call_ids)
         rows = self._conn.execute(
             "SELECT tool_call_id, file_path, sheet, columns_json, rows_json, "
             "       total_rows, truncated "
-            "FROM session_excel_previews WHERE session_id = ? ORDER BY id ASC",
-            (session_id,),
+            f"FROM session_excel_previews {selection}",
+            params,
         ).fetchall()
+        if limit is not None:
+            rows.reverse()
         result = []
         for r in rows:
             try:

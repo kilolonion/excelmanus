@@ -55,8 +55,8 @@ def test_security_reservation_survives_optimization_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_loop_wrap_reserves_final_mutation_verify_slot() -> None:
-    """串行：非交付评估给 mutation.verify 留最后一次机会。"""
+async def test_loop_wrap_does_not_reserve_a_delivery_review_slot() -> None:
+    """The removed delivery reviewer cannot consume an optimization slot."""
     engine = _engine(JevTurnBudget(max_evaluations=2, max_latency_ms=1000))
     with patch(
         "excelmanus.system_one.evaluate",
@@ -66,14 +66,14 @@ async def test_loop_wrap_reserves_final_mutation_verify_slot() -> None:
         first = await evaluate_for_host(engine, "loop.wrap", {"user_text": "x"}, config=config)
         assert first.reason != "budget_exhausted"
         second = await evaluate_for_host(engine, "loop.wrap", {"user_text": "x"}, config=config)
-        assert second.reason == "budget_exhausted"
-        verify = await evaluate_for_host(engine, "mutation.verify", {"user_text": "x"}, config=config)
-        assert verify.reason != "budget_exhausted"
+        assert second.reason != "budget_exhausted"
+        third = await evaluate_for_host(engine, "loop.wrap", {"user_text": "x"}, config=config)
+        assert third.reason == "budget_exhausted"
 
 
 @pytest.mark.asyncio
-async def test_loop_wrap_reserves_final_mutation_verify_latency() -> None:
-    """keep_latency_ms = min(500, max/2)：600ms 预算下 loop.wrap 最多预留 300ms。"""
+async def test_loop_wrap_does_not_withhold_delivery_review_latency() -> None:
+    """All available latency can serve an actual optimization call."""
     budget = JevTurnBudget(max_evaluations=4, max_latency_ms=600)
     engine = _engine(budget)
     captured: list[float] = []
@@ -87,4 +87,4 @@ async def test_loop_wrap_reserves_final_mutation_verify_latency() -> None:
             engine, "loop.wrap", {"user_text": "x"}, config=engine.config,
         )
     assert decision.reason != "budget_exhausted"
-    assert captured and captured[0] <= 300.0
+    assert captured == [600.0]

@@ -120,11 +120,6 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
     # 连接成功后自动暴露给当前用户的 Codex 可用模型（仅用户私有，不写入全局 model_profiles）。
     # model: 真实模型 ID；display_name: 前端展示友好别名。
     _SUPPORTED_MODELS: tuple[tuple[str, str], ...] = (
-        ("gpt-6-astra", "GPT-6 Astra"),
-        ("gpt-5.6-sol", "GPT-5.6 Sol"),
-        ("gpt-5.6", "GPT-5.6"),
-        ("gpt-5.6-terra", "GPT-5.6 Terra"),
-        ("gpt-5.6-luna", "GPT-5.6 Luna"),
         ("gpt-5.2-codex", "Codex 5.2 (Legacy)"),
         ("gpt-5.1-codex", "Codex 5.1 (Legacy)"),
         ("gpt-5.1-codex-mini", "Codex Mini (Legacy)"),
@@ -134,7 +129,6 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
         ("gpt-5.2", "GPT-5.2 (Legacy)"),
         ("gpt-5.1", "GPT-5.1 (Legacy)"),
         ("gpt-5", "GPT-5 (Legacy)"),
-        # Legacy entries kept for backward compatibility.
         ("gpt-5.3-codex", "Codex 5.3 (Legacy)"),
         ("gpt-5.3-codex-spark", "Codex Spark (Legacy)"),
     )
@@ -484,7 +478,7 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
     # ── 订阅档案钩子（连接建档 / 状态展示） ────────────────────
 
     # 连接成功后的默认模型档案；兼容去重覆盖历史自动创建的名称/模型。
-    _DEFAULT_PROFILE_NAME = "openai-codex/gpt-6-astra"
+    _DEFAULT_PROFILE_NAME = "openai-codex/gpt-5.2-codex"
     _LEGACY_PROFILE_NAMES = {
         "Codex 5.3", "codex-5.3", "codex-oauth",
         "Codex Spark", "codex-spark", "Codex 5.2", "codex-5.2",
@@ -510,7 +504,7 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
             "model": self._DEFAULT_PROFILE_NAME,
             "api_key": "",
             "base_url": "https://api.openai.com/v1",
-            "description": "GPT-6 Astra - OAuth 登录（无需 API Key）",
+            "description": "Codex 5.2 - OAuth 登录（无需 API Key）",
             "protocol": self.PROTOCOL,
             "thinking_mode": "openai_reasoning",
             "model_family": "gpt",

@@ -40,10 +40,26 @@ def offloaded_image_prefix_count(
 
 
 def required_image_indices(messages: Sequence[dict[str, Any]]) -> set[int]:
-    """最新用户消息及其后工具注入的图片 occurrence。"""
+    """最新真实用户消息及其后的图片 occurrence。
+
+    Tool-produced image observations are stored with a user wire role for
+    provider compatibility, but they are not new user intent.  They must not
+    move the user-turn boundary used by request offloading.
+    """
+
+    def is_internal_observation(message: Any) -> bool:
+        return (
+            isinstance(message, dict)
+            and message.get("_prompt_kind") == "image_observation"
+        )
+
     last_user = -1
     for index, message in enumerate(messages):
-        if isinstance(message, dict) and message.get("role") == "user":
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and not is_internal_observation(message)
+        ):
             last_user = index
     if last_user < 0:
         return set()

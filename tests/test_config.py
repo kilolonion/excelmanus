@@ -252,7 +252,7 @@ class TestDefaultValues:
         """配置对象不可变。"""
         cfg = _load()
         with pytest.raises(AttributeError):
-            cfg.api_key = 'new-key'
+            setattr(cfg, 'api_key', 'new-key')
 
 class TestDotEnvIgnored:
     """磁盘上的 dotenv 文件不是设置源。"""
@@ -510,7 +510,7 @@ class TestContextWindowInference:
             cfg = _load(EXCELMANUS_MODEL=model)
             assert cfg.max_context_tokens == 256000
 
-    @pytest.mark.parametrize(('model', 'expected'), [('gemini-2.0-flash', ('gemini-2.0-flash', 'gemini-3.8-flash')), ('claude-3-5-sonnet', ('claude-3-5-sonnet', 'claude-sonnet-5')), ('openai-codex/codex-mini-latest', ('codex-mini-latest', 'gpt-5.6-luna')), ('gpt-5', None)])
+    @pytest.mark.parametrize(('model', 'expected'), [('gemini-2.0-flash', ('gemini-2.0-flash', 'gemini-3.8-flash')), ('claude-3-5-sonnet', ('claude-3-5-sonnet', 'claude-sonnet-5')), ('openai-codex/codex-mini-latest', ('codex-mini-latest', 'gpt-6-luna')), ('mimo-v2-flash', ('mimo-v2-flash', 'mimo-v2.6-flash')), ('gpt-5', None)])
     def test_deprecated_model_replacement_lookup(self, model: str, expected) -> None:
         assert get_deprecated_model_replacement(model) == expected
 

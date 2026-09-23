@@ -209,6 +209,58 @@ class FileRegistryStore:
         self._conn.commit()
         return cur.rowcount > 0
 
+    def normalize_path(self, workspace: str, old_path: str, new_path: str) -> None:
+        """Repair legacy slash aliases, preserving provenance and group links.
+
+        Colliding rows describe the same disk path. Keep the canonical row and
+        transfer its aliases/events/references; retain the old row's metadata
+        as an audit event and its id as a lookup alias.
+        """
+        import secrets
+
+        if old_path == new_path:
+            return
+        with self._conn._lock:
+            self._conn.execute("SAVEPOINT registry_path_normalize")
+            try:
+                old = self.get_by_path(workspace, old_path)
+                target = self.get_by_path(workspace, new_path)
+                if old is not None:
+                    target_id = target["id"] if target else old["id"]
+                    if target and target_id != old["id"]:
+                        for alias in self.get_aliases(old["id"]):
+                            self._conn.execute(
+                                "INSERT OR IGNORE INTO file_registry_aliases (id, file_id, alias_type, alias_value) VALUES (?, ?, ?, ?)",
+                                (secrets.token_hex(8), target_id, alias["alias_type"], alias["alias_value"]),
+                            )
+                        self._conn.execute("UPDATE file_registry_events SET file_id = ? WHERE file_id = ?", (target_id, old["id"]))
+                        self._conn.execute("UPDATE file_registry SET parent_file_id = ? WHERE parent_file_id = ?", (target_id, old["id"]))
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO file_group_members (group_id, file_id, role, added_at) "
+                            "SELECT group_id, ?, role, added_at FROM file_group_members WHERE file_id = ?",
+                            (target_id, old["id"]),
+                        )
+                        self._conn.execute("DELETE FROM file_registry WHERE id = ?", (old["id"],))
+                        self._conn.execute(
+                            "INSERT OR IGNORE INTO file_registry_aliases (id, file_id, alias_type, alias_value) VALUES (?, ?, 'registry_id', ?)",
+                            (secrets.token_hex(8), target_id, old["id"]),
+                        )
+                    else:
+                        self._conn.execute("UPDATE file_registry SET canonical_path = ? WHERE id = ?", (new_path, old["id"]))
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO file_registry_aliases (id, file_id, alias_type, alias_value) VALUES (?, ?, 'previous_path', ?)",
+                        (secrets.token_hex(8), target_id, old_path),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO file_registry_events (id, file_id, event_type, details_json, created_at) VALUES (?, ?, 'path_normalized', ?, ?)",
+                        (secrets.token_hex(8), target_id, json.dumps({"previous": old, "path": new_path}, ensure_ascii=False), _now_iso()),
+                    )
+                self._conn.execute("RELEASE SAVEPOINT registry_path_normalize")
+            except BaseException:
+                self._conn.execute("ROLLBACK TO SAVEPOINT registry_path_normalize")
+                self._conn.execute("RELEASE SAVEPOINT registry_path_normalize")
+                raise
+
     # ── file_registry_aliases CRUD ───────────────────────────
 
     def add_alias(
@@ -260,16 +312,19 @@ class FileRegistryStore:
                 })
         return result
 
-    def find_by_alias(self, alias_value: str) -> dict[str, Any] | None:
+    def find_by_alias(self, alias_value: str, workspace: str | None = None) -> dict[str, Any] | None:
         """通过别名值查找文件记录。"""
-        row = self._conn.execute(
-            "SELECT fr.* FROM file_registry fr"
+        rows = self._conn.execute(
+            "SELECT DISTINCT fr.* FROM file_registry fr"
             " JOIN file_registry_aliases fra ON fr.id = fra.file_id"
             " WHERE fra.alias_value = ? AND fr.deleted_at IS NULL"
-            " LIMIT 1",
-            (alias_value,),
-        ).fetchone()
-        return self._row_to_dict(row) if row else None
+            + (" AND fr.workspace = ?" if workspace is not None else "")
+            + " LIMIT 2",
+            (alias_value, workspace) if workspace is not None else (alias_value,),
+        ).fetchall()
+        # A display name is not an identity. Ambiguous names must be supplied
+        # as full paths, never resolved by row order or the last cache write.
+        return self._row_to_dict(rows[0]) if len(rows) == 1 else None
 
     def remove_aliases_for_file(self, file_id: str) -> int:
         """删除文件的所有别名。"""

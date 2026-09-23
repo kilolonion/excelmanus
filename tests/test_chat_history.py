@@ -21,6 +21,18 @@ def test_create_and_list_session(store):
     assert sessions[0]["title"] == "测试会话"
 
 
+def test_excel_event_pages_bound_history_without_truncating_exports(store):
+    store.create_session("events")
+    for i in range(8):
+        store.save_excel_preview("events", f"call-{i}", "book.xlsx", "Sheet1", ["A"], [[i]], 1, False)
+    assert len(store.load_excel_previews("events")) == 8
+    assert [row["tool_call_id"] for row in store.load_excel_previews("events", limit=2)] == ["call-6", "call-7"]
+    assert [row["tool_call_id"] for row in store.load_excel_previews(
+        "events", tool_call_ids=["call-1", "call-3"], limit=2,
+    )] == ["call-1", "call-3"]
+    assert store.load_excel_previews("other", tool_call_ids=["call-1"]) == []
+
+
 def test_save_and_load_messages(store):
     store.create_session("s1", "测试")
     messages = [

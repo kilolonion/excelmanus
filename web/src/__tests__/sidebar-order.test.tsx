@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { SessionList } from "@/components/sidebar/SessionList";
 import { useSessionStore } from "@/stores/session-store";
 import { fetchWorkspaces, reorderWorkspaces } from "@/lib/api";
+import { createOrReuseSession } from "@/lib/session-actions";
 import { applySidebarOrder, moveSidebarItem } from "@/lib/sidebar-order";
 
 vi.mock("@/lib/api", () => ({ fetchWorkspaces: vi.fn(), reorderWorkspaces: vi.fn() }));
@@ -146,5 +147,25 @@ describe("sidebar ordering", () => {
     fireEvent.dragStart(card("__ungrouped__:a1"), { dataTransfer });
     fireEvent.drop(row("__ungrouped__:a3"), { dataTransfer, clientY: 40 });
     expect(useSessionStore.getState().sidebarSessionOrder.__ungrouped__).toEqual(["a2", "a3", "a1", "b1"]);
+  });
+
+  it("shows the loading icon only on the workspace that starts a new conversation", async () => {
+    let finishCreation: (() => void) | undefined;
+    const pending = new Promise<never>((resolve) => {
+      finishCreation = () => resolve(undefined as never);
+    });
+    vi.mocked(createOrReuseSession).mockReturnValueOnce(pending);
+    await mount();
+
+    const workspaceButtons = ["a", "b", "c"].map((id) =>
+      screen.getByRole("button", { name: `在「Workspace ${id}」新建对话` }),
+    );
+    fireEvent.click(workspaceButtons[0]);
+    await waitFor(() => expect(workspaceButtons[0].querySelector("svg")?.getAttribute("class")).toContain("animate-spin"));
+    expect(workspaceButtons[1].querySelector("svg")?.getAttribute("class")).not.toContain("animate-spin");
+    expect(workspaceButtons[2].querySelector("svg")?.getAttribute("class")).not.toContain("animate-spin");
+
+    finishCreation?.();
+    await waitFor(() => expect(workspaceButtons[0].querySelector("svg")?.getAttribute("class")).not.toContain("animate-spin"));
   });
 });

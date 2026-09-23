@@ -40,6 +40,7 @@ export async function createOrReuseSession(opts?: {
   /** Set false for an explicit user-triggered new conversation. */
   reuseBlank?: boolean;
 }): Promise<Session> {
+  const activeAtStart = useSessionStore.getState().activeSessionId;
   const created = mapCreatedSession(await createSession({
     workspaceId: opts?.workspaceId,
     workspacePath: opts?.workspacePath,
@@ -51,7 +52,7 @@ export async function createOrReuseSession(opts?: {
   } else {
     store.patchSession(created.id, created);
   }
-  if (opts?.activate !== false) {
+  if (opts?.activate !== false && useSessionStore.getState().activeSessionId === activeAtStart) {
     store.setActiveSession(created.id);
     useChatStore.getState().switchSession(created.id);
   }
@@ -109,6 +110,10 @@ async function ensureLandingSessionOnce(opts?: {
   const store = useSessionStore.getState();
   const currentActive = store.activeSessionId;
   if (currentActive?.startsWith(DEMO_SESSION_PREFIX)) return null;
+  const active = store.sessions.find((session) => session.id === currentActive);
+  // Landing only needs a conversation when there is no current one. Opening
+  // history must not create an unrelated blank session in the background.
+  if (active) return active;
 
   let workspaces = opts?.workspaces;
   if (!workspaces) {
@@ -126,11 +131,15 @@ async function ensureLandingSessionOnce(opts?: {
     lastWorkspacePath: store.lastWorkspacePath,
     lastOpenedSessionId: currentActive,
   });
-  const keepActive = Boolean(
-    currentActive && store.sessions.some((session) => session.id === currentActive),
-  );
-  return createOrReuseSession({
+  const created = await createOrReuseSession({
     ...preferred,
-    activate: !keepActive,
+    activate: false,
   });
+  // The user may have navigated or explicitly created a chat while the
+  // workspace/session requests were in flight. Never steal that selection.
+  if (useSessionStore.getState().activeSessionId === currentActive) {
+    useSessionStore.getState().setActiveSession(created.id);
+    useChatStore.getState().switchSession(created.id);
+  }
+  return created;
 }

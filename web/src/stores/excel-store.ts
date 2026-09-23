@@ -333,8 +333,8 @@ interface ExcelState {
   addRecentFile: (file: { path: string; filename: string }, workspaceKey?: string) => void;
   /** System-initiated add that respects dismissedPaths. */
   addRecentFileIfNotDismissed: (file: { path: string; filename: string }, workspaceKey?: string) => void;
-  removeRecentFile: (path: string) => void;
-  removeRecentFiles: (paths: string[]) => void;
+  removeRecentFile: (path: string, workspaceKey?: string | null) => void;
+  removeRecentFiles: (paths: string[], workspaceKey?: string | null) => void;
   clearAllRecentFiles: () => void;
   mergeRecentFiles: (
     files: { path: string; filename: string; modifiedAt?: number }[],
@@ -534,11 +534,16 @@ export const useExcelStore = create<ExcelState>()(
       for (const [key, value] of Object.entries(state.contentVersions)) {
         if (key.startsWith(`${nextKey}|`)) contentVersions[key] = value;
       }
+      const recentWorkspaceFiles = sanitizeRecentFiles(state.recentFiles)
+        .filter((file) => file.workspaceKey === nextKey)
+        .map((file) => ({ path: file.path, filename: file.filename }));
       return {
         activeWorkspaceKey: nextKey,
         viewGeneration: state.viewGeneration + 1,
-        workspaceFiles: [],
-        wsFilesLoaded: false,
+        // Seed the new scope from its persisted recent bucket. The backend
+        // scan will replace this projection with the complete tree.
+        workspaceFiles: recentWorkspaceFiles,
+        wsFilesLoaded: recentWorkspaceFiles.length > 0,
         workspaceFilesLoading: false,
         workspaceFilesSessionId: undefined,
         workspaceFilesWorkspaceId: null,
@@ -658,13 +663,17 @@ export const useExcelStore = create<ExcelState>()(
       const newDismissed = new Set(state.dismissedPaths);
       newDismissed.delete(file.path);
       newDismissed.delete(normPath);
+      newDismissed.delete(`${workspaceKey}|${file.path}`);
+      newDismissed.delete(`${workspaceKey}|${normPath}`);
       return { recentFiles: updated, dismissedPaths: newDismissed };
     }),
 
   addRecentFileIfNotDismissed: (file, explicitWorkspaceKey) =>
     set((state) => {
-      if (state.dismissedPaths.has(file.path)) return {};
       const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
+      if (state.dismissedPaths.has(file.path)
+        || state.dismissedPaths.has(`${workspaceKey}|${file.path}`)
+        || state.dismissedPaths.has(`${workspaceKey}|${normalizeExcelPath(file.path)}`)) return {};
       if (
         !isScopedWorkspaceKey(workspaceKey)
         || !toPublicFileIdentity(file.path)
@@ -686,23 +695,35 @@ export const useExcelStore = create<ExcelState>()(
       return { recentFiles: updated, workspaceFilesVersion: state.workspaceFilesVersion + 1 };
     }),
 
-  removeRecentFile: (path) =>
+  removeRecentFile: (path, workspaceKey) =>
     set((state) => {
+      const normalized = normalizeExcelPath(path);
       const newDismissed = new Set(state.dismissedPaths);
-      newDismissed.add(path);
+      // A relative path can legitimately exist in multiple workspaces. Keep
+      // deletion scoped to the workspace that issued it.
+      newDismissed.add(workspaceKey == null ? path : `${workspaceKey}|${normalized}`);
       return {
-        recentFiles: state.recentFiles.filter((f) => f.path !== path),
+        recentFiles: state.recentFiles.filter((f) =>
+          !(normalizeExcelPath(f.path) === normalized
+            && (workspaceKey == null || f.workspaceKey === workspaceKey))),
         dismissedPaths: newDismissed,
       };
     }),
 
-  removeRecentFiles: (paths) =>
+  removeRecentFiles: (paths, workspaceKey) =>
     set((state) => {
-      const pathSet = new Set(paths);
+      const pathSet = new Set(paths.map((path) => normalizeExcelPath(path)));
       const newDismissed = new Set(state.dismissedPaths);
-      for (const p of paths) newDismissed.add(p);
+      for (const p of paths) {
+        const normalized = normalizeExcelPath(p);
+        newDismissed.add(workspaceKey == null ? p : `${workspaceKey}|${normalized}`);
+      }
       return {
-        recentFiles: state.recentFiles.filter((f) => !pathSet.has(f.path)),
+        recentFiles: state.recentFiles.filter((f) => {
+          const matchesPath = pathSet.has(normalizeExcelPath(f.path));
+          const matchesScope = workspaceKey == null || f.workspaceKey === workspaceKey;
+          return !(matchesPath && matchesScope);
+        }),
         dismissedPaths: newDismissed,
       };
     }),
@@ -744,7 +765,10 @@ export const useExcelStore = create<ExcelState>()(
           ) continue;
           const key = `${workspaceKey}|${normalizeExcelPath(f.path)}`;
           present.add(normalizeExcelPath(f.path));
-          if (!map.has(key) && !state.dismissedPaths.has(f.path)) {
+          if (!map.has(key)
+            && !state.dismissedPaths.has(f.path)
+            && !state.dismissedPaths.has(`${workspaceKey}|${f.path}`)
+            && !state.dismissedPaths.has(`${workspaceKey}|${normalizeExcelPath(f.path)}`)) {
             map.set(key, {
               path: f.path,
               filename: displayFileName(f.path) || f.filename,
@@ -929,13 +953,18 @@ export const useExcelStore = create<ExcelState>()(
       : options.workspaceId ?? null;
     const state = get();
     const version = state.workspaceFilesVersion;
-    if (options?.cached && state.wsFilesLoaded && !state.workspaceFilesError && state.workspaceFilesSessionId === sid
+    const sameWorkspace = wid ? state.workspaceFilesWorkspaceId === wid : state.workspaceFilesSessionId === sid;
+    if (options?.cached && state.wsFilesLoaded && !state.workspaceFilesError && sameWorkspace
       && state.workspaceFilesWorkspaceId === wid
       && state.workspaceFilesLoadedVersion === version && Date.now() - state.workspaceFilesLoadedAt < 30_000) {
+      if (state.workspaceFilesSessionId !== sid) set({ workspaceFilesSessionId: sid });
       return Promise.resolve();
     }
     if (state.workspaceFilesSessionId !== sid || state.workspaceFilesWorkspaceId !== wid) {
-      set({ workspaceFiles: [], wsFilesLoaded: false, workspaceFilesSessionId: sid, workspaceFilesWorkspaceId: wid,
+      // A session rebind may have seeded the list from the scoped recent
+      // bucket. Keep those rows visible while the authoritative scan runs.
+      const seeded = state.workspaceFiles.length > 0;
+      set({ workspaceFiles: seeded ? state.workspaceFiles : [], wsFilesLoaded: seeded, workspaceFilesSessionId: sid, workspaceFilesWorkspaceId: wid,
         workspaceFilesLoadedVersion: -1, workspaceFilesLoadedAt: 0, workspaceFilesLoading: false,
         fileGroups: [], fileGroupsLoaded: false, fileGroupsScope: null, workspaceFilesTruncated: false });
     }
@@ -963,6 +992,19 @@ export const useExcelStore = create<ExcelState>()(
           return;
         }
         const next = files.map((f) => ({ path: f.path, filename: f.filename, is_dir: f.is_dir }));
+        // A capped or partially unreadable scan is not authoritative. Keep
+        // scoped historical entries visible even when they fall outside the
+        // returned page; opening a deleted one will evict it safely.
+        if (truncated) {
+          const present = new Set(next.map((file) => normalizeExcelPath(file.path)));
+          for (const recent of sanitizeRecentFiles(current.recentFiles)) {
+            if (recent.workspaceKey !== workspaceKeyForSessionId(sid)) continue;
+            const normalized = normalizeExcelPath(recent.path);
+            if (present.has(normalized)) continue;
+            present.add(normalized);
+            next.push({ path: recent.path, filename: recent.filename, is_dir: false });
+          }
+        }
         const previous = current.workspaceFiles;
         const unchanged = previous.length === next.length && previous.every((file, index) =>
           file.path === next[index].path && file.filename === next[index].filename && file.is_dir === next[index].is_dir);

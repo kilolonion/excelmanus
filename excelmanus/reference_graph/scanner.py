@@ -29,7 +29,7 @@ class Tier1Scanner:
     def scan(self, file_path: str) -> WorkbookRefIndex:
         from openpyxl import load_workbook
 
-        wb = load_workbook(file_path, data_only=False, read_only=True)
+        wb = load_workbook(file_path, data_only=False, read_only=False)
         try:
             return self._scan_workbook(file_path, wb)
         finally:
@@ -63,7 +63,7 @@ class Tier1Scanner:
                     upper = val.upper()
                     if any(token in upper for token in ("INDIRECT(", "OFFSET(", "[", "#SPILL!")):
                         dynamic_refs.append({"sheet": ws_name, "cell": str(cell.coordinate), "formula": val[:500]})
-                    refs = self._extractor.extract(val)
+                    refs = self._extractor.extract(val, wb, ws_name)
                     funcs = self._extractor.extract_functions(val)
                     for f in funcs:
                         func_counter[f] += 1
@@ -155,7 +155,7 @@ class Tier2Resolver:
     ) -> CellNode:
         from openpyxl import load_workbook
 
-        wb = load_workbook(file_path, data_only=False, read_only=True)
+        wb = load_workbook(file_path, data_only=False, read_only=False)
         try:
             self._formula_index = self._index_formulas(wb)
             return self._resolve(wb, sheet_name, address, direction,
@@ -193,7 +193,7 @@ class Tier2Resolver:
 
         direct_prec: list[CellRef] = []
         if formula and direction in ("both", "precedents"):
-            direct_prec = self._extractor.extract(formula)
+            direct_prec = self._extractor.extract(formula, wb, sheet_name)
 
         direct_deps: list[CellRef] = []
         if direction in ("both", "dependents"):
@@ -245,7 +245,7 @@ class Tier2Resolver:
                 sub_formula = self._find_formula(wb, ref_sheet, ref.cell_or_range)
                 if not sub_formula:
                     continue
-                sub_refs = self._extractor.extract(sub_formula)
+                sub_refs = self._extractor.extract(sub_formula, wb, ref_sheet)
                 for sr in sub_refs:
                     key = sr.display()
                     if key not in seen:
@@ -298,7 +298,7 @@ class Tier2Resolver:
         seen: set[str] = set()
 
         for (ws_name, coord), val in self._formula_index.items():
-            refs = self._extractor.extract(val)
+            refs = self._extractor.extract(val, wb, ws_name)
             for ref in refs:
                 ref_sheet = ref.sheet_name or ws_name
                 if ref_sheet == sheet_name and address_in_ref(address, ref.cell_or_range):

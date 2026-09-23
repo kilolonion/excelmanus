@@ -942,7 +942,11 @@ def delete_file(
     )
 
 
-def offer_download(file_path: str, description: str = "") -> ToolResult:
+def offer_download(
+    file_path: str,
+    description: str = "",
+    expected_version: str | None = None,
+) -> ToolResult:
     """向用户提供工作区内文件的可下载链接。
 
     下载事实放在 ui_meta.download，由分派器投影为 FILE_DOWNLOAD 事件。
@@ -951,6 +955,21 @@ def offer_download(file_path: str, description: str = "") -> ToolResult:
     safe_path = guard.resolve_and_validate(file_path)
     if not safe_path.is_file():
         raise FileNotFoundError(f"文件不存在: {file_path}")
+
+    from excelmanus.workbook_commit import content_version_of
+
+    content_version = content_version_of(safe_path.read_bytes())
+    if expected_version and expected_version != content_version:
+        return error_result(
+            "下载目标版本已改变，请先重新读取文件并确认最终版本。",
+            code="VERSION_CONFLICT",
+            fields={
+                "file_path": file_path,
+                "expected_version": expected_version,
+                "content_version": content_version,
+                "committed": False,
+            },
+        )
 
     filename = safe_path.name
     size = _format_size(safe_path.stat().st_size)
@@ -961,6 +980,7 @@ def offer_download(file_path: str, description: str = "") -> ToolResult:
         "filename": filename,
         "size": size,
         "description": description_text,
+        "content_version": content_version,
     }
     return ok_result(
         payload,
@@ -970,6 +990,7 @@ def offer_download(file_path: str, description: str = "") -> ToolResult:
                 "file_path": file_path,
                 "filename": filename,
                 "description": description_text,
+                "content_version": content_version,
             },
         ),
     )
@@ -1202,6 +1223,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "对文件的简短描述（显示在下载卡片上）",
                         "default": "",
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "可选；仅当文件当前 content_version 与此值一致时才生成下载事实。",
                     },
                 },
                 "required": ["file_path"],

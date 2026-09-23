@@ -60,6 +60,7 @@ export function inferProfileProvider(profile: Pick<ProfileEntry, "model" | "base
   if (model.startsWith("hf/") || model.includes("huggingface") || baseUrl.includes("huggingface") || family === "huggingface") return "huggingface";
   if (baseUrl.includes("siliconflow") || baseUrl.includes("siliconcloud") || family === "siliconflow" || family === "siliconcloud") return "siliconflow";
   if (model.includes("minimax") || baseUrl.includes("minimax") || family === "minimax") return "minimax";
+  if (model.includes("mimo") || baseUrl.includes("xiaomimimo") || family === "mimo") return "mimo";
   if (baseUrl.includes("openai") || family === "gpt" || model.startsWith("gpt-") || model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") || model.includes("chatgpt")) return "openai";
 
   const prefixMap: Record<string, string> = {
@@ -99,6 +100,9 @@ export function inferProfileProvider(profile: Pick<ProfileEntry, "model" | "base
     aliyun: "alibabacloud",
     alibabacloud: "alibabacloud",
     minimax: "minimax",
+    mimo: "mimo",
+    xiaomi: "mimo",
+    xiaomimimo: "mimo",
   };
   return prefixMap[modelPrefix] || null;
 }

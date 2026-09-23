@@ -32,7 +32,7 @@ def engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     names = DEFAULT_DISCLOSURE_CORE_TOOLS - {"introspect_capability"} | {
         "compare_spreadsheets", "trace_spreadsheet_formulas", "split_spreadsheet",
         "manage_spreadsheet_objects", "manage_spreadsheet_versions",
-        "read_text_file", "copy_file", "run_shell", "read_word", "write_word",
+        "copy_file", "run_shell", "read_word", "write_word",
         "delegate", "list_subagents", "manage_skills", "memory_read_topic",
         "mcp_docs_search", "mcp_private_search",
     }
@@ -119,7 +119,7 @@ def test_default_core_is_explicit_and_every_deferred_tool_is_discoverable(engine
     assert {
         "compare_spreadsheets", "trace_spreadsheet_formulas", "split_spreadsheet",
         "manage_spreadsheet_objects", "manage_spreadsheet_versions",
-        "read_text_file", "copy_file", "run_shell", "read_word", "write_word",
+        "copy_file", "run_shell", "read_word", "write_word",
         "delegate", "list_subagents", "manage_skills", "memory_read_topic",
         "mcp_docs_search", "mcp_private_search",
     } <= deferred

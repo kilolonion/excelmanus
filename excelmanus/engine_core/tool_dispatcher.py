@@ -376,6 +376,7 @@ class ToolDispatcher:
             return 0
         e = self._engine
         count = 0
+        parts: list[dict[str, Any]] = []
         for inj in self._deferred_image_injections:
             attachment = inj.get("attachment")
             if not attachment and inj.get("base64"):
@@ -387,11 +388,22 @@ class ToolDispatcher:
                 except Exception:
                     logger.warning("延迟图片准入失败，写入占位文本", exc_info=True)
             if attachment:
-                e.memory.add_user_message([{"type": "image", "attachment": attachment}])
+                parts.append({"type": "image", "attachment": attachment})
             else:
-                e.memory.add_user_message([{"type": "text", "text": "[image omitted: unreadable attachment]"}])
+                parts.append({"type": "text", "text": "[image omitted: unreadable attachment]"})
             count += 1
             logger.info("已注入 %d 张延迟图片到 memory", count)
+        if parts:
+            # These are observations produced by a tool, not fresh user intent.
+            # Keep one multimodal message per tool batch so a crop burst does not
+            # create one durable user turn per image.  The hidden/prompt_kind
+            # markers also let request projection distinguish them from the
+            # user's next real turn without changing provider wire roles.
+            e.memory.add_user_message(
+                parts,
+                hidden=True,
+                prompt_kind="image_observation",
+            )
         self._deferred_image_injections.clear()
         return count
 
@@ -1336,6 +1348,15 @@ class ToolDispatcher:
             structured = error_result(
                 f"工具参数解析错误: {parse_error}",
                 code=INVALID_ARGS,
+                fields={
+                    "executed": False,
+                    "committed": False,
+                    "parse_error": True,
+                },
+                remediation=(
+                    "JSON 参数无法解析；本次调用未执行且未提交。"
+                    "修正参数 JSON 后再调用，不要把这次失败当作已写入。"
+                ),
             )
             result_str = structured.model_text
             success = False

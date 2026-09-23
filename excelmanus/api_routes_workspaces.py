@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from excelmanus.api_app_state import (
     error_json_response as _error_json_response,
@@ -22,7 +23,8 @@ async def list_workspaces() -> JSONResponse:
     session_manager = get_session_manager()
     if session_manager is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
-    return JSONResponse(content={"workspaces": session_manager.list_workspaces()})
+    workspaces = await run_in_threadpool(session_manager.list_workspaces)
+    return JSONResponse(content={"workspaces": workspaces})
 
 
 @router.post("/api/v1/workspaces")

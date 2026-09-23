@@ -49,6 +49,9 @@ export const PROVIDER_COLORS: Record<string, string> = {
   siliconflow: "#06b6d4",
   siliconcloud: "#06b6d4",
   minimax: "#ec5f27",
+  mimo: "#ff6900",
+  xiaomi: "#ff6900",
+  xiaomimimo: "#ff6900",
 };
 
 /** Friendly display names for known providers */
@@ -102,6 +105,9 @@ export const PROVIDER_DISPLAY: Record<string, string> = {
   siliconflow: "SiliconFlow",
   siliconcloud: "SiliconCloud",
   minimax: "MiniMax",
+  mimo: "小米 MiMo",
+  xiaomi: "小米",
+  xiaomimimo: "小米 MiMo",
 };
 
 /**
@@ -179,6 +185,9 @@ const PROVIDER_ALIASES: Record<string, string> = {
   aliyun: "alibabacloud",
   alibabacloud: "alibabacloud",
   huawei: "huawei",
+  mimo: "mimo",
+  xiaomi: "mimo",
+  xiaomimimo: "mimo",
 };
 
 const MODEL_BRAND_PATTERNS: Array<[string, RegExp]> = [
@@ -206,6 +215,7 @@ const MODEL_BRAND_PATTERNS: Array<[string, RegExp]> = [
   ["minimax", /minimax/],
   ["alibabacloud", /alibabacloud|aliyun|阿里云/],
   ["huawei", /huawei|pangu|华为|盘古/],
+  ["mimo", /\bmimo|xiaomimimo|小米/],
   ["openai", /openai|chatgpt|\bgpt(?:[-_\s/]|\d)|\bo[134](?:[-_\s/]|$)/],
 ];
 

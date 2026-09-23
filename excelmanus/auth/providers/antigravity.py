@@ -165,11 +165,7 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
         ("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
         ("gemini-pro-agent", "Gemini 3.1 Pro (High)"),
         ("gemini-3-flash", "Gemini 3 Flash"),
-        ("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)"),
-        ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
-        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
         ("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"),
-        ("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite"),
         ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
         ("gemini-3.1-flash-image", "Gemini 3.1 Flash Image"),
     )

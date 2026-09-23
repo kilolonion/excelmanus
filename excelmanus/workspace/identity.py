@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Literal
 
 # 保留第一段 / 前缀：resolve + catalog 均拒绝（方案 §8 / P1）
@@ -125,12 +125,9 @@ def is_reserved_relative(rel: str) -> bool:
 def is_overlay_leftover(rel: str) -> bool:
     """True if the path is (or sits under) an overlay/backup leftover."""
     rel = _normalize_slashes(rel).removeprefix("./").strip("/")
-    lowered = rel.lower()
-    # Strip a drive / abs prefix down to the reserved suffix when present.
-    for marker in ("outputs/backups/", "outputs/backups"):
-        idx = lowered.find(marker)
-        if idx >= 0:
-            return True
+    parts = rel.lower().split("/")
+    if any(a == "outputs" and b == "backups" for a, b in zip(parts, parts[1:])):
+        return True
     return is_reserved_relative(rel)
 
 
@@ -194,17 +191,7 @@ def public_identity(path: str, workspace_root: str | Path | None) -> str:
 
     try:
         return resolve_canonical(root, raw).public
-    except IdentityError:
-        if root is None and not _looks_absolute(raw):
-            rel = _normalize_slashes(raw).removeprefix("./").strip("/")
-            if (
-                rel
-                and not is_reserved_relative(rel)
-                and not is_overlay_leftover(rel)
-                and ".." not in Path(rel).parts
-                and not _has_hidden_component(rel)
-            ):
-                return f"./{rel}"
+    except (IdentityError, OSError, ValueError):
         return ""
 
 
@@ -245,6 +232,14 @@ def catalog(workspace_root: str | Path) -> list[CanonicalPath]:
         ]
         for name in filenames:
             if is_product_source_path(Path(dirpath) / name, root):
+                continue
+            # A symlink is an alias to another path.  Publishing it as a
+            # catalog identity would either duplicate the target or make the
+            # identity change when the link target changes.
+            try:
+                if (Path(dirpath) / name).is_symlink():
+                    continue
+            except OSError:
                 continue
             rel = f"{rel_dir}/{name}".lstrip("/") if rel_dir else name
             try:
@@ -334,15 +329,23 @@ def _resolve_relative(workspace_root: str | Path | None, raw: str) -> str:
         if not text:
             raise IdentityError("empty path")
 
+    if ".." in PurePosixPath(text).parts:
+        raise IdentityError(f"path escape: {text}")
+    windows = PureWindowsPath(text)
+    if windows.drive and not windows.is_absolute():
+        raise IdentityError(f"drive-relative path: {text}")
+
     if workspace_root is None:
         if _looks_absolute(text):
             raise IdentityError("absolute path without workspace")
-        rel = text.removeprefix("./").strip("/")
+        rel = PurePosixPath(text).as_posix()
         _assert_allowed_relative(rel)
         return rel
 
     root = Path(workspace_root).expanduser().resolve()
     candidate = Path(text)
+    if windows.drive and not candidate.is_absolute():
+        raise IdentityError(f"foreign absolute path: {text}")
     if candidate.is_absolute() or _looks_absolute(text):
         resolved = Path(text).expanduser().resolve()
     else:

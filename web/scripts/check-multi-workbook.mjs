@@ -93,8 +93,9 @@ try {
   await page.keyboard.press("Control+y");
   await page.waitForFunction(() => window.excelStore.getState().getContentVersion("库存.xlsx", "id:multi-ws") === "v4");
   assert.equal(writes.length, 5);
-  await page.locator('[data-workbook-workspace] button[title="更多"]').click();
+  await page.getByRole("button", { name: "视图", exact: true }).click();
   await page.getByRole("menuitemcheckbox", { name: /同步定位/ }).click();
+  await page.keyboard.press("Escape");
   await page.evaluate(() => {
     const api = window.multiWorkbookAPIs.find((api) => api.getActiveWorkbook()?.getActiveSheet()?.getRange("A1").getValue() === "库存.xlsx");
     const sheet = api.getActiveWorkbook().getActiveSheet(); sheet.setActiveRange(sheet.getRange("C4:D6"));
@@ -108,13 +109,15 @@ try {
   await page.getByRole("button", { name: "返回表格", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-workspace-surface="excel"]'));
   assert.equal(await page.evaluate(() => window.excelStore.getState().fullViewPath), "销售.xlsx");
-  await page.locator('[data-workbook-workspace] button[title="更多"]').click();
+  await page.getByRole("button", { name: "视图", exact: true }).click();
   await page.getByRole("menuitem", { name: "并排对话", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-workbook-layout="split"]'));
-  await page.locator('[data-workbook-workspace] button[title="更多"]').click();
+  await page.getByRole("button", { name: "视图", exact: true }).click();
   await page.getByRole("menuitem", { name: "展开表格", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[data-workbook-layout="embedded"]'));
-  await page.getByRole("button", { name: "将 库存.xlsx 设为主表" }).click();
+  await page.locator('[role="tab"]').filter({ hasText: "库存.xlsx" }).click();
+  await page.locator('[data-workbook-workspace] button[title="更多"]').click();
+  await page.getByRole("menuitem", { name: "设为主表", exact: true }).click();
   assert.equal(await page.evaluate(() => window.excelStore.getState().fullViewPath), "库存.xlsx");
   await page.evaluate(() => window.excelStore.getState().openFullView("第四表.xlsx", "明细"));
   await ready(4);

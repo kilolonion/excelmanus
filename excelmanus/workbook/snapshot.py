@@ -487,14 +487,15 @@ def prune_snapshot_cache(workspace_root: str | Path, *, keep: int = 40, max_age_
     return removed
 
 
-def _read_and_convert(abs_path: Path, workspace: WorkspaceRef) -> tuple[bytes, str]:
-    from excelmanus.xls_converter import ensure_xlsx, needs_conversion
+def _read_and_convert(abs_path: Path, workspace: WorkspaceRef) -> tuple[bytes, str, str]:
+    from excelmanus.xls_converter import convert_preview_bytes, needs_conversion
 
+    source = abs_path.read_bytes()
+    version = content_version_of(source)
     if needs_conversion(abs_path):
-        converted, _ = ensure_xlsx(abs_path, workspace_root=workspace.root)
-        return Path(converted).read_bytes(), ".xlsx"
+        return convert_preview_bytes(source, abs_path.suffix), ".xlsx", version
     suffix = abs_path.suffix.lower() or ".bin"
-    return abs_path.read_bytes(), suffix
+    return source, suffix, version
 
 
 def open_snapshot_at(
@@ -510,8 +511,7 @@ def open_snapshot_at(
         raise SnapshotError(f"文件不存在: {relative or path}", code="PATH_INVALID")
 
     def build() -> tuple[WorkbookSnapshot, int]:
-        data, suffix = _read_and_convert(path, workspace)
-        version = content_version_of(data)
+        data, suffix, version = _read_and_convert(path, workspace)
         if expected_version and expected_version != version:
             raise SnapshotStale(
                 f"{relative} 版本已变化：期望 {expected_version}，实际 {version}",
@@ -531,7 +531,7 @@ def open_snapshot_at(
             relative=file_ref.relative,
             content_version=version,
         )
-        backing = _materialize_backing(workspace, data, suffix, version)
+        backing = _materialize_backing(workspace, data, suffix, content_version_of(data))
         remember_content_version(file_ref.relative, version)
         snapshot = WorkbookSnapshot(
             id=snap_id,

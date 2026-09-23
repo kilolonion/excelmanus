@@ -9,12 +9,13 @@ import { useChatStore } from "@/stores/chat-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
+import { isBlankSession } from "@/lib/session-loading";
 
 /** 由按 sessionId 挂载的任务面板持有；聊天流结束后继续查询活动任务。 */
 export function useBackgroundTasks(sessionId: string, open: boolean) {
   const [runs, setRuns] = useState<SubagentRun[]>([]);
   const [taskList, setTaskList] = useState<SessionTaskList | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
   const runsRef = useRef<SubagentRun[]>([]);
@@ -22,6 +23,11 @@ export function useBackgroundTasks(sessionId: string, open: boolean) {
   const mounted = useRef(false);
   const streaming = useChatStore((s) => s.loadedSessionId === sessionId && s.isStreaming);
   const messagesReady = useChatStore((s) => s.loadedSessionId === sessionId && !s.isLoadingMessages);
+  const blank = useSessionStore((s) => isBlankSession(s.sessions.find((item) => item.id === sessionId)));
+  const knownActive = useChatStore((s) => s.loadedSessionId === sessionId && s.messages.some((message) =>
+    message.role === "assistant" && message.blocks.some((block) =>
+      block.type === "subagent" && block.background && block.status === "running")));
+  const hasRunningTasks = runs.some((run) => run.background && isSubagentActive(run.status));
 
   const accept = useCallback((rows: SubagentRun[]) => {
     const changedFiles = completedSubagentFiles(runsRef.current, rows);
@@ -46,7 +52,11 @@ export function useBackgroundTasks(sessionId: string, open: boolean) {
   }, []);
 
   useEffect(() => {
+    // Empty chats have neither persisted tasks nor an engine to restore.
+    // Initial history loading owns the connection budget until it can paint.
+    if (!messagesReady || (blank && !streaming) || !(open || knownActive || hasRunningTasks)) return;
     let stopped = false;
+    const controller = new AbortController();
     let polling = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
@@ -55,11 +65,11 @@ export function useBackgroundTasks(sessionId: string, open: boolean) {
       if (document.hidden) return;
       polling = true;
       const version = ++requestVersion.current;
-      setLoading(true);
+      if (open && !runsRef.current.length) setLoading(true);
       try {
         const [rowsResult, taskListResult] = await Promise.allSettled([
-          fetchSubagentRuns(sessionId),
-          fetchSessionTaskList(sessionId),
+          fetchSubagentRuns(sessionId, { signal: controller.signal }),
+          fetchSessionTaskList(sessionId, { signal: controller.signal }),
         ]);
         if (stopped || version !== requestVersion.current) return;
         if (rowsResult.status === "rejected") throw rowsResult.reason;
@@ -87,12 +97,13 @@ export function useBackgroundTasks(sessionId: string, open: boolean) {
     void poll();
     return () => {
       stopped = true;
+      controller.abort();
       requestVersion.current += 1;
       clearTimeout(timer);
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [sessionId, open, streaming, messagesReady, revision, accept]);
+  }, [sessionId, open, streaming, messagesReady, blank, knownActive, hasRunningTasks, revision, accept]);
 
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
   const control = useCallback(async (runId: string, action: SubagentControlAction, message = "") => {

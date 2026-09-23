@@ -1,6 +1,15 @@
 import type { ViewRect, WorkbookViewSnapshot } from "@/lib/workbook-view";
 import { cellRefFromIndex } from "@/lib/excel-cell-edit";
 
+/**
+ * Small, style-free opening window used by every workbook entry point.
+ *
+ * Keeping this value in one module is important: a hover prefetch and the
+ * editor's first request can then share the same in-flight/cache entry instead
+ * of reading two different rectangles before the grid is even visible.
+ */
+export const INITIAL_WORKBOOK_VIEW_RECT = "A1:Z80";
+
 export function rangeIsLoaded(view: WorkbookViewSnapshot, sheet: string, rect: ViewRect): boolean {
   return firstUnloadedCell(view, sheet, rect) === null;
 }

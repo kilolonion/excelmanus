@@ -1,6 +1,6 @@
 import { normalizeExcelPath } from "@/lib/api";
 import { isSpreadsheetFile } from "@/lib/file-kind";
-import { displayFileName } from "@/lib/file-identity";
+import { displayFileName, toPublicFileIdentity } from "@/lib/file-identity";
 import type { Session } from "@/lib/types";
 import { useSessionStore } from "@/stores/session-store";
 
@@ -41,7 +41,7 @@ export function fileRefFromSession(
   const ref: WorkspaceFileRef = {
     workspaceId: session?.workspaceId ?? null,
     workspaceKey: workspaceKeyFromSession(session),
-    relative: normalizeRelativePath(relative),
+    relative: normalizeRelativePath(toPublicFileIdentity(relative, session?.workspacePath) ?? relative),
   };
   if (observedVersion) ref.observedVersion = observedVersion;
   return ref;

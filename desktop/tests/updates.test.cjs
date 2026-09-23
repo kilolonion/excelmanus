@@ -145,3 +145,66 @@ test('installer names cannot escape the private download directory', () => {
     assert.equal(selectInstaller([asset(name)], 'win32', 'x64'), undefined);
   }
 });
+
+for (const failure of ['network', 'timeout', 'server', 'json']) {
+  test(`falls back to releases after API ${failure} failure`, async () => {
+    const calls = [];
+    // AbortSignal.timeout uses an unreferenced timer; keep this mocked network
+    // test alive until its timeout has fired.
+    const keepAlive = setTimeout(() => {}, 1000);
+    const service = createUpdateService({ current: '1.8.0', checkTimeoutMs: 20,
+      platform: 'win32', arch: 'x64', fetchImpl: async (url, options) => {
+        calls.push(url);
+        if (url.includes('api.github.com')) {
+          if (failure === 'network') throw new TypeError('fetch failed');
+          if (failure === 'timeout') return new Promise((_, reject) => {
+            options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+          });
+          if (failure === 'server') return new Response('', { status: 503 });
+          return new Response('<html>proxy</html>', { status: 200 });
+        }
+        if (url.endsWith('/latest')) return new Response('', { status: 302, headers: {
+          location: 'https://github.com/kilolonion/excelmanus/releases/tag/v1.9.0',
+        } });
+        return new Response(`<li class="Box-row"><a href="/kilolonion/excelmanus/releases/download/v1.9.0/ExcelManus.Setup.1.9.0.exe">installer</a>sha256:${'a'.repeat(64)}</li>`);
+      },
+    });
+    try {
+      const result = await service.check();
+      assert.equal(result.latest, '1.9.0');
+      assert.equal(result.hasUpdate, true);
+      assert.equal(result.installerName, 'ExcelManus.Setup.1.9.0.exe');
+      assert.equal(calls.length, 3);
+    } finally { clearTimeout(keepAlive); }
+  });
+}
+
+test('fallback rejects prereleases and never follows an untrusted tag URL', async () => {
+  for (const location of ['https://evil.test/releases/tag/v1.9.0',
+    'https://github.com/kilolonion/excelmanus/releases/tag/v1.9.0-beta.1']) {
+    let requests = 0;
+    const service = createUpdateService({ current: '1.8.0', fetchImpl: async url => {
+      requests++;
+      if (url.includes('api.github.com')) throw new TypeError('offline');
+      return new Response('', { status: 302, headers: { location } });
+    } });
+    await assert.rejects(service.check(), /回退也失败/);
+    assert.equal(requests, 2);
+    await assert.rejects(service.download(), /先检查更新/);
+  }
+});
+
+test('fallback skips asset requests when the installed version is newer', async () => {
+  let requests = 0;
+  const service = createUpdateService({ current: '2.0.0', fetchImpl: async url => {
+    requests++;
+    if (url.includes('api.github.com')) throw new TypeError('offline');
+    return new Response('', { status: 302, headers: {
+      location: 'https://github.com/kilolonion/excelmanus/releases/tag/v1.9.0',
+    } });
+  } });
+  const result = await service.check();
+  assert.equal(result.hasUpdate, false);
+  assert.equal(result.downloadUrl, null);
+  assert.equal(requests, 2);
+});

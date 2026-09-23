@@ -51,7 +51,7 @@ describe("desktop updates", () => {
   it("can collapse and reopen the data-preservation guidance", () => {
     render(<DesktopUpdateCard current="1.8.0" />);
     const toggle = screen.getByRole("button", { name: /仅处理 ExcelManus 程序/ });
-    const details = screen.getByText(/迁移数据安装（推荐）/).parentElement;
+    const details = document.getElementById(toggle.getAttribute("aria-controls")!);
 
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(details?.hasAttribute("hidden")).toBe(false);

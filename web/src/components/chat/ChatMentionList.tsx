@@ -15,6 +15,7 @@ import {
   truncateMention,
 } from "./chat-input-insert";
 import { displayFilePath } from "@/lib/file-identity";
+import { workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 
 export function useChatMentions() {
   const [mentionData, setMentionData] = useState<MentionData | null>(null);
@@ -25,8 +26,12 @@ export function useChatMentions() {
 
   const fetchMentionData = useCallback((subpath?: string) => {
     const sessionId = useSessionStore.getState().activeSessionId;
+    const session = useSessionStore.getState().sessions?.find((item) => item.id === sessionId);
+    const workspaceKey = workspaceKeyFromSession(session);
     const version = useExcelStore.getState().workspaceFilesVersion;
-    const key = JSON.stringify([sessionId, version, subpath ?? ""]);
+    // Session ids can be rebound to another workspace. Include the resolved
+    // scope so a cached mention list can never leak files across workspaces.
+    const key = JSON.stringify([sessionId, workspaceKey, version, subpath ?? ""]);
     if (pending.current && pending.current.key !== key) {
       pending.current.controller.abort();
       pending.current = null;

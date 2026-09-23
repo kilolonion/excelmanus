@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import { MentionHighlighter } from "../MentionHighlighter";
 import { baseMarkdownComponents } from "../MarkdownComponents";
 import { isWorkspaceFileHref } from "@/lib/file-kind";
-import { displayFileName } from "@/lib/file-identity";
+import { decodeUriEscapedPath, displayFileName } from "@/lib/file-identity";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import React, { useEffect, useRef, useState } from "react";
 
@@ -61,7 +61,7 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
   // 拦截链接：工作区文件链接 → 预览/下载按钮，其他 → 普通 <a>
   a({ href, children }) {
     if (href && isWorkspaceFileLink(href)) {
-      return <WorkspaceFileLink href={href}>{children}</WorkspaceFileLink>;
+      return <WorkspaceFileLink href={decodeUriEscapedPath(href)}>{children}</WorkspaceFileLink>;
     }
     return (
       <a href={href} target="_blank" rel="noopener noreferrer" className="text-[var(--em-primary)] underline">

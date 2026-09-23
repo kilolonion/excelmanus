@@ -75,7 +75,7 @@ describe("ensureLandingSession", () => {
     });
   });
 
-  it("keeps the restored session and still ensures a blank chat", async () => {
+  it("keeps the restored session without creating an unused chat or fetching folders", async () => {
     useSessionStore.setState({
       sessions: [{
         id: "old",
@@ -92,12 +92,10 @@ describe("ensureLandingSession", () => {
 
     await ensureLandingSession();
 
-    expect(createSession).toHaveBeenCalledWith({
-      workspaceId: "ws-b",
-      workspacePath: "/data/b",
-    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(fetchWorkspaces).not.toHaveBeenCalled();
     expect(useSessionStore.getState().activeSessionId).toBe("old");
-    expect(useSessionStore.getState().sessions.some((s) => s.id === "blank-1")).toBe(true);
+    expect(useSessionStore.getState().sessions).toHaveLength(1);
   });
 });
 
@@ -133,5 +131,15 @@ describe("createOrReuseSession", () => {
       workspacePath: undefined,
       reuseBlank: false,
     });
+  });
+
+  it("does not steal selection if the user navigates during creation", async () => {
+    let finish!: (value: unknown) => void;
+    createSession.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const pending = createOrReuseSession();
+    useSessionStore.getState().setActiveSession("chosen-later");
+    finish({ id: "created-late", blank: true, message_count: 0, title: "New" });
+    await pending;
+    expect(useSessionStore.getState().activeSessionId).toBe("chosen-later");
   });
 });

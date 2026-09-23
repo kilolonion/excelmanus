@@ -174,6 +174,77 @@ def _schema_ref_id(tool_name: str, parameters: dict[str, Any]) -> str:
     return schema_id(tool_name, parameters)
 
 
+_JSON_SCHEMA_TYPES = frozenset({"object", "array", "string", "number", "integer", "boolean", "null"})
+
+
+def _known_outer_types(
+    node: Any,
+    root: dict[str, Any],
+    *,
+    seen: frozenset[str] = frozenset(),
+    depth: int = 0,
+    budget: list[int] | None = None,
+) -> tuple[str, ...] | None:
+    """A conservative outer type bound; never expand property trees.
+
+    Every allowed value must satisfy an explicit type or each allOf branch.
+    A union is bounded only if all its branches have known types. Unknown,
+    remote and recursive pure references stay untyped, rather than becoming
+    objects. oneOf branches lose their inner constraints during disclosure,
+    so expose a type union instead of falsely making broad shapes exclusive.
+    """
+    remaining = [128] if budget is None else budget
+    if not isinstance(node, dict) or depth >= 16 or remaining[0] <= 0:
+        return None
+    remaining[0] -= 1
+    declared = node.get("type")
+    if isinstance(declared, str) and declared in _JSON_SCHEMA_TYPES:
+        return (declared,)
+    if (
+        isinstance(declared, list) and declared
+        and all(isinstance(item, str) and item in _JSON_SCHEMA_TYPES for item in declared)
+    ):
+        return tuple(dict.fromkeys(declared))
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/") and ref not in seen:
+        from excelmanus.tools.schema_walk import resolve_local_ref
+
+        target = resolve_local_ref(root, ref)
+        types = _known_outer_types(target, root, seen=seen | {ref}, depth=depth + 1, budget=remaining)
+        if types is not None:
+            return types
+    for key in ("anyOf", "oneOf"):
+        branches = node.get(key)
+        if not isinstance(branches, list) or not branches or len(branches) > 32:
+            continue
+        known = [_known_outer_types(branch, root, seen=seen, depth=depth + 1, budget=remaining) for branch in branches]
+        if all(types is not None for types in known):
+            return tuple(dict.fromkeys(kind for types in known if types is not None for kind in types))
+    branches = node.get("allOf")
+    if isinstance(branches, list) and len(branches) <= 32:
+        # Keeping any proven conjunct is a safe (possibly wider) disclosure.
+        # The full host schema still validates every actual call.
+        for branch in branches:
+            types = _known_outer_types(branch, root, seen=seen, depth=depth + 1, budget=remaining)
+            if types is not None:
+                return types
+    return None
+
+
+def _deferred_field_shape(node: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
+    """Keep honest outer shapes and annotations while deferring nested refs."""
+    projected: dict[str, Any] = {}
+    types = _known_outer_types(node, root)
+    if types:
+        projected["type"] = types[0] if len(types) == 1 else list(types)
+        if "array" in types:
+            projected["items"] = {}
+    for key in ("examples", "default"):
+        if key in node:
+            projected[key] = node[key]
+    return projected
+
+
 def _prune_parameters_schema(
     parameters: dict[str, Any],
     *,
@@ -192,13 +263,11 @@ def _prune_parameters_schema(
         p, pruned = _prune_schema_node(pspec, 1)
         if isinstance(p, dict) and _contains_ref(p):
             desc = str(p.get("description") or "")
-            p = {
-                "type": "object",
-                "description": (
-                    f"{desc}（结构化规格；字段合同见 "
-                    "introspect_capability query_type=tool_detail）"
-                ).strip(),
-            }
+            p = _deferred_field_shape(p, parameters)
+            p["description"] = (
+                f"{desc}（完整字段合同见 "
+                "introspect_capability query_type=tool_detail）"
+            ).strip()
             pruned = True
         elif pruned and isinstance(p, dict):
             p = dict(p)

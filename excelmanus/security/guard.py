@@ -16,7 +16,7 @@ class FileAccessGuard:
 
     def __init__(self, workspace_root: str) -> None:
         # 解析并规范化工作目录的绝对路径
-        self._root: Path = Path(workspace_root).resolve()
+        self._root: Path = Path(workspace_root).expanduser().resolve()
 
     @property
     def workspace_root(self) -> Path:
@@ -83,7 +83,13 @@ class FileAccessGuard:
                 f"路径穿越特征被拒绝：{user_path!r} 包含 '..'"
             )
 
+        # API/SDK paths use POSIX separators even when produced by Windows.
+        # Apply the same spelling as CanonicalPath before touching the disk.
+        user_path = str(user_path).replace("\\", "/")
         raw = Path(user_path)
+        from pathlib import PureWindowsPath
+        if PureWindowsPath(user_path).drive and not raw.is_absolute():
+            raise SecurityViolationError(f"非本机绝对路径或盘符相对路径：{user_path!r}")
 
         # 相对路径基于工作目录解析
         if not raw.is_absolute():

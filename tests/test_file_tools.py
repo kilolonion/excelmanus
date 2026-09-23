@@ -434,6 +434,22 @@ class TestGetTools:
         tools = {tool.name: tool for tool in file_tools.get_tools()}
         assert tools["list_directory"].max_result_chars == 0
 
+    def test_offer_download_schema_accepts_expected_version(self) -> None:
+        tools = {tool.name: tool for tool in file_tools.get_tools()}
+        assert "expected_version" in tools["offer_download"].input_schema["properties"]
+
+
+class TestOfferDownload:
+    def test_version_guard(self, workspace: Path) -> None:
+        version = content_version_of_file(workspace / "hello.txt")
+        result = _payload(file_tools.offer_download("hello.txt", expected_version=version))
+        assert result["status"] == "success"
+        assert result["content_version"] == version
+
+        stale = _payload(file_tools.offer_download("hello.txt", expected_version="sha256:" + "0" * 64))
+        assert stale["error_code"] == "VERSION_CONFLICT"
+        assert stale["committed"] is False
+
 
 class TestEmLockHidden:
     """<file>.em-lock 为工作簿建议锁残留（内部工件），不得出现在模型可见列举中。"""

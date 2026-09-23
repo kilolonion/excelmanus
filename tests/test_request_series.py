@@ -321,6 +321,31 @@ def test_required_images_not_omitted_while_old_pins_held() -> None:
     assert unmet is False
 
 
+def test_internal_image_observation_does_not_move_user_boundary() -> None:
+    def image(digest: str) -> dict:
+        return {
+            "type": "image",
+            "attachment": {
+                "attachmentId": "sha256:" + digest * 32,
+                "mediaType": "image/png",
+                "bytes": 10,
+                "width": 8,
+                "height": 8,
+            },
+        }
+
+    messages = [
+        {"role": "user", "content": [image("a")]},
+        {
+            "role": "user",
+            "content": [image("b")],
+            "_ui_hidden": True,
+            "_prompt_kind": "image_observation",
+        },
+    ]
+    assert required_image_indices(messages) == {0, 1}
+
+
 def test_required_omitted_forces_quota_unmet() -> None:
     lengths = [10, 10]
     required = {0, 1}

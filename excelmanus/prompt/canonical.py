@@ -25,6 +25,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "只读表格数据对比。必须提供两个工作簿，或同一工作簿中的两个不同工作表。"
         "有业务主键时用 alignment=key 并提供 key_columns；"
         "alignment=position 按行列，遇到增删行会对齐错。未指定 sheet 时只比较两边第一张表，"
+        "ignore_style=false 时还比较单元格样式、合并、尺寸、打印设置、规则和富对象；"
         "返回 scope/compared_sheets/formula_status。"
     ),
     "trace_spreadsheet_formulas": (
@@ -41,7 +42,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "规格只用于创建；uploads/ 只读，改表写到 outputs/ 副本。"
     ),
     "format_spreadsheet": (
-        "改外观：字体/填充/边框/对齐、合并、列宽、冻结窗格、条件格式、数据验证。合并非空格需 allow_data_loss=true。"
+        "改外观：字体/填充/边框/对齐、合并、列宽、冻结窗格、打印布局(print_layout)、条件格式、数据验证。合并非空格需 allow_data_loss=true。"
         "整列写 B:B。一次 operations 提交。单表可省略 sheet；多表必须带 sheet 或 表!A1。"
     ),
     "split_spreadsheet": (
@@ -49,7 +50,30 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "任一目标已存在则全部取消；拆分键按原始值分组，安全文件名冲突会加后缀。"
         "公式/样式等不可复制对象会在 warnings 中列出。"
     ),
-    "manage_spreadsheet_objects": "富对象。当前 kind=chart 创建原生图表；没有 Table 或已有图表更新/删除入口。一批 operations 一次提交。",
+    "manage_spreadsheet_objects": (
+        "富对象：图表创建/更新/删除，Table 创建/调整/删除，命名区域，图片、超链接、批注，以及可刷新原生透视表。"
+        "对象操作一批提交；每个对象使用稳定 name/index/cell 定位，未指定的图表属性会保留。"
+    ),
+    "calculate_spreadsheet": (
+        "显式调用可用的表格计算引擎重算公式，扫描错误单元格后原子发布。"
+        "引擎不可用、公式错误或格式不支持时不写入，并返回明确状态。"
+    ),
+    "render_spreadsheet": (
+        "将工作表或打印区域渲染为 PDF 或分页 PNG，返回页数、引擎、源版本和实际产物。"
+        "需要宿主 soffice；PNG 还需要 Poppler。"
+    ),
+    "convert_spreadsheet": (
+        "将 xls/xlsb 等工作簿转换为 xlsx，保留源文件并返回转换前后对象清单及损失警告。"
+        "preserve 使用表格引擎，data_only 明确只迁移单元格值。"
+    ),
+    "validate_spreadsheet": (
+        "按规则确定性校验工作簿：unique、required、foreign_key、row_expression、total、formula_errors。"
+        "返回检查数量、失败单元格和截断状态，不修改文件。"
+    ),
+    "query_spreadsheet": (
+        "将多个 Excel/CSV 源逐行导入临时磁盘 SQLite，执行只读 SELECT/WITH 查询。"
+        "返回有限预览，可将完整结果原子导出为 xlsx/csv；保留源版本依赖。"
+    ),
     "manage_spreadsheet_versions": (
         "list 当前版本与检查点（只读）；checkpoint 打快照；restore 按 revision 恢复；delete 删除显式检查点。"
         "历史读取结果不可当作写入目标。"

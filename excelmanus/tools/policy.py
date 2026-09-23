@@ -13,7 +13,9 @@ from __future__ import annotations
 # 其余内置/MCP 能力通过 introspect_capability 按需披露；执行目录不裁剪。
 DEFAULT_DISCLOSURE_CORE_TOOLS: frozenset[str] = frozenset({
     "inspect_spreadsheet", "analyze_spreadsheet", "edit_spreadsheet", "format_spreadsheet",
-    "list_directory", "run_code", "introspect_capability",
+    "calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet",
+    "validate_spreadsheet", "query_spreadsheet",
+    "list_directory", "read_text_file", "read_image", "run_code", "introspect_capability",
     "ask_user", "show_workbook", "offer_download", "task_create", "task_update", "sleep", "skill",
     "write_plan", "exit_plan_mode",
 })
@@ -26,6 +28,7 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
     {
         "inspect_spreadsheet",
         "analyze_spreadsheet",
+        "validate_spreadsheet",
         "compare_spreadsheets",
         "trace_spreadsheet_formulas",
         "read_word",
@@ -51,6 +54,7 @@ PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
     {
         "inspect_spreadsheet",
         "analyze_spreadsheet",
+        "validate_spreadsheet",
         "compare_spreadsheets",
         "trace_spreadsheet_formulas",
         "read_word",
@@ -92,6 +96,7 @@ MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
         "copy_file",
         "write_word",
         "edit_spreadsheet",
+        "calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet", "query_spreadsheet",
         "format_spreadsheet",
         "split_spreadsheet",
         "manage_spreadsheet_objects",
@@ -196,6 +201,11 @@ AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "split_spreadsheet": ("file_path", "output_dir"),
     "manage_spreadsheet_objects": ("file_path",),
     "manage_spreadsheet_versions": ("file_path",),
+    "calculate_spreadsheet": ("file_path", "output_path"),
+    "render_spreadsheet": ("output_path",),
+    "convert_spreadsheet": ("output_path",),
+    "query_spreadsheet": ("output_path",),
+    "manage_skills": ("skill",),
 }
 
 # mode=first：按字段优先级提取第一个非空路径
@@ -232,7 +242,7 @@ def is_concurrency_safe(
 
 
 _PATH_RULED_TOOLS = set(AUDIT_TARGET_ARG_RULES_ALL) | set(AUDIT_TARGET_ARG_RULES_FIRST)
-_EXPECTED_PATH_RULED_TOOLS = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell", "manage_skills"}
+_EXPECTED_PATH_RULED_TOOLS = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell"}
 if _PATH_RULED_TOOLS != _EXPECTED_PATH_RULED_TOOLS:
     missing = sorted(_EXPECTED_PATH_RULED_TOOLS - _PATH_RULED_TOOLS)
     extra = sorted(_PATH_RULED_TOOLS - _EXPECTED_PATH_RULED_TOOLS)
@@ -274,6 +284,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "format": ("format_spreadsheet",),
     "split": ("split_spreadsheet",),
     "objects": ("manage_spreadsheet_objects",),
+    "spreadsheet_engine": ("calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet", "query_spreadsheet", "validate_spreadsheet"),
     "formula_trace": ("trace_spreadsheet_formulas",),
     "versions": ("manage_spreadsheet_versions",),
     "word": ("read_word", "inspect_word", "search_word", "write_word"),
@@ -303,9 +314,15 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
     "编辑/写入/改值/公式/去重/清洗": ("edit_spreadsheet",),
     "拆分文件/分文件/按列拆成多个文件": ("split_spreadsheet",),
     "格式/样式/合并": ("format_spreadsheet",),
+    "打印/打印区域/分页/页面设置/page_setup": ("format_spreadsheet",),
     "冻结/冻结窗格/首行/freeze": ("format_spreadsheet",),
     "下拉框/数据验证/下拉/validation": ("format_spreadsheet",),
     "图表": ("manage_spreadsheet_objects",),
+    "计算/重算/公式错误": ("calculate_spreadsheet",),
+    "预览/渲染/PDF/PNG": ("render_spreadsheet",),
+    "转换/xls/xlsb": ("convert_spreadsheet",),
+    "校验/验收/主键/合计": ("validate_spreadsheet",),
+    "SQL/多表查询/大数据": ("query_spreadsheet",),
     "公式依赖/影响面": ("trace_spreadsheet_formulas",),
     "版本/检查点/恢复": ("manage_spreadsheet_versions",),
     "目录/查找文件": ("list_directory",),
@@ -325,9 +342,14 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "analyze_spreadsheet": "只读分析：profile/quality 全貌，filter 筛选，aggregate 汇总，pivot 透视，relationships 跨文件关联，files 扫目录",
     "compare_spreadsheets": "只读表格数据对比（diff）；两个工作簿或两个工作表；未指定 sheet 时只比较第一张表；position 按坐标，key 按关键列",
     "edit_spreadsheet": "原子编辑：写值/公式、selection 写回、插删行列、改表结构、透视写入、清洗变换，或编译 WorkbookSpec",
-    "format_spreadsheet": "改外观：字体/填充/边框/对齐/数字格式、合并、列宽(auto_fit)、冻结窗格、条件格式、数据验证(下拉框)",
+    "format_spreadsheet": "改外观：字体/填充/边框/对齐/数字格式、合并、列宽(auto_fit)、冻结窗格、打印布局(print_layout)、条件格式、数据验证(下拉框)",
     "split_spreadsheet": "按某列取值把一个表拆成每组一个新 xlsx（by_column 必填，如按省拆分）；只新建不覆盖",
-    "manage_spreadsheet_objects": "富对象：插入原生 Excel 图表",
+    "manage_spreadsheet_objects": "富对象：图表、Table、名称、批注、超链接、图片和原生透视表",
+    "calculate_spreadsheet": "显式调用计算引擎重算公式，检查错误后原子发布",
+    "render_spreadsheet": "将工作表或打印区域渲染为 PDF/分页 PNG，返回页数和引擎状态",
+    "convert_spreadsheet": "将 xls/xlsb 等转换为 xlsx，并返回转换前后对象损失报告",
+    "validate_spreadsheet": "按唯一性、主键、逐行公式、合计和公式错误规则确定性校验工作簿",
+    "query_spreadsheet": "把多个 Excel/CSV 源流入临时 SQLite，执行只读 SQL 并可导出完整结果",
     "trace_spreadsheet_formulas": "只读公式分析：map 全景、trace 单元格、impact 影响面",
     "manage_spreadsheet_versions": "只读列出当前版本与检查点；打快照与按 revision 恢复会写入",
     "read_word": "读取 Word (.docx) 文档的段落内容和表格，支持分页和行内格式",

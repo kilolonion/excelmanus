@@ -436,6 +436,36 @@ class TestBenchWriteRefused:
 class TestWrapperPreservesSemantics:
     """Wrapper 不应破坏 __file__ / __name__ 语义。"""
 
+    @pytest.mark.parametrize("tier", ["GREEN", "YELLOW", "RED"])
+    def test_pipe_descriptors_keep_python_open_semantics(self, workspace: Path, tier: str) -> None:
+        result = _run_in_sandbox(workspace, '''import os, io
+reader, writer = os.pipe()
+with io.open(writer, "wb", closefd=False) as stream:
+    stream.write(b"pipe-ok")
+os.close(writer)
+with open(reader, "rb") as stream:
+    assert stream.read() == b"pipe-ok"
+try:
+    os.fstat(reader)
+except OSError:
+    print("pipe-closed")
+else:
+    raise AssertionError("closefd=True must close the descriptor")
+''', tier)
+        assert result.returncode == 0, result.stderr
+        assert "pipe-closed" in result.stdout
+
+    def test_red_subprocess_can_capture_both_pipes(self, workspace: Path) -> None:
+        result = _run_in_sandbox(workspace, '''import subprocess, sys
+child = subprocess.run([sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
+                       capture_output=True, text=True, check=True, timeout=5)
+assert child.stdout.strip() == "out"
+assert child.stderr.strip() == "err"
+print("capture-ok")
+''', "RED")
+        assert result.returncode == 0, result.stderr
+        assert "capture-ok" in result.stdout
+
     def test_file_and_name(self, workspace: Path) -> None:
         script = workspace / "check_env.py"
         script.write_text(

@@ -50,7 +50,7 @@ _SURFACE_OPS = frozenset({OP_APPEND, OP_REPLACE, OP_VOID})
 
 # tool/result replace 允许变化的 payload 字段。
 _TOOL_REPLACE_MUTABLE = frozenset(
-    {"content", "message_id", "_projection_content", "replaces_message_id"}
+    {"content", "message_id", "_projection_content", "_tool_result_context", "replaces_message_id"}
 )
 
 # SSE 工具调用审计：非 surface，供 UI/回放按 parent 重建子调用时间线。

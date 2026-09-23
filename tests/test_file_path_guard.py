@@ -96,6 +96,24 @@ def test_resolve_excel_path_uses_guard(tmp_path: Path) -> None:
     assert resolve_excel_path("../outside.xlsx", workspace_root=str(ws)) is None
 
 
+def test_resolve_excel_path_decodes_uri_escaped_names(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    (ws / "outputs").mkdir(parents=True)
+    (ws / "outputs" / "收款收据_布局还原版.xlsx").write_bytes(b"xl")
+    set_config(type("C", (), {"workspace_root": str(ws)})())
+    encoded = (
+        "./outputs/"
+        "%E6%94%B6%E6%AC%BE%E6%94%B6%E6%8D%AE"
+        "_%E5%B8%83%E5%B1%80%E8%BF%98%E5%8E%9F%E7%89%88.xlsx"
+    )
+    found = resolve_excel_path(encoded, workspace_root=str(ws))
+    assert found is not None
+    assert found.replace("\\", "/").endswith("outputs/收款收据_布局还原版.xlsx")
+    assert resolve_excel_path("%2e%2e/escape.xlsx", workspace_root=str(ws)) is None
+    assert resolve_excel_path("outputs/%2e%2e/%2e%2e/x.xlsx", workspace_root=str(ws)) is None
+    assert resolve_excel_path("outputs/%E4%B8%8D%E5%AD%98%E5%9C%A8.xlsx", workspace_root=str(ws)) is None
+
+
 def test_resolve_excel_path_does_not_guess_uploads(tmp_path: Path) -> None:
     ws = tmp_path / "workspace"
     uploads = ws / "uploads"

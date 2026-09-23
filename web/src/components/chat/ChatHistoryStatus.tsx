@@ -5,8 +5,8 @@ import { refreshSessionMessagesFromBackend, useChatStore } from "@/stores/chat-s
 
 /** Visible state for history restore/revalidation instead of a silent blank chat. */
 export function ChatHistoryStatus({ sessionId, empty = false }: { sessionId: string | null; empty?: boolean }) {
-  const loading = useChatStore((state) => state.isLoadingMessages);
-  const error = useChatStore((state) => state.messageLoadError);
+  const loading = useChatStore((state) => state.loadedSessionId === sessionId && state.isLoadingMessages);
+  const error = useChatStore((state) => state.loadedSessionId === sessionId ? state.messageLoadError : null);
   if (!loading && !error) return null;
 
   const retry = () => {

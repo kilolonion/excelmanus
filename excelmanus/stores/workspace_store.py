@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from excelmanus.workspace.paths import (
     canonicalize_workspace_path,
+    paths_equal,
     unique_workspace_title,
     workspace_title_from_path,
 )
@@ -147,7 +148,11 @@ class WorkspaceStore:
             "FROM workspaces WHERE path = ?",
             (canon,),
         ).fetchone()
-        return self._row(row) if row is not None else None
+        if row is not None:
+            return self._row(row)
+        # Existing registrations may predate realpath/case normalization.
+        # Reuse the registered id so aliases never create a second workspace.
+        return next((item for item in self._rows() if paths_equal(item["path"], canon)), None)
 
     def create(self, path: str, *, title: str = "", source_access: bool = True) -> tuple[dict[str, Any], bool]:
         """Adopt an existing directory. Same path returns the old row (created=False)."""

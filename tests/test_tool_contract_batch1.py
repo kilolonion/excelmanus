@@ -185,7 +185,7 @@ def test_copy_sheet_conflict_rejected(tmp_path: Path) -> None:
     assert "工作表不一致" in _err(result)
 
 
-def test_insert_refuses_when_formulas_exist(tmp_path: Path) -> None:
+def test_insert_rewrites_formulas_when_formula_dependencies_exist(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = tmp_path / "formula.xlsx"
     wb = Workbook()
@@ -200,13 +200,13 @@ def test_insert_refuses_when_formulas_exist(tmp_path: Path) -> None:
         expected_version=content_version_of_file(path),
         operations=[{"kind": "insert", "sheet": "Sheet1", "axis": "row", "at": 1, "count": 1}],
     )
-    assert not result.success
-    wb = load_workbook(path)
-    assert wb.active["B1"].value == "=A1"
-    wb.close()
+    assert result.success, result.model_text
+    reopened = load_workbook(path, data_only=False)
+    assert reopened["Sheet1"]["B2"].value == "=A2"
+    reopened.close()
 
 
-def test_rename_refuses_when_formulas_exist(tmp_path: Path) -> None:
+def test_rename_preserves_formula_workbooks(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = tmp_path / "rename.xlsx"
     wb = Workbook()
@@ -220,10 +220,11 @@ def test_rename_refuses_when_formulas_exist(tmp_path: Path) -> None:
         expected_version=content_version_of_file(path),
         operations=[{"kind": "sheet", "action": "rename", "sheet": "First", "new_name": "Renamed"}],
     )
-    assert not result.success
-    wb = load_workbook(path)
-    assert wb.sheetnames[0] == "First"
-    wb.close()
+    assert result.success, result.model_text
+    reopened = load_workbook(path, data_only=False)
+    assert "Renamed" in reopened.sheetnames
+    assert reopened["Renamed"]["A1"].value == "=1+1"
+    reopened.close()
 
 
 def test_object_batch_failure_does_not_commit_first_chart(tmp_path: Path) -> None:
@@ -286,7 +287,7 @@ def test_alignment_position_rejects_key_columns(tmp_path: Path) -> None:
     assert not result.success
 
 
-def test_ignore_style_false_rejected(tmp_path: Path) -> None:
+def test_ignore_style_false_compares_appearance(tmp_path: Path) -> None:
     _bind(tmp_path)
     a = tmp_path / "a.xlsx"
     wb = Workbook()
@@ -294,8 +295,8 @@ def test_ignore_style_false_rejected(tmp_path: Path) -> None:
     wb.save(a)
     wb.close()
     result = compare_spreadsheets(file_a=str(a), file_b=str(a), ignore_style=False)
-    assert not result.success
-    assert "样式" in _err(result)
+    assert result.success, result.model_text
+    assert "appearance" in result.value
 
 
 def test_write_patterns_no_longer_claims_short_write_deletes() -> None:

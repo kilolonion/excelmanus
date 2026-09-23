@@ -23,6 +23,7 @@ from excelmanus.tools.policy import (
 EXPECTED_MUTATING_CONFIRM_TOOLS = {
     "run_shell",
     "delete_file",
+    "manage_skills",
     # write_text_file, edit_text_file, rename_file: 降级到 Tier B
     # Batch 1: write_excel, transform_data
     # Batch 3: create_sheet, copy_sheet, rename_sheet, delete_sheet, copy_range_between_sheets
@@ -39,6 +40,10 @@ EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
     "split_spreadsheet",
     "manage_spreadsheet_objects",
     "manage_spreadsheet_versions",
+    "calculate_spreadsheet",
+    "render_spreadsheet",
+    "convert_spreadsheet",
+    "query_spreadsheet",
 }
 
 
@@ -96,6 +101,11 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
             "manage_spreadsheet_objects",
             "manage_spreadsheet_versions",
             "split_spreadsheet",
+            "calculate_spreadsheet",
+            "render_spreadsheet",
+            "convert_spreadsheet",
+            "query_spreadsheet",
+            "manage_skills",
         }
         or name.startswith(prefixes)
     }

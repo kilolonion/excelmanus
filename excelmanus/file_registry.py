@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from excelmanus.excel_extensions import EXCEL_EXTENSIONS as _EXCEL_EXTENSIONS_BASE
 from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
-from excelmanus.workspace.identity import is_hidden_name
+from excelmanus.workspace.identity import IdentityError, is_hidden_name, resolve_canonical
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -261,8 +261,20 @@ class FileRegistry:
         """从 DB 加载到内存缓存。"""
         try:
             rows = self._store.list_all(self._workspace_key, include_deleted=False)
+            for row in rows:
+                try:
+                    canonical = self._canonical_rel(row["canonical_path"])
+                except (ValueError, OSError):
+                    continue
+                if canonical != row["canonical_path"]:
+                    self._store.normalize_path(self._workspace_key, row["canonical_path"], canonical)
+            rows = self._store.list_all(self._workspace_key, include_deleted=False)
             file_ids: list[str] = []
             for row in rows:
+                try:
+                    self._canonical_rel(row["canonical_path"])
+                except (ValueError, OSError):
+                    continue
                 entry = FileEntry.from_dict(row)
                 self._path_cache[entry.canonical_path] = entry
                 self._id_to_path[entry.id] = entry.canonical_path
@@ -300,6 +312,13 @@ class FileRegistry:
         # Windows 上 str(relative) 会给反斜杠导致 get_by_path 查不到。
         return abs_path.relative_to(self._workspace_root).as_posix()
 
+    def _canonical_rel(self, raw: str) -> str:
+        """Normalize every registry key to one workspace-relative POSIX path."""
+        try:
+            return resolve_canonical(self._workspace_root, str(raw or "")).relative
+        except IdentityError as exc:
+            raise ValueError(str(exc)) from exc
+
     # ── 注册入口 ─────────────────────────────────────────────
 
     def register_upload(
@@ -313,6 +332,7 @@ class FileRegistry:
         sheet_meta: list[dict] | None = None,
     ) -> FileEntry:
         """注册上传文件。"""
+        canonical_path = self._canonical_rel(canonical_path)
         if not file_type:
             file_type = _detect_file_type(canonical_path)
         now = _now_iso()
@@ -372,6 +392,7 @@ class FileRegistry:
         content_hash: str = "",
     ) -> FileEntry:
         """从工作区扫描注册文件（新增或更新）。"""
+        canonical_path = self._canonical_rel(canonical_path)
         if not file_type:
             file_type = _detect_file_type(canonical_path)
         now = _now_iso()
@@ -421,6 +442,9 @@ class FileRegistry:
         sheet_meta: list[dict] | None = None,
     ) -> FileEntry:
         """注册 agent 产出文件。"""
+        canonical_path = self._canonical_rel(canonical_path)
+        if parent_canonical:
+            parent_canonical = self._canonical_rel(parent_canonical)
         file_type = _detect_file_type(canonical_path)
         now = _now_iso()
         parent_id = None
@@ -477,12 +501,9 @@ class FileRegistry:
             from excelmanus.workspace.refs import WorkspaceRef
 
             cache = get_cache()
-            try:
-                rel = str(Path(canonical_path).resolve().relative_to(self._workspace_root)).replace("\\", "/")
-            except ValueError:
-                rel = Path(canonical_path).name
+            rel = self._canonical_rel(canonical_path)
             snap = open_snapshot_at(
-                canonical_path,
+                self._resolve(rel),
                 relative=rel,
                 workspace=WorkspaceRef.from_root(self._workspace_root),
             )
@@ -522,6 +543,10 @@ class FileRegistry:
 
     def get_by_path(self, canonical_path: str) -> FileEntry | None:
         """按规范路径查询（优先缓存）。"""
+        try:
+            canonical_path = self._canonical_rel(canonical_path)
+        except ValueError:
+            return None
         cached = self._path_cache.get(canonical_path)
         if cached:
             return cached
@@ -534,12 +559,7 @@ class FileRegistry:
 
     def get_by_alias(self, alias_value: str) -> FileEntry | None:
         """通过别名查找文件。"""
-        file_id = self._alias_cache.get(alias_value)
-        if file_id:
-            path = self._id_to_path.get(file_id)
-            if path and path in self._path_cache:
-                return self._path_cache[path]
-        row = self._store.find_by_alias(alias_value)
+        row = self._store.find_by_alias(alias_value, workspace=self._workspace_key)
         if row:
             entry = FileEntry.from_dict(row)
             self._cache_entry(entry)
@@ -553,7 +573,9 @@ class FileRegistry:
         if path and path in self._path_cache:
             return self._path_cache[path]
         row = self._store.get_by_id(file_id)
-        if row:
+        if row is None:
+            row = self._store.find_by_alias(file_id, workspace=self._workspace_key)
+        if row and row["workspace"] == self._workspace_key:
             entry = FileEntry.from_dict(row)
             self._cache_entry(entry)
             return entry
@@ -605,9 +627,19 @@ class FileRegistry:
 
         查找顺序：canonical_path 精确 → alias → original_name 模糊匹配。
         """
-        # 1. canonical_path 精确匹配
-        if path_or_alias in self._path_cache:
-            return path_or_alias
+        # 1. canonical_path 精确匹配 (including Windows separators/./)
+        try:
+            canonical = self._canonical_rel(path_or_alias)
+        except ValueError:
+            canonical = ""
+        if canonical in self._path_cache:
+            return canonical
+        if canonical:
+            try:
+                if self._resolve(canonical).is_file():
+                    return canonical
+            except (ValueError, OSError):
+                pass
 
         # 2. alias 匹配
         entry = self.get_by_alias(path_or_alias)
@@ -615,16 +647,17 @@ class FileRegistry:
             return entry.canonical_path
 
         # 3. original_name 模糊匹配
-        for e in self._path_cache.values():
-            if e.deleted_at is None and e.original_name == path_or_alias:
-                return e.canonical_path
+        candidates = [e for e in self._path_cache.values()
+                      if e.deleted_at is None and e.original_name == path_or_alias]
+        if len(candidates) == 1:
+            return candidates[0].canonical_path
 
         # 4. 直接返回原始路径
-        return path_or_alias
+        return canonical or path_or_alias
 
     def resolve_for_display(self, canonical_path: str) -> str:
         """规范路径 → 用户友好的原始名。"""
-        entry = self._path_cache.get(canonical_path)
+        entry = self.get_by_path(canonical_path)
         if entry:
             return entry.original_name
         return Path(canonical_path).name
@@ -633,6 +666,7 @@ class FileRegistry:
 
     def mark_deleted(self, canonical_path: str) -> None:
         """软删除（文件从磁盘消失时调用）。"""
+        canonical_path = self._canonical_rel(canonical_path)
         entry = self._path_cache.get(canonical_path)
         if entry:
             entry.deleted_at = _now_iso()
@@ -655,6 +689,8 @@ class FileRegistry:
         同时同步别名缓存，并记录 renamed 事件。
         返回 True 表示成功迁移，False 表示旧路径不存在于注册表。
         """
+        old_path = self._canonical_rel(old_path)
+        new_path = self._canonical_rel(new_path)
         entry = self._path_cache.get(old_path)
         if entry is None:
             return False
@@ -859,6 +895,13 @@ class FileRegistry:
                 and entry.deleted_at is None
                 and path not in current_rel_paths
             ):
+                # A bounded/filtered/partially unreadable scan is not proof of
+                # deletion. Verify absence on disk before retiring provenance.
+                try:
+                    if self._resolve(path).exists():
+                        continue
+                except (ValueError, OSError):
+                    continue
                 self.mark_deleted(path)
                 result.deleted_files += 1
 
@@ -886,11 +929,13 @@ class FileRegistry:
         result = ScanResult()
 
         for walk_root, dirs, files in os.walk(uploads_dir):
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not (Path(walk_root) / d).is_symlink()]
             for name in files:
                 if is_hidden_name(name):
                     continue
                 fp = Path(walk_root, name)
+                if fp.is_symlink():
+                    continue
                 try:
                     stat = fp.stat()
                 except OSError:
@@ -965,13 +1010,21 @@ class FileRegistry:
                 dirs[:] = []
                 continue
             dirs[:] = [d for d in dirs if d not in _SKIP_DIRS
+                       and not is_hidden_name(d)
+                       and not (Path(walk_root) / d).is_symlink()
+                       and not getattr(os.path, "isjunction", lambda p: False)(Path(walk_root) / d)
                        and not is_product_source_path(Path(walk_root) / d, root)]
             if rel_dir == "outputs":
                 dirs[:] = [d for d in dirs if d not in {"backups", "audits", ".versions"}]
             for name in files:
                 if is_hidden_name(name):
                     continue
-                if is_product_source_path(Path(walk_root) / name, root):
+                candidate = Path(walk_root) / name
+                if candidate.is_symlink():
+                    # Symlinked files are aliases and must not become a second
+                    # registry identity for the same bytes.
+                    continue
+                if is_product_source_path(candidate, root):
                     continue
                 _, ext = os.path.splitext(name)
                 ext_lower = ext.lower()
@@ -1257,12 +1310,12 @@ class FileRegistry:
         return False
 
 
-_SHARED_REGISTRIES: dict[str, FileRegistry] = {}
+_SHARED_REGISTRIES: dict[tuple[int, str], FileRegistry] = {}
 
 
 def get_shared_file_registry(database: "Database", workspace_root: str | Path) -> FileRegistry:
     """Process-wide FileRegistry: engine and API share one instance per workspace."""
-    key = str(Path(workspace_root).expanduser().resolve())
+    key = (id(database.conn), str(Path(workspace_root).expanduser().resolve()))
     existing = _SHARED_REGISTRIES.get(key)
     if existing is not None:
         return existing

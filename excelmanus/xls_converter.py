@@ -123,10 +123,10 @@ def _commit_converted_xlsx(
 
 def _save_converted_workbook(
     xlsx_wb: Any,
-    dst: Path,
+    dst: Path | None,
     *,
     workspace_root: str | Path | None = None,
-) -> Path:
+) -> Path | bytes:
     from io import BytesIO
 
     buf = BytesIO()
@@ -136,6 +136,8 @@ def _save_converted_workbook(
         raise ConversionError(f"保存 .xlsx 失败: {e}") from e
     finally:
         xlsx_wb.close()
+    if dst is None:
+        return buf.getvalue()
     _commit_converted_xlsx(dst, buf.getvalue(), workspace_root=workspace_root)
     return dst
 
@@ -144,8 +146,9 @@ def _save_converted_workbook(
 
 
 def _convert_xls(
-    src: Path, dst: Path, *, workspace_root: str | Path | None = None,
-) -> Path:
+    src: Path, dst: Path | None, *, workspace_root: str | Path | None = None,
+    source_bytes: bytes | None = None,
+) -> Path | bytes:
     """用 xlrd 读取 .xls，openpyxl 写出 .xlsx。
 
     保留：数据、sheet 结构、基础字体/填充/对齐/边框、列宽、行高、合并单元格。
@@ -161,7 +164,10 @@ def _convert_xls(
     from openpyxl import Workbook
 
     try:
-        xls_wb = xlrd.open_workbook(str(src), formatting_info=True)
+        xls_wb = xlrd.open_workbook(
+            **({"file_contents": source_bytes} if source_bytes is not None else {"filename": str(src)}),
+            formatting_info=True,
+        )
     except xlrd.XLRDError as e:
         raise ConversionError(f"读取 .xls 文件失败: {e}") from e
 
@@ -270,7 +276,8 @@ def _convert_xls(
         logger.warning(
             "XLS → XLSX 转换会丢失图表、宏、条件格式、验证、超链接和图片；请核对转换报告",
         )
-    logger.info("XLS → XLSX 转换完成: %s → %s (%d sheets)", src.name, dst.name, xls_wb.nsheets)
+    logger.info("XLS → XLSX 转换完成: %s → %s (%d sheets)", src.name, dst.name if isinstance(dst, Path) else "preview", xls_wb.nsheets)
+    xls_wb.release_resources()
     return dst
 
 
@@ -358,8 +365,9 @@ def _xlrd_color_to_hex(colour_index: int, xls_wb: Any) -> str | None:
 
 
 def _convert_xlsb(
-    src: Path, dst: Path, *, workspace_root: str | Path | None = None,
-) -> Path:
+    src: Path, dst: Path | None, *, workspace_root: str | Path | None = None,
+    source_bytes: bytes | None = None,
+) -> Path | bytes:
     """用 pyxlsb 读取 .xlsb，openpyxl 写出 .xlsx。
 
     仅转换数据和 sheet 结构，不保留样式。
@@ -374,7 +382,9 @@ def _convert_xlsb(
     from openpyxl import Workbook
 
     try:
-        xlsb_wb = open_xlsb(str(src))
+        from io import BytesIO
+
+        xlsb_wb = open_xlsb(BytesIO(source_bytes) if source_bytes is not None else str(src))
     except Exception as e:
         raise ConversionError(f"读取 .xlsb 文件失败: {e}") from e
 
@@ -407,11 +417,26 @@ def _convert_xlsb(
     logger.warning(
         "XLSB → XLSX 仅保留数据与工作表结构；样式、图表、宏、条件格式、验证、链接和图片不会迁移",
     )
-    logger.info("XLSB → XLSX 转换完成: %s → %s", src.name, dst.name)
+    logger.info("XLSB → XLSX 转换完成: %s → %s", src.name, dst.name if isinstance(dst, Path) else "preview")
     return dst
 
 
 # ── 便捷入口 ────────────────────────────────────────────────
+
+
+def convert_preview_bytes(data: bytes, suffix: str) -> bytes:
+    """Convert an immutable legacy workbook without publishing a sibling file.
+
+    Previews must not adopt an unrelated same-stem .xlsx or produce a second
+    live identity. Only an explicit conversion/import publishes a new path.
+    """
+    source = Path("preview" + suffix.lower())
+    converter = {".xls": _convert_xls, ".xlsb": _convert_xlsb}.get(source.suffix)
+    if converter is None:
+        raise ValueError(f"不需要转换的格式: {suffix}")
+    result = converter(source, None, source_bytes=data)
+    assert isinstance(result, bytes)
+    return result
 
 
 def ensure_xlsx(

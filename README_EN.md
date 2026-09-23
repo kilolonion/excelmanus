@@ -203,6 +203,9 @@ The backend defaults to [http://localhost:8000](http://localhost:8000). Its [int
 | `POST /api/v1/revisions/restore` | Restore a file revision |
 | `GET /api/v1/version/check` | Check published releases and update info |
 | `GET /api/v1/version/manifest` | Read frontend/backend version fingerprints |
+| `GET /api/v1/version/installations` | List local installation paths and their current/available/missing status |
+| `POST /api/v1/version/installations/delete` | Delete an old installation record, optionally removing its directory (current install is protected) |
+| `POST /api/v1/version/installations/cleanup` | Remove records for directories that no longer exist |
 | `GET /api/v1/version/upgrade/capability` | Check whether web updates are available and why |
 | `GET /api/v1/version/upgrade/status` | Read the latest web update status |
 | `POST /api/v1/version/upgrade` | Start a stop-then-update when supported |

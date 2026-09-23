@@ -24,6 +24,7 @@ def scan_workspace(root: str | Path, *, limit: int | None = 2000,
         for path in protected_source_paths(root)
     }
     results: list[dict[str, Any]] = []
+    incomplete = False
     pending = [(str(root), "")]
     while pending:
         directory, parent = pending.pop()
@@ -31,6 +32,9 @@ def scan_workspace(root: str | Path, *, limit: int | None = 2000,
             with os.scandir(directory) as iterator:
                 entries = sorted(iterator, key=lambda e: (e.name != "uploads", e.name))
         except OSError:
+            # A permission/race failure means the result is only a partial
+            # snapshot. Mark it so callers do not prune valid history entries.
+            incomplete = True
             continue
         children = []
         for entry in entries:
@@ -46,13 +50,10 @@ def scan_workspace(root: str | Path, *, limit: int | None = 2000,
                 is_dir = entry.is_dir(follow_symlinks=False)
                 is_link = entry.is_symlink() or getattr(entry, "is_junction", lambda: False)()
                 if is_link:
-                    target = Path(entry.path).resolve()
-                    target_rel = target.relative_to(root).as_posix()
-                    if (target.is_dir() or is_reserved_relative(target_rel)
-                            or is_sensitive_relative(target_rel)
-                            or any(is_hidden_name(part) for part in Path(target_rel).parts)
-                            or any(target_rel == p or target_rel.startswith(p + "/") for p in protected)):
-                        continue
+                    # A link inside the workspace is an alias, not a second
+                    # user file.  Listing it would expose a path that later
+                    # resolves to the target and creates duplicate identities.
+                    continue
                 if is_dir:
                     if name in _SKIP_DIRS:
                         continue
@@ -68,6 +69,7 @@ def scan_workspace(root: str | Path, *, limit: int | None = 2000,
                     "modified_at": entry.stat().st_mtime, "is_dir": is_dir,
                 })
             except (OSError, ValueError):
+                incomplete = True
                 continue
         pending.extend(reversed(children))
-    return results, False
+    return results, incomplete

@@ -30,6 +30,7 @@ from excelmanus.api_app_state import (
 )
 from excelmanus.logger import get_logger
 from excelmanus.workbook.read_cache import ReadCache
+from excelmanus.workspace.identity import IdentityError, resolve_canonical
 
 # Immutable, serialized view responses; live bytes are still version-checked on
 # every request, so external edits cannot be hidden by a time-based cache.
@@ -243,14 +244,16 @@ async def get_excel_file(request: Request) -> StreamingResponse:
 
     # .xls/.xlsb → 透明转换为 xlsx 供前端 Univer 加载
     actual_file = resolved
-    from excelmanus.xls_converter import needs_conversion as _nc2, ensure_xlsx as _ensure2
+    converted_bytes: bytes | None = None
+    from excelmanus.xls_converter import needs_conversion as _nc2
     if _nc2(resolved):
         try:
-            _xlsx_p2, _ = _ensure2(resolved, workspace_root=ws_root)
-            actual_file = str(_xlsx_p2)
+            snap = await run_in_threadpool(_open_route_snapshot, resolved, path, ws_root, workspace_id)
+            converted_bytes = snap.read_bytes()
             suffix = ".xlsx"
-        except Exception:
-            logger.warning("excel 流转换失败，返回原始文件: %s", resolved)
+        except Exception as exc:
+            logger.warning("excel 流转换失败: %s", resolved, exc_info=True)
+            return _error_json_response(422, f"旧版工作簿无法转换为 .xlsx: {exc}", code="CONVERSION_FAILED")  # type: ignore[return-value]
 
     content_type = (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -259,6 +262,9 @@ async def get_excel_file(request: Request) -> StreamingResponse:
     )
 
     def _iter_file():
+        if converted_bytes is not None:
+            yield converted_bytes
+            return
         with open(actual_file, "rb") as f:  # type: ignore[arg-type]
             while chunk := f.read(65536):
                 yield chunk
@@ -604,13 +610,11 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
     from excelmanus.workspace.file_service import WorkspaceFileService
 
     try:
-        from excelmanus.xls_converter import needs_conversion as _nc3, ensure_xlsx as _ensure3
+        from excelmanus.xls_converter import needs_conversion as _nc3
         if _nc3(resolved):
-            try:
-                _xlsx_p3, _ = await run_in_threadpool(_ensure3, resolved, workspace_root=ws_root)
-                resolved = str(_xlsx_p3)
-            except Exception:
-                pass
+            return _error_json_response(
+                400, "旧版工作簿可预览；请先显式转换为 .xlsx 后编辑", code="CONVERSION_REQUIRED",
+            )
 
         dest = _Path(resolved).resolve()
         try:
@@ -1758,14 +1762,18 @@ async def workspace_mkdir(request: Request) -> JSONResponse:
         return _error_json_response(400, "缺少 path 参数")
 
     _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
-    dest = svc.root / path.replace("\\", "/").lstrip("./")
+    try:
+        rel = resolve_canonical(svc.root, path).relative
+    except IdentityError as exc:
+        return _error_json_response(400, str(exc))
+    dest = svc.root / rel
     if dest.exists():
         return _error_json_response(409, "目录已存在" if dest.is_dir() else "目标已存在")
     try:
         svc.raise_if_failed(svc.mkdir(path))
     except Exception as exc:
         return _commit_http_error(exc)
-    return JSONResponse(content={"status": "created", "path": path})
+    return JSONResponse(content={"status": "created", "path": f"./{rel}"})
 
 @router.post("/api/v1/files/workspace/create")
 async def workspace_create_file(request: Request) -> JSONResponse:
@@ -1778,10 +1786,14 @@ async def workspace_create_file(request: Request) -> JSONResponse:
 
     _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
     try:
+        rel = resolve_canonical(svc.root, path).relative
+    except IdentityError as exc:
+        return _error_json_response(400, str(exc))
+    try:
         svc.raise_if_failed(svc.create(path, b""))
     except Exception as exc:
         return _commit_http_error(exc)
-    return JSONResponse(content={"status": "created", "path": path})
+    return JSONResponse(content={"status": "created", "path": f"./{rel}"})
 
 @router.delete("/api/v1/files/workspace/item")
 async def workspace_delete_item(request: Request) -> JSONResponse:
@@ -1793,7 +1805,11 @@ async def workspace_delete_item(request: Request) -> JSONResponse:
         return _error_json_response(400, "缺少 path 参数")
 
     _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
-    dest = svc.root / path.replace("\\", "/").lstrip("./")
+    try:
+        rel = resolve_canonical(svc.root, path).relative
+    except IdentityError as exc:
+        return _error_json_response(400, str(exc))
+    dest = svc.root / rel
     try:
         if dest.is_dir():
             receipt = svc.delete_tree(path, observe_live=True)
@@ -1805,7 +1821,7 @@ async def workspace_delete_item(request: Request) -> JSONResponse:
     manager = get_session_manager()
     if manager is not None:
         manager.notify_mutation(receipt.to_dict())
-    return JSONResponse(content={"status": "deleted", "path": path})
+    return JSONResponse(content={"status": "deleted", "path": f"./{rel}"})
 
 @router.post("/api/v1/files/workspace/rename")
 async def workspace_rename_item(request: Request) -> JSONResponse:
@@ -1817,7 +1833,12 @@ async def workspace_rename_item(request: Request) -> JSONResponse:
     if not old_path or not new_path:
         return _error_json_response(400, "缺少路径参数")
     _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
-    src = svc.root / old_path.replace("\\", "/").lstrip("./")
+    try:
+        old_rel = resolve_canonical(svc.root, old_path).relative
+        new_rel = resolve_canonical(svc.root, new_path).relative
+    except IdentityError as exc:
+        return _error_json_response(400, str(exc))
+    src = svc.root / old_rel
     try:
         if src.is_dir():
             receipt = svc.move_tree(old_path, new_path, observe_live=True)
@@ -1829,7 +1850,7 @@ async def workspace_rename_item(request: Request) -> JSONResponse:
     manager = get_session_manager()
     if manager is not None:
         manager.notify_mutation(receipt.to_dict())
-    return JSONResponse(content={"status": "renamed", "old_path": old_path, "new_path": new_path})
+    return JSONResponse(content={"status": "renamed", "old_path": f"./{old_rel}", "new_path": f"./{new_rel}"})
 
 @router.post("/api/v1/files/reveal")
 async def reveal_file(request: Request) -> JSONResponse:

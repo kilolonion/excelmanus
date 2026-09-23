@@ -159,6 +159,9 @@ scripts/*
 !scripts/security/
 scripts/security/*
 !scripts/security/scan_secrets.sh
+!scripts/package-release.mjs
+!scripts/package-release.ps1
+!scripts/package-release-macos.sh
 
 # ==============================
 # 测试报告

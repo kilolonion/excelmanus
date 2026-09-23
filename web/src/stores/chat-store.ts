@@ -4,6 +4,7 @@ import { isSubagentActive, subagentChangedFiles } from "@/lib/subagent-runs";
 import { loadCachedMessages, saveCachedMessages, deleteCachedMessages, clearAllCachedMessages } from "@/lib/idb-cache";
 import { fetchSessionMessages, fetchSessionExcelEvents, clearAllSessions } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
+import { isBlankSession } from "@/lib/session-loading";
 import { useExcelStore } from "@/stores/excel-store";
 import { useJevStore } from "@/stores/jev-store";
 import type { ExcelDiffEntry } from "@/stores/excel-store";
@@ -33,7 +34,20 @@ import {
 const _sessionMessages = new Map<string, Message[]>();
 const _sessionMessageMeta = new Map<string, { total: number; offset: number; hasMore: boolean }>();
 const _messageRefreshes = new Map<string, Promise<void>>();
-const MESSAGE_PAGE_SIZE = 100;
+const MESSAGE_PAGE_SIZE = 50;
+let _sessionLoadController: AbortController | null = null;
+let _localTurnVersion = 0;
+
+function _cacheSessionMessages(sessionId: string, messages: Message[]): void {
+  // Keep a bounded warm window; the full transcript remains server-owned.
+  _sessionMessages.delete(sessionId);
+  _sessionMessages.set(sessionId, messages.slice(-100));
+  if (_sessionMessages.size > 20) {
+    const oldest = _sessionMessages.keys().next().value;
+    if (oldest) { _sessionMessages.delete(oldest); _sessionMessageMeta.delete(oldest); }
+  }
+}
+
 
 // F5：switchSession 取消息令牌 —— 递归版本号，当 loadAndSwitch 检测到版本号变化后放送更新
 let _switchSessionVersion = 0;
@@ -107,8 +121,8 @@ function _patchMessageById(
 }
 
 interface LoadMessagesOptions {
-  preferCache?: boolean;
   replaceVisibleMessages?: boolean;
+  signal?: AbortSignal;
 }
 
 /**
@@ -153,33 +167,27 @@ function _preserveSseOnlyBlocks(
   oldMessages: Message[],
   newMessages: Message[],
 ): Message[] {
-  // 鎸夐『搴忔敹闆嗘棫 assistant 娑堟伅
-  const oldAssistant: AssistantBlock[][] = [];
-  for (const m of oldMessages) {
-    if (m.role === "assistant") oldAssistant.push(m.blocks);
+  const oldById = new Map(oldMessages.map((message) => [message.id, message]));
+  const oldUsers = oldMessages.filter((message) => message.role === "user");
+  const assistantsByUser = new Map<string, Extract<Message, { role: "assistant" }>>();
+  let previousUser = "";
+  for (const message of oldMessages) {
+    if (message.role === "user") previousUser = message.id;
+    else if (previousUser) assistantsByUser.set(previousUser, message);
   }
-  if (oldAssistant.length === 0) return newMessages;
-
-  // 同时保留用户消息的文件：内存中的消息可能含有更完整的 FileAttachment（含实际上传大小），
-  // 而后端从通知字符串无法完全还原。
-  const oldUserFiles: (FileAttachment[] | undefined)[] = [];
-  for (const m of oldMessages) {
-    if (m.role === "user") oldUserFiles.push(m.files);
-  }
-
-  let aIdx = 0;
-  let uIdx = 0;
+  let matchingUser: string | undefined;
   const result = newMessages.map((msg) => {
+    const exact = oldById.get(msg.id);
     if (msg.role === "user") {
-      const oldFiles = oldUserFiles[uIdx++];
-      // 鑻ユ棫娑堟伅鏈夋枃浠惰€屾柊娑堟伅娌℃湁鎴栨洿灏戯紝浼樺厛淇濈暀鏃х殑
-      if (oldFiles && oldFiles.length > 0 && (!msg.files || msg.files.length === 0)) {
-        return { ...msg, files: oldFiles };
-      }
-      return msg;
+      const old = exact?.role === "user" ? exact
+        : oldUsers.findLast((user) => user.content === msg.content);
+      matchingUser = old?.id;
+      return old?.files?.length && !msg.files?.length ? { ...msg, files: old.files } : msg;
     }
     if (msg.role !== "assistant") return msg;
-    const oldBlocks = oldAssistant[aIdx++];
+    const old = exact?.role === "assistant" ? exact
+      : matchingUser ? assistantsByUser.get(matchingUser) : undefined;
+    const oldBlocks = old?.blocks;
     if (!oldBlocks) return msg;
 
     // 鎸?toolCallId 寤虹珛鏃?tool_call 鍧楁槧灏勶紝鐢ㄤ簬鐘舵€佹仮澶嶃€?
@@ -252,37 +260,11 @@ function _preserveSseOnlyBlocks(
     return { ...msg, blocks: merged };
   });
 
-  // 鈹€鈹€ 杩藉姞鍚庣灏氭湭鎸佷箙鍖栫殑灏鹃儴鏃ф秷鎭?鈹€鈹€
-  // 褰撳悗绔繑鍥炵殑娑堟伅灏戜簬鏈湴锛堝閿欒鍙戠敓鍚庡姪鎵嬫秷鎭湭琚寔涔呭寲锛夛紝
-  // 棰濆鐨勬湰鍦版秷鎭紙鍚?failure_guidance 绛?SSE-only 鍧楋級浼氳涓婇潰鐨?map 涓㈠純銆?
-  // 姝ゅ灏嗚繖浜涙湭鍖归厤鐨勫熬閮ㄦ棫娑堟伅杩藉姞鍥炵粨鏋滐紝閬垮厤閿欒鎻愮ず琚埛鏂版帀銆?
-  if (aIdx < oldAssistant.length) {
-    let consumedA = 0;
-    let consumedU = 0;
-    for (let i = 0; i < oldMessages.length; i++) {
-      const m = oldMessages[i];
-      if (m.role === "assistant") {
-        if (consumedA < aIdx) { consumedA++; continue; }
-      } else if (m.role === "user") {
-        if (consumedU < uIdx) { consumedU++; continue; }
-      }
-      // 浠庣涓€鏉℃湭娑堣垂鐨勬秷鎭紑濮嬶紝妫€鏌ユ槸鍚︽湁鍊煎緱淇濈暀鐨?SSE-only 鍧?
-      const trailing = oldMessages.slice(i);
-      const hasPreservable = trailing.some(
-        (tm) => tm.role === "assistant" && tm.blocks.some((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type)),
-      );
-      if (hasPreservable) {
-        const lastNew = [...newMessages].reverse().find((m) => m.role === "assistant");
-        const dropStaleFailure = lastNew ? blocksHaveProgress(lastNew.blocks) : false;
-        result.push(
-          ...trailing.filter((tm) => {
-            if (!dropStaleFailure || tm.role !== "assistant") return true;
-            return !tm.blocks.some(isFailureGuidanceBlock) || blocksHaveProgress(tm.blocks);
-          }),
-        );
-      }
-      break;
-    }
+  // A failed local reply may not have reached durable history. Keep it only
+  // when the server ends at that same user turn, never by page-relative index.
+  if (result.at(-1)?.role === "user" && matchingUser) {
+    const trailing = assistantsByUser.get(matchingUser);
+    if (trailing?.blocks.some((block) => _SSE_ONLY_BLOCK_TYPES.has(block.type))) result.push(trailing);
   }
 
   return result;
@@ -720,11 +702,14 @@ function _mergeRecoveredExcelState(
  * 浠庡悗绔寔涔呭寲鐨?excel-events 绔偣鎭㈠ diff 鍜屾敼鍔ㄦ枃浠跺埌 store銆?
  * 杩斿洖鐨勬暟鎹潵鑷?SQLite锛屼笉渚濊禆鍓嶇鎺ㄦ柇锛岄噸鍚悗 100% 鍙仮澶嶃€?
  */
-async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
+async function _loadPersistedExcelEvents(sessionId: string, signal: AbortSignal | undefined, messages: Message[]): Promise<void> {
+  const toolCallIds = [...new Set(messages.flatMap((message) => message.role === "assistant"
+    ? message.blocks.flatMap((block) => block.type === "tool_call" && block.toolCallId ? [block.toolCallId] : []) : []))];
+  if (!toolCallIds.length || signal?.aborted) return;
   try {
-    const { diffs, previews, affected_files } = await fetchSessionExcelEvents(sessionId);
+    const { diffs, previews, affected_files } = await fetchSessionExcelEvents(sessionId, { signal, limit: 100, toolCallIds: toolCallIds.slice(0, 100) });
     if (diffs.length === 0 && previews.length === 0 && affected_files.length === 0) return;
-    if (useChatStore.getState().loadedSessionId !== sessionId) return;
+    if (signal?.aborted || useChatStore.getState().loadedSessionId !== sessionId) return;
 
     const excelStore = useExcelStore.getState();
     const sourceWorkspaceKey = workspaceKeyForSessionId(sessionId);
@@ -833,6 +818,9 @@ async function _loadMessagesAsyncWithOptions(
   sessionId: string,
   opts: LoadMessagesOptions,
 ): Promise<void> {
+  const turnVersion = _localTurnVersion;
+  const isCurrent = () => !opts.signal?.aborted
+    && useChatStore.getState().loadedSessionId === sessionId && turnVersion === _localTurnVersion;
   const maybeBackfillTitle = (messages: Message[]) => {
     const store = useSessionStore.getState();
     const current = store.sessions.find((s) => s.id === sessionId);
@@ -845,36 +833,17 @@ async function _loadMessagesAsyncWithOptions(
     }
   };
 
-  const shouldPreferCache = opts.preferCache !== false;
   const shouldReplaceVisibleMessages = opts.replaceVisibleMessages === true;
-
-  // 浼樺厛灏濊瘯 IndexedDB
-  if (shouldPreferCache) {
-    const cached = await loadCachedMessages(sessionId);
-    if (cached && cached.length > 0) {
-      _sessionMessages.set(sessionId, cached);
-      maybeBackfillTitle(cached);
-      const store = useChatStore.getState();
-      if (
-        store.loadedSessionId === sessionId
-        && !store.isStreaming
-        && !store.abortController
-        && (store.messages.length === 0 || shouldReplaceVisibleMessages)
-      ) {
-        useChatStore.getState().setMessages(cached);
-      }
-      // 娑堟伅宸插姞杞藉埌 store锛岀珛鍗虫仮澶?Excel 浜嬩欢骞跺洖濉?affectedFiles
-      _loadPersistedExcelEvents(sessionId).catch(() => {});
-      return;
-    }
-  }
+  const previousMeta = _sessionMessageMeta.get(sessionId);
 
   // 鍥為€€鍒板悗绔?API
   try {
     const result = await fetchSessionMessages(sessionId, MESSAGE_PAGE_SIZE, 0, {
       tail: true,
       withMeta: true,
+      signal: opts.signal,
     });
+    if (!isCurrent()) return;
     const page = Array.isArray(result)
       ? { messages: result, total: result.length, offset: 0, hasMore: false }
       : result;
@@ -891,14 +860,14 @@ async function _loadMessagesAsyncWithOptions(
       if (shouldReplaceVisibleMessages) {
         const current = useChatStore.getState();
         if (current.loadedSessionId === sessionId && !current.abortController) {
-          _sessionMessages.set(sessionId, []);
+          _cacheSessionMessages(sessionId, []);
           _sessionMessageMeta.set(sessionId, { total: 0, offset: 0, hasMore: false });
           saveCachedMessages(sessionId, []).catch(() => {});
           current.setMessages([]);
         }
       }
       if (useChatStore.getState().loadedSessionId === sessionId) {
-        useChatStore.setState({ messageLoadError: null });
+        useChatStore.setState({ messageLoadError: null, loadedMessageTotal: page.total, hasMoreMessages: false });
       }
       return;
     }
@@ -925,27 +894,14 @@ async function _loadMessagesAsyncWithOptions(
       shouldReplace && shouldReplaceVisibleMessages && store.messages.length > 0
         ? _preserveSseOnlyBlocks(store.messages, messages)
         : messages;
-    // A previous visit may have a complete transcript in memory/IndexedDB,
-    // while the revalidation intentionally fetched only the newest page. Keep
-    // the cached prefix when it can still fit the server total so the first
-    // background refresh does not make older visible messages disappear.
-    if (
-      shouldReplace
-      && shouldReplaceVisibleMessages
-      && page.total >= store.messages.length
-      && store.messages.length > messages.length
-    ) {
-      const freshIds = new Set(messages.map((message) => message.id));
-      const cachedPrefix = store.messages.filter((message) => !freshIds.has(message.id));
-      finalMessages = _mergeMessagePages(cachedPrefix, messages);
-    }
-    const visibleHasMore = page.hasMore;
-    _sessionMessageMeta.set(sessionId, {
-      total: page.total,
-      offset: visibleHasMore ? page.offset : 0,
-      hasMore: visibleHasMore,
-    });
-    _sessionMessages.set(sessionId, finalMessages);
+    const overlap = store.messages.findIndex((message) => message.id === messages[0]?.id);
+    const keepPrefix = shouldReplace && shouldReplaceVisibleMessages && overlap > 0
+      && previousMeta != null && previousMeta.offset < page.offset;
+    if (keepPrefix) finalMessages = _mergeMessagePages(store.messages.slice(0, overlap), finalMessages);
+    const visibleOffset = keepPrefix ? previousMeta.offset : page.offset;
+    const visibleHasMore = visibleOffset > 0;
+    _sessionMessageMeta.set(sessionId, { total: page.total, offset: visibleOffset, hasMore: visibleHasMore });
+    _cacheSessionMessages(sessionId, finalMessages);
     // A tail page may not contain the first user turn; deriving a title from
     // it would rename an existing conversation to an unrelated recent prompt.
     if (!visibleHasMore) maybeBackfillTitle(finalMessages);
@@ -959,7 +915,7 @@ async function _loadMessagesAsyncWithOptions(
         for (let i = 0; i < cur.length && equiv; i++) {
           const cm = cur[i];
           const fm = finalMessages[i];
-          if (cm.role !== fm.role) { equiv = false; break; }
+          if (cm.id !== fm.id || cm.role !== fm.role) { equiv = false; break; }
           if (cm.role === "user" && fm.role === "user") {
             equiv = cm.content === fm.content;
           } else if (cm.role === "assistant" && fm.role === "assistant") {
@@ -969,7 +925,8 @@ async function _loadMessagesAsyncWithOptions(
               const fb = fm.blocks[j];
               if (cb.type !== fb.type) { equiv = false; break; }
               if (cb.type === "tool_call" && fb.type === "tool_call") {
-                equiv = cb.status === fb.status && cb.toolCallId === fb.toolCallId;
+                equiv = cb.status === fb.status && cb.toolCallId === fb.toolCallId
+                  && cb.result === fb.result && cb.error === fb.error;
               } else if (cb.type === "text" && fb.type === "text") {
                 equiv = cb.content === fb.content;
               } else if (cb.type === "thinking" && fb.type === "thinking") {
@@ -991,8 +948,9 @@ async function _loadMessagesAsyncWithOptions(
       useChatStore.setState({ messageLoadError: null });
     }
     // 娑堟伅宸插姞杞斤紝绔嬪嵆鎭㈠ Excel 浜嬩欢骞跺洖濉?affectedFiles
-    _loadPersistedExcelEvents(sessionId).catch(() => {});
+    if (shouldReplace) _loadPersistedExcelEvents(sessionId, opts.signal, messages).catch(() => {});
   } catch (error) {
+    if (!isCurrent()) return;
     // Keep the cached/optimistic transcript visible, but expose the failure so
     // the UI can tell the user why a refresh is taking time and offer retry.
     const current = useChatStore.getState();
@@ -1011,18 +969,24 @@ export async function refreshSessionMessagesFromBackend(
 
   const refresh = (async () => {
     const current = useChatStore.getState();
+    const controller = _sessionLoadController ??= new AbortController();
+    if (current.loadedSessionId !== sessionId) return;
     if (current.loadedSessionId === sessionId) {
-      useChatStore.setState({ isLoadingMessages: true, messageLoadError: null });
+      useChatStore.setState({
+        isLoadingMessages: current.messages.length === 0 && current.loadedMessageTotal === null,
+        isRefreshingMessages: true,
+        messageLoadError: null,
+      });
     }
     try {
       await _loadMessagesAsyncWithOptions(sessionId, {
-        preferCache: false,
         replaceVisibleMessages: true,
+        signal: controller.signal,
       });
     } finally {
       const latest = useChatStore.getState();
-      if (latest.loadedSessionId === sessionId) {
-        useChatStore.setState({ isLoadingMessages: false });
+      if (!controller.signal.aborted && latest.loadedSessionId === sessionId) {
+        useChatStore.setState({ isLoadingMessages: false, isRefreshingMessages: false });
       }
     }
   })();
@@ -1046,20 +1010,22 @@ async function _loadOlderMessages(): Promise<void> {
   }
 
   useChatStore.setState({ isLoadingOlderMessages: true });
+  const signal = _sessionLoadController?.signal;
   try {
     const nextLimit = Math.min(MESSAGE_PAGE_SIZE, meta.offset);
     const nextOffset = Math.max(0, meta.offset - nextLimit);
     const result = await fetchSessionMessages(sessionId, nextLimit, nextOffset, {
       withMeta: true,
+      signal,
     });
     const page = Array.isArray(result)
       ? { messages: result, total: result.length, offset: nextOffset, hasMore: nextOffset > 0 }
       : result;
     const latest = useChatStore.getState();
-    if (latest.loadedSessionId !== sessionId) return;
+    if (signal?.aborted || latest.loadedSessionId !== sessionId) return;
     const converted = _convertBackendMessages(page.messages);
     const merged = _mergeMessagePages(converted.messages, latest.messages);
-    _sessionMessages.set(sessionId, merged);
+    _cacheSessionMessages(sessionId, merged);
     _sessionMessageMeta.set(sessionId, {
       total: page.total,
       offset: page.offset,
@@ -1072,8 +1038,13 @@ async function _loadOlderMessages(): Promise<void> {
     });
     saveCachedMessages(sessionId, merged).catch(() => {});
     _mergeRecoveredExcelState(converted.recoveredDiffs, converted.recoveredFilePaths, sessionId);
+    void _loadPersistedExcelEvents(sessionId, signal, converted.messages);
+  } catch (error) {
+    if (!signal?.aborted && useChatStore.getState().loadedSessionId === sessionId) {
+      useChatStore.setState({ messageLoadError: `更早消息加载失败：${error instanceof Error ? error.message : "网络请求失败"}` });
+    }
   } finally {
-    if (useChatStore.getState().loadedSessionId === sessionId) {
+    if (!signal?.aborted && useChatStore.getState().loadedSessionId === sessionId) {
       useChatStore.setState({ isLoadingOlderMessages: false });
     }
   }
@@ -1113,6 +1084,7 @@ interface ChatState {
   batchProgress: BatchProgress | null;
   toolProgress: Record<string, { stage: string; message: string }>;
   isLoadingMessages: boolean;
+  isRefreshingMessages: boolean;
   loadedMessageTotal: number | null;
   hasMoreMessages: boolean;
   isLoadingOlderMessages: boolean;
@@ -1182,6 +1154,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   batchProgress: null,
   toolProgress: {},
   isLoadingMessages: false,
+  isRefreshingMessages: false,
   loadedMessageTotal: null,
   hasMoreMessages: false,
   isLoadingOlderMessages: false,
@@ -1198,6 +1171,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
   addUserMessage: (id, content, files, workbookAction, workbookContext) =>
     set((state) => {
+      _localTurnVersion++;
       const message: Message = { id, role: "user", content, files, timestamp: Date.now(), ...(workbookAction ? { workbookAction } : {}), ...(workbookContext ? { workbookContext } : {}) };
       const newOrder = [...state.messageOrder, id];
       const newById = { ...state.messagesById, [id]: message };
@@ -1437,6 +1411,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { toolProgress: rest };
     }),
   clearMessages: () => {
+    _sessionLoadController?.abort();
+    _sessionLoadController = null;
+    _messageRefreshes.clear();
     const { loadedSessionId } = get();
     if (loadedSessionId) {
       _sessionMessages.delete(loadedSessionId);
@@ -1446,6 +1423,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       ..._setMessagesSnapshot([]),
       isLoadingMessages: false,
+      isRefreshingMessages: false,
       loadedMessageTotal: 0,
       hasMoreMessages: false,
       isLoadingOlderMessages: false,
@@ -1466,10 +1444,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     const state = get();
     if (state.loadedSessionId === sessionId) {
+      _sessionLoadController?.abort();
+      _sessionLoadController = null;
+      _messageRefreshes.delete(sessionId);
       set({
         loadedSessionId: null,
         ..._setMessagesSnapshot([]),
         isLoadingMessages: false,
+        isRefreshingMessages: false,
         loadedMessageTotal: 0,
         hasMoreMessages: false,
         isLoadingOlderMessages: false,
@@ -1491,6 +1473,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       stopGeneration();
     }
     await clearAllSessions();
+    _sessionLoadController?.abort();
+    _sessionLoadController = null;
     _sessionMessages.clear();
     _sessionMessageMeta.clear();
     _messageRefreshes.clear();
@@ -1501,6 +1485,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       loadedSessionId: null,
       ..._setMessagesSnapshot([]),
       isLoadingMessages: false,
+      isRefreshingMessages: false,
       loadedMessageTotal: null,
       hasMoreMessages: false,
       isLoadingOlderMessages: false,
@@ -1516,7 +1501,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   saveCurrentSession: () => {
     const { loadedSessionId, messages } = get();
     if (loadedSessionId && messages.length > 0) {
-      _sessionMessages.set(loadedSessionId, [...messages]);
+      _cacheSessionMessages(loadedSessionId, [...messages]);
       saveCachedMessages(loadedSessionId, messages).catch(() => {});
     }
   },
@@ -1525,7 +1510,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const state = get();
     if (state.loadedSessionId === sessionId) return;
     if (state.loadedSessionId && state.messages.length > 0) {
-      _sessionMessages.set(state.loadedSessionId, [...state.messages]);
+      _cacheSessionMessages(state.loadedSessionId, [...state.messages]);
       saveCachedMessages(state.loadedSessionId, state.messages).catch(() => {});
     }
     set({ loadedSessionId: sessionId });
@@ -1535,150 +1520,43 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchSession: (sessionId) => {
     const state = get();
-
-    // Do not bind a different session while an SSE stream is still writing to
-    // the current one. SessionSync retries the switch when the stream closes;
-    // changing loadedSessionId here would make that retry look like a no-op
-    // and could leave the old transcript attached to the new session.
-    if (state.abortController) {
-      if (state.isLoadingMessages) useChatStore.setState({ isLoadingMessages: false });
-      return;
-    }
-
-    // 已绑定该会话：流式输出中跳过；已有消息由 SessionSync 的显式
-    // revalidation 负责更新，避免每次轮询都重建历史。
-    if (sessionId === state.loadedSessionId) {
-      if (!sessionId || state.messages.length > 0) return;
-    }
+    // A live stream owns its transcript until it is detached/stopped.
+    if (state.abortController) return;
+    // Empty is a loaded state too. SessionSync and explicit navigation must
+    // share one load, including while the first request is still pending.
+    if (sessionId === state.loadedSessionId && (
+      !sessionId || state.isLoadingMessages || state.isRefreshingMessages
+      || state.loadedMessageTotal !== null || state.messages.length > 0
+    )) return;
 
     if (state.loadedSessionId && state.messages.length > 0) {
-      _sessionMessages.set(state.loadedSessionId, [...state.messages]);
+      _cacheSessionMessages(state.loadedSessionId, [...state.messages]);
       saveCachedMessages(state.loadedSessionId, state.messages).catch(() => {});
     }
-
+    _sessionLoadController?.abort();
+    if (state.loadedSessionId) _messageRefreshes.delete(state.loadedSessionId);
+    const controller = new AbortController();
+    _sessionLoadController = controller;
+    const version = ++_switchSessionVersion;
+    const isCurrent = () => !controller.signal.aborted && version === _switchSessionVersion
+      && get().loadedSessionId === sessionId;
     useJevStore.getState().reset();
 
-    const myVersion = ++_switchSessionVersion;
-
-    const finishLoad = () => {
-      if (_switchSessionVersion === myVersion && get().loadedSessionId === sessionId) {
-        useChatStore.setState({ isLoadingMessages: false });
-      }
-    };
-
-    // Cache is only the fast first paint. Always revalidate it from SQLite/API
-    // in the background so a stale tab cannot hide messages until the user
-    // sends another message or clicks another control.
-    const revalidateFromBackend = () => {
-      if (!sessionId || _switchSessionVersion !== myVersion) return;
-      if (get().abortController) {
-        finishLoad();
-        return;
-      }
-      _loadMessagesAsyncWithOptions(sessionId, {
-        preferCache: false,
-        replaceVisibleMessages: true,
-      }).finally(finishLoad);
-    };
-
-    const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
-    if (sessionId && memCached && memCached.length > 0) {
-      set({
-        loadedSessionId: sessionId,
-        ..._setMessagesSnapshot(memCached),
-        isLoadingMessages: true,
-        loadedMessageTotal: _sessionMessageMeta.get(sessionId)?.total ?? memCached.length,
-        hasMoreMessages: _sessionMessageMeta.get(sessionId)?.hasMore ?? false,
-        isLoadingOlderMessages: false,
-        messageLoadError: null,
-        pendingApproval: null,
-        pendingQuestion: null,
-        pipelineStatus: null,
-        resumeFailedReason: null,
-      });
-      _loadPersistedExcelEvents(sessionId).catch(() => {});
-      revalidateFromBackend();
-      return;
-    }
-
-    const loadAndSwitch = async () => {
-      if (!sessionId) {
-        set({
-          loadedSessionId: null,
-          ..._setMessagesSnapshot([]),
-          isLoadingMessages: false,
-          loadedMessageTotal: 0,
-          hasMoreMessages: false,
-          isLoadingOlderMessages: false,
-          messageLoadError: null,
-          pendingApproval: null,
-          pendingQuestion: null,
-          pipelineStatus: null,
-          activeStreamId: null,
-          latestSeq: 0,
-          resumeFailedReason: null,
-        });
-        return;
-      }
-
-      try {
-        const cached = await loadCachedMessages(sessionId);
-        if (cached && cached.length > 0) {
-          if (_switchSessionVersion !== myVersion) return;
-          if (get().abortController) {
-            finishLoad();
-            return;
-          }
-          _sessionMessages.set(sessionId, cached);
-          set({
-            loadedSessionId: sessionId,
-            ..._setMessagesSnapshot(cached),
-            isLoadingMessages: true,
-            loadedMessageTotal: _sessionMessageMeta.get(sessionId)?.total ?? cached.length,
-            hasMoreMessages: _sessionMessageMeta.get(sessionId)?.hasMore ?? false,
-            isLoadingOlderMessages: false,
-            messageLoadError: null,
-            pendingApproval: null,
-            pendingQuestion: null,
-            pipelineStatus: null,
-            resumeFailedReason: null,
-          });
-          _loadPersistedExcelEvents(sessionId).catch(() => {});
-          revalidateFromBackend();
-          return;
-        }
-      } catch {
-        // IndexedDB 失败，继续后续流程
-      }
-
-      if (_switchSessionVersion !== myVersion) return;
-      if (get().abortController) {
-        finishLoad();
-        return;
-      }
-
-      set({
-        loadedSessionId: sessionId,
-        ..._setMessagesSnapshot([]),
-        loadedMessageTotal: null,
-        hasMoreMessages: false,
-        isLoadingOlderMessages: false,
-        messageLoadError: null,
-        pendingApproval: null,
-        pendingQuestion: null,
-        pipelineStatus: null,
-        activeStreamId: null,
-        latestSeq: 0,
-        resumeFailedReason: null,
-      });
-      _loadMessagesAsyncWithOptions(sessionId, { preferCache: false }).finally(finishLoad);
-    };
-
-    // 立即绑定 loadedSessionId，但保持当前消息直到新消息加载完成。
-    // 不写 session-store：选中态由 setActiveSession 单源更新。
+    const session = useSessionStore.getState().sessions.find((item) => item.id === sessionId);
+    const blank = isBlankSession(session);
+    const cached = sessionId && !blank ? _sessionMessages.get(sessionId) : undefined;
+    if (cached?.length === 100 && sessionId) _sessionMessageMeta.delete(sessionId);
+    const meta = sessionId ? _sessionMessageMeta.get(sessionId) : undefined;
+    const ready = !sessionId || blank || Boolean(cached?.length);
+    // Never label the previous conversation's messages with the new id.
     set({
       loadedSessionId: sessionId,
-      isLoadingMessages: true,
+      ..._setMessagesSnapshot(cached ?? []),
+      isLoadingMessages: !ready,
+      isRefreshingMessages: false,
+      loadedMessageTotal: blank || !sessionId ? 0 : meta?.total ?? null,
+      hasMoreMessages: !blank && Boolean(meta?.hasMore),
+      isLoadingOlderMessages: false,
       messageLoadError: null,
       pendingApproval: null,
       pendingQuestion: null,
@@ -1686,11 +1564,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       activeStreamId: null,
       latestSeq: 0,
       resumeFailedReason: null,
-      loadedMessageTotal: sessionId ? null : 0,
-      hasMoreMessages: false,
-      isLoadingOlderMessages: false,
+      isStreaming: false,
     });
+    if (!sessionId || blank) return;
 
-    loadAndSwitch();
+    // IDB is a speculative first paint, never a prerequisite for HTTP. A
+    // blocked/slow local database cannot stall history restoration forever.
+    if (!cached?.length) {
+      void loadCachedMessages(sessionId).then((messages) => {
+        const latest = get();
+        if (!isCurrent() || !messages?.length || !latest.isLoadingMessages
+          || latest.abortController || latest.isStreaming) return;
+        _cacheSessionMessages(sessionId, messages);
+        set({ ..._setMessagesSnapshot(messages), isLoadingMessages: false });
+      }).catch(() => {});
+    }
+    void refreshSessionMessagesFromBackend(sessionId);
   },
 }));

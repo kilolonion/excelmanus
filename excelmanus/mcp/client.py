@@ -139,16 +139,19 @@ class MCPClientWrapper:
         ready: asyncio.Future[None],
         close_requested: asyncio.Event,
     ) -> None:
-        self._exit_stack = AsyncExitStack()
+        exit_stack = AsyncExitStack()
+        self._exit_stack = exit_stack
         try:
             if self._config.transport == "stdio":
-                read_stream, write_stream = await self._connect_stdio()
+                read_stream, write_stream = await self._connect_stdio(exit_stack)
             elif self._config.transport == "sse":
-                read_stream, write_stream = await self._connect_sse()
+                read_stream, write_stream = await self._connect_sse(exit_stack)
             else:
-                read_stream, write_stream = await self._connect_streamable_http()
+                read_stream, write_stream = await self._connect_streamable_http(
+                    exit_stack
+                )
 
-            session = await self._exit_stack.enter_async_context(
+            session = await exit_stack.enter_async_context(
                 ClientSession(read_stream, write_stream)
             )
             await session.initialize()
@@ -168,22 +171,22 @@ class MCPClientWrapper:
             self._session = None
             await self._cleanup_exit_stack()
 
-    async def _connect_stdio(self) -> tuple[Any, Any]:
+    async def _connect_stdio(self, exit_stack: AsyncExitStack) -> tuple[Any, Any]:
         """建立 stdio 传输连接，返回 (read_stream, write_stream)。"""
         params = StdioServerParameters(
             command=self._config.command,
             args=self._config.args or [],
             env=self._config.env or None,
         )
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
+        read_stream, write_stream = await exit_stack.enter_async_context(
             stdio_client(params)
         )
         return read_stream, write_stream
 
-    async def _connect_sse(self) -> tuple[Any, Any]:
+    async def _connect_sse(self, exit_stack: AsyncExitStack) -> tuple[Any, Any]:
         """建立 SSE 传输连接，返回 (read_stream, write_stream)。"""
         headers = self._config.headers or None
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
+        read_stream, write_stream = await exit_stack.enter_async_context(
             sse_client(
                 self._config.url,
                 headers=headers,
@@ -193,18 +196,20 @@ class MCPClientWrapper:
         )
         return read_stream, write_stream
 
-    async def _connect_streamable_http(self) -> tuple[Any, Any]:
+    async def _connect_streamable_http(
+        self, exit_stack: AsyncExitStack
+    ) -> tuple[Any, Any]:
         """建立 Streamable HTTP 传输连接，返回 (read_stream, write_stream)。"""
         if streamable_http_client is None or streamable_http_client is _SDK_UNSET:
             raise RuntimeError("当前 mcp SDK 不支持 streamable_http 传输")
 
-        http_client = await self._exit_stack.enter_async_context(
+        http_client = await exit_stack.enter_async_context(
             _new_streamable_httpx_client(
                 headers=self._config.headers or None,
                 timeout=self._config.timeout,
             )
         )
-        streams = await self._exit_stack.enter_async_context(
+        streams = await exit_stack.enter_async_context(
             streamable_http_client(self._config.url, http_client=http_client)
         )
         return _unpack_transport_streams(streams)
@@ -399,12 +404,15 @@ def _new_streamable_httpx_client(
     旧版 SDK 仍使用 ``httpx.AsyncClient``。
     """
     try:
-        import httpx2 as http_mod
+        import httpx2
     except ImportError:  # pragma: no cover - 兼容未安装 httpx2 的旧 SDK
-        http_mod = httpx
-    return http_mod.AsyncClient(
+        return httpx.AsyncClient(
+            headers=headers,
+            timeout=httpx.Timeout(timeout, read=timeout * 10),
+        )
+    return httpx2.AsyncClient(
         headers=headers,
-        timeout=http_mod.Timeout(timeout, read=timeout * 10),
+        timeout=httpx2.Timeout(timeout, read=timeout * 10),
     )
 
 

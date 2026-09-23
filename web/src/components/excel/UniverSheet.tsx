@@ -4,6 +4,7 @@ import { isSingleCellSelection, readActiveRange } from "@/lib/excel-selection";
 
 import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { Loader2 } from "lucide-react";
 import type { ICellData, IDisposable, IRange } from "@univerjs/core";
 import type { FUniver, IEventParamConfig } from "@univerjs/core/facade";
 import type { FWorksheet } from "@univerjs/sheets/facade";
@@ -30,7 +31,7 @@ import { useWorkbookFocusStore } from "@/stores/workbook-focus-store";
 import { highlightWorkbookRanges, type WorkbookHighlightRegistry } from "@/lib/workbook-focus";
 import { saveBlob } from "@/lib/save-blob";
 import { letterToColIndex, windowCellPatch, demoWorkbookView, viewMatchesLease, viewSnapshotToUniver, type WorkbookViewSnapshot } from "@/lib/workbook-view";
-import { pageForCell, pagesForViewport, rangeIsLoaded, mergeViewWindows, firstUnloadedCell } from "@/lib/workbook-window";
+import { INITIAL_WORKBOOK_VIEW_RECT, pageForCell, pagesForViewport, rangeIsLoaded, mergeViewWindows, firstUnloadedCell } from "@/lib/workbook-window";
 import { normalizeRelativePath, versionStoreKey, type WorkspaceFileRef } from "@/lib/workspace-file-ref";
 import { activateWorkbookSheet } from "@/lib/excel-univer-lifecycle";
 import {
@@ -49,6 +50,7 @@ import type { WorkbookViewState } from "@/stores/workbook-conversation-store";
 import { registerAgentContextMenu, type AgentMenuSelection } from "@/lib/excel-agent-menu";
 import { useWorkbookWorkflowStore } from "@/stores/workbook-workflow-store";
 import { captureWorkbookParameters, workbookCommandRange, workbookOperationKind } from "@/lib/workbook-handoff";
+import { WorkbookLoadingState } from "./WorkbookLoadingState";
 
 export { prefetchUniverModules, warmUniverModules } from "@/lib/univer-modules";
 
@@ -89,7 +91,7 @@ const LOADING_SHEET_ID = "__excelmanus_loading__";
 // The first request only needs enough cells to paint the opening viewport.
 // The actual visible window is fetched after Univer knows the container size;
 // asking for the legacy 10k-cell default here made large workbooks feel frozen.
-const INITIAL_VIEW_RECT = "A1:Z80";
+const INITIAL_VIEW_RECT = INITIAL_WORKBOOK_VIEW_RECT;
 
 function loadingFileKey(file: WorkspaceFileRef | null | undefined, path: string) {
   return `${file?.workspaceKey || "_"}|${path.replace(/^\.\//, "")}`;
@@ -556,21 +558,23 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
       && !editingRef.current && !hasPendingWorkbookEdits(file) && !isWorkbookEditPaused(file);
     try {
       let expected = version;
-      for (const page of pages) {
-        if (!valid()) return;
-        const pageKey = `${expected}|${name}|${page.address}`;
-        const loaded = rangeIsLoaded(viewRef.current!, name, page.rect);
-        if (!refresh && loaded && (!withStylesRef.current || styledPagesRef.current.has(pageKey))) continue;
-        setWindowStatus(loaded ? "正在同步格式…" : `正在加载 ${name} · ${page.address}…`);
+
+      // Values and formatting have different priorities. Fetch the visible
+      // values first so a slow style/merge pass can never delay the first
+      // useful paint. This mirrors spreadsheet clients that hydrate the grid
+      // from a compact value stream and decorate it afterwards.
+      const applyPage = async (page: ReturnType<typeof pageForCell>, styles: boolean) => {
+        if (!valid()) return false;
         const next = await fetchWorkbookView({ path: file.relative, workspaceKey: file.workspaceKey,
           workspaceId: file.workspaceId, sessionId: identity.sessionId || undefined,
-          expectedVersion: expected, sheet: name, rect: page.address, withStyles: withStylesRef.current,
+          expectedVersion: expected, sheet: name, rect: page.address, withStyles: styles,
           signal: controller.signal });
-        if (!valid()) return;
-        const current = viewRef.current!;
+        if (!valid()) return false;
+        const current = viewRef.current;
+        if (!current) return false;
         if (current.sheets.map((s) => s.name).join("\0") !== next.sheets.map((s) => s.name).join("\0")) {
           await loadDataRef.current(api, name);
-          return;
+          return false;
         }
         applyWindow(next);
         viewRef.current = current.content_version === next.content_version && !needsRefreshRef.current
@@ -580,9 +584,24 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         expected = next.content_version;
         rememberSnapshotVersion(file.relative, next.content_version, file.workspaceKey);
         onViewStateRef.current?.({ status: "ready", sheet: name, version: next.content_version });
-        if (next.with_styles !== false) styledPagesRef.current.add(`${expected}|${name}|${page.address}`);
+        if (styles && next.with_styles !== false) styledPagesRef.current.add(`${expected}|${name}|${page.address}`);
         setError(null);
         externalRefreshRef.current = false;
+        return true;
+      };
+
+      for (const page of pages) {
+        if (!valid()) return;
+        const loaded = rangeIsLoaded(viewRef.current!, name, page.rect);
+        const styleKey = `${expected}|${name}|${page.address}`;
+        if (refresh || !loaded) {
+          setWindowStatus(`正在加载 ${name} · ${page.address}…`);
+          if (!await applyPage(page, false)) return;
+        }
+        if (withStylesRef.current && (refresh || !styledPagesRef.current.has(styleKey))) {
+          setWindowStatus("正在同步格式…");
+          if (!await applyPage(page, true)) return;
+        }
       }
       setSyncing(false);
       setWindowStatus(null);
@@ -596,9 +615,12 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         if (!prefetchedPagesRef.current.has(key)) {
           prefetchedPagesRef.current.add(key);
           if (prefetchedPagesRef.current.size > 16) prefetchedPagesRef.current.delete(prefetchedPagesRef.current.values().next().value!);
-          await fetchWorkbookView({ path: file.relative, workspaceKey: file.workspaceKey,
+          // Speculate with values only. Formatting is deliberately deferred
+          // until the page becomes visible so the prefetch cannot compete with
+          // the current viewport for CPU or bandwidth.
+          void fetchWorkbookView({ path: file.relative, workspaceKey: file.workspaceKey,
             workspaceId: file.workspaceId, sessionId: identity.sessionId || undefined,
-            expectedVersion: expected, sheet: name, rect: neighbour.address, withStyles: withStylesRef.current,
+            expectedVersion: expected, sheet: name, rect: neighbour.address, withStyles: false,
             signal: controller.signal }).catch(() => { prefetchedPagesRef.current.delete(key); });
         }
       }
@@ -1367,7 +1389,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   });
 
   return (
-    <div className={`relative w-full h-full ${fitContainer ? "min-h-0" : "min-h-[400px]"} bg-white dark:bg-gray-800`} data-workbook-loading={loading || undefined} aria-busy={loading}>
+    <div className={`relative isolate w-full h-full ${fitContainer ? "min-h-0" : "min-h-[400px]"} bg-white dark:bg-gray-800`} data-workbook-loading={loading || undefined} aria-busy={loading}>
       <div
         ref={containerRef}
         className="w-full h-full bg-white dark:bg-gray-800"
@@ -1385,20 +1407,20 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         </div>
       )}
       {loading && (
-        <div className={engineReady
-          ? "absolute bottom-10 right-3 max-w-[90%] rounded border bg-background/95 px-3 py-2 text-sm text-muted-foreground shadow-sm pointer-events-none z-10"
-          : "absolute inset-0 flex items-center justify-center gap-2 bg-background text-sm text-muted-foreground z-10"
-        } role="status" aria-live="polite">
-          <span className="truncate">{engineReady ? `正在读取 ${fileBaseName(filePath)}…` : "正在准备表格…"}</span>
-        </div>
+        <WorkbookLoadingState
+          compact={engineReady}
+          label={engineReady ? `正在读取 ${fileBaseName(filePath)}` : "正在准备表格"}
+          detail={engineReady ? "先显示首屏数据，随后补齐格式" : "正在启动表格引擎"}
+        />
       )}
       {!loading && (windowStatus || saving || syncing) && !error && (
-        <div role="status" aria-live="polite" className="absolute bottom-8 right-3 max-w-[90%] rounded border bg-background/95 px-3 py-1.5 text-xs text-muted-foreground shadow-sm pointer-events-none">
-          {saving ? "正在保存…" : windowStatus || "正在同步最新版本…"}
+        <div role="status" aria-live="polite" className="absolute top-16 right-3 z-[1000] flex max-w-[min(90%,360px)] items-center gap-2 rounded-xl border border-[color-mix(in_srgb,var(--em-primary)_18%,var(--em-line))] bg-background/95 px-3 py-2 text-xs text-muted-foreground shadow-lg backdrop-blur-md pointer-events-none">
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--em-primary)]" aria-hidden="true" />
+          <span className="truncate">{saving ? "正在保存更改" : windowStatus || "正在同步最新版本"}</span>
         </div>
       )}
       {error && (
-        <div role="alert" className={`absolute z-20 bg-background/95 border p-3 ${viewRef.current ? "bottom-8 left-3 right-3 rounded shadow-sm" : "inset-x-3 top-24 rounded"}`}>
+        <div role="alert" className={`absolute z-[1100] bg-background/95 border p-3 ${viewRef.current ? "bottom-8 left-3 right-3 rounded-xl shadow-lg" : "inset-x-3 top-24 rounded-xl shadow-lg"}`}>
           <div className="flex items-center gap-3"><span className="text-sm text-destructive flex-1">{error}</span>
             {identityRef.current.fileRef && isWorkbookEditPaused(identityRef.current.fileRef) && <button className="text-sm underline shrink-0" type="button" onClick={() => {
               const { fileRef: file, sessionId } = identityRef.current;

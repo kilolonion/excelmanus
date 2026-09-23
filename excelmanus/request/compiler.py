@@ -569,6 +569,14 @@ async def _compile_request(
         else:
             series.note(event)
 
+    memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
+    if memory is not None and getattr(memory, "_projection_dirty", False) is True:
+        # replace_tool_result / annotate_tool_result explicitly mark edits to
+        # already projected results. Record the cause before assemble_envelope
+        # consumes that flag, so the independent series guard can accept this
+        # tracked rewrite without relaxing protection against unrelated edits.
+        series.note("rollback/edit", source="tool_result_projection")
+
     if vision_capable is None:
         vision_capable = bool(getattr(engine, "_is_vision_capable", True))
 

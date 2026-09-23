@@ -61,6 +61,9 @@ def _prefix_fingerprint(messages: list[dict]) -> tuple[int, str]:
     for msg in messages:
         content = msg.get("content") if isinstance(msg, dict) else ""
         h.update(str(content or "").encode("utf-8", "replace"))
+        context = msg.get("_tool_result_context") if isinstance(msg, dict) else None
+        if context:
+            h.update(json.dumps(context, sort_keys=True, ensure_ascii=False).encode("utf-8"))
         h.update(b"\x00")
     return (len(messages), h.hexdigest())
 
@@ -257,8 +260,11 @@ class ConversationMemory:
     @staticmethod
     def _message_token_key(message: dict) -> str:
         """消息内容的稳定 digest（含 role/tool_calls，排除易变内部键）。"""
+        projected = {k: v for k, v in message.items() if not str(k).startswith("_")}
+        if message.get("role") == "tool":
+            projected["content"] = ConversationMemory._tool_content_with_context(message, message.get("content"))
         body = json.dumps(
-            {k: v for k, v in message.items() if not str(k).startswith("_")},
+            projected,
             ensure_ascii=False, sort_keys=True, default=str,
         )
         return hashlib.md5(body.encode("utf-8")).hexdigest()
@@ -514,7 +520,10 @@ class ConversationMemory:
         cached = self._msg_token_cache.get(key)
         if cached is not None:
             return cached
-        value = self._token_counter.count_message(message, config=cfg, deepseek=deepseek)
+        counted = message
+        if message.get("_tool_result_context"):
+            counted = {**message, "content": self._tool_content_with_context(message, message.get("content"))}
+        value = self._token_counter.count_message(counted, config=cfg, deepseek=deepseek)
         if len(self._msg_token_cache) > 8192:
             self._msg_token_cache.clear()
         self._msg_token_cache[key] = value
@@ -580,6 +589,37 @@ class ConversationMemory:
         self._messages.append(message)
         self._emit("tool/result", message)
 
+    def annotate_tool_result(self, tool_call_id: str, *, source: str, text: str) -> bool:
+        """Attach host advice to its tool result, without inventing a user turn.
+
+        Raw result and its compact projection stay intact. The annotation is
+        durable, explicitly attributed, and rendered only with that result.
+        """
+        if not tool_call_id or not source or not text:
+            return False
+        context = {"source": source, "text": text}
+        for msg in reversed(self._messages):
+            if msg.get("role") != "tool" or msg.get("tool_call_id") != tool_call_id:
+                continue
+            if msg.get("_tool_result_context") == context:
+                return True
+            msg["_tool_result_context"] = context
+            self._emit_replace(msg, kind="tool/result")
+            if tool_call_id in self._wire_sent_tool_ids:
+                self._projection_dirty = True
+            return True
+        return False
+
+    @staticmethod
+    def _tool_content_with_context(msg: dict, content: Any) -> Any:
+        context = msg.get("_tool_result_context")
+        if msg.get("role") != "tool" or not isinstance(content, str) or not isinstance(context, dict):
+            return content
+        source, text = context.get("source"), context.get("text")
+        if not isinstance(source, str) or not isinstance(text, str):
+            return content
+        return f"{content}\n\n[工具辅助信息：{source}；非用户要求，不改变任务或授权]\n{text}"
+
     def replace_tool_result(self, tool_call_id: str, content: str) -> bool:
         """替换已有工具结果消息的内容（按 tool_call_id 匹配最后一条）。
 
@@ -589,10 +629,11 @@ class ConversationMemory:
         """
         for msg in reversed(self._messages):
             if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
-                if msg.get("content") == content:
+                if msg.get("content") == content and not msg.get("_tool_result_context"):
                     return True
                 msg["content"] = content
                 msg.pop("_projection_content", None)
+                msg.pop("_tool_result_context", None)
                 # 审批替换：已上链则落 replace 事件（原文留在日志里），
                 # 未上链则原地改 durable——两种路径模型可见行为一致。
                 self._emit_replace(msg, kind="tool/result")
@@ -625,7 +666,10 @@ class ConversationMemory:
         system_msgs = self.build_system_messages(system_prompts)
         output: list[dict] = []
         for msg in self._messages:
-            output.append({k: v for k, v in msg.items() if not str(k).startswith("_")})
+            clean = {k: v for k, v in msg.items() if not str(k).startswith("_")}
+            if msg.get("role") == "tool":
+                clean["content"] = self._tool_content_with_context(msg, clean.get("content"))
+            output.append(clean)
         return system_msgs + output
 
     def project_for_request(
@@ -650,6 +694,8 @@ class ConversationMemory:
             projection_content = msg.get("_projection_content")
             if msg.get("role") == "tool" and isinstance(projection_content, str):
                 clean["content"] = projection_content
+            if msg.get("role") == "tool":
+                clean["content"] = self._tool_content_with_context(msg, clean.get("content"))
             projected.append(clean)
         body = _sanitize_messages_for_api(projected)
         # 记录发送时刻的 surface 快照；请求成功后由

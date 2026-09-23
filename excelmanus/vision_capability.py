@@ -27,7 +27,9 @@ _NON_VISION_KEYWORDS = (
     "mistral-small-3.0", "mistral-small-3.1",
     "gemma-3-1b",
     "embedding", "embed", "rerank", "tts", "whisper",
-    "transcribe", "realtime", "moderation", "audio",
+    "transcribe", "realtime", "moderation", "audio", "asr",
+    # MiMo 纯文本/语音型号（mimo-v2.5-pro 无全模态，v2-pro/v2-flash 为纯文本）
+    "mimo-v2.5-pro", "mimo-v2-pro", "mimo-v2-flash",
 )
 
 # 命中即疑似视觉模型
@@ -54,7 +56,8 @@ _VISION_KEYWORDS = (
     "llama-3.2", "llama-4",
     "pixtral",
     "ministral-3b", "ministral-8b", "ministral-14b",
-    "mistral-small-3", "mistral-medium-3", "mistral-large-3",
+    "mistral-small-3", "mistral-small-4", "mistral-small-2603",
+    "mistral-medium-3", "mistral-large-3",
     "glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v", "glm-5v", "glm-5",
     "internvl",
     "minicpm-v", "minicpm-o",
@@ -64,6 +67,8 @@ _VISION_KEYWORDS = (
     "step-1v", "step-1.5v", "step-3", "step-r1-v-mini",
     "llava",
     "gemma-3", "gemma-3n",
+    # 小米 MiMo 全模态型号（v2.5 全能版 / v2.6 全系 / v2-omni）
+    "mimo-v2.5", "mimo-v2.6", "mimo-v2-omni",
 )
 
 _NON_VISION_PATTERN = token_sequence_pattern(_NON_VISION_KEYWORDS)

@@ -20,16 +20,13 @@ import { rememberFullViewTarget } from "@/lib/workspace-surface";
 import { fileRefFromSession, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import { recordWorkbookChatNavigation } from "@/lib/workbook-chat-navigation";
 import { WorkbookInteractionBar, useWorkbookQuestionRequest } from "./WorkbookInteractionBar";
+import { WorkbookLoadingState } from "./WorkbookLoadingState";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
   {
     ssr: false,
-    loading: () => (
-      <div role="status" className="flex items-center justify-center h-full text-sm text-muted-foreground">
-        正在准备表格…
-      </div>
-    ),
+    loading: () => <WorkbookLoadingState />,
   }
 );
 

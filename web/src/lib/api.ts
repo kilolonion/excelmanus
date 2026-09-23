@@ -2,7 +2,7 @@ import type { SessionDetail, SessionTaskList, SubagentRun, WorkspaceFolder } fro
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 import { saveBlob } from "@/lib/save-blob";
 import { formatApiErrorMessage } from "@/lib/api-error";
-import { displayFileName } from "@/lib/file-identity";
+import { displayFileName, normalizeFilePath } from "@/lib/file-identity";
 import { parseWorkbookTarget } from "@/lib/workbook-interaction-types";
 
 const API_BASE_PATH = "/api/v1";
@@ -274,16 +274,18 @@ export async function fetchSessions(opts?: { signal?: AbortSignal }): Promise<un
   return res.sessions ?? [];
 }
 
-export async function fetchSubagentRuns(sessionId: string): Promise<SubagentRun[]> {
+export async function fetchSubagentRuns(sessionId: string, opts?: { signal?: AbortSignal }): Promise<SubagentRun[]> {
   const data = await apiGet<{ runs: SubagentRun[] }>(
     `/sessions/${encodeURIComponent(sessionId)}/subagents`,
+    opts,
   );
   return data.runs;
 }
 
-export async function fetchSessionTaskList(sessionId: string): Promise<SessionTaskList | null> {
+export async function fetchSessionTaskList(sessionId: string, opts?: { signal?: AbortSignal }): Promise<SessionTaskList | null> {
   const data = await apiGet<{ task_list: SessionTaskList | null }>(
     `/sessions/${encodeURIComponent(sessionId)}/task-list`,
+    opts,
   );
   return data.task_list ?? null;
 }
@@ -338,9 +340,14 @@ export async function createSession(opts?: {
   });
 }
 
-export async function fetchWorkspaces(): Promise<WorkspaceFolder[]> {
-  const res: { workspaces?: WorkspaceFolder[] } = await apiGet("/workspaces");
-  return res.workspaces ?? [];
+let workspaceListRequest: Promise<WorkspaceFolder[]> | null = null;
+export function fetchWorkspaces(): Promise<WorkspaceFolder[]> {
+  if (!workspaceListRequest) {
+    workspaceListRequest = apiGet<{ workspaces?: WorkspaceFolder[] }>("/workspaces")
+      .then((res) => res.workspaces ?? [])
+      .finally(() => { workspaceListRequest = null; });
+  }
+  return workspaceListRequest;
 }
 
 export async function reorderWorkspaces(workspaceIds: string[]): Promise<WorkspaceFolder[]> {
@@ -548,11 +555,17 @@ export interface SessionExcelEventsResponse {
 }
 
 export async function fetchSessionExcelEvents(
-  sessionId: string
+  sessionId: string,
+  opts?: { signal?: AbortSignal; limit?: number; toolCallIds?: string[] },
 ): Promise<SessionExcelEventsResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  for (const id of opts?.toolCallIds ?? []) params.append("tool_call_id", id);
+  const query = params.size ? `?${params}` : "";
   try {
     return await apiGet<SessionExcelEventsResponse>(
-      `/sessions/${encodeURIComponent(sessionId)}/excel-events`
+      `/sessions/${encodeURIComponent(sessionId)}/excel-events${query}`,
+      { signal: opts?.signal },
     );
   } catch {
     return { diffs: [], previews: [], affected_files: [] };
@@ -817,25 +830,13 @@ export interface ExcelSnapshot {
  * - Double slashes: ``./uploads//foo.xlsx`` -> ``./uploads/foo.xlsx``
  */
 export function normalizeExcelPath(path: string): string {
-  // Native Windows uploads use backslashes, while API snapshots use POSIX
-  // separators. Both must have the same identity and cache key.
-  const raw = String(path ?? "").trim().replace(/\\/g, "/");
-  if (!raw) return "";
-  if (raw.startsWith("<path>/")) {
-    const basename = raw.slice("<path>/".length).trim();
-    return basename ? `./${basename}` : "";
-  }
-  let p = raw.replace(/\/\/+/g, "/");
-  if (raw.startsWith("//")) p = `/${p}`; // Preserve UNC server/share roots.
-  // 保留绝对路径不变，以便后端可根据工作区进行校验。
-  if (p.startsWith("/") || /^[a-zA-Z]:\//.test(p)) return p;
-  if (!p.startsWith("./")) p = `./${p}`;
-  return p;
+  return normalizeFilePath(path);
 }
 
 export interface WorkspaceRequestScope {
   sessionId?: string | null;
   workspaceId?: string | null;
+  signal?: AbortSignal;
 }
 
 function appendWorkspaceScope(params: URLSearchParams, scope?: WorkspaceRequestScope): void {
@@ -1152,7 +1153,7 @@ export async function fetchExcelCompare(
   const url = buildApiUrl(`/files/excel/compare?${params.toString()}`);
   const res = await apiFetch(url, {
     headers: { ...getAuthHeaders() },
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS, opts?.signal),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -1580,6 +1581,8 @@ export function prefetchWorkbookView(opts: {
   sessionId?: string;
   workspaceId?: string | null;
   sheet?: string;
+  /** Optional opening window. The editor uses the same range for cache reuse. */
+  rect?: string;
   signal?: AbortSignal;
 }): void {
   if (!opts.path || (!opts.sessionId && !opts.workspaceId)) return;

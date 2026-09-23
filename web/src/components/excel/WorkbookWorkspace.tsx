@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useId, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import {
   ArrowLeft,
   AtSign,
@@ -11,7 +11,6 @@ import {
   FileSpreadsheet,
   FolderOpen,
   GitCompare,
-  GripVertical,
   LayoutGrid,
   Link2,
   Loader2,
@@ -29,6 +28,7 @@ import { useWorkbookWorkspaceStore, visibleWorkbookPaths } from "@/stores/workbo
 import { fileBaseName } from "@/lib/revision-display";
 import { WorkbookPane } from "./WorkbookPane";
 import { prepareWorkbookGroupAction } from "@/lib/workbook-group-actions";
+import { prefetchExcelView } from "@/lib/excel-view-prefetch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,9 +43,9 @@ import {
 import styles from "./WorkbookWorkspace.module.css";
 
 const LAYOUTS = [
-  { count: 1 as const, label: "单表", shortLabel: "1", icon: LayoutGrid },
-  { count: 2 as const, label: "双表", shortLabel: "2", icon: Columns2 },
-  { count: 3 as const, label: "三表", shortLabel: "3", icon: Columns3 },
+  { count: 1 as const, label: "单表", icon: LayoutGrid },
+  { count: 2 as const, label: "双表", icon: Columns2 },
+  { count: 3 as const, label: "三表", icon: Columns3 },
 ];
 
 export function WorkbookWorkspace({ active }: { active: boolean }) {
@@ -53,6 +53,9 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
   const isMobile = useIsMobile();
   const layout = useExcelStore((state) => state.fullViewLayout);
   const container = useRef<HTMLDivElement>(null);
+  const tabScroll = useRef<HTMLDivElement>(null);
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
+  const workspaceId = useId();
   const [width, setWidth] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -61,8 +64,12 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
 
   const closeFile = async (path: string) => {
     setError("");
+    const restoreFocus = tabRefs.current.get(path)?.parentElement?.contains(document.activeElement);
     if (!await useExcelStore.getState().closeWorkbook(path)) {
       setError(`${fileBaseName(path)} 尚未保存，已保留标签。请先处理保存问题。`);
+    } else if (restoreFocus) {
+      const next = useWorkbookWorkspaceStore.getState().workspaces[key]?.focused;
+      if (next) tabRefs.current.get(next)?.focus();
     }
   };
 
@@ -80,7 +87,19 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
     return () => { useWorkbookWorkspaceStore.getState().setVisible(key, []); };
   }, [key, active, signature]);
 
+  useEffect(() => {
+    if (!active) return;
+    const scroll = tabScroll.current;
+    const tab = workspace.focused && tabRefs.current.get(workspace.focused)?.parentElement;
+    if (!scroll || !tab) return;
+    const viewport = scroll.getBoundingClientRect();
+    const bounds = tab.getBoundingClientRect();
+    if (bounds.left < viewport.left + 10) scroll.scrollLeft -= viewport.left + 10 - bounds.left;
+    else if (bounds.right > viewport.right - 10) scroll.scrollLeft += bounds.right - viewport.right + 10;
+  }, [active, workspace.focused, workspace.files.length, width]);
+
   const primary = workspace.files[0];
+  const focusedFile = workspace.files.find((file) => file.path === workspace.focused) ?? primary;
   const compareTarget = workspace.focused !== primary?.path
     ? workspace.focused
     : paths.find((path) => path !== primary?.path) ?? workspace.files[1]?.path;
@@ -131,6 +150,24 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
     }
   };
 
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % workspace.files.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + workspace.files.length) % workspace.files.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = workspace.files.length - 1;
+    else if (event.key === "Delete") {
+      event.preventDefault();
+      void closeFile(workspace.files[index].path);
+      return;
+    } else return;
+    event.preventDefault();
+    const path = workspace.files[next].path;
+    prefetchExcelView(path);
+    useExcelStore.getState().focusWorkbook(path);
+    tabRefs.current.get(path)?.focus();
+  };
+
   const readDraggedPath = (event: DragEvent<HTMLElement>) =>
     event.dataTransfer.getData("application/x-excelmanus-workbook")
       || event.dataTransfer.getData("text/plain");
@@ -163,36 +200,8 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
   return (
     <div ref={container} className={styles.workspace} data-workbook-workspace data-pane-count={paths.length}>
       <header className={styles.toolbar}>
-        <div className={styles.identity}>
-          <div className={styles.workspaceIcon} aria-hidden="true"><LayoutGrid size={17} /></div>
-        </div>
-
-        <div
-          className={styles.tabs}
-          role="group"
-          aria-label="表格工作区"
-          data-drop-active={dropActive}
-          onDragOver={(event) => {
-            if (!draggingPath) return;
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "move";
-            setDropActive(true);
-          }}
-          onDragLeave={(event) => {
-            if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-            setDropActive(false);
-          }}
-          onDrop={(event) => {
-            event.preventDefault();
-            const path = readDraggedPath(event);
-            if (path && workspace.files.some((file) => file.path === path)) {
-              useExcelStore.getState().focusWorkbook(path);
-              useWorkbookWorkspaceStore.getState().setPaneCount(key, Math.min(3, Math.max(2, workspace.paneCount)) as 1 | 2 | 3);
-            }
-            finishTabDrag();
-          }}
-        >
-          <div className={styles.tabScroll} role="tablist" aria-label="已打开的表格">
+        <div className={styles.tabs}>
+          <div ref={tabScroll} className={styles.tabScroll} role="tablist" aria-label="已打开的表格">
             {workspace.files.map((file, index) => {
               const focused = workspace.focused === file.path;
               return (
@@ -201,38 +210,43 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
                   className={styles.tab}
                   data-focused={focused}
                   data-dragging={draggingPath === file.path}
-                  draggable
+                  data-workbook-tab={file.path}
+                  role="presentation"
+                  draggable={width >= 720 && workspace.files.length > 1}
                   onDragStart={(event) => beginTabDrag(event, file.path)}
                   onDragEnd={finishTabDrag}
+                  onAuxClick={(event) => {
+                    if (event.button === 1) { event.preventDefault(); void closeFile(file.path); }
+                  }}
                 >
                   <button
                     type="button"
                     role="tab"
+                    id={`${workspaceId}-tab-${encodeURIComponent(file.path)}`}
+                    aria-controls={paths.includes(file.path) ? `${workspaceId}-pane-${encodeURIComponent(file.path)}` : undefined}
+                    ref={(element) => {
+                      if (element) tabRefs.current.set(file.path, element);
+                      else tabRefs.current.delete(file.path);
+                    }}
                     className={styles.tabName}
-                    title={file.path}
+                    title={`${file.path}${file.sheet ? `\n当前工作表：${file.sheet}` : ""}`}
                     aria-selected={focused}
-                    onClick={() => useExcelStore.getState().focusWorkbook(file.path)}
+                    tabIndex={focused ? 0 : -1}
+                    onKeyDown={(event) => handleTabKeyDown(event, index)}
+                    onClick={() => {
+                      prefetchExcelView(file.path);
+                      useExcelStore.getState().focusWorkbook(file.path);
+                    }}
                   >
-                    <GripVertical size={12} className={styles.tabDragIcon} aria-hidden="true" />
-                    <FileSpreadsheet size={14} className={styles.tabIcon} aria-hidden="true" />
-                    <span className={styles.badge}>{index === 0 ? "主表" : "参考"}</span>
-                    <span className={styles.tabSheet}>{file.sheet ?? "工作表"}</span>
+                    <FileSpreadsheet size={16} className={styles.tabIcon} aria-hidden="true" />
                     <span className={styles.tabFileName}>{fileBaseName(file.path)}</span>
                   </button>
-                  {index > 0 && <button
-                    type="button"
-                    className={styles.tabPrimary}
-                    aria-label={`将 ${fileBaseName(file.path)} 设为主表`}
-                    title="设为主表"
-                    onClick={() => useExcelStore.getState().setPrimaryWorkbook(file.path)}
-                  >
-                    <Star size={12} />
-                  </button>}
                   <button
                     type="button"
                     className={styles.tabClose}
                     aria-label={`关闭标签 ${fileBaseName(file.path)}`}
                     title="关闭此表格"
+                    tabIndex={focused ? 0 : -1}
                     onClick={() => void closeFile(file.path)}
                   >
                     <X size={13} />
@@ -245,7 +259,7 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
             type="button"
             className={styles.tabAdd}
             aria-label="添加表格"
-            title="添加表格并打开多表工作区"
+            title="打开另一份表格"
             onClick={openWorkbookPicker}
           >
             <Plus size={16} />
@@ -253,28 +267,52 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
         </div>
 
         <div className={styles.headerActions}>
+          {workspace.files.length > 1 && <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button type="button" className={styles.iconButton} aria-label="已打开的表格列表" title="已打开的表格列表">
+                <ChevronDown size={16} />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className={styles.fileMenu}>
+              <DropdownMenuLabel className={styles.menuSectionLabel}>{workspace.files.length} 份已打开的表格</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={workspace.focused ?? primary.path} onValueChange={(path) => {
+                prefetchExcelView(path);
+                useExcelStore.getState().focusWorkbook(path);
+              }}>
+                {workspace.files.map((file, index) => <DropdownMenuRadioItem key={file.path} value={file.path} title={file.path}>
+                  <FileSpreadsheet />
+                  <span className={styles.fileMenuName}>{fileBaseName(file.path)}</span>
+                  {index === 0 && <span className={styles.menuHint}>主表</span>}
+                </DropdownMenuRadioItem>)}
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={openWorkbookPicker}><Plus /><span>打开表格</span></DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <button type="button" className={`${styles.button} ${styles.moreButton}`} aria-label="更多" title="更多" disabled={busy}>
-                {busy ? <Loader2 className={styles.spin} size={15} /> : <MoreHorizontal size={15} />}
-                <span>{busy ? "处理中…" : "更多"}</span>
-                {!busy && <ChevronDown size={13} />}
+              <button type="button" className={styles.button} aria-label="视图" title="视图与布局">
+                <Columns2 size={16} />
+                <span className={styles.actionLabel}>视图</span>
+                <ChevronDown size={12} className={styles.actionLabel} />
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className={styles.actionMenu}>
-              <DropdownMenuLabel>处理当前工作区</DropdownMenuLabel>
               <DropdownMenuLabel className={styles.menuSectionLabel}>并列显示</DropdownMenuLabel>
-              <DropdownMenuRadioGroup value={String(workspace.paneCount)} onValueChange={setLayout} aria-label="同时显示的表格数量">
+              <DropdownMenuRadioGroup value={String(paths.length)} onValueChange={setLayout} aria-label="同时显示的表格数量">
                 {LAYOUTS.map(({ count, label, icon: Icon }) => (
-                  <DropdownMenuRadioItem key={count} value={String(count)}>
+                  <DropdownMenuRadioItem key={count} value={String(count)} disabled={count > workspace.files.length || (width < 720 && count > 1)}>
                     <Icon />
                     <span>{label}</span>
                     <span className={styles.menuHint}>{count === 1 ? "聚焦当前" : `同时 ${count} 张`}</span>
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>
+              {width < 720 && <p className={styles.menuNote}>当前宽度显示单表，通过标签切换</p>}
+              <DropdownMenuSeparator />
               <DropdownMenuCheckboxItem
                 checked={workspace.linkSelection}
+                disabled={paths.length < 2}
                 onCheckedChange={(checked) => useWorkbookWorkspaceStore.getState().setLinkSelection(key, checked === true)}
                 onSelect={(event) => event.preventDefault()}
               >
@@ -282,11 +320,27 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
                 <span>同步定位</span>
                 <span className={styles.menuHint}>{workspace.linkSelection ? "已开启" : "已关闭"}</span>
               </DropdownMenuCheckboxItem>
-              <DropdownMenuItem onSelect={toggleLayout}>
+              <DropdownMenuItem onSelect={toggleLayout} disabled={isMobile}>
                 <MessageSquare />
                 <span>{layout === "split" ? "展开表格" : "并排对话"}</span>
               </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button type="button" className={styles.iconButton} aria-label="更多" title="更多" disabled={busy}>
+                {busy ? <Loader2 className={styles.spin} size={16} /> : <MoreHorizontal size={18} />}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className={styles.actionMenu}>
+              <DropdownMenuLabel className={styles.menuSectionLabel}>当前表格</DropdownMenuLabel>
+              <DropdownMenuItem onSelect={openWorkbookPicker}><FolderOpen /><span>打开表格</span></DropdownMenuItem>
+              <DropdownMenuItem disabled={focusedFile.path === primary.path} onSelect={() => useExcelStore.getState().setPrimaryWorkbook(focusedFile.path)}>
+                <Star /><span>设为主表</span>{focusedFile.path === primary.path && <span className={styles.menuHint}>已是主表</span>}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void closeFile(focusedFile.path)}><X /><span>关闭当前表格</span></DropdownMenuItem>
               <DropdownMenuSeparator />
+              <DropdownMenuLabel className={styles.menuSectionLabel}>多表协作</DropdownMenuLabel>
               <DropdownMenuItem disabled={!compareTarget || busy} onSelect={() => void groupAction("compare")}>
                 <GitCompare />
                 <span>与主表对比</span>
@@ -302,18 +356,10 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
                 <span>引用同屏表格</span>
                 <span className={styles.menuHint}>{paths.length} 张表</span>
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={openWorkbookPicker}>
-                <FolderOpen />
-                <span>打开表格</span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={closeWorkspace}>
-                <ArrowLeft />
-                <span>返回对话</span>
-              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <button type="button" className={styles.iconButton} onClick={closeWorkspace} aria-label="返回对话" title="返回对话">
+          <span className={styles.actionDivider} aria-hidden="true" />
+          <button type="button" className={styles.iconButton} onClick={closeWorkspace} aria-label="返回对话" title="返回对话，保留已打开的表格">
             <ArrowLeft size={15} />
           </button>
         </div>
@@ -337,30 +383,25 @@ export function WorkbookWorkspace({ active }: { active: boolean }) {
         onDrop={handleGridDrop}
         style={{ gridTemplateColumns: paths.length === 3 && width < 1440 ? undefined : `repeat(${paths.length}, minmax(0, 1fr))` }}
       >
+        {dropActive && <div className={styles.dropHint}>松开以并列查看表格</div>}
         {paths.map((path) => (
           <WorkbookPane
             key={path}
+            id={`${workspaceId}-pane-${encodeURIComponent(path)}`}
+            labelledBy={`${workspaceId}-tab-${encodeURIComponent(path)}`}
             path={path}
             active={active}
             focused={workspace.focused === path}
-            onClose={() => void closeFile(path)}
-            onExpand={() => {
+            onClose={paths.length > 1 ? () => void closeFile(path) : undefined}
+            onExpand={workspace.files.length > 1 ? () => {
               useExcelStore.getState().focusWorkbook(path);
               useWorkbookWorkspaceStore.getState().setPaneCount(key, workspace.paneCount === 1 ? 3 : 1);
-            }}
+            } : undefined}
             expandTitle={workspace.paneCount === 1 ? "恢复多表展示" : "单独查看此表"}
           />
         ))}
       </div>
 
-      <footer className={styles.status}>
-        <span className={styles.statusItem}><span className={styles.statusDot} aria-hidden="true" />{workspace.files.length} 张已打开</span>
-        <span className={styles.statusItem}>{paths.length} 张同屏</span>
-        {width < 720 && workspace.paneCount > 1 && <span className={styles.statusNote}>当前宽度使用单表，可通过上方标签切换</span>}
-        {workspace.linkSelection && <span className={styles.statusItem}><Link2 size={12} />同名工作表同步定位</span>}
-        <span className={styles.statusSpacer} />
-        <span className={styles.statusHint}>主表：{fileBaseName(primary.path)}</span>
-      </footer>
     </div>
   );
 }

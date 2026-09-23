@@ -94,7 +94,7 @@ _EXTENDED_CAPABILITIES: dict[str, str] = {
     "merge_cells": "合并单元格：format_spreadsheet operations.kind=merge",
     "named_range": "命名范围：当前不可用。已有 xlsx 没有命名范围保存通路。",
     "auto_filter": "自动筛选：当前不可用。已有 xlsx 没有 auto_filter 保存通路。",
-    "page_setup": "页面设置：当前不可用。已有 xlsx 没有打印区域保存通路。",
+    "page_setup": "打印/页面设置：format_spreadsheet kind=print_layout；print_layout 含 print_area、orientation、paper_size、fit_to_width/fit_to_height 或 scale。创建时可用 workbook_spec.sheets[].print_layout。",
     "cell_style": "单元格样式：format_spreadsheet operations.kind=format",
     "batch_write": "批量写入：edit_spreadsheet operations.kind=write；大表规约再用 run_code 调 SDK",
     "formula": "公式写入：edit_spreadsheet operations.kind=write",
@@ -135,7 +135,7 @@ _TOOL_COMMON_ERRORS: dict[str, list[str]] = {
         "alignment=position 不能同时提供 key_columns；按键对齐请明确使用 alignment=key",
     ],
     "run_code": [
-        "缺少 try/except：代码必须包含顶层 try/except，错误 print 到 stderr",
+        "异常应保留失败状态；不要只打印错误再正常退出，把执行失败伪装成 success",
         "超时：默认 900s，可调大 timeout_seconds（最大 1800）；CPU 限额仍最多 300s",
         "ModuleNotFoundError：仅支持沙箱内的库（openpyxl/pandas/numpy 等），不支持 pip install",
         "禁止调用：sys.exit()/exec()/eval()/os.system()",
@@ -175,7 +175,7 @@ _TOOL_USAGE_EXAMPLES: dict[str, str] = {
         ' 创建: {"file_path": "new.xlsx", "workbook_spec": {"sheets": [{"name": "S1", "dimensions": {"rows": 3, "cols": 2}, "value_blocks": [{"start": "A1", "values": [["h1","h2"],[1,2]]}]}], "uncertainties": []}}'
     ),
     "format_spreadsheet": '{"file_path": "data.xlsx", "expected_version": "sha256:...", "operations": [{"kind": "format", "sheet": "Sheet1", "range": "A1:B1", "font": {"bold": true}}]}',
-    "run_code": '{"code": "from em import inspect_spreadsheet\\ntry:\\n    print(inspect_spreadsheet(mode=\\"overview\\", file_path=\\"data.xlsx\\"))\\nexcept Exception as e:\\n    import sys; print(e, file=sys.stderr)"}',
+    "run_code": '{"code": "from em import inspect_spreadsheet\\nprint(inspect_spreadsheet(mode=\\"overview\\", file_path=\\"data.xlsx\\"))"}',
     "manage_spreadsheet_objects": '{"file_path": "data.xlsx", "expected_version": "sha256:...", "operations": [{"kind": "chart", "sheet": "Sheet1", "chart_type": "bar", "data_range": "B1:B20", "categories_range": "A2:A20"}]}',
     "split_spreadsheet": '{"file_path": "orders.xlsx", "by_column": "省份", "output_dir": "outputs", "filename_template": "{stem}_{key}"}',
 }
@@ -188,6 +188,12 @@ _FORMAT_KIND_ALIASES: dict[str, str] = {
     "dv": "data_validation",
 }
 _FORMAT_KIND_CHEATSHEETS: dict[str, str] = {
+    "print_layout": (
+        "kind=print_layout: sheet + print_layout 对象。print_area=A1:F17；orientation=portrait|landscape；"
+        "paper_size=A3|A4|A5|Letter|Legal；fit_to_width/fit_to_height 为页数（0 不限），自动启用 fit_to_page；"
+        "scale 为 10–400 的百分比，与启用的 fit 模式互斥。"
+        ' 示例：{"kind":"print_layout","sheet":"Sheet1","print_layout":{"print_area":"A1:F17","fit_to_width":1,"fit_to_height":1}}'
+    ),
     "format": (
         "kind=format 形状：range（A1:K1 或 表!A1:K1）+ font/fill/border/alignment/number_format。"
         "sheet 或地址里的 表!A1；单表可省略 sheet。"
@@ -228,6 +234,8 @@ _FORMAT_KIND_CHEATSHEETS: dict[str, str] = {
 def _format_kind_from_query(field_path: str, kind_enum: list[str]) -> str | None:
     """format_spreadsheet.operations.size / format_spreadsheet.freeze → kind 名。"""
     tokens = [part for part in str(field_path or "").split(".") if part]
+    if len(tokens) > 2 and tokens[:2] == ["operations", "print_layout"]:
+        return None  # This is a real object property; use its exact field schema.
     if not tokens:
         return None
     if tokens[0] == "operations" and len(tokens) >= 2:
@@ -415,10 +423,9 @@ def _handle_tool_detail(tool_name: str) -> str:
     desc = _short_desc(tool_name, tool_def)
     lines = [
         f"工具: {tool_name}",
-        f"分类: {category}",
-        f"权限: {permission}",
-        f"描述: {desc}",
     ]
+    if not field_path:
+        lines.extend([f"分类: {category}", f"权限: {permission}", f"描述: {desc}"])
     if field_path == "output" or field_path.startswith("output."):
         from excelmanus.tools.output_contracts import contract_summary, output_schema_for
 
@@ -504,6 +511,10 @@ def _handle_tool_detail(tool_name: str) -> str:
             parent, _, _ = walk_schema_path(schema, parent_path)
         props = parent.get("properties", {}) if isinstance(parent, dict) else {}
         raw_node = props.get(final_key) if isinstance(props, dict) else None
+        if parent_path in {"$defs", "definitions"}:
+            # A named nullable/union definition is itself the raw endpoint.
+            # It is not a property of the unwrapped definition container.
+            raw_node = (schema.get(parent_path) or {}).get(final_key)
         if isinstance(raw_node, dict) and "$ref" in raw_node:
             from excelmanus.tools.schema_walk import resolve_local_ref
 
@@ -519,6 +530,13 @@ def _handle_tool_detail(tool_name: str) -> str:
         lines.append(f"\n参数 {field_path}:\n{schema_str}")
         if available:
             lines.append("当前节点可查: " + ", ".join(available))
+        if tool_name == "edit_spreadsheet" and field_path == "workbook_spec":
+            from excelmanus.tools.workbook_examples import workbook_creation_example
+
+            lines.append("可执行示例（workbook_spec 值）:\n" + json.dumps(
+                workbook_creation_example(), ensure_ascii=False, separators=(",", ":"),
+            ))
+            lines.append("uncertainties 非空时每项必填 location/reason；类型定义可查 edit_spreadsheet.$defs.StyleClass。")
         tail = field_path.rsplit(".", 1)[-1]
         if tail in {"range", "start_cell", "source_range", "target_start", "cell_range"}:
             hint = describe_for_schema()
@@ -531,13 +549,13 @@ def _handle_tool_detail(tool_name: str) -> str:
             if execution:
                 lines.append(execution)
 
-    errors = _TOOL_COMMON_ERRORS.get(tool_name)
+    errors = _TOOL_COMMON_ERRORS.get(tool_name) if not field_path else None
     if errors:
         lines.append("\n常见错误:")
         for err in errors:
             lines.append(f"  - {err}")
 
-    example = _TOOL_USAGE_EXAMPLES.get(tool_name)
+    example = _TOOL_USAGE_EXAMPLES.get(tool_name) if not field_path else None
     if example:
         lines.append(f"\n调用示例: {example}")
 
@@ -782,6 +800,12 @@ def _handle_system_status(_query: str = "") -> str:
 
         installed = [name for name in sorted(ALLOWED_COMMANDS) if shutil.which(name)]
         lines.append(f"  主机: {platform.system()}；当前安装的白名单可执行文件: {', '.join(installed) or '无'}")
+
+    if "run_code" in source or "run_shell" in source:
+        from excelmanus.runtime_capabilities import environment_text
+        from excelmanus.tools.context import call_has_full_access
+
+        lines.append(environment_text(full_access=call_has_full_access()))
 
     if mcp_tools:
         lines.append("  MCP 工具列表:")

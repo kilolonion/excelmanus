@@ -225,7 +225,9 @@ async def test_create_or_reuse_binds_last_used_workspace(tmp_path: Path) -> None
         [{"role": "user", "content": "b", "message_id": "u-b"}],
         turn_number=1,
     )
-    landing = await manager.create_or_reuse_session()
+    with patch.object(manager, "list_workspaces", side_effect=AssertionError("must use recent workspace")) as list_all:
+        landing = await manager.create_or_reuse_session()
+    list_all.assert_not_called()
     assert landing["workspace_id"] == rec["id"]
     assert landing["blank"] is True
     assert landing["id"] != other_sess["id"]

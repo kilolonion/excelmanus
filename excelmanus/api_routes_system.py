@@ -64,6 +64,7 @@ async def upload_file(raw_request: Request) -> JSONResponse:
         raw_request,
         session_id=str(form.get("session_id") or raw_request.query_params.get("session_id") or "") or None,
         workspace_id=str(form.get("workspace_id") or raw_request.query_params.get("workspace_id") or "") or None,
+        require_scope=True,
     )
 
     try:
@@ -118,14 +119,15 @@ async def upload_file(raw_request: Request) -> JSONResponse:
         except (ConversionError, Exception) as exc:
             logger.warning("上传文件转换失败，保留原始格式: %s (%s)", original_filename, exc)
 
-    rel_path = f"./{dest_path.relative_to(ws.root_dir)}"
+    rel_path = f"./{dest_path.relative_to(ws.root_dir).as_posix()}"
+    canonical_rel = rel_path.removeprefix("./")
 
     # 注册到 FileRegistry
     registry = _get_file_registry(str(ws.root_dir))
     if registry is not None:
         try:
             entry = registry.register_upload(
-                canonical_path=str(dest_path.relative_to(ws.root_dir)),
+                canonical_path=canonical_rel,
                 original_name=original_filename,
                 size_bytes=dest_path.stat().st_size,
             )
@@ -145,7 +147,7 @@ async def upload_file(raw_request: Request) -> JSONResponse:
         # dest_path 落盘名带 uploads/{8hex}_ 前缀，响应只给展示名
         from excelmanus.workspace.identity import display_name_for
         resp["converted_to"] = display_name_for(
-            str(dest_path.relative_to(ws.root_dir)).replace("\\", "/")
+            dest_path.relative_to(ws.root_dir).as_posix()
         )
     return JSONResponse(content=resp)
 
@@ -204,6 +206,7 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
         raw_request,
         session_id=(body.get("session_id") or None),
         workspace_id=(body.get("workspace_id") or None),
+        require_scope=True,
     )
     safe_name = f"{uuid.uuid4().hex[:8]}_{raw_filename}"
     rel = f"uploads/{safe_name}"
@@ -242,14 +245,15 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
         except (_CE_url, Exception) as exc:
             logger.warning("URL 上传文件转换失败，保留原始格式: %s (%s)", original_filename, exc)
 
-    rel_path = f"./{dest_path.relative_to(ws.root_dir)}"
+    rel_path = f"./{dest_path.relative_to(ws.root_dir).as_posix()}"
+    canonical_rel = rel_path.removeprefix("./")
 
     # 注册到 FileRegistry
     registry = _get_file_registry(str(ws.root_dir))
     if registry is not None:
         try:
             entry = registry.register_upload(
-                canonical_path=str(dest_path.relative_to(ws.root_dir)),
+                canonical_path=canonical_rel,
                 original_name=original_filename,
                 size_bytes=dest_path.stat().st_size,
             )
@@ -267,7 +271,7 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
         resp["converted_from"] = original_filename
         from excelmanus.workspace.identity import display_name_for
         resp["converted_to"] = display_name_for(
-            str(dest_path.relative_to(ws.root_dir)).replace("\\", "/")
+            dest_path.relative_to(ws.root_dir).as_posix()
         )
     return JSONResponse(content=resp)
 
@@ -297,7 +301,10 @@ def _list_mentions(request: Request, path: str = "") -> JSONResponse:
             })
     safe_path = path.replace("..", "").strip("/")
     if _config is not None:
-        ws = _resolve_workspace_root(request)
+        # Mentions are a file discovery surface too. Require the caller's
+        # session/workspace scope so a stale picker cannot fall back to the
+        # process default directory after a workspace switch.
+        ws = _resolve_workspace_root(request, require_scope=True)
         from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
         from excelmanus.security.source_isolation import is_product_source_path
         from excelmanus.workspace.identity import is_hidden_name

@@ -56,16 +56,25 @@ def _apply_crop(data: bytes, crop: Any) -> bytes:
 
 
 def _inject(ref: Any, *, detail: str, extra: dict[str, Any] | None = None) -> ToolResult:
+    extra = dict(extra or {})
     value = {
         "status": "ok",
         "mime_type": ref.media_type,
         "attachment_id": ref.attachment_id,
         "width": ref.width,
         "height": ref.height,
-        **(extra or {}),
+        **extra,
     }
+    summary = (
+        "图片已加载到视觉上下文"
+        f"（attachment_id={ref.attachment_id}，尺寸={ref.width}x{ref.height}px，detail={detail}"
+    )
+    crop = extra.get("crop")
+    if isinstance(crop, dict):
+        summary += f"，crop={crop}"
+    summary += "）。"
     return ToolResult.from_image_injection(
-        model_text="图片已加载到视觉上下文。",
+        model_text=summary,
         injection=ImageInjection(
             mime_type=ref.media_type,
             detail=detail,
@@ -110,7 +119,10 @@ def read_image(
                 ref = admit_image_bytes(_apply_crop(raw, crop), media_type=ref.media_type)
         except AttachmentError as exc:
             return error_result(str(exc), code=exc.code)
-        return _inject(ref, detail=detail, extra={"file_path": str(path), "size_bytes": size})
+        extra = {"file_path": str(path), "size_bytes": size}
+        if isinstance(crop, dict):
+            extra["crop"] = dict(crop)
+        return _inject(ref, detail=detail, extra=extra)
 
     store = get_attachment_store()
     ref = store.get_ref(attach)
@@ -130,7 +142,8 @@ def read_image(
     except AttachmentError as exc:
         code = "corrupt" if "CORRUPT" in str(exc.code) else "missing"
         return error_result(str(exc), code=code)
-    return _inject(ref, detail=detail)
+    extra = {"crop": dict(crop)} if isinstance(crop, dict) else None
+    return _inject(ref, detail=detail, extra=extra)
 
 
 def get_tools() -> list[ToolDef]:

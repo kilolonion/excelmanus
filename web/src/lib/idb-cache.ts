@@ -3,6 +3,7 @@ import type { Message } from "./types";
 
 const PREFIX = "chat_msgs_";
 const MAX_CACHED_SESSIONS = 50;
+const MAX_CACHED_MESSAGES = 100;
 
 export interface CachedMessagesV2 {
   version: 2;
@@ -15,7 +16,9 @@ function _buildCachedPayload(messages: Message[]): CachedMessagesV2 {
   const normalized: Message[] = [];
   const messageOrder: string[] = [];
   const messagesById: Record<string, Message> = {};
-  for (const msg of messages) {
+  // Persist only a recent window. The server owns the full transcript and
+  // older rows are paged on demand; switching must not deserialize thousands.
+  for (const msg of messages.slice(-MAX_CACHED_MESSAGES)) {
     const msgId = String(msg.id || "").trim();
     if (!msgId) continue;
     if (messagesById[msgId]) {

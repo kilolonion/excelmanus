@@ -304,56 +304,18 @@ def _build_reply_sse(chat_result: Any, engine: Any) -> str:
     })
 
 
-def _public_excel_path(path: str) -> str:
-    """将 Excel 路径规范化为前端可直接回传的形式。
+def _public_excel_path(path: str, workspace_root: str | None = None) -> str:
+    """Return a reversible identity in the originating workspace, or omit it.
 
-    公开身份只认 CanonicalPath（方案 P1）。overlay / backups 映射到正本，
-    映射不到则省略，不把 staging 路径当交付物。未知绝对路径脱敏，不泄露家目录。
+    Sanitized absolute paths lose their directory and must never be used as
+    clickable file identities. Display redaction belongs to text rendering.
     """
-    raw = str(path or "").strip()
-    if not raw:
-        return ""
+    from excelmanus.workspace.identity import public_identity
 
-    from pathlib import Path
+    config = get_config()
+    root = workspace_root or (config.workspace_root if config is not None else None)
+    return public_identity(path, root)
 
-    from excelmanus.workspace.identity import (
-        is_overlay_leftover,
-        is_reserved_relative,
-        public_identity,
-    )
-
-    workspace = None
-    if get_config() is not None:
-        workspace = Path(get_config().workspace_root).resolve()
-
-    ident = public_identity(raw, workspace)
-    if ident:
-        return ident
-
-    probe = raw.removeprefix("<path>/").strip() if raw.startswith("<path>/") else raw
-    if is_overlay_leftover(probe) or is_reserved_relative(probe.replace("\\", "/")):
-        return ""
-
-    if raw.startswith("<path>/"):
-        basename = raw.removeprefix("<path>/").strip()
-        return f"./{basename}" if basename else ""
-
-    if workspace is not None:
-        candidate = Path(raw)
-        if candidate.is_absolute():
-            try:
-                rel = candidate.resolve().relative_to(workspace)
-                ident = public_identity(rel.as_posix(), workspace)
-                return ident
-            except Exception:
-                return sanitize_external_text(raw, max_len=500)
-
-    normalized = raw.replace("\\", "/")
-    if normalized.startswith("./"):
-        return public_identity(normalized, workspace) or ""
-    if normalized.startswith("/"):
-        return sanitize_external_text(normalized, max_len=500)
-    return public_identity(normalized, workspace) or ""
 
 
 
@@ -363,9 +325,10 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
     if get_session_manager() is None or get_session_manager().chat_history is None:
         return
     ch = get_session_manager().chat_history
+    workspace_root = get_session_manager().workspace_path_for_session(session_id)
     try:
         if event.event_type == EventType.EXCEL_DIFF:
-            pub_path = _public_excel_path(event.excel_file_path)
+            pub_path = _public_excel_path(event.excel_file_path, workspace_root)
             ch.save_excel_diff(
                 session_id=session_id,
                 tool_call_id=event.tool_call_id or "",
@@ -376,7 +339,7 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
             )
             ch.save_affected_file(session_id, pub_path)
         elif event.event_type == EventType.EXCEL_PREVIEW:
-            pub_path = _public_excel_path(event.excel_file_path)
+            pub_path = _public_excel_path(event.excel_file_path, workspace_root)
             ch.save_excel_preview(
                 session_id=session_id,
                 tool_call_id=event.tool_call_id or "",
@@ -392,7 +355,7 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
         elif event.event_type == EventType.MUTATION:
             seen: set[str] = set()
             for f in (event.changed_files or [])[:50]:
-                pub = _public_excel_path(f)
+                pub = _public_excel_path(f, workspace_root)
                 if pub and pub not in seen:
                     seen.add(pub)
                     ch.save_affected_file(session_id, pub)
@@ -400,14 +363,14 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
                 if not isinstance(item, dict):
                     continue
                 ident = str(item.get("identity") or "")
-                pub = _public_excel_path(ident)
+                pub = _public_excel_path(ident, workspace_root)
                 if pub and pub not in seen:
                     seen.add(pub)
                     ch.save_affected_file(session_id, pub)
         elif event.event_type == EventType.FILES_CHANGED:
             # 历史 replay / 旧客户端兼容；新写入统一发 MUTATION。
             for f in (event.changed_files or [])[:50]:
-                pub = _public_excel_path(f)
+                pub = _public_excel_path(f, workspace_root)
                 if pub:
                     ch.save_affected_file(session_id, pub)
     except Exception:
@@ -1085,7 +1048,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         _seq, event = seq_item
                         if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                             _last_pipeline_stage = event.pipeline_stage
-                        sse = _sse_event_to_sse(event)
+                        sse = _sse_event_to_sse(event, session_id)
                         if sse is not None:
                             yield _inject_seq(sse, _seq, stream_state.stream_id)
                     if chat_task.done():
@@ -1104,7 +1067,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                             _seq, event = seq_item
                             if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                                 _last_pipeline_stage = event.pipeline_stage
-                            sse = _sse_event_to_sse(event)
+                            sse = _sse_event_to_sse(event, session_id)
                             if sse is not None:
                                 yield _inject_seq(sse, _seq, stream_state.stream_id)
                     break
@@ -1529,7 +1492,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                         continue
                     if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
                         continue
-                    sse = _sse_event_to_sse(event)
+                    sse = _sse_event_to_sse(event, session_id)
                     if sse is not None:
                         yield _inject_seq(sse, seq, _sid)
                 if completed_result is not None:
@@ -1589,7 +1552,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     continue
                 if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
                     continue
-                sse = _sse_event_to_sse(event)
+                sse = _sse_event_to_sse(event, session_id)
                 if sse is not None:
                     yield _inject_seq(sse, seq, _sid)
 
@@ -1613,7 +1576,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     seq_item = queue_get_task.result()
                     if seq_item is not None:
                         _seq, event = seq_item
-                        sse = _sse_event_to_sse(event)
+                        sse = _sse_event_to_sse(event, session_id)
                         if sse is not None:
                             yield _inject_seq(sse, _seq, _sid)
                     if chat_task.done():
@@ -1629,7 +1592,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                             break
                         if seq_item is not None:
                             _seq, event = seq_item
-                            sse = _sse_event_to_sse(event)
+                            sse = _sse_event_to_sse(event, session_id)
                             if sse is not None:
                                 yield _inject_seq(sse, _seq, _sid)
                     break
@@ -1940,9 +1903,11 @@ async def _generate_session_title_with_timeout(
         return None
 
 
-def _sse_event_to_sse(event: ToolCallEvent) -> str | None:
+def _sse_event_to_sse(event: ToolCallEvent, session_id: str | None = None) -> str | None:
     """将 ToolCallEvent 转换为 SSE 文本（委托到 api/sse.py）。"""
+    manager = get_session_manager()
+    root = manager.workspace_path_for_session(session_id) if manager is not None and session_id else None
     return _sse_event_to_sse_impl(
         event,
-        public_path_fn=_public_excel_path,
+        public_path_fn=lambda path: _public_excel_path(path, root),
     )

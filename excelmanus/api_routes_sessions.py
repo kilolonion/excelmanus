@@ -96,15 +96,25 @@ async def get_compaction_handoff(session_id: str, request: Request) -> dict[str,
 
 @router.get("/api/v1/sessions/{session_id}/subagents")
 async def list_subagent_runs(session_id: str, request: Request) -> dict:
-    runtime = (await _engine_for_session(session_id, request))._subagent_runtime
+    engine = await _task_engine_for_session(session_id, request)
+    if engine is None:
+        snapshot = await _task_snapshot_for_session(session_id)
+        return {"runs": snapshot["runs"]}
+    runtime = engine._subagent_runtime
     return {"runs": runtime.list_runs()}
 
 
 @router.get("/api/v1/sessions/{session_id}/task-list")
 async def get_session_task_list(session_id: str, request: Request) -> dict:
     """返回会话当前任务清单快照；无任务清单时 task_list 为 None。"""
-    engine = await _engine_for_session(session_id, request)
-    store = getattr(engine, "_task_store", None)
+    engine = await _task_engine_for_session(session_id, request)
+    if engine is None:
+        from excelmanus.task_list import TaskStore
+
+        snapshot = await _task_snapshot_for_session(session_id)
+        store = TaskStore.from_dict(snapshot["task_store"])
+    else:
+        store = getattr(engine, "_task_store", None)
     current = store.current if store is not None else None
     payload = sanitize_external_data(current.to_dict()) if current is not None else None
     if payload is not None and store.plan_file_path:
@@ -112,6 +122,26 @@ async def get_session_task_list(session_id: str, request: Request) -> dict:
             store.plan_file_path, max_len=500
         )
     return {"task_list": payload}
+
+
+async def _task_engine_for_session(session_id: str, request: Request):
+    """Task reads must never initialize an agent, including nonempty history."""
+    if not await _has_session_access(session_id, request):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    manager = get_session_manager()
+    if manager is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
+    get_engine = getattr(manager, "get_engine", None)
+    return get_engine(session_id) if callable(get_engine) else None
+
+
+async def _task_snapshot_for_session(session_id: str) -> dict:
+    from excelmanus.stores.session_state_store import SessionStateStore
+
+    database = getattr(get_session_manager(), "database", None)
+    if database is None:
+        return {"runs": [], "task_store": {}}
+    return await run_in_threadpool(SessionStateStore(database).load_task_snapshot, session_id)
 
 
 @router.post("/api/v1/sessions/{session_id}/subagents/{run_id}")
@@ -487,52 +517,18 @@ async def undo_operation(
     })
 
 
-def _public_excel_path(path: str) -> str:
-    """将 Excel 路径规范化为前端可直接回传的形式。
+def _public_excel_path(path: str, workspace_root: str | None = None) -> str:
+    """Return a reversible identity in the originating workspace, or omit it.
 
-    公开身份只认 CanonicalPath（方案 P1）。overlay / backups 映射到正本，
-    映射不到则省略，不把 staging 路径当交付物。未知绝对路径脱敏，不泄露家目录。
+    Sanitized absolute paths lose their directory and must never be used as
+    clickable file identities. Display redaction belongs to text rendering.
     """
-    raw = str(path or "").strip()
-    if not raw:
-        return ""
+    from excelmanus.workspace.identity import public_identity
 
-    from excelmanus.workspace.identity import (
-        is_overlay_leftover,
-        is_reserved_relative,
-        public_identity,
-    )
+    config = get_config()
+    root = workspace_root or (config.workspace_root if config is not None else None)
+    return public_identity(path, root)
 
-    _config = get_config()
-    workspace = Path(_config.workspace_root).resolve() if _config is not None else None
-
-    ident = public_identity(raw, workspace)
-    if ident:
-        return ident
-
-    probe = raw.removeprefix("<path>/").strip() if raw.startswith("<path>/") else raw
-    if is_overlay_leftover(probe) or is_reserved_relative(probe.replace("\\", "/")):
-        return ""
-
-    if raw.startswith("<path>/"):
-        basename = raw.removeprefix("<path>/").strip()
-        return f"./{basename}" if basename else ""
-
-    if workspace is not None:
-        candidate = Path(raw)
-        if candidate.is_absolute():
-            try:
-                rel = candidate.resolve().relative_to(workspace)
-                return public_identity(rel.as_posix(), workspace)
-            except Exception:
-                return sanitize_external_text(raw, max_len=500)
-
-    normalized = raw.replace("\\", "/")
-    if normalized.startswith("./"):
-        return public_identity(normalized, workspace) or ""
-    if normalized.startswith("/"):
-        return sanitize_external_text(normalized, max_len=500)
-    return public_identity(normalized, workspace) or ""
 
 
 @router.get("/api/v1/sessions")
@@ -674,14 +670,23 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
     ch = session_manager.chat_history
     if ch is None:
         return JSONResponse(content={"diffs": [], "affected_files": [], "previews": []})
-    diffs = ch.load_excel_diffs(session_id)
-    affected_files = ch.load_affected_files(session_id)
-    previews = ch.load_excel_previews(session_id)
+    workspace_root = session_manager.workspace_path_for_session(session_id)
+    try:
+        limit = min(200, max(1, int(request.query_params["limit"]))) if "limit" in request.query_params else None
+    except ValueError:
+        return _error_json_response(400, "limit 必须为整数")
+    tool_ids = request.query_params.getlist("tool_call_id") or None
+    if tool_ids and len(tool_ids) > 100:
+        return _error_json_response(400, "一次最多查询 100 个工具调用")
+    event_options = {"limit": limit, "tool_call_ids": tool_ids} if limit is not None or tool_ids else {}
+    diffs = ch.load_excel_diffs(session_id, **event_options)
+    affected_files = ch.load_affected_files(session_id, **({"limit": limit} if limit is not None else {}))
+    previews = ch.load_excel_previews(session_id, **event_options)
     safe_diffs = []
     for d in diffs:
         safe_diffs.append({
             "tool_call_id": d["tool_call_id"],
-            "file_path": _public_excel_path(d["file_path"]),
+            "file_path": _public_excel_path(d["file_path"], workspace_root),
             "sheet": d["sheet"],
             "affected_range": d["affected_range"],
             "changes": d["changes"],
@@ -691,7 +696,7 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
     for p in previews:
         safe_previews.append({
             "tool_call_id": p["tool_call_id"],
-            "file_path": _public_excel_path(p["file_path"]),
+            "file_path": _public_excel_path(p["file_path"], workspace_root),
             "sheet": p["sheet"],
             "columns": p["columns"],
             "rows": p["rows"],
@@ -699,7 +704,7 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
             "truncated": p["truncated"],
         })
     safe_files = [
-        _public_excel_path(f)
+        _public_excel_path(f, workspace_root)
         for f in affected_files if f
     ]
     return JSONResponse(content={
@@ -744,19 +749,20 @@ async def export_session(session_id: str, request: Request) -> Response:
     excel_previews: list[dict] = []
     affected_files: list[str] = []
     if ch is not None:
+        workspace_root = session_manager.workspace_path_for_session(session_id)
         excel_diffs = [
-            {**d, "file_path": _public_excel_path(d.get("file_path", ""))}
+            {**d, "file_path": _public_excel_path(d.get("file_path", ""), workspace_root)}
             for d in ch.load_excel_diffs(session_id)
         ]
         excel_previews = [
-            {**p, "file_path": _public_excel_path(p.get("file_path", ""))}
+            {**p, "file_path": _public_excel_path(p.get("file_path", ""), workspace_root)}
             for p in ch.load_excel_previews(session_id)
         ]
         affected_files = []
         for f in ch.load_affected_files(session_id):
             if not f:
                 continue
-            ident = _public_excel_path(f)
+            ident = _public_excel_path(f, workspace_root)
             if ident:
                 affected_files.append(ident)
 

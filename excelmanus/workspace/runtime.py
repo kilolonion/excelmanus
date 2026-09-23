@@ -6,6 +6,7 @@ import json
 import re
 import secrets
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,8 @@ def allocate_pending_run_id() -> str:
 
 
 def pending_run_dir(workspace_root: str | Path, run_id: str) -> Path:
+    if not _SAFE_RUN_ID.fullmatch(run_id):
+        raise ValueError("invalid pending run id")
     return Path(workspace_root).resolve() / ".excelmanus" / "pending" / run_id
 
 
@@ -52,7 +55,11 @@ def prepare_pending_run_dir(workspace_root: str | Path, run_id: str) -> Path:
 
 
 def discard_orphan_pending_dirs(workspace_root: str | Path) -> int:
-    """Startup: leftover pending dirs are unpublished orphans. Never auto-publish."""
+    """Discard old unpublished runs, never another worker's active directory.
+
+    run_code is bounded to 30 minutes. A 24-hour grace period also covers
+    startup races before the child is launched and after it exits.
+    """
     root = Path(workspace_root).resolve() / ".excelmanus" / "pending"
     if not root.is_dir():
         return 0
@@ -62,10 +69,15 @@ def discard_orphan_pending_dirs(workspace_root: str | Path) -> int:
     except OSError:
         return 0
     for child in children:
-        if not child.is_dir():
+        try:
+            if (not child.is_dir() or child.is_symlink()
+                    or time.time() - child.stat().st_mtime < 86400):
+                continue
+            child.resolve().relative_to(root.resolve())
+            shutil.rmtree(child)
+            removed += 1
+        except (OSError, ValueError):
             continue
-        shutil.rmtree(child, ignore_errors=True)
-        removed += 1
     return removed
 
 
@@ -123,7 +135,7 @@ def _read_pending_manifest(run_dir: Path) -> list[tuple[str, str]]:
         if not isinstance(rec, dict):
             continue
         rel = normalize_version_path(str(rec.get("rel") or ""))
-        name = Path(str(rec.get("name") or "")).name
+        name = str(rec.get("name") or "")
         if rel and name and name != "manifest.jsonl":
             by_rel[rel] = name
     return list(by_rel.items())
@@ -184,7 +196,11 @@ def publish_pending_writes(
 
     try:
         for rel, name in _read_pending_manifest(run_dir):
-            source = _contained_file(run_dir, run_dir / name)
+            source = (
+                _contained_file(run_dir, run_dir / name)
+                if name not in {".", ".."} and not any(c in name for c in "/\\:")
+                else None
+            )
             if source is None:
                 published.append({
                     "path": rel,

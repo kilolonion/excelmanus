@@ -101,6 +101,7 @@ export const SessionList = memo(function SessionList() {
   const [editValue, setEditValue] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
   const [creating, setCreating] = useState(false);
+  const [creatingWorkspaceKey, setCreatingWorkspaceKey] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [workspaces, setWorkspaces] = useState<WorkspaceFolder[]>([]);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -115,6 +116,9 @@ export const SessionList = memo(function SessionList() {
   const [reorderingWorkspace, setReorderingWorkspace] = useState(false);
   const dragPreview = useRef<HTMLElement | null>(null);
   const dragBlocked = useRef(false);
+  const dragRef = useRef<SidebarDrag | null>(null);
+  const dragPointerY = useRef<number | null>(null);
+  const dragScrollFrame = useRef<number | null>(null);
 
   useEffect(() => {
     if (editingSessionId && editInputRef.current) {
@@ -156,17 +160,37 @@ export const SessionList = memo(function SessionList() {
     }
   }, []);
 
-  const handleNewSession = useCallback(async (workspaceId?: string | null, workspacePath?: string | null) => {
+  const handleNewSession = useCallback(async (
+    workspaceId?: string | null,
+    workspacePath?: string | null,
+    workspaceKey?: string,
+  ) => {
     if (creating) return;
     setCreating(true);
+    setCreatingWorkspaceKey(workspaceKey ?? "__global__");
     setCreateError(null);
     try {
-      await createOrReuseSession({ workspaceId, workspacePath, reuseBlank: false });
+      // The global “new chat” button has no group argument. Inherit the
+      // active conversation's workspace so a new chat keeps seeing the same
+      // uploaded/recent files instead of silently landing in another folder.
+      // Group-specific + buttons still use their explicit scope.
+      const sessionState = useSessionStore.getState();
+      const active = sessionState.sessions.find(
+        (session) => session.id === sessionState.activeSessionId,
+      );
+      const scopedWorkspaceId = workspaceId === undefined ? active?.workspaceId : workspaceId;
+      const scopedWorkspacePath = workspacePath === undefined ? active?.workspacePath : workspacePath;
+      await createOrReuseSession({
+        workspaceId: scopedWorkspaceId,
+        workspacePath: scopedWorkspacePath,
+        reuseBlank: false,
+      });
     } catch (err) {
       console.error("新建对话失败:", err);
       setCreateError(err instanceof Error ? err.message : "新建对话失败，请检查后端服务后重试");
     } finally {
       setCreating(false);
+      setCreatingWorkspaceKey(null);
     }
   }, [creating]);
 
@@ -194,12 +218,16 @@ export const SessionList = memo(function SessionList() {
     preview.querySelectorAll("button, input").forEach((child) => child.setAttribute("tabindex", "-1"));
     Object.assign(preview.style, {
       position: "fixed", top: "-10000px", left: "0", width: `${rect.width}px`,
-      margin: "0", background: "var(--card)", boxShadow: "0 8px 24px #0003",
-      pointerEvents: "none",
+      margin: "0", border: "1px solid color-mix(in srgb, var(--em-primary) 28%, transparent)",
+      borderRadius: "14px", background: "linear-gradient(135deg, color-mix(in srgb, var(--em-primary) 12%, var(--em-panel)), var(--em-panel))",
+      boxShadow: "0 18px 42px color-mix(in srgb, var(--em-primary) 25%, #0003), 0 3px 10px #0002",
+      transform: "rotate(1.2deg) scale(1.02)", opacity: "0.96", overflow: "hidden", pointerEvents: "none",
     });
     document.body.appendChild(preview);
     dragPreview.current = preview;
     event.dataTransfer.setDragImage(preview, event.clientX - rect.left, event.clientY - rect.top);
+    dragRef.current = source;
+    dragPointerY.current = event.clientY;
     setDrag(source);
     setDragSessions(sessions);
     setDropTarget(null);
@@ -208,14 +236,66 @@ export const SessionList = memo(function SessionList() {
     event.dataTransfer.setData("text/plain", source.id);
   }, [reorderingWorkspace, sessions]);
 
+  const stopDragAutoScroll = useCallback(() => {
+    dragPointerY.current = null;
+    if (dragScrollFrame.current !== null) {
+      window.cancelAnimationFrame(dragScrollFrame.current);
+      dragScrollFrame.current = null;
+    }
+  }, []);
+
+  const updateDragAutoScroll = useCallback((clientY: number) => {
+    dragPointerY.current = clientY;
+    if (dragScrollFrame.current !== null) return;
+
+    const step = () => {
+      const viewport = viewportRef.current;
+      const pointerY = dragPointerY.current;
+      if (!dragRef.current || !viewport || pointerY === null) {
+        dragScrollFrame.current = null;
+        return;
+      }
+
+      const rect = viewport.getBoundingClientRect();
+      const edgeSize = Math.min(112, Math.max(56, rect.height * 0.2));
+      const distanceFromTop = pointerY - rect.top;
+      const distanceFromBottom = rect.bottom - pointerY;
+      let direction = 0;
+      let distance = 0;
+      if (distanceFromTop < edgeSize && viewport.scrollTop > 0) {
+        direction = -1;
+        distance = edgeSize - distanceFromTop;
+      } else if (
+        distanceFromBottom < edgeSize
+        && viewport.scrollTop < viewport.scrollHeight - viewport.clientHeight
+      ) {
+        direction = 1;
+        distance = edgeSize - distanceFromBottom;
+      }
+
+      if (direction === 0) {
+        dragScrollFrame.current = null;
+        return;
+      }
+
+      const intensity = Math.min(1, distance / edgeSize);
+      viewport.scrollTop += direction * (3 + Math.round(15 * intensity ** 1.35));
+      dragScrollFrame.current = window.requestAnimationFrame(step);
+    };
+
+    dragScrollFrame.current = window.requestAnimationFrame(step);
+  }, []);
+
   const clearDrag = useCallback(() => {
     dragBlocked.current = false;
+    dragRef.current = null;
+    stopDragAutoScroll();
     setDrag(null);
     setDragSessions(null);
     setDropTarget(null);
     dragPreview.current?.remove();
     dragPreview.current = null;
-  }, []);
+  }, [stopDragAutoScroll]);
 
   useEffect(() => {
     // Native dragend/drop can target the document or another component after
@@ -232,9 +312,21 @@ export const SessionList = memo(function SessionList() {
       window.removeEventListener("dragend", finishDrag, true);
       window.removeEventListener("drop", finishDrag);
       window.removeEventListener("pointerdown", finishDrag, true);
+      stopDragAutoScroll();
+      dragRef.current = null;
       dragPreview.current?.remove();
     };
-  }, [clearDrag]);
+  }, [clearDrag, stopDragAutoScroll]);
+
+  const handleViewportDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    event.preventDefault();
+    updateDragAutoScroll(event.clientY);
+  }, [updateDragAutoScroll]);
+
+  const handleViewportDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) stopDragAutoScroll();
+  }, [stopDragAutoScroll]);
 
   const saveWorkspaceOrder = useCallback(async (sourceId: string, target: SidebarDrop) => {
     const previous = workspaces;
@@ -459,7 +551,9 @@ export const SessionList = memo(function SessionList() {
       >
         <span className="flex items-center gap-2">
           <span className="em-new-session-icon flex h-6 w-6 items-center justify-center rounded-lg bg-white/15">
-            {creating ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            {creatingWorkspaceKey === "__global__"
+              ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+              : <Plus className="h-3.5 w-3.5" />}
           </span>
           <span className="text-[12px] font-semibold tracking-wide">新建对话</span>
         </span>
@@ -512,13 +606,21 @@ export const SessionList = memo(function SessionList() {
   );
 
   return (
-    <div className="flex flex-col h-full" onDragEnd={clearDrag}
+    <div
+      className="flex flex-col h-full"
+      data-sidebar-dragging={drag?.kind || undefined}
+      onDragEnd={clearDrag}
       onDragLeave={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
       }}>
       {searchRow}
       {orderError && <p role="alert" className="px-3 pb-2 text-xs text-destructive">{orderError}</p>}
-      <ScrollArea className="flex-1 min-h-0" viewportRef={viewportRef}>
+      <ScrollArea
+        className="flex-1 min-h-0"
+        viewportRef={viewportRef}
+        onDragOver={handleViewportDragOver}
+        onDragLeave={handleViewportDragLeave}
+      >
         <div className="space-y-2 pb-2">
             {searchQuery && filteredSessions.length === 0 ? (
               <div className="flex flex-col items-center gap-2 px-2 py-6 text-muted-foreground">
@@ -539,6 +641,9 @@ export const SessionList = memo(function SessionList() {
                       <div key={row.key} data-index={row.index} ref={virtualizer.measureElement}
                         data-sidebar-row={rows[row.index].key}
                         data-drag-frozen={frozen || undefined}
+                        data-drag-active={drag ? "true" : undefined}
+                        data-drag-source={frozen ? "true" : undefined}
+                        data-drop-target={indicator ? "true" : undefined}
                         onDragEnter={(event) => {
                           if (drag) event.preventDefault();
                         }}
@@ -554,7 +659,7 @@ export const SessionList = memo(function SessionList() {
                         {indicator && <div aria-hidden="true" data-drop-indicator={indicator}
                           className="pointer-events-none absolute inset-x-2 z-10 h-0.5 rounded-full bg-[var(--em-primary)]"
                           style={indicator === "before" ? { top: -1 } : { bottom: 0 }} />}
-                        <div style={frozen ? { opacity: 0.4, filter: "grayscale(1)" } : undefined}>
+                        <div>
                         {!session ? (
                         <div
                           className={cn(
@@ -673,11 +778,13 @@ export const SessionList = memo(function SessionList() {
                               )}
                               title={`在「${group.title}」新建对话`}
                               aria-label={`在「${group.title}」新建对话`}
-                              aria-busy={creating}
+                              aria-busy={creatingWorkspaceKey === group.key}
                               disabled={creating}
-                              onClick={() => void handleNewSession(group.workspaceId, group.path)}
+                              onClick={() => void handleNewSession(group.workspaceId, group.path, group.key)}
                             >
-                              {creating ? <LoaderCircle className="h-3.5 w-3.5 animate-spin text-current" /> : <Plus className="h-3.5 w-3.5 text-current" />}
+                              {creatingWorkspaceKey === group.key
+                                ? <LoaderCircle className="h-3.5 w-3.5 animate-spin text-current" />
+                                : <Plus className="h-3.5 w-3.5 text-current" />}
                             </Button>
                           ) : null}
                         </div>

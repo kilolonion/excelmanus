@@ -87,6 +87,11 @@ def walk_schema_path(
     document = root if root is not None else schema
     current = unwrap_schema(schema, document)
     tokens = [part for part in str(path or "").split(".") if part]
+    if tokens and tokens[0] in {"$defs", "definitions"}:
+        definitions = document.get(tokens[0]) or {}
+        if len(tokens) < 2 or tokens[1] not in definitions:
+            return None, list(definitions), "需要有效的类型定义名称"
+        return walk_schema_path(definitions[tokens[1]], ".".join(tokens[2:]), root=document)
     if not tokens:
         return current, property_names(current), ""
     for index, token in enumerate(tokens):

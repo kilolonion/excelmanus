@@ -65,7 +65,7 @@ def _strip_absolute(addr: str) -> tuple[str, bool, bool]:
 class FormulaRefExtractor:
     """从 Excel 公式中提取所有单元格/区域引用（去重）。"""
 
-    def extract(self, formula: str) -> list[CellRef]:
+    def extract(self, formula: str, workbook=None, sheet_name=None, _seen_names=None) -> list[CellRef]:
         if not formula or not isinstance(formula, str):
             return []
         body = formula.lstrip("=").strip() if formula.startswith("=") else formula
@@ -75,6 +75,7 @@ class FormulaRefExtractor:
         seen: set[str] = set()
         results: list[CellRef] = []
 
+        body = re.sub(r'"(?:[^"\\]|\\.|"")*"', " ", body)
         remaining = body
 
         for m in _EXTERNAL_RE.finditer(body):
@@ -161,6 +162,40 @@ class FormulaRefExtractor:
                 seen.add(key)
                 results.append(ref)
 
+        if workbook is not None:
+            from openpyxl.formula.tokenizer import Tokenizer
+            from excelmanus.workbook.structural_refs import split_reference
+            from excelmanus.workbook.refs import parse_ref, TableRef
+            from excelmanus.workbook.data import _table_ref_to_rect
+            names_seen = set(_seen_names or ())
+            try:
+                tokens = Tokenizer(formula if formula.startswith("=") else "="+formula).items
+            except Exception:
+                tokens = []
+            for token in tokens:
+                if token.type != "OPERAND" or token.subtype != "RANGE":
+                    continue
+                context, local = split_reference(token.value)
+                context = context or sheet_name
+                resolved = []
+                if "[" in local and "]" in local:
+                    try:
+                        ref = parse_ref(token.value).areas[0]
+                        if isinstance(ref, TableRef):
+                            rect = _table_ref_to_rect(workbook, ref, None)
+                            resolved = [CellRef(sheet_name=rect.sheet, cell_or_range=rect.to_a1(include_sheet=False))]
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    dn = workbook[context].defined_names.get(local) if context in workbook.sheetnames else None
+                    dn = dn or workbook.defined_names.get(local)
+                    key = (context, local)
+                    if dn is not None and key not in names_seen:
+                        resolved = self.extract(dn.attr_text, workbook, context, names_seen | {key})
+                for ref in resolved:
+                    key = ref.display()
+                    if key not in seen:
+                        seen.add(key); results.append(ref)
         return results
 
     def extract_functions(self, formula: str) -> list[str]:

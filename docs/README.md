@@ -14,6 +14,7 @@ These guides describe the **1.8.0 source tree**, updated on **2026-09-21**. Inst
 | 技能编写与加载 / Skill authoring and loading | [Skillpack 协议](skillpack_protocol.md) | [Skillpack protocol](skillpack_protocol_en.md) |
 | 升级方式与边界 / Update behavior | [升级与部署](hot-update-design.md) | Covered in [Operations](ops-manual_en.md) |
 | 网页与桌面更新 / Web and desktop updates | [升级与部署](hot-update-design.md) | [Desktop README](../desktop/README.md) |
+| 发布打包 / Release packaging | [可重复发布打包](release-packaging.md) | [Desktop README](../desktop/README.md) |
 | 隐私与服务说明 / Privacy and terms | [隐私政策](privacy-policy.md) · [用户服务协议](terms-of-service.md) | Chinese documents |
 
 运行服务的 API 请求与响应结构可在 [本机 API 文档](http://localhost:8000/docs) 查看；使用其他端口时相应替换地址。

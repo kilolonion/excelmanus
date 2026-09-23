@@ -214,8 +214,7 @@ def check_sheet_name(safe_path: Path, sheet_name: str | None) -> tuple[str | Non
 def ensure_openpyxl_compatible(safe_path: Path) -> Path:
     """确保路径指向 openpyxl 可操作的文件格式（.xlsx/.xlsm）。
 
-    若为 .xls/.xlsb，透明转换为同目录 .xlsx 并返回新路径。
-    转换结果会被缓存（同名 .xlsx 已存在时跳过转换）。
+    若为 .xls/.xlsb，返回隐藏的只读预览 backing，不发布同目录副本。
     CSV 文件原样返回（由调用方处理）。
 
     Args:
@@ -224,7 +223,7 @@ def ensure_openpyxl_compatible(safe_path: Path) -> Path:
     Returns:
         openpyxl 可直接打开的文件路径。
     """
-    from excelmanus.xls_converter import needs_conversion, ensure_xlsx
+    from excelmanus.xls_converter import needs_conversion
 
     if not needs_conversion(safe_path):
         return safe_path
@@ -233,13 +232,13 @@ def ensure_openpyxl_compatible(safe_path: Path) -> Path:
         from excelmanus.tools.context import current_call
 
         call = current_call()
-        workspace_root = (
-            str(call.binding.workspace.root) if call is not None else None
-        )
-        xlsx_path, converted = ensure_xlsx(safe_path, workspace_root=workspace_root)
-        if converted:
-            _logger.info("工具层自动转换: %s → %s", safe_path.name, xlsx_path.name)
-        return xlsx_path
+        if call is None:
+            raise ValueError("转换预览缺少工作区上下文")
+        from excelmanus.workbook.snapshot import open_snapshot_at
+
+        workspace = call.binding.workspace
+        relative = safe_path.relative_to(workspace.root).as_posix()
+        return open_snapshot_at(safe_path, relative=relative, workspace=workspace).backing_path
     except Exception as exc:
         _logger.warning("工具层 xls 转换失败，返回原路径: %s (%s)", safe_path.name, exc)
         return safe_path
@@ -263,7 +262,12 @@ def workspace_relpath(guard: Any, path: Path | str) -> str:
 
 def prepare_excel_commit_path(guard: Any, file_path: str) -> tuple[Path, str]:
     """解析用户路径、必要时转 xlsx，返回 (绝对路径, 工作区相对路径)。"""
-    safe_path = ensure_openpyxl_compatible(guard.resolve_and_validate(file_path))
+    safe_path = guard.resolve_and_validate(file_path)
+    from excelmanus.xls_converter import needs_conversion
+    if needs_conversion(safe_path):
+        from excelmanus.workbook_commit import CommitError
+
+        raise CommitError("CONVERSION_REQUIRED", "请先显式转换为 .xlsx 后编辑旧版工作簿")
     rel = workspace_relpath(guard, safe_path)
     rel_posix = rel.replace("\\", "/").lstrip("./")
     if rel_posix == "uploads" or rel_posix.startswith("uploads/"):

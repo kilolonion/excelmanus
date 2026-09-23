@@ -306,6 +306,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
     setAutoScroll(shouldAutoScroll);
     if (
       scrollTop < 180
+      && userMovedUp
       && hasMoreMessages
       && !isLoadingOlderMessages
       && !prependAnchorRef.current
@@ -460,9 +461,15 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
             className="pointer-events-none sticky top-1 z-10 flex h-0 justify-center overflow-visible"
             aria-live="polite"
           >
-            <span className="rounded-full border border-border/60 bg-background/90 px-3 py-1 text-[11px] text-muted-foreground shadow-sm">
-              {isLoadingOlderMessages ? "正在加载更早消息…" : "上滑加载更早消息"}
-            </span>
+            <button type="button" disabled={isLoadingOlderMessages}
+              onClick={() => {
+                const container = viewportRef.current;
+                if (container) prependAnchorRef.current = { top: container.scrollTop, height: container.scrollHeight };
+                void loadOlderMessages();
+              }}
+              className="pointer-events-auto rounded-full border border-border/60 bg-background/90 px-3 py-1 text-[11px] text-muted-foreground shadow-sm">
+              {isLoadingOlderMessages ? "正在加载更早消息…" : "加载更早消息"}
+            </button>
           </div>
         )}
         <div

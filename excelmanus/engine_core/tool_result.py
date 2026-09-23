@@ -203,6 +203,17 @@ def annotate_shadow_schema_violations(
     mode = str(getattr(registry, "_schema_validation_mode", "off") or "off").strip().lower()
     if mode != "shadow" or not tool_name:
         return result
+    # A malformed function-arguments payload never reached the tool or the
+    # schema validator.  Do not append the normal shadow hint (which says the
+    # call executed) or manufacture required-field violations from the empty
+    # parsed argument object.
+    if (
+        result.error is not None
+        and isinstance(result.value, dict)
+        and result.value.get("parse_error") is True
+        and result.value.get("executed") is False
+    ):
+        return result
     getter = getattr(registry, "get_tool", None)
     tool = getter(tool_name) if callable(getter) else None
     schema = getattr(tool, "input_schema", None) if tool is not None else None

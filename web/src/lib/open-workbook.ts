@@ -7,9 +7,14 @@ import { prefetchExcelView } from "@/lib/excel-view-prefetch";
 import { useSessionStore, waitForSessionHydration } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWorkbookConversationStore } from "@/stores/workbook-conversation-store";
+import { useWorkbookWorkspaceStore } from "@/stores/workbook-workspace-store";
+import { useWordStore } from "@/stores/word-store";
+import { useFilePreviewStore } from "@/stores/file-preview-store";
 import { fileBaseName } from "@/lib/revision-display";
 import type { Session } from "@/lib/types";
 import type { WorkbookViewLayout } from "@/lib/workspace-surface";
+
+let optimisticOpenSequence = 0;
 
 export async function ensureWorkbookSession(): Promise<Session> {
   await waitForSessionHydration();
@@ -57,33 +62,76 @@ export async function openWorkbookForConversation(path: string, session: Session
   if (!isSpreadsheetFile(path)) throw new Error("请选择 Excel 或 CSV 表格");
   opts?.signal?.throwIfAborted();
   const file = fileRefFromSession(path, session);
-  prefetchExcelView();
-  const view = await fetchWorkbookView({
-    path: file.relative, workspaceKey: file.workspaceKey, workspaceId: file.workspaceId,
-    sessionId: session.id, sheet: opts?.sheet, withStyles: false, signal: opts?.signal,
-  });
-  opts?.signal?.throwIfAborted();
-  assertWorkbookSession(session);
-  if (!view.sheets.length) throw new Error("文件无工作表");
-  const excel = useExcelStore.getState();
-  excel.rebindSession(excel.activeWorkspaceKey, file.workspaceKey);
-  const sheet = view.active_sheet ?? view.windows[0]?.sheet;
-  if (opts?.showSheet === false) {
-    // Changing the discussion target from chat must not switch the visible surface.
-    excel.addRecentFile({ path: file.relative, filename: fileBaseName(file.relative) }, file.workspaceKey);
-    useExcelStore.setState({ activeFilePath: file.relative, activeSheet: sheet ?? null });
-    const conversation = useWorkbookConversationStore.getState();
-    conversation.bind(session.id, file, sheet, opts.layout);
-    excel.setPrimaryWorkbook(file.relative, sheet);
-    conversation.setShowSheet(session.id, false);
-    conversation.observe(session.id, file, { status: "ready", sheet, version: view.content_version });
-    return;
+  const requestSequence = ++optimisticOpenSequence;
+  const showSheet = opts?.showSheet !== false;
+
+  // Warm the engine and the exact style-free opening rectangle. The editor
+  // requests this same rectangle, so a hover/open race shares one flight.
+  prefetchExcelView(file);
+
+  // Mount the sheet surface before waiting for the workbook parser. Univer
+  // paints a lightweight empty grid immediately and upgrades it when the first
+  // window arrives, so recent-file opens feel the same as view switches.
+  const beforeExcel = useExcelStore.getState();
+  const beforeConversation = useWorkbookConversationStore.getState();
+  const beforeWorkspace = useWorkbookWorkspaceStore.getState();
+  const beforeWord = useWordStore.getState();
+  const beforePreview = useFilePreviewStore.getState();
+  if (showSheet) {
+    openWorkspaceFile(file.relative, {
+      intent: "full",
+      sheet: opts?.sheet,
+      sessionId: session.id,
+      workspaceId: session.workspaceId,
+      workbookLayout: opts?.layout,
+    });
   }
-  excel.closeCompare();
-  openWorkspaceFile(file.relative, {
-    intent: "full", sheet,
-    sessionId: session.id, workspaceId: session.workspaceId,
-    workbookLayout: opts?.layout,
-  });
-  if (opts?.makePrimary) excel.setPrimaryWorkbook(file.relative);
+
+  const rollbackOptimisticOpen = () => {
+    if (!showSheet || requestSequence !== optimisticOpenSequence) return;
+    const current = useExcelStore.getState();
+    // A newer user action owns the surface. Never restore an older snapshot
+    // over it when a slow request eventually fails.
+    if (current.fullViewPath !== file.relative || current.activeWorkspaceKey !== file.workspaceKey) return;
+    useExcelStore.setState(beforeExcel);
+    useWorkbookConversationStore.setState(beforeConversation);
+    useWorkbookWorkspaceStore.setState(beforeWorkspace);
+    useWordStore.setState(beforeWord);
+    useFilePreviewStore.setState(beforePreview);
+  };
+
+  try {
+    const view = await fetchWorkbookView({
+      path: file.relative, workspaceKey: file.workspaceKey, workspaceId: file.workspaceId,
+      sessionId: session.id, sheet: opts?.sheet, withStyles: false, signal: opts?.signal,
+    });
+    opts?.signal?.throwIfAborted();
+    assertWorkbookSession(session);
+    if (!view.sheets.length) throw new Error("文件无工作表");
+    const excel = useExcelStore.getState();
+    excel.rebindSession(excel.activeWorkspaceKey, file.workspaceKey);
+    const sheet = view.active_sheet ?? view.windows[0]?.sheet;
+    if (opts?.showSheet === false) {
+      // Changing the discussion target from chat must not switch the visible surface.
+      excel.addRecentFile({ path: file.relative, filename: fileBaseName(file.relative) }, file.workspaceKey);
+      useExcelStore.setState({ activeFilePath: file.relative, activeSheet: sheet ?? null });
+      const conversation = useWorkbookConversationStore.getState();
+      conversation.bind(session.id, file, sheet, opts.layout);
+      excel.setPrimaryWorkbook(file.relative, sheet);
+      conversation.setShowSheet(session.id, false);
+      conversation.observe(session.id, file, { status: "ready", sheet, version: view.content_version });
+      return;
+    }
+    excel.closeCompare();
+    // Reapply the resolved sheet while keeping the already-mounted shell.
+    openWorkspaceFile(file.relative, {
+      intent: "full", sheet,
+      sessionId: session.id, workspaceId: session.workspaceId,
+      workbookLayout: opts?.layout,
+    });
+    if (opts?.makePrimary) excel.setPrimaryWorkbook(file.relative);
+  } catch (error) {
+    rollbackOptimisticOpen();
+    throw error;
+  }
 }

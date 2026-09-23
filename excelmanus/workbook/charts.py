@@ -256,7 +256,9 @@ def _select_chart(ws: Any, *, index: int | None = None, target_cell: str | None 
             return int(index), charts[int(index)]
         return None
     for pos, chart in enumerate(charts):
-        if title and str(getattr(chart, "title", "") or "") == title:
+        if title and _chart_title(chart) == title:
+            return pos, chart
+        if target_cell and isinstance(chart.anchor, str) and chart.anchor.upper() == target_cell.upper():
             return pos, chart
         anchor = getattr(getattr(chart, "anchor", None), "_from", None)
         if target_cell and anchor is not None:
@@ -265,6 +267,56 @@ def _select_chart(ws: Any, *, index: int | None = None, target_cell: str | None 
             if cell.upper() == str(target_cell).upper():
                 return pos, chart
     return None
+
+
+def _chart_title(chart: Any) -> str:
+    tx = getattr(getattr(chart, "title", None), "tx", None)
+    rich = getattr(tx, "rich", None)
+    return "".join(str(run.t or "") for paragraph in getattr(rich, "p", ()) for run in getattr(paragraph, "r", ()))
+
+
+def update_chart_in_workbook(wb: Any, op: dict[str, Any]) -> dict[str, Any]:
+    """Patch properties/series on the existing chart, preserving other settings."""
+    ws = get_worksheet(wb, op.get("sheet") or op.get("sheet_name"))
+    found = _select_chart(ws, index=op.get("index", op.get("chart_index")), target_cell=op.get("target_cell"), title=op.get("old_title"))
+    if found is None:
+        raise ValueError("未找到要更新的图表；请提供 index、old_title 或 target_cell")
+    index, chart = found
+    from openpyxl.chart import BarChart, LineChart, PieChart, ScatterChart, AreaChart
+    classes = {"bar": BarChart, "line": LineChart, "pie": PieChart, "scatter": ScatterChart, "area": AreaChart}
+    old_type = next((name for name, cls in classes.items() if isinstance(chart, cls)), None)
+    new_type = _CHART_TYPE_ALIASES.get(str(op.get("chart_type", "")).lower(), op.get("chart_type")) or old_type
+    if new_type is None:
+        raise ValueError("该图表类型暂不支持原生修改")
+    if new_type != old_type:
+        raise ValueError("修改图表类型请显式删除并创建；update_chart 保留原对象的其余属性")
+    if "data_range" in op or "categories_range" in op:
+        if not op.get("data_range"):
+            raise ValueError("修改数据系列需要 data_range")
+        spec = normalize_chart_args(chart_type=new_type, data_range=op["data_range"], categories_range=op.get("categories_range"), sheet_name=ws.title, from_rows=bool(op.get("from_rows")))
+        if isinstance(spec, ToolResult):
+            raise ValueError(spec.model_text)
+        add_chart_to_workbook(wb, spec)
+        new_chart = ws._charts.pop()
+        old_series = chart.series
+        for pos, series in enumerate(new_chart.series):
+            if pos < len(old_series):
+                from copy import deepcopy
+                for attr in ("graphicalProperties", "marker", "dLbls", "trendline", "errBars"):
+                    if hasattr(series, attr) and hasattr(old_series[pos], attr):
+                        setattr(series, attr, deepcopy(getattr(old_series[pos], attr)))
+        chart.series = new_chart.series
+    for field in ("title", "style", "width", "height"):
+        if field in op:
+            setattr(chart, field, op[field])
+    for field, axis in (("x_title", "x_axis"), ("y_title", "y_axis")):
+        if field in op:
+            if not hasattr(chart, axis):
+                raise ValueError("该图表没有坐标轴")
+            getattr(chart, axis).title = op[field]
+    if "target_cell" in op:
+        chart.anchor = op["target_cell"]
+    return {"target_sheet": ws.title, "index": index, "chart_type": new_type, "total_charts": len(ws._charts)}
 
 
 def delete_chart_from_workbook(

@@ -549,7 +549,20 @@ function Write-RuntimeJson {
         start_script = (Join-Path $Script:SCRIPT_DIR "start.ps1")
     }
     $json = $payload | ConvertTo-Json
-    Set-Content -Path (Join-Path $homeDir "runtime.json") -Value $json -Encoding UTF8
+    # PowerShell 5 writes a BOM with Set-Content -Encoding UTF8, which breaks
+    # Python JSON readers. Publish the complete BOM-free record atomically.
+    $runtimeFile = Join-Path $homeDir "runtime.json"
+    $temporaryFile = Join-Path $homeDir ("runtime." + [guid]::NewGuid().ToString("N") + ".tmp")
+    try {
+        [IO.File]::WriteAllText($temporaryFile, $json, (New-Object Text.UTF8Encoding($false)))
+        if ([IO.File]::Exists($runtimeFile)) {
+            [IO.File]::Replace($temporaryFile, $runtimeFile, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporaryFile, $runtimeFile)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporaryFile)) { [IO.File]::Delete($temporaryFile) }
+    }
 }
 
 function Clear-RuntimeJson {

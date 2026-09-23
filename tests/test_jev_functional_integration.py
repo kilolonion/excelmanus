@@ -129,22 +129,20 @@ def test_column_from_other_file_cannot_be_combined():
 
 
 @pytest.mark.asyncio
-async def test_missing_provider_still_checks_delivery_and_respects_off(tmp_path):
+@pytest.mark.parametrize("changes", [{"api_key": None}, {"enabled": "off"}, {}])
+async def test_delivery_review_stays_disabled_with_any_provider_settings(tmp_path, changes):
     e = engine(tmp_path)
     e._state.affected_files = ["a.xlsx"]
     e._state.write_operations_log = [{"tool": "edit_spreadsheet"}]
-    with patch("excelmanus.system_one.host.live_jev_settings", return_value=settings(api_key=None)):
-        assert should_check_delivery(e)
+    with patch("excelmanus.system_one.host.live_jev_settings", return_value=settings(**changes)):
+        assert not should_check_delivery(e)
         advice = await maybe_verify_mutation(e, NS(tool_calls=[], truncated=False), on_event=None)
-        assert advice and e._mutation_verification["source"] == "deterministic"
+        assert advice == ""
+        assert not hasattr(e, "_mutation_verification")
         assert not should_check_delivery(e)
         e._state.write_operations_log.append({"tool": "edit_spreadsheet"})
-        assert should_check_delivery(e)
-        await maybe_verify_mutation(e, NS(tool_calls=[], truncated=False), on_event=None)
-        e._state.write_operations_log.append({"tool": "edit_spreadsheet"})
         assert not should_check_delivery(e)
-    with patch("excelmanus.system_one.host.live_jev_settings", return_value=settings(enabled="off")):
-        assert not should_check_delivery(e)
+        assert await maybe_verify_mutation(e, NS(tool_calls=[], truncated=False)) == ""
 
 
 def test_checklist_does_not_hide_requirements_past_user_text_cap(tmp_path):

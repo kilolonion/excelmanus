@@ -1,567 +1,275 @@
 .workspace {
-  --workspace-line: color-mix(in srgb, var(--em-line) 84%, transparent);
-  --workspace-soft-line: color-mix(in srgb, var(--em-line) 58%, transparent);
+  --workspace-line: color-mix(in srgb, var(--em-line) 80%, transparent);
+  --workspace-surface: var(--em-panel);
+  --workspace-strip: color-mix(in srgb, var(--em-primary) 6%, var(--em-panel));
+  container: workbook / inline-size;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  background: var(--em-page);
+  background: var(--workspace-surface);
   color: var(--em-ink);
 }
 
-/* The workspace chrome is one compact row so the workbook receives the
-   vertical space that used to be consumed by three separate toolbars. */
+/* The active tab and ribbon share a surface, without an intervening card or gap. */
 .toolbar {
   position: relative;
   z-index: 2;
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
-  min-height: 50px;
-  margin-bottom: -12px;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--workspace-line);
-  border-radius: 0 0 14px 14px;
-  background:
-    radial-gradient(circle at 12% 0, var(--em-primary-alpha-10), transparent 38%),
-    linear-gradient(180deg, color-mix(in srgb, var(--em-panel) 94%, transparent), var(--em-panel));
-  box-shadow: 0 5px 14px rgba(24, 58, 40, .08);
+  height: 38px;
+  padding: 5px 8px 0 4px;
   flex-shrink: 0;
-  overflow: hidden;
+  background: var(--workspace-strip);
 }
 
-.toolbar > .identity {
-  flex: 0 0 auto;
-}
-
-.toolbar > .tabs {
-  flex: 1 1 360px;
-}
-
-.toolbar > .headerActions {
-  flex: 0 0 auto;
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px;
-  min-height: 74px;
-  padding: 12px 18px;
-  border-bottom: 1px solid var(--workspace-line);
-  background:
-    radial-gradient(circle at 12% 0, var(--em-primary-alpha-10), transparent 38%),
-    linear-gradient(180deg, color-mix(in srgb, var(--em-panel) 94%, transparent), var(--em-panel));
-  flex-shrink: 0;
-}
-
-.identity {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-width: 0;
-}
-
-.workspaceIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 auto;
-  border: 1px solid color-mix(in srgb, var(--em-primary) 22%, var(--em-line));
-  border-radius: 10px;
-  background: var(--em-primary-alpha-10);
-  color: var(--em-primary);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .62);
-}
-
-.statusDot,
-.focusSummaryDot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--em-primary-light);
-  box-shadow: 0 0 0 3px var(--em-primary-alpha-08);
-}
-
-.headerActions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.button,
-.iconButton,
-.segmentButton,
-.linkToggle,
-.tabName,
-.tabClose {
-  border: 0;
-  font: inherit;
-  cursor: pointer;
-}
-
-.button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-  transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
-}
-
-.button:active,
-.iconButton:active,
-.segmentButton:active,
-.linkToggle:active,
-.tabClose:active {
-  transform: scale(.97);
-}
-
-.button:focus-visible,
-.iconButton:focus-visible,
-.segmentButton:focus-visible,
-.linkToggle:focus-visible,
-.tabName:focus-visible,
-.tabClose:focus-visible {
-  outline: 2px solid var(--em-primary-light);
-  outline-offset: 2px;
-}
-
-.button:disabled {
-  cursor: not-allowed;
-  opacity: .52;
-}
-
-.primaryButton {
-  border: 1px solid var(--em-primary);
-  background: var(--em-primary);
-  color: #fff;
-  box-shadow: 0 4px 10px color-mix(in srgb, var(--em-primary) 18%, transparent);
-}
-
-.primaryButton:hover {
-  background: var(--em-primary-dark);
-}
-
-.moreButton {
-  border: 1px solid var(--workspace-line);
-  background: color-mix(in srgb, var(--em-panel) 78%, transparent);
-  color: var(--em-ink);
-}
-
-.moreButton:hover {
-  border-color: color-mix(in srgb, var(--em-primary) 30%, var(--em-line));
-  background: var(--em-primary-alpha-06);
-  color: var(--em-primary);
-}
-
-.iconButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--workspace-line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--em-muted);
-  transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
-}
-
-.iconButton:hover {
-  border-color: color-mix(in srgb, var(--em-primary) 28%, var(--em-line));
-  background: var(--em-primary-alpha-06);
-  color: var(--em-primary);
-}
-
-.controlBar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 48px;
-  padding: 7px 18px;
-  border-bottom: 1px solid var(--workspace-soft-line);
-  background: color-mix(in srgb, var(--em-panel-soft) 52%, var(--em-page));
-  flex-shrink: 0;
-}
-
-.controlGroup {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.controlLabel {
-  color: var(--em-muted);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .055em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.segmented {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--workspace-line);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--em-panel-soft) 78%, transparent);
-}
-
-.segmentButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-width: 52px;
-  min-height: 28px;
-  padding: 4px 8px;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--em-muted);
-  font-size: 11px;
-  font-weight: 650;
-  transition: background 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
-}
-
-.segmentButton:hover {
-  color: var(--em-ink);
-}
-
-.segmentButton[data-active="true"] {
-  background: var(--em-panel);
-  color: var(--em-primary);
-  box-shadow: 0 2px 7px rgba(24, 58, 40, .08), inset 0 1px 0 rgba(255, 255, 255, .45);
-}
-
-.segmentShortLabel {
-  display: none;
-}
-
-.linkToggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 5px 9px;
-  border: 1px solid var(--workspace-line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--em-muted);
-  font-size: 11px;
-  font-weight: 650;
-  transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
-}
-
-.linkToggle:hover,
-.linkToggle[data-active="true"] {
-  border-color: color-mix(in srgb, var(--em-primary) 30%, var(--em-line));
-  background: var(--em-primary-alpha-08);
-  color: var(--em-primary);
-}
-
-.toggleState {
-  color: color-mix(in srgb, currentColor 68%, transparent);
-  font-size: 10px;
-  font-weight: 500;
-}
-
-.controlSpacer {
-  flex: 1;
-  min-width: 8px;
-}
-
-.focusSummary {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  max-width: min(270px, 25vw);
-  overflow: hidden;
-  color: var(--em-muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.focusSummaryDot {
-  width: 5px;
-  height: 5px;
-  box-shadow: none;
-}
-
-.moreButton {
-  min-width: 62px;
-}
-
-.spin {
-  animation: workspace-spin .8s linear infinite;
-}
-
-.actionMenu {
-  min-width: 250px;
-}
-
-.menuSectionLabel {
-  padding-top: 7px;
-  color: var(--em-muted);
-  font-size: 10px;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-
-.menuHint {
-  margin-left: auto;
-  color: var(--em-muted);
-  font-size: 10px;
+.toolbar::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: var(--workspace-line);
+  content: "";
+  pointer-events: none;
 }
 
 .tabs {
   display: flex;
   align-items: stretch;
+  flex: 1;
   min-width: 0;
-  min-height: 42px;
-  padding: 2px 3px;
-  border: 1px solid var(--workspace-line);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--em-panel-soft) 58%, var(--em-panel));
-  flex-shrink: 0;
-  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
-}
-
-.tabs[data-drop-active="true"] {
-  border-color: color-mix(in srgb, var(--em-primary) 62%, var(--em-line));
-  background: var(--em-primary-alpha-06);
-  box-shadow: 0 0 0 3px var(--em-primary-alpha-08);
 }
 
 .tabScroll {
   display: flex;
   align-items: stretch;
+  flex: 0 1 auto;
   min-width: 0;
-  flex: 1 1 auto;
+  padding-inline: 10px;
   overflow-x: auto;
   scrollbar-width: none;
+  overscroll-behavior-x: contain;
 }
 
-.tabScroll::-webkit-scrollbar {
-  display: none;
-}
+.tabScroll::-webkit-scrollbar { display: none; }
 
 .tab {
   position: relative;
   display: flex;
-  align-items: stretch;
-  min-width: 170px;
-  max-width: 290px;
-  border-right: 1px solid var(--workspace-soft-line);
-  border-top: 2px solid transparent;
-  cursor: grab;
-  transition: background 160ms ease, border-color 160ms ease;
+  align-items: center;
+  flex: 0 1 240px;
+  width: 240px;
+  min-width: 148px;
+  border-radius: 10px 10px 0 0;
+  color: var(--em-muted);
+  transition: background 140ms ease, color 140ms ease;
 }
 
-.tab:active {
-  cursor: grabbing;
+.tab:not([data-focused="true"])::after {
+  position: absolute;
+  top: 9px;
+  right: 0;
+  width: 1px;
+  height: 16px;
+  background: var(--workspace-line);
+  content: "";
 }
 
-.tab[data-dragging="true"] {
-  opacity: .42;
-}
+.tab:hover { background: color-mix(in srgb, var(--workspace-surface) 55%, transparent); }
 
 .tab[data-focused="true"] {
-  border-top-color: var(--em-primary);
-  background: var(--em-primary-alpha-06);
+  z-index: 1;
+  background: var(--workspace-surface);
+  color: var(--em-ink);
+}
+
+/* Inverse corners connect the selected tab to the sheet, as in a browser. */
+.tab[data-focused="true"]::before,
+.tab[data-focused="true"]::after {
+  position: absolute;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
+  content: "";
+  pointer-events: none;
+}
+
+.tab[data-focused="true"]::before {
+  left: -10px;
+  background: radial-gradient(circle at 0 0, transparent 10px, var(--workspace-surface) 10.5px);
+}
+
+.tab[data-focused="true"]::after {
+  right: -10px;
+  background: radial-gradient(circle at 100% 0, transparent 10px, var(--workspace-surface) 10.5px);
+}
+
+.tab[data-dragging="true"] { opacity: .45; }
+
+.tabName,
+.tabClose,
+.tabAdd,
+.button,
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
 }
 
 .tabName {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
+  justify-content: flex-start;
   flex: 1;
-  padding: 7px 6px 7px 11px;
-  background: transparent;
-  color: var(--em-ink);
+  gap: 9px;
+  min-width: 0;
+  height: 33px;
+  padding: 0 6px 0 14px;
+  border-radius: 10px 0 0 0;
   text-align: left;
-  transition: background 160ms ease;
 }
 
-.tabName:hover {
-  background: var(--em-primary-alpha-04);
-}
-
-.tabIcon {
-  flex: 0 0 auto;
-  color: var(--em-primary);
-}
-
-.tabDragIcon {
-  flex: 0 0 auto;
-  color: var(--em-muted);
-  opacity: .56;
-}
-
-.badge {
-  flex: 0 0 auto;
-  color: var(--em-primary);
-  font-size: 9px;
-  font-weight: 750;
-  letter-spacing: .03em;
-}
+.tabIcon { flex-shrink: 0; color: var(--em-primary); }
+.tab:not([data-focused="true"]) .tabIcon { opacity: .7; }
 
 .tabFileName {
   min-width: 0;
-  max-width: 150px;
   overflow: hidden;
-  color: var(--em-muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tabSheet {
-  min-width: 0;
-  max-width: 130px;
-  overflow: hidden;
-  color: var(--em-ink);
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tabClose {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  margin: 7px 5px 7px 0;
-  border-radius: 6px;
-  background: transparent;
+  width: 24px;
+  height: 24px;
+  margin-right: 8px;
+  border-radius: 7px;
   color: var(--em-muted);
-  opacity: .72;
-  transition: background 160ms ease, color 160ms ease, opacity 160ms ease;
-}
-
-.tabPrimary {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 23px;
-  margin: 7px 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--em-muted);
-  cursor: pointer;
-  opacity: .64;
-  transition: background 160ms ease, color 160ms ease, opacity 160ms ease;
-}
-
-.tabPrimary:hover {
-  background: var(--em-primary-alpha-08);
-  color: var(--em-primary);
-  opacity: 1;
-}
-
-.tabPrimary:focus-visible {
-  outline: 2px solid var(--em-primary-light);
-  outline-offset: 1px;
 }
 
 .tabClose:hover {
-  background: color-mix(in srgb, var(--em-error) 10%, transparent);
-  color: var(--em-error);
-  opacity: 1;
+  background: color-mix(in srgb, var(--em-ink) 8%, transparent);
+  color: var(--em-ink);
 }
 
-.tabAdd {
-  display: inline-flex;
+.tabAdd,
+.iconButton {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--em-muted);
+}
+
+.tabAdd { align-self: center; margin: 0 0 3px 2px; }
+
+.headerActions {
+  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 32px;
-  min-width: 32px;
-  margin: 3px 2px 3px 4px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--em-primary);
-  cursor: pointer;
-  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+  flex-shrink: 0;
+  gap: 3px;
+  padding-bottom: 3px;
 }
 
-.tabAdd:hover {
-  border-color: color-mix(in srgb, var(--em-primary) 24%, var(--em-line));
+.button {
+  gap: 6px;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 8px;
+  color: var(--em-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tabAdd:hover,
+.button:hover,
+.iconButton:hover,
+.button[data-state="open"],
+.iconButton[data-state="open"] {
   background: var(--em-primary-alpha-10);
+  color: var(--em-primary);
 }
 
-.tabAdd:active {
-  transform: scale(.94);
+.button:disabled,
+.iconButton:disabled { cursor: wait; opacity: .55; }
+
+.tabName:focus-visible,
+.tabClose:focus-visible,
+.tabAdd:focus-visible,
+.button:focus-visible,
+.iconButton:focus-visible,
+.selectionConfirm:focus-visible,
+.selectionCancel:focus-visible {
+  outline: 2px solid var(--em-primary);
+  outline-offset: -3px;
 }
 
-.tabAdd:focus-visible {
-  outline: 2px solid var(--em-primary-light);
-  outline-offset: 1px;
-}
+.actionDivider { width: 1px; height: 16px; margin-inline: 4px; background: var(--workspace-line); }
+
+.actionMenu { width: 268px; max-width: calc(100vw - 16px); }
+.fileMenu { width: 320px; max-width: calc(100vw - 16px); }
+.fileMenuName { min-width: 0; overflow-wrap: anywhere; }
+.menuSectionLabel { color: var(--em-muted); font-size: 11px; font-weight: 500; }
+.menuHint { margin-left: auto; color: var(--em-muted); font-size: 11px; white-space: nowrap; }
+.menuNote { margin: 4px 8px 8px; color: var(--em-muted); font-size: 11px; line-height: 1.5; }
+.spin { animation: workspace-spin .8s linear infinite; }
+@keyframes workspace-spin { to { transform: rotate(360deg); } }
 
 .error {
   display: flex;
   align-items: center;
   gap: 7px;
   margin: 0;
-  padding: 7px 18px;
+  padding: 8px 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--em-error) 16%, var(--em-line));
-  background: color-mix(in srgb, var(--em-error) 6%, transparent);
+  background: color-mix(in srgb, var(--em-error) 6%, var(--workspace-surface));
   color: var(--em-error);
-  font-size: 11px;
-  line-height: 1.45;
+  font-size: 12px;
+  line-height: 1.5;
   flex-shrink: 0;
 }
 
-.error > span {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--em-error) 14%, transparent);
-  font-size: 10px;
-  font-weight: 800;
-}
-
 .grid {
-  display: grid;
   position: relative;
+  display: grid;
   flex: 1;
   min-height: 0;
   min-width: 0;
-  gap: 8px;
-  padding: 16px 8px 8px;
-  background: color-mix(in srgb, var(--em-panel-soft) 48%, var(--em-page));
+  gap: 1px;
   overflow: hidden;
-  transition: outline-color 160ms ease, background 160ms ease;
+  background: var(--workspace-line);
 }
 
 .grid[data-drop-active="true"] {
-  outline: 2px dashed color-mix(in srgb, var(--em-primary) 66%, transparent);
-  outline-offset: -4px;
-  background: color-mix(in srgb, var(--em-primary-alpha-06) 70%, var(--em-page));
+  outline: 2px dashed var(--em-primary);
+  outline-offset: -3px;
+}
+
+.dropHint {
+  position: absolute;
+  z-index: 5;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border: 1px solid var(--em-primary);
+  border-radius: 8px;
+  background: var(--workspace-surface);
+  color: var(--em-primary);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .stacked {
@@ -569,240 +277,34 @@
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
 }
 
-.stacked > :first-child {
-  grid-row: 1 / 3;
-}
+.stacked > .pane:first-of-type { grid-row: 1 / 3; }
 
 .pane {
-  display: flex;
-  min-height: 0;
-  min-width: 0;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--workspace-line);
-  border-radius: 10px;
-  background: var(--em-panel);
-  box-shadow: 0 4px 16px rgba(24, 58, 40, .045);
-  transition: border-color 160ms ease, box-shadow 160ms ease;
-}
-
-.pane[data-focused="true"] {
-  border-color: color-mix(in srgb, var(--em-primary) 38%, var(--em-line));
-  box-shadow: 0 7px 22px color-mix(in srgb, var(--em-primary) 9%, transparent);
-}
-
-.paneBody {
   position: relative;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   min-width: 0;
-  flex: 1;
   overflow: hidden;
-  background: var(--em-panel);
+  background: var(--workspace-surface);
 }
 
-.selectionBar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 39px;
-  padding: 7px 10px;
-  border-top: 1px solid var(--workspace-line);
-  background: var(--em-primary-alpha-06);
-  font-size: 10px;
-  flex-shrink: 0;
+/* Only split panes need a focus marker; a single sheet is one continuous canvas. */
+.workspace:not([data-pane-count="1"]) .pane[data-focused="true"]::after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 1px solid color-mix(in srgb, var(--em-primary) 45%, transparent);
+  content: "";
+  pointer-events: none;
 }
 
-.selectionText {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: var(--em-primary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.paneBody { position: relative; flex: 1; min-height: 0; min-width: 0; overflow: hidden; background: var(--workspace-surface); }
 
-.selectionConfirm,
-.selectionCancel {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-height: 26px;
-  padding: 4px 8px;
-  border-radius: 7px;
-  font-size: 10px;
-  font-weight: 650;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.selectionConfirm {
-  border: 1px solid var(--em-primary);
-  background: var(--em-primary);
-  color: #fff;
-}
-
-.selectionCancel {
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--em-muted);
-}
-
-.selectionCancel:hover {
-  background: var(--em-primary-alpha-08);
-  color: var(--em-primary);
-}
-
-@keyframes workspace-spin {
-  to { transform: rotate(360deg); }
-}
-
-.status {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 5px 14px;
-  min-height: 30px;
-  padding: 5px 18px;
-  border-top: 1px solid var(--workspace-line);
-  background: var(--em-panel);
-  color: var(--em-muted);
-  font-size: 10px;
-  flex-shrink: 0;
-}
-
-.statusItem {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.statusDot {
-  width: 5px;
-  height: 5px;
-  box-shadow: none;
-}
-
-.statusNote {
-  color: var(--em-gold);
-}
-
-.statusSpacer {
-  flex: 1;
-}
-
-.statusHint {
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@media (max-width: 980px) {
-  .toolbar {
-    gap: 10px;
-    padding-inline: 12px;
-  }
-
-  .toolbar > .identity {
-    max-width: 260px;
-  }
-
-  .tabFileName {
-    max-width: 110px;
-  }
-}
-
-@media (max-width: 720px) {
-  .toolbar {
-    gap: 6px;
-    min-height: 46px;
-    margin-bottom: -8px;
-    padding: 3px 8px;
-    border-radius: 0 0 11px 11px;
-  }
-
-  .toolbar > .identity {
-    max-width: 168px;
-    gap: 7px;
-  }
-
-  .workspaceIcon {
-    width: 29px;
-    height: 29px;
-    border-radius: 9px;
-  }
-
-  .headerActions {
-    gap: 4px;
-  }
-
-  .headerActions .moreButton span {
-    display: none;
-  }
-
-  .headerActions .moreButton {
-    width: 32px;
-    min-width: 32px;
-    padding-inline: 0;
-  }
-
-  .tabs {
-    min-height: 42px;
-    flex-basis: 112px;
-  }
-
-  .tab {
-    min-width: 136px;
-  }
-
-  .tabDragIcon {
-    display: none;
-  }
-
-  .tabFileName {
-    display: none;
-  }
-
-  .tabName {
-    padding-left: 9px;
-  }
-
-  .tabAdd {
-    width: 28px;
-    min-width: 28px;
-  }
-
-  .grid {
-    gap: 5px;
-    padding: 12px 5px 5px;
-  }
-
-  .status {
-    gap: 4px 10px;
-    min-height: 28px;
-    padding-inline: 10px;
-  }
-
-  .statusHint {
-    display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .button,
-  .iconButton,
-  .segmentButton,
-  .linkToggle,
-  .tabName,
-  .tabClose {
-    transition: none;
-  }
-
-  .spin {
-    animation: none;
-  }
+/* Univer owns the ribbon, but its tab row belongs to the same workspace surface. */
+.workspace :global([data-univer-container] [data-u-comp="ribbon-header-menu"]),
+.workspace :global([data-univer-container] [role="tablist"][aria-label="ribbon.menu"]) {
+  background: var(--workspace-surface);
 }
 
 .workspace :global([data-univer-container] [role="tablist"][aria-label="ribbon.menu"]) {
@@ -813,4 +315,42 @@
 .workspace :global([data-univer-container] [role="tablist"][aria-label="ribbon.menu"] [role="tab"]) {
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+.selectionBar { display: flex; align-items: center; gap: 8px; min-height: 39px; padding: 7px 10px; border-top: 1px solid var(--workspace-line); background: var(--em-primary-alpha-06); font-size: 11px; flex-shrink: 0; }
+.selectionText { min-width: 0; flex: 1; overflow: hidden; color: var(--em-primary); text-overflow: ellipsis; white-space: nowrap; }
+.selectionConfirm,
+.selectionCancel { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 28px; padding: 4px 8px; border: 1px solid transparent; border-radius: 7px; font-size: 11px; font-weight: 500; white-space: nowrap; cursor: pointer; }
+.selectionConfirm { background: var(--em-primary); color: #fff; }
+.selectionCancel { background: transparent; color: var(--em-muted); }
+.selectionCancel:hover { background: var(--em-primary-alpha-08); color: var(--em-primary); }
+
+@container workbook (max-width: 720px) {
+  .toolbar { gap: 2px; padding-inline: 0 5px; }
+  .headerActions { gap: 1px; }
+  .actionLabel { display: none; }
+  .button { width: 28px; padding: 0; }
+  .actionDivider { margin-inline: 2px; }
+  .tab { width: 200px; min-width: 148px; }
+  .tabName { gap: 7px; padding-left: 10px; }
+}
+
+@media (pointer: coarse) {
+  .toolbar { height: 44px; }
+  .workspace .tabName { height: 39px; min-height: 39px; }
+  .workspace .tabClose { width: 32px; min-width: 32px; height: 36px; min-height: 36px; margin-right: 4px; }
+  .workspace .tabAdd,
+  .workspace .iconButton,
+  .workspace .button { width: 36px; min-width: 36px; height: 36px; min-height: 36px; }
+  .workspace .button { width: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab,
+  .tabName,
+  .tabClose,
+  .tabAdd,
+  .button,
+  .iconButton { transition: none; }
+  .spin { animation: none; }
 }

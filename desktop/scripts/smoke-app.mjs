@@ -11,7 +11,7 @@ const executable = resolve(process.argv[2]);
 const home = process.argv[3] ? resolve(process.argv[3]) : mkdtempSync(join(tmpdir(), 'ExcelManus 中文 空格 '));
 mkdirSync(home, {recursive:true});
 const env = {...process.env, EXCELMANUS_HOME:home, EXCELMANUS_DESKTOP_CONTROL_STDIN:'1'};
-for(const key of Object.keys(env)) if(key.startsWith('PYTHON') || ['EXCELMANUS_DB_PATH','EXCELMANUS_DATA_ROOT','EXCELMANUS_CHAT_HISTORY_DB_PATH','EXCELMANUS_MANAGE_TOKEN'].includes(key)) delete env[key];
+for(const key of Object.keys(env)) if(key.startsWith('PYTHON') || ['EXCELMANUS_DB_PATH','EXCELMANUS_DATA_ROOT','EXCELMANUS_CHAT_HISTORY_DB_PATH','EXCELMANUS_MANAGE_TOKEN','ELECTRON_RUN_AS_NODE'].includes(key)) delete env[key];
 for(const key of Object.keys(env)) if(key.toUpperCase()==='PATH') delete env[key];
 env.PATH=process.platform==='win32' ? `${process.env.SystemRoot || process.env.SYSTEMROOT}\\System32` : '/usr/bin:/bin';
 const resources = process.platform==='darwin' ? resolve(dirname(executable),'../Resources') : join(dirname(executable),'resources');

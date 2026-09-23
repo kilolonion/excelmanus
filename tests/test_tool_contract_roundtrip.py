@@ -242,7 +242,8 @@ def test_compare_swapped_rows_and_style_only(tmp_path: Path) -> None:
     wb.save(styled)
     wb.close()
     same = compare_spreadsheets(file_a=str(a), file_b=str(a), ignore_style=False)
-    assert not same.success
+    assert same.success, _err(same)
+    assert "appearance" in same.value
 
 
 def test_partial_formula_scan_has_coverage(tmp_path: Path) -> None:

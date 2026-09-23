@@ -45,7 +45,7 @@ def _result() -> ChatResult:
 
 
 @pytest.mark.asyncio
-async def test_mutation_verify_runs_only_for_written_turns() -> None:
+async def test_legacy_mutation_verify_does_not_review_written_turns() -> None:
     engine = SimpleNamespace(
         config=_config(),
         _subagent_config=None,
@@ -72,9 +72,10 @@ async def test_mutation_verify_runs_only_for_written_turns() -> None:
         extras={"satisfied": 0.8, "scope_ok": 0.9, "next": "inspect_more"},
     )
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)) as mocked:
-        await maybe_verify_mutation(engine, _result())
-    mocked.assert_awaited_once()
-    assert engine._mutation_verification["next"] == "inspect_more"
+        advice = await maybe_verify_mutation(engine, _result())
+    mocked.assert_not_awaited()
+    assert advice == ""
+    assert not hasattr(engine, "_mutation_verification")
 
 
 @pytest.mark.asyncio

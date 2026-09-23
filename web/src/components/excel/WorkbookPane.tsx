@@ -19,13 +19,15 @@ import { HistoryPaneOverlay } from "./HistoryPaneOverlay";
 import { ExcelWriteConflictBar } from "./ExcelWriteConflictBar";
 import { WorkbookInteractionBar, useWorkbookQuestionRequest } from "./WorkbookInteractionBar";
 import styles from "./WorkbookWorkspace.module.css";
+import { WorkbookLoadingState } from "./WorkbookLoadingState";
 
 const UniverSheet = dynamic(() => import("./UniverSheet").then((module) => module.UniverSheet), {
-  ssr: false, loading: () => <div role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">正在准备表格…</div>,
+  ssr: false, loading: () => <WorkbookLoadingState />,
 });
 
-export function WorkbookPane({ path, active, focused, onClose, onExpand, expandTitle }: {
-  path: string; active: boolean; focused: boolean; onClose: () => void; onExpand: () => void; expandTitle: string;
+export function WorkbookPane({ id, labelledBy, path, active, focused, onClose, onExpand, expandTitle }: {
+  id?: string; labelledBy?: string;
+  path: string; active: boolean; focused: boolean; onClose?: () => void; onExpand?: () => void; expandTitle: string;
 }) {
   const { session, workspaceKey, key, workspace } = useWorkbookWorkspace();
   const file = fileRefFromSession(path, session);
@@ -66,7 +68,7 @@ export function WorkbookPane({ path, active, focused, onClose, onExpand, expandT
   const filename = fileBaseName(path);
   const navigation = workspace.linkSelection && !focused && workspace.navigation?.source !== path ? workspace.navigation : undefined;
 
-  return <section className={styles.pane} data-workbook-pane={path} data-focused={focused}
+  return <section id={id} role="tabpanel" aria-labelledby={labelledBy} className={styles.pane} data-workbook-pane={path} data-focused={focused}
     aria-label={`${primary ? "主表" : "参考表"}：${filename}`} onPointerDownCapture={focus} onFocusCapture={focus}>
     <div className={styles.paneBody}>
       <UniverSheet fitContainer active={active && !historyActive} focused={focused} fileUrl={buildExcelFileUrl(path, session?.id, session?.workspaceId)}

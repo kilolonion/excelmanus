@@ -302,7 +302,8 @@ async def test_native_dispatcher_read_filter_write_result_is_model_usable(tmp_pa
             payload = json.loads(SpillStore(tmp_path).get(payload['result_spill']))
         return payload
     filtered = await call('analyze_spreadsheet', {'mode': 'filter', 'file_path': 'book.xlsx', 'conditions': [], 'columns': ['amount']}, 'filter')
-    assert len(filtered['data']) == 4  # actual native text, beyond the old three-row preview
+    assert len(filtered['values']) == 4  # actual native text, beyond the old three-row preview
+    assert filtered['model_field_aliases']['data'] == 'values'
     assert filtered['selection']['cols'] == [2]
     written = await call('edit_spreadsheet', {'file_path': 'book.xlsx', 'operations': [{'kind': 'write', 'selection': filtered['selection'], 'values': [[10], [20], [30], [40]]}]}, 'write')
     assert written['content_version']

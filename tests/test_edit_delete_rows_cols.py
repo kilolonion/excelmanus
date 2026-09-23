@@ -119,7 +119,7 @@ def test_delete_rows_count_deletes_multiple(tmp_path: Path) -> None:
         wb.close()
 
 
-def test_delete_rows_refuses_formulas(tmp_path: Path) -> None:
+def test_delete_rows_rewrites_formulas(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = tmp_path / "formula.xlsx"
     wb = Workbook()
@@ -139,13 +139,10 @@ def test_delete_rows_refuses_formulas(tmp_path: Path) -> None:
             "count": 1,
         }],
     )
-    assert not result.success
-    assert "公式" in _err(result)
-    loaded = load_workbook(path)
-    try:
-        assert loaded.active["B1"].value == "=A1"
-    finally:
-        loaded.close()
+    assert result.success, result.model_text
+    reopened = load_workbook(path, data_only=False)
+    assert reopened["Sheet1"]["B1"].value is None
+    reopened.close()
 
 
 def _sheet_delete(path: Path, sheet: str) -> ToolResult:
@@ -251,7 +248,7 @@ def test_delete_kind_in_schema_with_additional_properties_false() -> None:
     schema = tools["edit_spreadsheet"].input_schema
     items = schema["properties"]["operations"]["items"]
     assert items.get("additionalProperties") is False
-    assert set(items["properties"]["kind"]["enum"]) == {
+    assert {
         "write", "insert", "sheet", "copy", "delete_rows", "delete_columns",
         "pivot", "transform",
-    }
+    } <= set(items["properties"]["kind"]["enum"])

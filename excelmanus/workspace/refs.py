@@ -52,9 +52,9 @@ class FileRef:
     observed_version: str | None = None
 
     def __post_init__(self) -> None:
-        relative = str(self.relative or "").replace("\\", "/").strip()
-        if not relative or relative.startswith("/") or ".." in Path(relative).parts:
-            raise ValueError("FileRef.relative must be a workspace-relative path")
+        from excelmanus.workspace.identity import resolve_canonical
+
+        relative = resolve_canonical(None, str(self.relative or "")).relative
         object.__setattr__(self, "relative", relative)
 
     def to_dict(self) -> dict[str, str]:

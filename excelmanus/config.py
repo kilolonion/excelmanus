@@ -9,6 +9,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import overload
 from excelmanus.data_home import get_data_home
 from excelmanus.model_identity import (
     longest_prefix_match,
@@ -54,6 +55,8 @@ _DEFAULT_CONTEXT_TOKENS = 256_000
 _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     # OpenAI 提供商
     "gpt-6-astra": 1_050_000,
+    "gpt-6-sol": 1_050_000,
+    "gpt-6-luna": 1_050_000,
     "gpt-6": 1_050_000,
     "gpt-5.6-sol": 1_050_000,
     "gpt-5.6-terra": 1_050_000,
@@ -107,8 +110,11 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "claude-opus-4.8": 1_000_000,
     "claude-sonnet-4.6": 200_000,
     "claude-fable-5": 1_000_000,
+    "claude-fable-5-1": 1_000_000,
     "claude-mythos-5": 1_000_000,
+    "claude-mythos-5-1": 1_000_000,
     "claude-opus-5": 1_000_000,
+    "claude-opus-5-5": 1_000_000,
     "claude-sonnet-5": 1_000_000,
     "claude-haiku-4.5": 200_000,
     # Google Gemini 提供商
@@ -119,6 +125,9 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gemini-2.5-flash-live-preview": 1_048_576,
     "gemini-2.5-flash-native-audio-preview": 1_048_576,
     "gemini-3.8-flash": 1_048_576,
+    "gemini-3.8-flash-cyber": 1_048_576,
+    "gemini-3.8-live": 1_048_576,
+    "gemini-3.8-live-extended-thinking": 1_048_576,
     "gemini-3.7-flash": 1_048_576,
     "gemini-3.6-flash": 1_048_576,
     "gemini-3.5-flash-lite": 1_048_576,
@@ -147,6 +156,8 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "qwen-plus-latest": 1_000_000,
     "qwen3.8-max": 1_000_000,
     "qwen3.8-flash": 1_000_000,
+    "qwen3.8-omni-flash": 1_000_000,
+    "qwen3.8-omni-flash-realtime": 1_000_000,
     "qwen3.7-plus": 1_000_000,
     "qwen3.7-flash": 1_000_000,
     "qwen3.7-max": 1_000_000,
@@ -190,8 +201,10 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "mistral-large-latest": 256_000,
     "mistral-medium-2508": 128_000,
     "mistral-medium-latest": 128_000,
+    "mistral-small-4": 262_144,
+    "mistral-small-2603": 262_144,
     "mistral-small-2506": 128_000,
-    "mistral-small-latest": 128_000,
+    "mistral-small-latest": 262_144,
     "devstral-2512": 256_000,
     "labs-devstral-small-2512": 256_000,
     "labs-devstral-small-latest": 256_000,
@@ -252,6 +265,8 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "moonshot-v1-32k": 32_000,
     "moonshot-v1-8k": 8_000,
     # Cohere 提供商
+    "command-a-plus": 128_000,
+    "command-a-plus-05-2026": 128_000,
     "command-a": 256_000,
     "command-a-03-2025": 256_000,
     "command-a-reasoning": 256_000,
@@ -265,6 +280,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     # 智谱 GLM 提供商
     "glm-5.3": 1_000_000,
     "glm-5.3-flash": 1_000_000,
+    "glm-5.3-flashx": 1_000_000,
     "glm-5.2": 1_000_000,
     "glm-5.1": 200_000,
     "glm-5-turbo": 200_000,
@@ -288,6 +304,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "doubao-seed-2.0": 256_000,
     "doubao-seed-1.6": 256_000,
     # xAI Grok 提供商
+    "grok-4.7": 500_000,
     "grok-4.6": 500_000,
     "grok-4.5": 500_000,
     "grok-4.3": 1_000_000,
@@ -297,12 +314,28 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "grok-4.1-fast-non-reasoning": 2_000_000,
     "grok-code-fast-1": 256_000,
     "grok-4": 256_000,
-    # Meta Llama 提供商
+    # Meta Llama / Muse 提供商
+    "muse-spark": 1_000_000,
+    "muse-glimmer-30b": 131_072,
     "llama-4-scout": 10_000_000,
     "llama-4-maverick": 1_000_000,
     "llama-3.3": 131_072,
     "llama-3.2": 131_072,
     "llama-3.1": 131_072,
+    # 小米 MiMo 提供商
+    "mimo-v2.6-pro-ultraspeed": 1_000_000,
+    "mimo-v2.6-pro": 1_000_000,
+    "mimo-v2.6-flash": 1_000_000,
+    "mimo-v2.5-pro": 1_000_000,
+    "mimo-v2.5": 1_000_000,
+    "mimo-v2-pro": 256_000,
+    "mimo-v2-omni": 256_000,
+    "mimo-v2-flash": 256_000,
+    "mimo-v2.5-asr": 8_192,
+    "mimo-v2.5-tts": 8_192,
+    "mimo-v2.5-tts-voiceclone": 8_192,
+    "mimo-v2.5-tts-voicedesign": 8_192,
+    "mimo-v2-tts": 8_192,
 }
 
 
@@ -311,7 +344,7 @@ _CONTEXT_WINDOW_LOOKUP = normalize_lookup_table(_MODEL_CONTEXT_WINDOW)
 
 _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     # OpenAI
-    "codex-mini-latest": "gpt-5.6-luna",
+    "codex-mini-latest": "gpt-6-luna",
     "gpt-4-turbo": "gpt-6-astra",
     "gpt-4-turbo-preview": "gpt-6-astra",
     "gpt-4-0125-preview": "gpt-6-astra",
@@ -324,6 +357,10 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     "claude-3-5-sonnet": "claude-sonnet-5",
     "claude-3-5-haiku": "claude-haiku-4-5",
     "claude-3-7-sonnet": "claude-sonnet-5",
+    # Anthropic 旧旗舰（已被 5.5 / 5.1 取代）
+    "claude-opus-5": "claude-opus-5-5",
+    "claude-fable-5": "claude-fable-5-1",
+    "claude-mythos-5": "claude-mythos-5-1",
     # Gemini 1.5 / 2.0 generations（2.0 已关停）
     "gemini-1.5-pro": "gemini-3.8-flash",
     "gemini-1.5-flash": "gemini-3.8-flash",
@@ -341,8 +378,8 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     "qwen3.7-max": "qwen3.8-max",
     "qwen3.6-plus": "qwen3.8-max",
     "qwen3.6-flash": "qwen3.8-flash",
-    "grok-4.5": "grok-4.6",
-    "grok-4.3": "grok-4.6",
+    "grok-4.5": "grok-4.7",
+    "grok-4.3": "grok-4.7",
     # DeepSeek 旧别名（2026-07-24 下线）
     "deepseek-chat": "deepseek-flash",
     "deepseek-reasoner": "deepseek-flash",
@@ -356,6 +393,11 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     "glm-4-plus": "glm-5.3",
     "glm-4-long": "glm-5.3",
     "glm-z1": "glm-5.3",
+    # 小米 MiMo V2 系列（2026-06-30 官方下线）
+    "mimo-v2-pro": "mimo-v2.6-pro",
+    "mimo-v2-omni": "mimo-v2.6-flash",
+    "mimo-v2-flash": "mimo-v2.6-flash",
+    "mimo-v2-tts": "mimo-v2.5-tts",
 }
 
 
@@ -444,7 +486,7 @@ _VENDOR_PREFIX_TOKENS = frozenset({
     "azure", "bedrock", "deepseek", "moonshot", "zhipu", "mistral",
     "cohere", "alibaba", "aliyun", "bytedance", "volcengine", "nvidia",
     "ai21", "huggingface", "hf", "openrouter", "openai-codex",
-    "workbuddy", "antigravity",
+    "workbuddy", "antigravity", "xiaomi", "mimo",
 })
 # 尾部修饰性后缀（剥掉后不影响模型身份，如 -preview、-20260301、-v2）
 _NOISE_SUFFIX_TOKENS = frozenset({
@@ -633,12 +675,13 @@ _MODEL_FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("mistral", "mistral"), ("ministral", "mistral"), ("devstral", "mistral"),
     ("codestral", "mistral"), ("magistral", "mistral"), ("pixtral", "mistral"),
     ("voxtral", "mistral"),
-    ("llama", "meta"),
+    ("llama", "meta"), ("muse", "meta"),
     ("nova", "amazon"),
     ("jamba", "ai21"),
     ("command", "cohere"), ("c4ai", "cohere"),
     ("hunyuan", "hunyuan"),
     ("step", "stepfun"),
+    ("mimo", "mimo"),
 )
 
 
@@ -865,6 +908,10 @@ def load_runtime_env() -> None:
     _load_runtime_env()
 
 
+@overload
+def _s(name: str, default: str) -> str: ...
+@overload
+def _s(name: str, default: None = None) -> str | None: ...
 def _s(name: str, default: str | None = None) -> str | None:
     """读取产品设置；未设置时返回 default。"""
     from excelmanus.settings_runtime import get_setting

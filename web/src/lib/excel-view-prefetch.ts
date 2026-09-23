@@ -7,6 +7,7 @@ import {
 } from "@/lib/workspace-file-ref";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
+import { INITIAL_WORKBOOK_VIEW_RECT } from "@/lib/workbook-window";
 
 let prefetchController: AbortController | null = null;
 let prefetchKey = "";
@@ -32,6 +33,7 @@ export function prefetchExcelView(
     sessionId,
     workspaceId: ref.workspaceId ?? session?.workspaceId,
     sheet: state.activeFilePath?.replace(/^\.\//, "") === ref.relative ? state.activeSheet || undefined : undefined,
+    rect: INITIAL_WORKBOOK_VIEW_RECT,
     signal: prefetchController?.signal,
   });
 }

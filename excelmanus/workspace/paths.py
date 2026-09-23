@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,6 @@ def unique_workspace_title(desired: str, taken: set[str] | frozenset[str]) -> st
 
 def paths_equal(left: str | Path, right: str | Path) -> bool:
     try:
-        return canonicalize_workspace_path(left) == canonicalize_workspace_path(right)
+        return os.path.normcase(canonicalize_workspace_path(left)) == os.path.normcase(canonicalize_workspace_path(right))
     except (OSError, ValueError):
         return str(left) == str(right)

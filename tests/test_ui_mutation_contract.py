@@ -8,7 +8,7 @@ from excelmanus.workbook.view_mutate import apply_workbook_operations
 from excelmanus.workspace.file_service import WorkspaceFileService
 
 
-def test_ui_rejects_unmaintained_structure_without_publication(tmp_path):
+def test_ui_updates_structure_references_before_publication(tmp_path):
     wb = Workbook()
     wb.active.title = "Data"
     wb.active["A2"] = 3
@@ -20,9 +20,11 @@ def test_ui_rejects_unmaintained_structure_without_publication(tmp_path):
         book = load_workbook(BytesIO(before))
         apply_workbook_operations(book, [{"op":"insert_axis","sheet":"Data","axis":"row","index":2}])
         target = BytesIO(); book.save(target); return target.getvalue()
-    with pytest.raises(ValueError, match="拒绝结构修改"):
-        svc.update_with_builder("book.xlsx", builder, expected_version=created.primary_version())
-    assert (tmp_path / "book.xlsx").read_bytes() == out.getvalue()
+    receipt = svc.update_with_builder("book.xlsx", builder, expected_version=created.primary_version())
+    assert receipt.state == "committed"
+    loaded = load_workbook(tmp_path / "book.xlsx", data_only=False)
+    assert loaded["Data"]["B3"].value == "=A3*2"
+    loaded.close()
 
 
 def test_style_patch_can_disable_without_erasing_unrelated_fields():

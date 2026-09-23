@@ -31,6 +31,7 @@ import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import { isSpreadsheetFile, workspaceFileOpenHint } from "@/lib/file-kind";
 import { displayFilePath } from "@/lib/file-identity";
 import { useWorkspaceFileActive } from "@/lib/open-workspace-file";
+import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { useExcelStore } from "@/stores/excel-store";
 import { formatFileMention } from "@/components/chat/chat-input-insert";
 import {
@@ -120,7 +121,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
         const toRemove = excelStore.recentFiles
           .filter((f) => f.path.includes(prefix) || f.path.endsWith("/" + node.fullPath))
           .map((f) => f.path);
-        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove);
+        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove, workspaceKeyForSessionId(sessionId));
         excelStore.bumpWorkspaceFilesVersion();
         onRefresh();
       } catch (err) {
@@ -133,7 +134,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
         const toRemove = excelStore.recentFiles
           .filter((f) => f.path.includes(prefix) || f.path.endsWith("/" + node.fullPath))
           .map((f) => f.path);
-        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove);
+        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove, workspaceKeyForSessionId(sessionId));
         excelStore.bumpWorkspaceFilesVersion();
         onRefresh();
       }
@@ -198,7 +199,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
       try {
         await workspaceRenameItem(draggingPath, newPath, sessionId);
         // Update recentFiles: remove old path
-        useExcelStore.getState().removeRecentFile(draggingPath);
+        useExcelStore.getState().removeRecentFile(draggingPath, workspaceKeyForSessionId(sessionId));
         useExcelStore.getState().bumpWorkspaceFilesVersion();
         onRefresh();
       } catch {
@@ -324,7 +325,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
     try {
       await workspaceRenameItem(node.fullPath, newPath, sessionId);
       // W8: 从 recentFiles 移除旧路径（新路径会在下次扫描时加入）
-      if (file) useExcelStore.getState().removeRecentFile(file.path);
+      if (file) useExcelStore.getState().removeRecentFile(file.path, workspaceKeyForSessionId(sessionId));
       useExcelStore.getState().bumpWorkspaceFilesVersion();
       onRefresh();
     } catch {
@@ -342,7 +343,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
     try {
       await workspaceDeleteItem(node.fullPath, sessionId);
       // W8: 同步从 recentFiles 移除
-      if (file) useExcelStore.getState().removeRecentFile(file.path);
+      if (file) useExcelStore.getState().removeRecentFile(file.path, workspaceKeyForSessionId(sessionId));
       useExcelStore.getState().bumpWorkspaceFilesVersion();
       onRefresh();
     } catch (err) {
@@ -350,7 +351,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
         useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
         return;
       }
-      if (file) useExcelStore.getState().removeRecentFile(file.path);
+      if (file) useExcelStore.getState().removeRecentFile(file.path, workspaceKeyForSessionId(sessionId));
       useExcelStore.getState().bumpWorkspaceFilesVersion();
       onRefresh();
     }

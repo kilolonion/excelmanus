@@ -244,7 +244,7 @@ export function SessionSync() {
       hydratedChatModeSessionRef.current = activeSessionId;
     };
     const pollDetail = async () => {
-      if (cancelled || polling || document.hidden) return;
+      if (cancelled || polling || document.hidden || useChatStore.getState().abortController) return;
       polling = true;
       try {
         const modelProfileVersion = useUIStore.getState().modelProfileVersion;
@@ -322,11 +322,13 @@ export function SessionSync() {
           // 仅在快照校验失败时回源，避免常态全量刷新。
           if (detail.inFlight) {
             snapshotValidated = false;
-          } else if (!snapshotValidated || historyRevisionChanged) {
+          } else if (!snapshotValidated || historyRevisionChanged
+            || detail.messageCount !== chat.loadedMessageTotal) {
             snapshotValidated = true;
             const latestChat = useChatStore.getState();
             if (latestChat.abortController === null && !latestChat.isStreaming
-              && !latestChat.isLoadingMessages && latestChat.loadedSessionId === activeSessionId) {
+              && !latestChat.isLoadingMessages && !latestChat.isRefreshingMessages
+              && latestChat.loadedSessionId === activeSessionId) {
               const remoteCount = Math.max(0, detail.messageCount ?? 0);
               // loadedMessageTotal tracks the server total even when only the
               // newest page is present locally. Comparing against visible rows
@@ -401,30 +403,25 @@ export function SessionSync() {
     // 杩炵画澶辫触鏃舵寚鏁伴€€閬匡紙鏈€澶?30s锛夛紝鎴愬姛鏃堕噸缃?
     // 鎬ц兘浼樺寲锛氶娆″欢杩?800ms 鍐嶈Е鍙戯紝閬垮厤涓?switchSession 鐨勬秷鎭姞杞界珵鎬?
     const POLL_FAST = 2000;
-    const POLL_IDLE = 5000;
+    const POLL_IDLE = 15_000;
     const POLL_MAX_BACKOFF = 30_000;
-    const POLL_INITIAL_DELAY = 800;
-    let currentInterval = POLL_FAST;
     let consecutiveErrors = 0;
-    // chat_mode 首次 hydrate 不等轮询延迟，避免 F5 后 tab 先闪回 write。
-    // One initial request also hydrates chat mode; avoid a second detail fetch
-    // just for that field. Message validation waits for the session loader.
-    void pollDetail();
-    const onVisible = () => { if (!document.hidden) void pollDetail(); };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = async () => {
+      clearTimeout(timer);
+      await pollDetail();
+      if (cancelled || document.hidden) return;
+      clearTimeout(timer);
+      const base = prevInFlightRef.current ? POLL_FAST : POLL_IDLE;
+      timer = setTimeout(() => void schedule(),
+        Math.min(base * Math.pow(2, consecutiveErrors), POLL_MAX_BACKOFF));
+    };
+    const onVisible = () => {
+      clearTimeout(timer);
+      if (!document.hidden) void schedule();
+    };
     document.addEventListener("visibilitychange", onVisible);
-    let timer = window.setTimeout(function schedule() {
-      void pollDetail().then(() => {
-        if (cancelled) return;
-        const isActive = prevInFlightRef.current;
-        let nextInterval = isActive ? POLL_FAST : POLL_IDLE;
-        // 杩炵画澶辫触鏃舵寚鏁伴€€閬?
-        if (consecutiveErrors > 0) {
-          nextInterval = Math.min(nextInterval * Math.pow(2, consecutiveErrors), POLL_MAX_BACKOFF);
-        }
-        currentInterval = nextInterval;
-        timer = window.setTimeout(schedule, currentInterval);
-      });
-    }, POLL_INITIAL_DELAY); // 寤惰繜棣栨瑙﹀彂锛岄伩鍏嶄笌 switchSession 绔炴€?
+    void schedule();
 
     return () => {
       cancelled = true;
@@ -434,6 +431,7 @@ export function SessionSync() {
     };
   }, [
     activeSessionId,
+    abortController,
     setActiveSession,
     setStreaming,
     setCurrentModel,

@@ -38,14 +38,8 @@ async def evaluate_for_host(
 
     budget = turn_budget(engine)
     security = get_pack(pack_id).family == "security"
-    # Keep one short opportunity for the pre-delivery check. Reservations are
-    # synchronous so parallel tools cannot each spend the same remaining time.
-    keep_final = (
-        not security and pack_id != "mutation.verify"
-        and gate_for_pack("mutation.verify", settings) != "off"
-        and getattr(engine, "_mutation_verification", None) is None
-    )
-    keep_ms = min(500.0, budget.max_latency_ms / 2) if keep_final else 0.0
+    # Reservations are synchronous so parallel tools cannot spend the same
+    # remaining time. No budget is withheld for an automatic delivery review.
     timeout = max(0.001, settings.timeout_seconds)
     driver = getattr(engine, "_driver", None)
     remaining = getattr(driver, "remaining_turn_seconds", lambda: None)()
@@ -53,10 +47,9 @@ async def evaluate_for_host(
         if remaining <= 0:
             return Decision.ask("turn_deadline") if security else Decision.noop("turn_deadline")
         timeout = min(timeout, remaining)
-    reserved_ms = 0.0 if security else min(timeout * 1000, budget.available_latency_ms(keep_latency_ms=keep_ms))
+    reserved_ms = 0.0 if security else min(timeout * 1000, budget.available_latency_ms())
     if not budget.reserve(
         security=security, latency_ms=reserved_ms,
-        keep_evaluations=1 if keep_final else 0, keep_latency_ms=keep_ms,
     ):
         return Decision.noop(
             "budget_exhausted",

@@ -12,9 +12,11 @@ import {
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useWorkbookWorkspace } from "@/hooks/use-workbook-workspace";
 import styles from "./WorkspaceViewHost.module.css";
+import { WorkbookLoadingState } from "@/components/excel/WorkbookLoadingState";
 const loading = () => <div role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">正在准备工作区…</div>;
+const workbookLoading = () => <WorkbookLoadingState label="正在准备表格工作区" detail="正在挂载表格画布" />;
 const ExcelCompareView = dynamic(() => import("@/components/excel/ExcelCompareView").then((m) => m.ExcelCompareView), { ssr: false, loading });
-const WorkbookWorkspace = dynamic(() => import("@/components/excel/WorkbookWorkspace").then((m) => m.WorkbookWorkspace), { ssr: false, loading });
+const WorkbookWorkspace = dynamic(() => import("@/components/excel/WorkbookWorkspace").then((m) => m.WorkbookWorkspace), { ssr: false, loading: workbookLoading });
 const WordFullView = dynamic(() => import("@/components/word/WordFullView").then((m) => m.WordFullView), { ssr: false, loading });
 
 export function WorkspaceViewHost({ children, composer }: { children: ReactNode; composer?: ReactNode }) {

@@ -85,6 +85,42 @@ class SessionStateStore:
 
     save_checkpoint = save_session_snapshot
 
+    def load_task_snapshot(self, session_id: str) -> dict[str, Any]:
+        """Read task UI state without restoring an agent or its conversation.
+
+        Project the needed JSON fields in SQLite: prompt/cache snapshots and
+        provider history need not be decoded just to open the task panel.
+        """
+        row = self._conn.execute(
+            "SELECT CASE WHEN json_valid(state_json) THEN "
+            "json_extract(state_json, '$.runtime_state.subagents') END AS runs_json, "
+            "task_list_json FROM session_state_snapshots "
+            "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return {"runs": [], "task_store": {}}
+        try:
+            runs = json.loads(row["runs_json"] or "[]")
+        except (ValueError, TypeError):
+            runs = []
+        try:
+            task_store = json.loads(row["task_list_json"])
+        except (ValueError, TypeError):
+            task_store = {}
+        public_runs = []
+        for record in runs if isinstance(runs, list) else []:
+            if not isinstance(record, dict) or not record.get("run_id"):
+                continue
+            public = {key: value for key, value in record.items()
+                      if key not in {"history", "stop_requested"}}
+            # Match SubagentRuntime.restore: no task is executing in a cold
+            # session. A later explicit resume still restores the full state.
+            if public.get("status") in {"queued", "running"}:
+                public["status"] = "interrupted"
+            public_runs.append(public)
+        return {"runs": public_runs, "task_store": task_store if isinstance(task_store, dict) else {}}
+
     def load_latest_checkpoint(
         self,
         session_id: str,

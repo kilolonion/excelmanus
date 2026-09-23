@@ -198,7 +198,7 @@ class SessionManager:
         The marker inside the workspace makes this cheap after the first run.
         Failures do not block session startup; the missing marker retries later.
         """
-        if not path:
+        if not path or path in self._migrated_workspace_paths:
             return
         try:
             from excelmanus.workspace.paths import canonicalize_workspace_path
@@ -332,30 +332,28 @@ class SessionManager:
 
     def preferred_workspace_binding(self) -> tuple[str, str | None]:
         """Last used chat workspace, else the first registered folder, else process default."""
-        candidates: list[tuple[str | None, str | None]] = []
         seen: set[str] = set()
-        if self._chat_history is not None:
-            try:
-                for sess in self._chat_history.list_sessions():
-                    candidates.append(
-                        (
+        # Do not enumerate/validate every registered folder when the latest
+        # conversation already supplies a usable workspace.
+        def candidates():
+            if self._chat_history is not None:
+                try:
+                    for sess in self._chat_history.list_sessions():
+                        yield (
                             str(sess.get("workspace_id") or "").strip() or None,
                             str(sess.get("workspace_path") or "").strip() or None,
                         )
-                    )
-            except Exception:
-                logger.debug("读取最近会话工作区失败", exc_info=True)
-        try:
-            for item in self.list_workspaces():
-                candidates.append(
-                    (
+                except Exception:
+                    logger.debug("读取最近会话工作区失败", exc_info=True)
+            try:
+                for item in self.list_workspaces():
+                    yield (
                         str(item.get("id") or "").strip() or None,
                         str(item.get("path") or "").strip() or None,
                     )
-                )
-        except Exception:
-            logger.debug("读取工作区列表失败", exc_info=True)
-        for ws_id, ws_path in candidates:
+            except Exception:
+                logger.debug("读取工作区列表失败", exc_info=True)
+        for ws_id, ws_path in candidates():
             key = f"{ws_id or ''}|{ws_path or ''}"
             if key in seen or key == "|":
                 continue
@@ -748,23 +746,41 @@ class SessionManager:
         self.drain_workspace_events()
 
     def drain_workspace_events(self) -> None:
+        for _ in self._drain_workspace_events_by_root():
+            pass
+
+    def _drain_workspace_events_by_root(self):
+        """Yield between roots so periodic maintenance can share the event loop."""
         from excelmanus.workspace.file_service import WorkspaceFileService
-        from excelmanus.workspace.paths import paths_equal
+        from excelmanus.workspace.paths import canonicalize_workspace_path
+        # Resolve each loaded session's root once, rather than resolving both
+        # sides for every registered-workspace/session pair on Windows.
+        sessions_by_root: dict[str, list[tuple[str, _SessionEntry]]] = {}
+        for sid, entry in list(self._sessions.items()):
+            root = canonicalize_workspace_path(entry.engine._workspace.root_dir)
+            sessions_by_root.setdefault(root, []).append((sid, entry))
         roots = set(self._migrated_workspace_paths)
-        roots.update(str(entry.engine._workspace.root_dir) for entry in self._sessions.values())
+        roots.update(sessions_by_root)
         for root in roots:
             try:
-                WorkspaceFileService(root).deliver_outbox(self._consume_file_event, consumer_id="session-manager")
+                # Most registered folders have never published a transaction.
+                # Avoid constructing all of the revision/guard/index services
+                # (and creating a workspace lock) for these empty outboxes.
+                if not (Path(root) / ".excelmanus" / "tx").is_dir():
+                    continue
+                service = WorkspaceFileService(root)
+                service.deliver_outbox(self._consume_file_event, consumer_id="session-manager")
                 # Each session has its own durable cursor. Edits made while a
                 # session was unloaded must still reach it after restoration.
-                for sid, entry in list(self._sessions.items()):
-                    if paths_equal(entry.engine._workspace.root_dir, root):
-                        WorkspaceFileService(root).deliver_outbox(
-                            lambda event, engine=entry.engine: self._deliver_user_edit(engine, event),
-                            consumer_id=f"workbook-context:{sid}",
-                        )
+                for sid, entry in sessions_by_root.get(root, []):
+                    service.deliver_outbox(
+                        lambda event, engine=entry.engine: self._deliver_user_edit(engine, event),
+                        consumer_id=f"workbook-context:{sid}",
+                    )
             except Exception:
                 logger.warning("文件事件消费失败，将重试: %s", root, exc_info=True)
+            finally:
+                yield None
 
     @staticmethod
     def _deliver_user_edit(engine: AgentEngine, event: dict) -> None:
@@ -897,10 +913,11 @@ class SessionManager:
         while True:
             await asyncio.sleep(interval_seconds)
             try:
-                self.drain_workspace_events()
+                for _ in self._drain_workspace_events_by_root():
+                    await asyncio.sleep(0)
                 from excelmanus.workbook.snapshot import prune_snapshot_cache
-                for root in self._migrated_workspace_paths:
-                    prune_snapshot_cache(root)
+                for root in tuple(self._migrated_workspace_paths):
+                    await asyncio.to_thread(prune_snapshot_cache, root)
                 cleaned = await self.cleanup_expired()
                 if cleaned:
                     logger.info("定期清理：已清理 %d 个过期会话", cleaned)
@@ -1812,7 +1829,9 @@ class SessionManager:
         db_sessions_map: dict[str, dict] = {}
         if self._chat_history is not None:
             try:
-                for ds in self._chat_history.list_sessions():
+                # The frontend treats this endpoint as the complete inventory;
+                # truncating at 100 makes older selected sessions look deleted.
+                for ds in await asyncio.to_thread(self._chat_history.list_sessions, limit=None):
                     db_sessions_map[ds["id"]] = ds
             except Exception:
                 logger.warning("预取 SQLite 会话列表失败", exc_info=True)
@@ -1924,7 +1943,7 @@ class SessionManager:
                 logger.debug("读取会话流状态失败", exc_info=True)
             messages = []
             if include_messages and hasattr(engine, "raw_messages"):
-                raw_messages = list(engine.raw_messages)
+                raw_messages = engine.raw_messages
                 for idx, message in enumerate(raw_messages):
                     if isinstance(message, dict):
                         item = dict(message)
@@ -2120,7 +2139,7 @@ class SessionManager:
             entry = self._sessions.get(session_id)
             if entry is not None:
                 engine = entry.engine
-                raw_messages = list(engine.raw_messages)
+                raw_messages = engine.raw_messages
                 start = max(0, len(raw_messages) - limit) if tail else offset
                 page = raw_messages[start: start + limit]
                 normalized: list[dict] = []
@@ -2138,6 +2157,6 @@ class SessionManager:
             if not self._chat_history.session_exists(session_id):
                 return []
             if tail:
-                return self._chat_history.load_messages_tail(session_id, limit=limit)
-            return self._chat_history.load_messages(session_id, limit=limit, offset=offset)
+                return await asyncio.to_thread(self._chat_history.load_messages_tail, session_id, limit=limit)
+            return await asyncio.to_thread(self._chat_history.load_messages, session_id, limit=limit, offset=offset)
         return []

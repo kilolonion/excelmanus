@@ -24,6 +24,7 @@ import logging
 import os
 import platform
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -86,6 +87,134 @@ def _normalize_path(p: str) -> str:
     if sys.platform == "win32":
         return resolved.lower()
     return resolved
+
+
+def _installation_path_key(value: object) -> str:
+    """返回安装记录使用的稳定路径键。
+
+    安装记录来自历史版本，不能假设每条记录都完整或仍然可访问。
+    空值和无法解析的值返回空字符串，避免把空路径误判成当前工作目录。
+    """
+    if not isinstance(value, (str, Path)):
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    try:
+        return _normalize_path(raw)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ""
+
+
+def _installation_path_exists(value: object) -> bool:
+    """检查安装路径是否仍是可访问目录。"""
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        return False
+    try:
+        return Path(value).expanduser().is_dir()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+class InstallationDeletionError(RuntimeError):
+    """安装目录不满足安全删除条件，或删除过程中失败。"""
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """识别符号链接、Windows junction 和其他重解析点。"""
+    try:
+        if path.is_symlink() or os.path.islink(str(path)):
+            return True
+        is_junction = getattr(os.path, "isjunction", None)
+        if callable(is_junction) and is_junction(str(path)):
+            return True
+        attributes = getattr(os.lstat(str(path)), "st_file_attributes", 0)
+        return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise InstallationDeletionError(f"无法检查安装路径安全性: {path} ({exc})") from exc
+
+
+def _validate_installation_directory_for_removal(
+    value: str | Path,
+    protected_paths: tuple[str | Path, ...] = (),
+) -> Path | None:
+    """校验旧安装目录，返回可删除的真实路径；不存在时返回 ``None``。"""
+    raw = Path(value).expanduser()
+    if not raw.exists():
+        return None
+    if _is_reparse_point(raw):
+        raise InstallationDeletionError("拒绝删除符号链接或 Windows junction 安装路径")
+    try:
+        target = raw.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise InstallationDeletionError(f"无法解析安装路径: {raw}") from exc
+    if not target.is_dir():
+        raise InstallationDeletionError("安装路径不是目录，已拒绝删除")
+    if target.parent == target or target.parent == Path(target.anchor):
+        raise InstallationDeletionError("拒绝删除文件系统根目录")
+
+    protected: list[Path] = [
+        Path.home().resolve(),
+        get_excelmanus_home().resolve(),
+        get_data_home().resolve(),
+    ]
+    for candidate in protected_paths:
+        try:
+            protected.append(Path(candidate).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    for candidate in protected:
+        if target == candidate or candidate.is_relative_to(target):
+            raise InstallationDeletionError("安装目录包含当前运行目录或应用数据，已拒绝删除")
+
+    pending = [target]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    child = Path(entry.path)
+                    if _is_reparse_point(child):
+                        raise InstallationDeletionError(
+                            f"安装目录包含符号链接或 Windows junction，已拒绝删除: {child}"
+                        )
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(child)
+                    except OSError as exc:
+                        raise InstallationDeletionError(f"无法检查安装目录: {child}") from exc
+        except InstallationDeletionError:
+            raise
+        except OSError as exc:
+            raise InstallationDeletionError(f"无法读取安装目录: {directory}") from exc
+    return target
+
+
+def _delete_installation_directory(
+    value: str | Path,
+    protected_paths: tuple[str | Path, ...] = (),
+) -> bool:
+    """递归删除已校验的旧安装目录，不跟随重解析点。"""
+    target = _validate_installation_directory_for_removal(value, protected_paths)
+    if target is None:
+        return False
+
+    def _remove_readonly(func: Any, path: str, _exc_info: object) -> None:
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except OSError as exc:
+            raise InstallationDeletionError(f"删除安装文件失败: {path}") from exc
+
+    try:
+        shutil.rmtree(str(target), onerror=_remove_readonly)
+    except InstallationDeletionError:
+        raise
+    except OSError as exc:
+        raise InstallationDeletionError(f"删除安装目录失败: {target} ({exc})") from exc
+    return True
 
 
 # ── 路径常量 ──────────────────────────────────────────────
@@ -281,9 +410,15 @@ def _load_installations() -> list[dict[str, Any]]:
             return []
         data = json.loads(raw)
         if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and "installations" in data:
-            return data["installations"]
+            entries = data
+        elif isinstance(data, dict) and "installations" in data:
+            entries = data["installations"]
+        else:
+            return []
+        # 旧版本曾经允许任意 JSON 值进入列表。忽略损坏条目，避免一条
+        # 记录让设置页或后台扫描整体失败。
+        if isinstance(entries, list):
+            return [entry for entry in entries if isinstance(entry, dict)]
     except Exception as e:
         logger.warning("加载安装注册表失败（文件可能损坏）: %s", e)
     return []
@@ -346,7 +481,7 @@ def register_installation(
         # 查找是否已注册（Windows 下大小写不敏感匹配）
         entry: dict[str, Any] | None = None
         for inst in installations:
-            if _normalize_path(inst.get("path", "")) == project_root_norm:
+            if _installation_path_key(inst.get("path")) == project_root_norm:
                 entry = inst
                 break
 
@@ -372,11 +507,118 @@ def register_installation(
     return entry
 
 
-def discover_old_installations() -> list[dict[str, Any]]:
-    """返回所有已注册的安装记录（按 last_seen 倒序）。"""
+def remove_installation(
+    project_root: str | Path,
+    *,
+    delete_directory: bool = False,
+    protected_paths: tuple[str | Path, ...] = (),
+) -> dict[str, Any] | None:
+    """移除一个安装记录，可选择同时删除旧安装目录。
+
+    路径按与注册时相同的规范化规则匹配，并在文件锁内完成读取、修改、
+    保存，避免多个实例同时管理安装记录时互相覆盖。实际删除只允许对
+    已登记的旧目录执行，且会拒绝当前目录、应用数据目录和重解析点。
+    """
+    target = _installation_path_key(project_root)
+    if not target:
+        return None
+
+    lock_path = get_excelmanus_home() / _INSTALLATIONS_LOCK
+    removed: dict[str, Any] | None = None
+    changed = False
+    directory_deleted = False
+    with _file_lock(lock_path):
+        installations = _load_installations()
+        kept: list[dict[str, Any]] = []
+        for entry in installations:
+            if _installation_path_key(entry.get("path")) == target:
+                removed = removed or entry
+                changed = True
+                # 清掉历史上可能重复注册的同一路径，保持注册表唯一。
+                continue
+            kept.append(entry)
+        if changed:
+            if delete_directory and removed is not None:
+                directory_deleted = _delete_installation_directory(
+                    str(removed.get("path", project_root)),
+                    protected_paths,
+                )
+            _save_installations(kept)
+    if removed is not None:
+        removed = dict(removed)
+        removed["directory_deleted"] = directory_deleted
+    return removed
+
+
+def prune_missing_installations(
+    current_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """清理已经不存在的安装记录，返回被清理的条目。
+
+    当前进程对应的安装始终保留，即使系统暂时无法读取其目录；这避免
+    设置页在目录被锁定或服务从临时挂载启动时误删当前记录。
+    """
+    current_key = _installation_path_key(current_path)
+    lock_path = get_excelmanus_home() / _INSTALLATIONS_LOCK
+    removed: list[dict[str, Any]] = []
+    with _file_lock(lock_path):
+        installations = _load_installations()
+        kept: list[dict[str, Any]] = []
+        for entry in installations:
+            key = _installation_path_key(entry.get("path"))
+            if key and key != current_key and not _installation_path_exists(entry.get("path")):
+                removed.append(entry)
+                continue
+            kept.append(entry)
+        if removed:
+            _save_installations(kept)
+    return removed
+
+
+def discover_old_installations(
+    current_path: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """返回已注册安装及其状态。
+
+    提供 ``current_path`` 时按当前、可用、失效分组；省略时保留按最近
+    活跃时间排序的兼容行为。
+
+    返回值保留原有字段，并增加 ``exists``、``is_current`` 和 ``status``：
+    ``current`` 表示当前服务目录，``available`` 表示其他仍存在的目录，
+    ``missing`` 表示可以安全清理的失效记录。
+    """
+    current_key = _installation_path_key(current_path)
     installations = _load_installations()
-    installations.sort(key=lambda x: x.get("last_seen", ""), reverse=True)
-    return installations
+    by_path: dict[str, dict[str, Any]] = {}
+    for entry in installations:
+        key = _installation_path_key(entry.get("path"))
+        if not key:
+            continue
+        previous = by_path.get(key)
+        if (
+            previous is None
+            or str(entry.get("last_seen", "")) > str(previous.get("last_seen", ""))
+        ):
+            by_path[key] = entry
+
+    result: list[dict[str, Any]] = []
+    for key, entry in by_path.items():
+        exists = _installation_path_exists(entry.get("path"))
+        is_current = bool(current_key and key == current_key)
+        enriched = dict(entry)
+        enriched["exists"] = exists
+        enriched["is_current"] = is_current
+        enriched["status"] = "current" if is_current else ("available" if exists else "missing")
+        result.append(enriched)
+
+    # Keep the legacy function's ordering for callers that do not provide a
+    # current path. The API supplies it so the settings page can pin the
+    # current install and group stale records at the bottom.
+    result.sort(key=lambda item: str(item.get("last_seen", "")), reverse=True)
+    if current_key:
+        status_order = {"current": 0, "available": 1, "missing": 2}
+        result.sort(key=lambda item: status_order.get(str(item.get("status")), 3))
+    return result
 
 
 # ── 主动扫描发现 ────────────────────────────────────────
@@ -487,8 +729,9 @@ def scan_for_installations(
     # 扫描：只扫描 1 层深度的子目录
     found: list[dict[str, Any]] = []
     already_registered = {
-        _normalize_path(inst.get("path", ""))
+        _installation_path_key(inst.get("path"))
         for inst in _load_installations()
+        if _installation_path_key(inst.get("path"))
     }
 
     for root in unique_roots:

@@ -63,6 +63,14 @@ describe("idb-cache", () => {
     vi.clearAllMocks();
   });
 
+  it("bounds a cached conversation to its latest 100 messages", async () => {
+    await saveCachedMessages("long", Array.from({ length: 500 }, (_, i) => makeUserMsg(String(i))));
+    const messages = await loadCachedMessages("long");
+    expect(messages).toHaveLength(100);
+    expect(messages?.[0].id).toBe("400");
+    expect(messages?.at(-1)?.id).toBe("499");
+  });
+
   // ── loadCachedMessages ────────────────────────────────────────
 
   describe("loadCachedMessages", () => {

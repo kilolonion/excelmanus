@@ -171,31 +171,24 @@ def apply_workbook_operations(wb: Any, operations: list[dict[str, Any]]) -> int:
             ws = _sheet(wb, raw.get("sheet"))
             ws.unmerge_cells(str(raw.get("range") or ""))
         elif kind in {"insert_axis", "delete_axis"}:
-            assert_structure_supported(wb, kind)
+            from excelmanus.workbook.structure_edit import apply_structure_edit
             ws = _sheet(wb, raw.get("sheet"))
             axis = str(raw.get("axis") or "row")
             index = int(raw.get("index") or 1)
             count = max(1, int(raw.get("count") or 1))
             if axis not in {"row", "col"} or index < 1 or int(raw.get("count", 1)) < 1:
                 raise ValueError("axis/index/count 无效")
-            if kind == "insert_axis":
-                if axis == "col":
-                    ws.insert_cols(index, count)
-                else:
-                    ws.insert_rows(index, count)
-            elif axis == "col":
-                ws.delete_cols(index, count)
-            else:
-                ws.delete_rows(index, count)
+            action = ("insert_" if kind == "insert_axis" else "delete_") + ("cols" if axis == "col" else "rows")
+            apply_structure_edit(wb, action, ws.title, at=index, count=count)
         elif kind == "sheet_add":
             title = str(raw.get("name") or "Sheet")
             wb.create_sheet(title=title)
         elif kind == "sheet_rename":
-            assert_structure_supported(wb, kind)
+            from excelmanus.workbook.structure_edit import apply_structure_edit
             src = str(raw.get("from") or raw.get("sheet") or "")
             dest = str(raw.get("to") or raw.get("name") or "")
             if src in wb.sheetnames and dest:
-                wb[src].title = dest
+                apply_structure_edit(wb, "rename_sheet", src, new_name=dest)
             else:
                 raise ValueError("重命名的源表或目标名无效")
         elif kind == "sheet_delete":

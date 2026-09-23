@@ -94,6 +94,7 @@
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .description {
@@ -106,6 +107,7 @@
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .proof {
@@ -256,6 +258,7 @@
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+  line-clamp: 3;
 }
 
 .footer {
@@ -330,18 +333,17 @@
 }
 
 @container welcome-hero (max-height: 48px) {
-  .title { font-size: 16px; -webkit-line-clamp: 1; }
+  .title { font-size: 16px; -webkit-line-clamp: 1; line-clamp: 1; }
 }
 
+/* 附件标识是示例卡片的核心信息：先压缩摘要行数，空间实在不够才隐藏附件行。 */
 @container welcome-card (max-height: 140px) {
-  .cardContent { grid-template-rows: auto minmax(0, 1fr); gap: 6px; }
-  .footer { display: none; }
-  .card[data-error] .copy { display: none; }
-  .compactError { display: block; overflow: hidden; }
+  .cardContent { gap: 6px; }
+  .copy { -webkit-line-clamp: 2; line-clamp: 2; }
 }
 
 @container welcome-card (max-height: 100px) {
-  .copy { -webkit-line-clamp: 2; }
+  .copy { -webkit-line-clamp: 1; line-clamp: 1; }
 }
 
 @container welcome-card (max-height: 76px) {
@@ -349,12 +351,15 @@
   .icon svg { width: 14px; height: 14px; }
   .cardHeader { gap: 6px; }
   .label { font-size: 12px; }
-  .copy { font-size: 12px; line-height: 18px; -webkit-line-clamp: 2; }
+  .copy { font-size: 12px; line-height: 18px; }
   .cardContent { gap: 4px; }
 }
 
 @container welcome-card (max-height: 63px) {
-  .copy { -webkit-line-clamp: 1; }
+  .cardContent { grid-template-rows: auto minmax(0, 1fr); }
+  .footer { display: none; }
+  .card[data-error] .copy { display: none; }
+  .compactError { display: block; overflow: hidden; }
 }
 
 @container welcome-card (max-height: 45px) {

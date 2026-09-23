@@ -149,6 +149,10 @@ def build_stable_system_prompt(engine: Any) -> str:
         if nav:
             text = f"{text}\n\n{nav}" if text.strip() else nav
         engine._effective_catalog = catalog
+    if visible_names and "run_code" in visible_names:
+        from excelmanus.runtime_capabilities import environment_text
+
+        text += "\n\n" + environment_text(full_access=assemble_ctx.full_access)
     return text
 
 

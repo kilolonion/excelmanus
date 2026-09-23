@@ -357,6 +357,28 @@ class TestSchemaValidationModes:
         assert any("unknown" in item for item in payload["schema_violations"])
         assert "remediation" in payload
 
+    def test_shadow_does_not_claim_unparsed_call_executed(self) -> None:
+        registry = ToolRegistry()
+        registry.configure_schema_validation(mode="shadow", canary_percent=100, strict_path=False)
+        registry.register_tool(_schema_tool())
+        result = error_result(
+            "工具参数解析错误",
+            code="INVALID_ARGS",
+            fields={"executed": False, "committed": False, "parse_error": True},
+        )
+        annotated = annotate_shadow_schema_violations(
+            result,
+            registry=registry,
+            tool_name="test_tool",
+            arguments={},
+        )
+        payload = json.loads(annotated.model_text)
+        assert payload["executed"] is False
+        assert payload["committed"] is False
+        assert payload["parse_error"] is True
+        assert "schema_validation" not in payload
+        assert "本次已执行" not in annotated.model_text
+
     @pytest.mark.asyncio
     async def test_shadow_via_runtime_finalize_is_visible_to_model(self) -> None:
         from excelmanus.engine_types import ToolCallResult

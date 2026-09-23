@@ -1,5 +1,9 @@
 """Web updates must be authenticated, exclusive, observable and data-preserving."""
 import json
+import base64
+import os
+from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -55,6 +59,50 @@ def test_unsupported_deployment_has_explicit_reason(managed, options):
     routes, root, _ = managed
     write_runtime({"project_root": str(root), "workers": 1, **options})
     assert routes._web_upgrade_denial(request()).status_code == 409
+
+
+def test_powershell_bom_runtime_is_recognized(managed):
+    from excelmanus.upgrade.runtime import read_runtime, runtime_path
+    routes, root, _ = managed
+    runtime_path().write_text(json.dumps({"project_root": str(root), "workers": 1}), encoding="utf-8-sig")
+    assert read_runtime()["project_root"] == str(root)
+    assert routes._web_upgrade_denial(request()) is None
+
+
+def test_runtime_writer_replaces_existing_bom_record(managed):
+    from excelmanus.upgrade.runtime import read_runtime, runtime_path
+    _, root, _ = managed
+    runtime_path().write_text("{}", encoding="utf-8-sig")
+    write_runtime({"project_root": str(root), "workers": 1})
+    assert not runtime_path().read_bytes().startswith(b"\xef\xbb\xbf")
+    assert read_runtime()["project_root"] == str(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell launcher")
+def test_powershell_launcher_writes_bom_free_runtime(tmp_path, monkeypatch):
+    from excelmanus.upgrade.runtime import read_runtime, runtime_path
+    monkeypatch.setenv("EXCELMANUS_TEST_START_SCRIPT", str(Path(__file__).resolve().parents[1] / "deploy" / "start.ps1"))
+    # Load only the two writer functions: never start/stop real services.
+    command = """
+$ErrorActionPreference = 'Stop'
+$source = [IO.File]::ReadAllText($env:EXCELMANUS_TEST_START_SCRIPT)
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$null)
+$functions = $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Get-ExcelManusHome', 'Write-RuntimeJson')}, $true)
+Invoke-Expression ($functions.Extent.Text -join "`n")
+$Script:PROJECT_ROOT = $env:EXCELMANUS_HOME
+$Script:SCRIPT_DIR = Split-Path $env:EXCELMANUS_TEST_START_SCRIPT
+$BackendPort = 18000
+$FrontendPort = 13000
+$Workers = 1
+Write-RuntimeJson
+Write-RuntimeJson
+"""
+    result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                    base64.b64encode(command.encode("utf-16-le")).decode()],
+                   capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert not runtime_path().read_bytes().startswith(b"\xef\xbb\xbf")
+    assert read_runtime()["backend_port"] == 18000
 
 
 @pytest.mark.asyncio

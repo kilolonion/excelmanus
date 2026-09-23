@@ -574,14 +574,13 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
         try:
             import asyncio
             from functools import partial
-            from excelmanus.updater import check_for_updates, get_current_version
+            from excelmanus.release_check import check_release_updates
             loop = asyncio.get_running_loop()
-            info = await loop.run_in_executor(None, partial(check_for_updates, project_root, force=False))
+            info = await loop.run_in_executor(None, partial(check_release_updates, project_root, force=False))
             if info.has_update:
                 logger.info(
-                    "发现新版本: %s → %s（%d 个新提交）。"
-                    "可在设置页「版本管理」中执行更新。",
-                    get_current_version(project_root), info.latest, info.commits_behind,
+                    "发现新的正式发布: %s → %s。可在设置页「版本管理」中查看。",
+                    info.current, info.latest,
                 )
         except Exception:
             logger.debug("启动时后台版本检查失败（非致命）", exc_info=True)

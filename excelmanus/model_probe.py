@@ -790,6 +790,7 @@ _PROVIDER_URL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("cohere", re.compile(r"api\.cohere\.", re.IGNORECASE)),
     ("ai21", re.compile(r"api\.ai21\.", re.IGNORECASE)),
     ("minimax", re.compile(r"api\.minimax", re.IGNORECASE)),
+    ("mimo", re.compile(r"xiaomimimo\.com", re.IGNORECASE)),
     ("moonshot", re.compile(r"api\.moonshot\.cn|kimi", re.IGNORECASE)),
     ("volcengine", re.compile(r"volces\.com|volcengine|ark\.cn-beijing", re.IGNORECASE)),
     ("bedrock", re.compile(r"bedrock.*\.amazonaws\.com", re.IGNORECASE)),
@@ -884,6 +885,13 @@ def _get_thinking_strategies(
             "openai_reasoning",
         ))
         strategies.append(("plain", {}, "deepseek"))
+    elif provider == "mimo":
+        # 小米 MiMo: thinking.type=enabled/disabled（与 GLM 同形态）
+        strategies.append((
+            "mimo_thinking",
+            {"extra_body": {"thinking": {"type": "enabled"}}},
+            "glm_thinking",
+        ))
 
     # ── 通用兜底策略 ──────────────────────────────────────
     # 1) 纯流式检查（捕获自动输出推理的模型，如 DeepSeek-R1、QwQ）

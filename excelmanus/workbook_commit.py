@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import os
-import signal
 import shutil
 import subprocess
 import tempfile
@@ -153,7 +152,9 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
         return data, {"status": "unsupported_format", "engine": None, "errors": []}
     if os.environ.get("EXCELMANUS_FORMULA_RECALC", "auto").strip().lower() in {"0", "false", "off", "never"}:
         return data, {"status": "disabled", "engine": None, "errors": []}
-    executable = shutil.which("soffice") or shutil.which("libreoffice")
+    from excelmanus.runtime_capabilities import office_executable
+
+    executable = office_executable()
     if not executable:
         return data, {"status": "unavailable", "engine": None, "errors": []}
     ext = requested_suffix
@@ -162,6 +163,14 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
     except (TypeError, ValueError):
         timeout_seconds = 30.0
     timeout_seconds = max(5.0, min(timeout_seconds, 300.0))
+    from excelmanus.tools.runtime import (
+        _terminate_process_tree,
+        current_execution,
+        register_killable_process,
+        unregister_killable_process,
+    )
+
+    execution_id = getattr(current_execution(), "execution_id", None)
     with tempfile.TemporaryDirectory(prefix="excelmanus-recalc-") as raw_dir:
         root = Path(raw_dir)
         source = root / f"input{ext}"
@@ -191,27 +200,24 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
                     "--convert-to", "xlsx", "--outdir", str(out_dir), str(source),
                 ],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, creationflags=creationflags,
+                text=True, encoding="utf-8", errors="replace", creationflags=creationflags,
+                close_fds=True, start_new_session=os.name != "nt",
             )
+            register_killable_process(execution_id, process)
             try:
                 stdout, stderr = process.communicate(timeout=timeout_seconds)
                 return_code = process.returncode
             except subprocess.TimeoutExpired:
-                # ``subprocess.run(timeout=...)`` raises without killing the
-                # child.  LibreOffice may have spawned a helper process, so
-                # enforce the deadline on the complete session here.
-                pid = int(process.pid or 0)
-                if os.name != "nt" and pid:
-                    try:
-                        os.killpg(os.getpgid(pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError, OSError):
-                        pass
-                else:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-                stdout, stderr = process.communicate()
+                # LO launches helpers. Use the shared session/tree terminator,
+                # which never signals the host's group and handles Windows
+                # descendants as well as the console launcher.
+                _terminate_process_tree(process)
+                try:
+                    process.communicate(timeout=3)
+                except (OSError, subprocess.SubprocessError):
+                    # An escaped descendant may still hold a pipe open. Do
+                    # not turn the conversion deadline into an infinite wait.
+                    pass
                 return data, {
                     "status": "failed",
                     "engine": executable,
@@ -221,7 +227,12 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
                     "duration_seconds": round(time.monotonic() - started, 3),
                 }
         except (OSError, subprocess.SubprocessError) as exc:
+            if process is not None:
+                _terminate_process_tree(process)
             return data, {"status": "failed", "engine": executable, "errors": [str(exc)]}
+        finally:
+            if process is not None:
+                unregister_killable_process(execution_id, process)
         converted = out_dir / "input.xlsx"
         if return_code != 0 or not converted.is_file():
             detail = (stderr or stdout or "LibreOffice conversion failed").strip()
@@ -246,7 +257,7 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
                     for row in ws.iter_rows():
                         for cell in row:
                             value = cell.value
-                            if isinstance(value, str) and value.startswith("#"):
+                            if cell.data_type == "e":
                                 errors.append(f"{ws.title}!{cell.coordinate}:{value}")
                                 if len(errors) >= 100:
                                     break
@@ -257,7 +268,14 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
             finally:
                 wb.close()
         except Exception as exc:
-            errors.append(f"verification: {exc}")
+            # A zero converter exit code is not evidence of a readable XLSX.
+            # Never replace the caller's valid workbook with corrupt bytes.
+            return data, {
+                "status": "failed", "engine": executable,
+                "errors": [f"invalid_converted_workbook: {exc}"],
+                "error_count": 1, "formula_count": None,
+                "duration_seconds": round(time.monotonic() - started, 3),
+            }
         return result, {
             "status": "recalculated",
             "engine": executable,
@@ -515,6 +533,8 @@ def commit_workbook(
             fresh_default_sheets = list(wb.sheetnames)
         else:
             wb = load_workbook(BytesIO(before), keep_vba=suffix in {".xlsm", ".xlsb"})
+        from excelmanus.workbook.formula_values import attach_formula_source
+        attach_formula_source(wb, before)
         try:
             mutate_fn(wb)
             # 新建簿自带的默认空表（如 "Sheet"）若全程未动且已有其它表，剔除免留空壳。
@@ -748,6 +768,8 @@ def commit_workbook_batch(
                 fresh_default_sheets = list(wb.sheetnames)
             else:
                 wb = load_workbook(BytesIO(before), keep_vba=_suffix == ".xlsm")
+            from excelmanus.workbook.formula_values import attach_formula_source
+            attach_formula_source(wb, before)
             try:
                 _fn(wb)
                 if fresh_default_sheets and len(wb.sheetnames) > 1:

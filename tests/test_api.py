@@ -13,6 +13,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -37,7 +38,7 @@ from excelmanus.engine import ChatResult, ToolCallResult
 
 def _test_config(**overrides) -> ExcelManusConfig:
     """创建测试用配置。"""
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         api_key="test-key",
         base_url="https://test.example.com/v1",
         model="test-model",
@@ -73,8 +74,9 @@ def test_create_app_uses_config_cors_for_middleware(monkeypatch: pytest.MonkeyPa
         layer for layer in local_app.user_middleware if layer.cls is CORSMiddleware
     ]
     assert len(cors_layers) == 1
-    assert "Content-Disposition" in cors_layers[0].kwargs["expose_headers"]
-    assert set(cors_layers[0].kwargs["allow_origins"]) == {
+    cors_kwargs: dict[str, Any] = cors_layers[0].kwargs
+    assert "Content-Disposition" in cors_kwargs["expose_headers"]
+    assert set(cors_kwargs["allow_origins"]) == {
         "http://a.example",
         "http://b.example",
         "http://localhost:3000",
@@ -96,7 +98,8 @@ def test_create_app_adds_lan_and_custom_frontend_port_cors(monkeypatch: pytest.M
     cors_layers = [
         layer for layer in local_app.user_middleware if layer.cls is CORSMiddleware
     ]
-    origins = set(cors_layers[0].kwargs["allow_origins"])
+    cors_kwargs: dict[str, Any] = cors_layers[0].kwargs
+    origins = set(cors_kwargs["allow_origins"])
     assert "http://a.example" in origins
     assert "http://192.168.1.10:3001" in origins
     assert "http://192.168.1.10:4173" in origins
@@ -259,7 +262,7 @@ def _setup_api_globals(config=None, *, chat_history=None):
         for _mod_name, _saved in _saved_guards.items():
             try:
                 _mod = importlib.import_module(_mod_name)
-                _mod._guard = _saved
+                setattr(_mod, "_guard", _saved)
             except ImportError:
                 pass
 
@@ -267,8 +270,8 @@ def _setup_api_globals(config=None, *, chat_history=None):
 # ── Fixtures ──────────────────────────────────────────────
 
 
-@pytest.fixture
-def setup_api_state():
+@pytest.fixture(name="setup_api_state")
+def _api_state_fixture():
     """初始化 API 全局状态，绕过 lifespan 直接注入测试依赖。"""
     with _setup_api_globals() as state:
         yield state
@@ -770,7 +773,7 @@ class TestProperty14SessionDeletion:
 
     @pytest.mark.asyncio
     async def test_chat_approve_unknown_id_returns_404(
-        self, client: AsyncClient, setup_api_state: dict
+        self, client: AsyncClient
     ) -> None:
         with patch(
             "excelmanus.engine.AgentEngine.followup",
@@ -929,7 +932,7 @@ class TestSessionExportAPI:
 
     @pytest.mark.asyncio
     async def test_legacy_formats_rejected(
-        self, client: AsyncClient, setup_api_state: dict
+        self, client: AsyncClient
     ) -> None:
         for fmt in ("txt", "emx"):
             resp = await client.get(
@@ -1064,7 +1067,7 @@ class TestProperty15ErrorNoLeak:
 
     @pytest.mark.asyncio
     async def test_session_limit_returns_429(
-        self, client: AsyncClient, setup_api_state: dict
+        self, client: AsyncClient
     ) -> None:
         """会话数达到上限时返回 429。"""
         for i in range(5):
@@ -1472,7 +1475,6 @@ class TestSkillpackCrudEndpoints:
                     },
                 )
                 assert create_resp.status_code == 201
-                created_detail = create_resp.json()["detail"]
 
                 patch_resp = await c.patch(
                     "/api/v1/skills/api_skill",
@@ -2376,6 +2378,7 @@ class TestImageAttachment:
             )
         assert resp.status_code == 200
         assert mock_chat.await_count == 1
+        assert mock_chat.await_args is not None
         kwargs = mock_chat.await_args.kwargs
         assert "images" in kwargs
         assert kwargs["images"] == [
@@ -2406,6 +2409,7 @@ class TestImageAttachment:
             )
         assert resp.status_code == 200
         assert mock_chat.await_count == 1
+        assert mock_chat.await_args is not None
         kwargs = mock_chat.await_args.kwargs
         assert "images" in kwargs
         assert kwargs["images"] == [
@@ -2692,8 +2696,13 @@ class TestImageAttachment:
                 # 消费 chunk 直到找到 session_init 获取 session_id
                 session_id: str | None = None
                 async for chunk in stream_iter:
-                    if "event: session_init" in chunk:
-                        payload = json.loads(chunk.split("data:", 1)[1].strip())
+                    text = (
+                        bytes(chunk).decode("utf-8", "replace")
+                        if isinstance(chunk, (bytes, bytearray, memoryview))
+                        else str(chunk)
+                    )
+                    if "event: session_init" in text:
+                        payload = json.loads(text.split("data:", 1)[1].strip())
                         session_id = payload["session_id"]
                         break
                 assert session_id is not None, "未收到 session_init 事件"
@@ -2793,38 +2802,43 @@ class TestAdminGuardForModelConfig:
         [
             (
                 "https://api.minimax.chat/v1",
-                "MiniMax-M3",
+                "MiniMax-M2",
                 "MiniMax",
             ),
             (
                 "https://api.minimax.io/v1",
-                "MiniMax-M3",
+                "MiniMax-M2",
                 "MiniMax",
             ),
             (
                 "https://generativelanguage.googleapis.com/v1beta/openai",
-                "gemini-3.8-flash",
+                "gemini-2.5-pro",
                 "Gemini",
             ),
             (
                 "https://open.bigmodel.cn/api/paas/v4",
-                "glm-5.3",
+                "glm-4.7",
                 "GLM",
             ),
             (
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                "qwen3.8-max",
+                "qwen-max",
                 "DashScope",
             ),
             (
                 "https://api.moonshot.cn/v1",
-                "kimi-k3",
+                "kimi-k2.6",
                 "Moonshot",
             ),
             (
                 "https://api.deepseek.com/v1",
-                "deepseek-flash",
+                "deepseek-v3",
                 "DeepSeek",
+            ),
+            (
+                "https://api.xiaomimimo.com/v1",
+                "mimo-v2.6-flash",
+                "MiMo",
             ),
         ],
     )
@@ -2969,8 +2983,8 @@ class TestAdminGuardForModelConfig:
         """Codex（OAuth）档案无 API Key，应直接返回订阅支持的模型目录。"""
         mock_cfg_store = MagicMock()
         mock_cfg_store.get_profile.return_value = {
-            "name": "openai-codex/gpt-5.6-sol",
-            "model": "openai-codex/gpt-5.6-sol",
+            "name": "openai-codex/gpt-5.2-codex",
+            "model": "openai-codex/gpt-5.2-codex",
             "api_key": "",
             "base_url": "https://api.openai.com/v1",
             "protocol": "openai_responses",
@@ -2983,13 +2997,13 @@ class TestAdminGuardForModelConfig:
         with patch("httpx.AsyncClient.get", new=mock_get):
             resp = await client.post(
                 "/api/v1/config/models/list-remote",
-                json={"name": "openai-codex/gpt-5.6-sol"},
+                json={"name": "openai-codex/gpt-5.2-codex"},
             )
 
         assert resp.status_code == 200
         data = resp.json()
         ids = {m.get("id") for m in data.get("models", [])}
-        assert "openai-codex/gpt-5.6-sol" in ids
+        assert "openai-codex/gpt-5.2-codex" in ids
         assert not data.get("error")
         mock_get.assert_not_called()
 
@@ -3177,7 +3191,7 @@ class TestAdminGuardForModelConfig:
         resp = await client.get("/api/v1/config/models")
         assert resp.status_code == 200
         data = resp.json()
-        assert set(data) == {"profiles", "active"}
+        assert set(data) == {"profiles", "active", "canonical_match_enabled"}
         assert "main" not in data
         assert "aux" not in data
 

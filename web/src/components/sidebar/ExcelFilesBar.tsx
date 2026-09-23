@@ -48,6 +48,7 @@ import { mapWithConcurrency } from "@/lib/concurrency";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import {
   recentFilesForWorkspace,
+  workspaceKeyFromSession,
 } from "@/lib/workspace-file-ref";
 import { isSpreadsheetFile, WORKSPACE_FILE_INPUT_ACCEPT } from "@/lib/file-kind";
 import { displayFilePath } from "@/lib/file-identity";
@@ -275,6 +276,12 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       if (!files) return;
       const fileList = Array.from(files);
       if (fileList.length === 0 || uploading) return;
+      // Capture the scope before awaiting uploads. The user may switch
+      // conversations while the server is receiving a large file.
+      const uploadSessionId = activeSessionId;
+      const uploadWorkspaceId = activeWorkspaceId;
+      const uploadWorkspaceKey = activeWorkspaceKey
+        ?? workspaceKeyFromSession(useSessionStore.getState().sessions?.find((s) => s.id === uploadSessionId));
       setUploadFailureCount(0);
       setUploading(true);
       let failed = 0;
@@ -283,7 +290,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           fileList,
           async (file) => {
             try {
-              return await uploadFile(file, activeSessionId, activeWorkspaceId);
+              return await uploadFile(file, uploadSessionId, uploadWorkspaceId);
             } catch {
               failed += 1;
               return null;
@@ -293,13 +300,17 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         );
         for (const result of uploaded) {
           if (!result) continue;
-          addRecentFile({ path: result.path, filename: result.filename });
+          addRecentFile({ path: result.path, filename: result.filename }, uploadWorkspaceKey ?? undefined);
         }
         if (uploaded.some(Boolean)) {
           // Invalidate an in-flight pre-upload scan so it cannot win with a
           // snapshot that predates the newly uploaded files.
           useExcelStore.getState().bumpWorkspaceFilesVersion();
-          await refreshWorkspaceFiles(activeSessionId);
+          const currentSession = useSessionStore.getState().sessions?.find((s) => s.id === uploadSessionId);
+          if (useSessionStore.getState().activeSessionId === uploadSessionId
+            && workspaceKeyFromSession(currentSession) === uploadWorkspaceKey) {
+            await refreshWorkspaceFiles(uploadSessionId);
+          }
         }
         if (failed > 0) setUploadFailureCount(failed);
       } finally {
@@ -307,7 +318,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         setUploading(false);
       }
     },
-    [addRecentFile, refreshWorkspaceFiles, activeSessionId, activeWorkspaceId, uploading]
+    [addRecentFile, refreshWorkspaceFiles, activeSessionId, activeWorkspaceId, activeWorkspaceKey, uploading]
   );
 
   const handleClick = useCallback(
@@ -363,9 +374,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       } else {
         // 同步清理 recentFiles 中对应条目
         if (pendingRemovePaths.length === 1) {
-          removeRecentFile(pendingRemovePaths[0]);
+          removeRecentFile(pendingRemovePaths[0], activeWorkspaceKey);
         } else if (pendingRemovePaths.length > 0) {
-          removeRecentFiles(pendingRemovePaths);
+          removeRecentFiles(pendingRemovePaths, activeWorkspaceKey);
         }
         useExcelStore.getState().bumpWorkspaceFilesVersion();
       }
@@ -376,7 +387,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     setConfirmRemoveOpen(false);
     setPendingRemovePaths([]);
     exitSelectMode();
-  }, [pendingRemovePaths, removeRecentFile, removeRecentFiles, exitSelectMode, refreshWorkspaceFiles, activeSessionId, activeWorkspaceId]);
+  }, [pendingRemovePaths, removeRecentFile, removeRecentFiles, exitSelectMode, refreshWorkspaceFiles, activeSessionId, activeWorkspaceId, activeWorkspaceKey]);
 
   const requestClearAll = useCallback(() => {
     if (allVisibleFilePaths.length === 0) return;

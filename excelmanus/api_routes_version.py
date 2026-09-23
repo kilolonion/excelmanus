@@ -246,7 +246,8 @@ async def version_manifest(request: Request) -> JSONResponse:
 
 @router.get("/api/v1/version/check")
 async def version_check(request: Request) -> JSONResponse:
-    from excelmanus.updater import check_for_updates, get_current_version
+    from excelmanus.release_check import check_release_updates
+    from excelmanus.updater import get_current_version
 
     root = _get_project_root()
     if os.environ.get("EXCELMANUS_DESKTOP") == "1":
@@ -261,7 +262,7 @@ async def version_check(request: Request) -> JSONResponse:
     try:
         loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(
-            None, partial(check_for_updates, root, force=force),
+            None, partial(check_release_updates, root, force=force),
         )
         return JSONResponse(content={
             "current": current,
@@ -269,6 +270,7 @@ async def version_check(request: Request) -> JSONResponse:
             "has_update": info.has_update,
             "commits_behind": info.commits_behind,
             "release_notes": info.release_notes,
+            "release_url": info.release_url,
             "check_method": info.check_method,
             "check_failed": info.check_failed,
             "error": info.error or None,
@@ -344,12 +346,21 @@ async def cleanup_version_backups(request: Request) -> JSONResponse:
 async def list_installations(request: Request) -> JSONResponse:
     from excelmanus.data_home import discover_old_installations
 
-    installations = discover_old_installations()
-    return JSONResponse(content={"installations": installations})
+    current_path = _get_project_root().resolve()
+    installations = discover_old_installations(current_path)
+    return JSONResponse(content={
+        "installations": installations,
+        "current_path": str(current_path),
+        "stale_count": sum(1 for item in installations if item.get("status") == "missing"),
+    }, headers={"Cache-Control": "no-store"})
 
 
 class DeleteInstallationRequest(BaseModel):
     path: str = Field(description="安装路径")
+    delete_directory: bool = Field(
+        default=False,
+        description="是否同时删除已登记的旧安装目录",
+    )
 
 
 @router.post("/api/v1/version/installations/delete")
@@ -358,15 +369,53 @@ async def delete_installation(body: DeleteInstallationRequest, request: Request)
     if denied:
         return denied
 
-    from excelmanus.data_home import _load_installations, _save_installations
+    from excelmanus.data_home import (
+        InstallationDeletionError,
+        _installation_path_key,
+        _load_installations,
+        remove_installation,
+    )
 
-    installations = _load_installations()
-    before = len(installations)
-    installations = [i for i in installations if i.get("path") != body.path]
-    if len(installations) == before:
+    current_path = _get_project_root().resolve()
+    if _installation_path_key(body.path) == _installation_path_key(current_path):
+        return _error(409, "不能移除当前正在运行的安装记录")
+
+    try:
+        removed = remove_installation(
+            body.path,
+            delete_directory=body.delete_directory,
+            protected_paths=(current_path,),
+        )
+    except InstallationDeletionError as exc:
+        return _error(409, str(exc))
+    if removed is None:
         return _error(404, f"未找到安装记录: {body.path}")
-    _save_installations(installations)
-    return JSONResponse(content={"status": "ok", "remaining": len(installations)})
+    remaining = len(_load_installations())
+    directory_deleted = bool(removed.get("directory_deleted", False))
+    return JSONResponse(content={
+        "status": "ok",
+        "deleted_path": removed.get("path", body.path),
+        "remaining": remaining,
+        "directory_deleted": directory_deleted,
+    })
+
+
+@router.post("/api/v1/version/installations/cleanup")
+async def cleanup_installations(request: Request) -> JSONResponse:
+    """清理已不存在的旧安装记录，不删除任何磁盘目录。"""
+    denied = _require_control_plane(request)
+    if denied:
+        return denied
+
+    from excelmanus.data_home import prune_missing_installations
+
+    removed = prune_missing_installations(_get_project_root().resolve())
+    return JSONResponse(content={
+        "status": "ok",
+        "removed_count": len(removed),
+        "removed": [entry.get("path", "") for entry in removed],
+        "directory_deleted": False,
+    })
 
 
 class UpgradeRequest(BaseModel):

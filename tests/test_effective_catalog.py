@@ -444,9 +444,9 @@ def test_wire_projection_prunes_nested_schema(tmp_path) -> None:
         if (s.get("function") or s).get("name") == "edit_spreadsheet"
     )
     params = (wire.get("function") or wire)["parameters"]
-    # workbook_spec（$ref 引用）在 wire 上坍缩为 object + tool_detail 指引
+    # 字段树按需披露，但外层 object|string 合同不能缩窄成 object。
     spec = params["properties"]["workbook_spec"]
-    assert spec["type"] == "object"
+    assert set(spec["type"]) == {"object", "string"}
     assert "tool_detail" in spec["description"]
     # 无剩余 $ref 时 $defs 整体移除
     assert "$defs" not in params

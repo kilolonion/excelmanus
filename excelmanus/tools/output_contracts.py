@@ -128,6 +128,21 @@ def _obj(
 
 # ── 已核实的成功返回顶层键（真实工具输出驱动，非猜测） ──
 OUTPUT_CONTRACTS: dict[str, OutputContract] = {
+    "calculate_spreadsheet": _obj(
+        {"status": "str"}, {"file_path", "content_version", "source_version", "formula_recalculation", "receipt", "committed"}
+    ),
+    "render_spreadsheet": _obj(
+        {"status": "str"}, {"files", "source_version", "engine", "format", "page_count", "sheet", "range", "receipt"}
+    ),
+    "convert_spreadsheet": _obj(
+        {"status": "str"}, {"file_path", "content_version", "source_version", "engine", "mode", "loss_report", "receipt"}
+    ),
+    "validate_spreadsheet": _obj(
+        {"status": "str"}, {"file_path", "content_version", "valid", "validation_status", "uncalculated_cells", "rules", "failure_count", "failures", "truncated", "source_versions"}
+    ),
+    "query_spreadsheet": _obj(
+        {"status": "str"}, {"columns", "values", "total_rows", "truncated", "sources", "engine", "storage", "file_path", "content_version", "receipt"}
+    ),
     "inspect_spreadsheet": _obj(
         {"status": "str"},
         {
@@ -209,6 +224,7 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
             "duplicate_keys_a", "duplicate_keys_b",
             "unmatched_in_a", "unmatched_in_b",
             "alignment", "key_columns", "scope", "compared_sheets", "formula_status",
+            "appearance", "appearance_versions",
         },
     ),
     "trace_spreadsheet_formulas": _obj(
@@ -290,7 +306,7 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
     ),
     "offer_download": _obj(
         {"status": "str", "file_path": "str", "filename": "str"},
-        {"size", "description"},
+        {"size", "description", "content_version"},
     ),
     "run_shell": _obj(
         {"status": "str", "command": "str", "return_code": "int"},

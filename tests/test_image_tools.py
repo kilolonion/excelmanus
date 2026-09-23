@@ -41,6 +41,8 @@ class TestReadImage:
         assert out.value["size_bytes"] > 0
         assert out.value["attachment_id"].startswith("sha256:")
         assert "__tool_result_image__" not in out.model_text
+        assert out.value["attachment_id"] in out.model_text
+        assert "尺寸=" in out.model_text
         assert out.ui_meta.image and out.ui_meta.image.get("attachment")
 
     def test_read_nonexistent_file(self, tmp_path: Path) -> None:
@@ -194,6 +196,28 @@ class TestUiMetaImageInjection:
         content = engine.memory.add_user_message.call_args.args[0]
         assert content[0]["type"] == "image"
         assert content[0]["attachment"]["attachmentId"].startswith("sha256:")
+        kwargs = engine.memory.add_user_message.call_args.kwargs
+        assert kwargs["hidden"] is True
+        assert kwargs["prompt_kind"] == "image_observation"
+
+    def test_image_burst_is_one_hidden_observation_message(self) -> None:
+        """同一批图片不应各自制造一个 user turn。"""
+        from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta
+
+        dispatcher, engine = self._make_dispatcher()
+        b64 = _MINIMAL_PNG_B64.replace("\n", "").strip()
+        for _ in range(3):
+            dispatcher._apply_ui_meta_effects(
+                ToolResult(
+                    success=True,
+                    model_text="图片已加载",
+                    ui_meta=ToolUiMeta(image={"base64": b64, "mime_type": "image/png", "detail": "auto"}),
+                )
+            )
+        dispatcher.flush_deferred_images()
+        engine.memory.add_user_message.assert_called_once()
+        content = engine.memory.add_user_message.call_args.args[0]
+        assert len(content) == 1  # exact hash dedupe still applies
 
     def test_legacy_json_magic_field_is_lifted_at_dispatcher(self) -> None:
         """消费边界把未迁移工具的 JSON 魔法字段提升到 ui_meta 并注入。"""

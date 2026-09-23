@@ -18,7 +18,7 @@ from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta, error_res
 from excelmanus.logger import get_logger
 from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.security import FileAccessGuard, SecurityViolationError
-from excelmanus.tools.context import bind_workspace, require_guard
+from excelmanus.tools.context import bind_workspace, require_guard, current_call
 from excelmanus.tools._helpers import (
     MutationAborted,
     OUTSIDE_WORKSPACE_MESSAGE,
@@ -320,6 +320,12 @@ def _workbook_spec_param_schema() -> dict[str, Any]:
 
     return workbook_spec_json_schema()
 
+
+def _print_layout_param_schema() -> dict[str, Any]:
+    from excelmanus.workbook.layout import PrintLayout
+
+    return PrintLayout.model_json_schema()
+
 logger = get_logger("tools.intent")
 
 def _get_guard() -> FileAccessGuard:
@@ -486,6 +492,8 @@ def _coerce_operations(operations: Any) -> list[Any] | ToolResult:
         if isinstance(item, dict):
             item = dict(item)
             for names in _OP_ALIAS_GROUPS:
+                if names[0] == "start_cell" and item.get("kind") in {"fill", "comment", "hyperlink"}:
+                    continue
                 supplied = [(name, item[name]) for name in names if item.get(name) is not None]
                 if not supplied:
                     continue
@@ -537,6 +545,7 @@ _INSPECT_MODE_FIELDS: dict[str, frozenset[str]] = {
     }),
     "capabilities": frozenset({"request", "mode"}),
 }
+_INSPECT_MODE_FIELDS["objects"] = frozenset({"request", "mode", "file_path", "path", "sheet", "sheet_name", "expected_version", "content_version"})
 _INSPECT_DEFAULTS = {
     "match_mode": "contains",
     "directory": ".",
@@ -626,10 +635,14 @@ _EDIT_KIND_FIELDS = {
     "transform": "sheet sheet_name header_row action transform key_columns key_normalizers keep order_by column delimiter sep new_columns into",
 }
 
+from excelmanus.workbook.operations import KINDS as _RANGE_KINDS
+_EDIT_KIND_FIELDS.update({k: "sheet sheet_name " + v for k,v in _RANGE_KINDS.items()})
+
 _FORMAT_KIND_FIELDS = {
     "format": "range font fill border alignment number_format",
     "size": "range columns rows auto_fit axis",
     "freeze": "range freeze_panes rows cols",
+    "print_layout": "print_layout",
     "merge": "range allow_data_loss",
     "unmerge": "range",
     "conditional_format": "range rule remove",
@@ -1452,25 +1465,24 @@ def _parse_at_count(op: dict[str, Any], action: str) -> tuple[int, int]:
     return at, count
 
 
+def _structure(wb, action, sheet, **kwargs):
+    from excelmanus.workbook.structure_edit import apply_structure_edit
+    try:
+        return apply_structure_edit(wb, action, sheet, **kwargs)
+    except (ValueError, TypeError) as exc:
+        raise MutationAborted(_invalid(str(exc), code="STRUCTURE_UNSUPPORTED")) from exc
+
+
 def _apply_insert(wb: Any, op: dict[str, Any]) -> str:
     _require_explicit_sheet(op, "insert", wb=wb)
-    sheet = _op_get(op, "sheet", "sheet_name")
-    axis = str(_op_get(op, "axis") or "")
+    ws = _worksheet(wb, _op_get(op, "sheet", "sheet_name"))
+    axis = str(_op_get(op, "axis") or "").lower()
     at, count = _parse_at_count(op, "insert")
-    ws = _worksheet(wb, sheet)
-    axis_norm = axis.lower()
-    _refuse_unmaintained_structure(
-        ws, "insert", target_sheet=str(sheet),
-        axis=("column" if axis_norm in {"column", "columns", "col", "cols"} else "row"),
-        at=at, count=count,
-    )
-    if axis_norm in {"row", "rows"}:
-        ws.insert_rows(at, amount=count)
-        return f"rows@{at}+{count}"
-    if axis_norm in {"column", "columns", "col", "cols"}:
-        ws.insert_cols(at, amount=count)
-        return f"cols@{at}+{count}"
-    raise MutationAborted(_invalid("insert.axis 必须是 row 或 column"))
+    if axis not in {"row", "rows", "column", "columns", "col", "cols"}:
+        raise MutationAborted(_invalid("insert.axis 必须是 row 或 column"))
+    action = "insert_rows" if axis in {"row", "rows"} else "insert_cols"
+    _structure(wb, action, ws.title, at=at, count=count)
+    return f"{axis}s@{at}+{count}"
 
 
 def _apply_delete_rows(wb: Any, op: dict[str, Any]) -> str:
@@ -1478,33 +1490,21 @@ def _apply_delete_rows(wb: Any, op: dict[str, Any]) -> str:
     if sel is not None:
         ws = _worksheet(wb, sel.sheet)
         rows = sorted({int(r) for r in sel.rows}, reverse=True)
-        _refuse_unmaintained_structure(
-            ws, "delete_rows", target_sheet=sel.sheet, axis="row",
-            at=min(rows), count=len(rows),
-        )
         for row in rows:
-            ws.delete_rows(row, amount=1)
+            _structure(wb, "delete_rows", ws.title, at=row, count=1)
         return f"delete_rows:selection:{len(rows)}"
     _require_explicit_sheet(op, "delete_rows", wb=wb)
-    sheet = _op_get(op, "sheet", "sheet_name")
+    ws = _worksheet(wb, _op_get(op, "sheet", "sheet_name"))
     at, count = _parse_at_count(op, "delete_rows")
-    ws = _worksheet(wb, sheet)
-    _refuse_unmaintained_structure(
-        ws, "delete_rows", target_sheet=str(sheet), axis="row", at=at, count=count,
-    )
-    ws.delete_rows(at, amount=count)
+    _structure(wb, "delete_rows", ws.title, at=at, count=count)
     return f"delete_rows@{at}x{count}"
 
 
 def _apply_delete_columns(wb: Any, op: dict[str, Any]) -> str:
     _require_explicit_sheet(op, "delete_columns", wb=wb)
-    sheet = _op_get(op, "sheet", "sheet_name")
+    ws = _worksheet(wb, _op_get(op, "sheet", "sheet_name"))
     at, count = _parse_at_count(op, "delete_columns")
-    ws = _worksheet(wb, sheet)
-    _refuse_unmaintained_structure(
-        ws, "delete_columns", target_sheet=str(sheet), axis="column", at=at, count=count,
-    )
-    ws.delete_cols(at, amount=count)
+    _structure(wb, "delete_cols", ws.title, at=at, count=count)
     return f"delete_columns@{at}x{count}"
 
 
@@ -1563,7 +1563,7 @@ def _apply_pivot(
     src = _worksheet(wb, source)
     if not isinstance(header_row, int) or isinstance(header_row, bool) or header_row < 1:
         raise MutationAborted(_invalid("pivot.header_row 必须是 Excel 正整数行号；表单数据请先转换为带表头的数据表"))
-    df = dataframe_from_worksheet(src, header_row=int(header_row))
+    df = dataframe_from_worksheet(src, header_row=int(header_row), cached_formulas=True)
     if df.empty and source == target:
         raise MutationAborted(
             _invalid(
@@ -1580,7 +1580,7 @@ def _apply_pivot(
         if _get_guard().resolve_and_validate(right_file) == _get_guard().resolve_and_validate(file_path):
             if not join_spec["right_sheet"]:
                 raise MutationAborted(_invalid("同簿 pivot.join 必须提供右侧 sheet"))
-            right_frame = dataframe_from_worksheet(_worksheet(wb, join_spec["right_sheet"]), header_row=join_spec["right_header"] or 1)
+            right_frame = dataframe_from_worksheet(_worksheet(wb, join_spec["right_sheet"]), header_row=join_spec["right_header"] or 1, cached_formulas=True)
         merged, _unmatched, merge_err = _apply_join(df, join_spec, file_path, right_frame=right_frame)
         if merge_err is not None:
             raise MutationAborted(merge_err)
@@ -1787,8 +1787,7 @@ def _apply_sheet(wb: Any, op: dict[str, Any]) -> str:
             raise MutationAborted(_sheet_not_found(name, wb.sheetnames))
         if resolve_sheet_name(new_name, wb.sheetnames) is not None:
             raise MutationAborted(_invalid(f"工作表已存在：{new_name}"))
-        _refuse_rename_if_workbook_has_refs(wb)
-        wb[resolved].title = str(new_name)
+        _structure(wb, "rename_sheet", resolved, new_name=str(new_name))
         return f"rename:{resolved}->{new_name}"
     if action == "delete":
         if not name:
@@ -1964,13 +1963,15 @@ def _format_range_optional(kind: str, op: dict[str, Any]) -> bool:
             or _truthy_op_field(op, "columns", "column_widths")
             or _truthy_op_field(op, "rows", "row_heights")
         )
-    if kind == "freeze":
+    if kind in {"freeze", "print_layout"}:
         return True
     return False
 
 
 def _format_example_op(kind: str, sheet: str) -> dict[str, Any]:
     canon = _canonical_format_kind(kind)
+    if canon == "print_layout":
+        return {"kind": "print_layout", "sheet": sheet, "print_layout": {"fit_to_width": 1, "fit_to_height": 1}}
     if canon == "size":
         return {"kind": "size", "sheet": sheet, "columns": {"A": 18}}
     if canon == "freeze":
@@ -2064,12 +2065,21 @@ def _apply_format(wb: Any, op: dict[str, Any]) -> tuple[str, list[str]]:
         _format_contract_abort(
             kind=kind, kind_omitted=kind_omitted, missing=missing, wb=wb,
         )
-    if kind not in {"format", "merge", "unmerge", "size", "freeze", "conditional_format", "conditionalformat", "cf", "data_validation", "datavalidation", "dv"}:
+    if kind not in {"format", "merge", "unmerge", "size", "freeze", "print_layout", "conditional_format", "conditionalformat", "cf", "data_validation", "datavalidation", "dv"}:
         raise MutationAborted(
             _invalid(
-                f"不支持的 format.kind={kind}。可用：format / merge / unmerge / size / freeze / conditional_format / data_validation"
+                f"不支持的 format.kind={kind}。可用：format / merge / unmerge / size / freeze / print_layout / conditional_format / data_validation"
             )
         )
+    if kind == "print_layout":
+        from excelmanus.workbook.layout import PrintLayout, apply_print_layout
+
+        layout = PrintLayout.model_validate(_op_get(op, "print_layout"))
+        if not layout.model_dump(exclude_none=True):
+            raise ValueError("print_layout 至少提供一个打印设置")
+        ws = _worksheet(wb, _format_bound_sheet(op, raw_range))
+        apply_print_layout(ws, layout)
+        return "print_layout", []
     if kind == "freeze":
         sheet = _format_bound_sheet(op, raw_range)
         ws = _worksheet(wb, sheet)
@@ -2440,6 +2450,7 @@ def _apply_edit_operations(
     """
     applied: list[str] = []
     mutation_warnings: list[str] = []
+    from excelmanus.workbook.formula_values import FormulaValueError
     for index, raw in enumerate(operations):
         if not isinstance(raw, dict):
             raise MutationAborted(_invalid(f"operations[{index}] 必须是对象"))
@@ -2462,6 +2473,9 @@ def _apply_edit_operations(
                 applied.append(_apply_pivot(wb, raw, file_path, mutation_warnings))
             elif kind == "transform":
                 applied.append(_apply_transform(wb, raw, mutation_warnings))
+            elif kind in _RANGE_KINDS:
+                from excelmanus.workbook.operations import apply_range_operation
+                applied.append(apply_range_operation(wb, raw))
             else:
                 raise MutationAborted(
                     _invalid(
@@ -2470,6 +2484,10 @@ def _apply_edit_operations(
                         "外观用 format_spreadsheet"
                     )
                 )
+        except (ValueError, TypeError, KeyError) as exc:
+            if isinstance(exc, FormulaValueError):
+                _abort_operation(MutationAborted(_invalid(str(exc), code=exc.code, cells=exc.cells)), index, kind)
+            _abort_operation(MutationAborted(_invalid(str(exc))), index, kind)
         except MutationAborted as exc:
             _abort_operation(exc, index, kind)
     return applied, mutation_warnings
@@ -2485,7 +2503,11 @@ def _edit_spreadsheet_batch(workbooks: Any) -> ToolResult:
     if not isinstance(workbooks, list) or not workbooks:
         return _invalid("workbooks 必须是非空对象数组")
 
-    from excelmanus.security.source_isolation import is_probe_path, probe_error_message
+    from excelmanus.security.source_isolation import (
+        PROBE_FILE_FORBIDDEN,
+        is_probe_path,
+        probe_error_message,
+    )
     from excelmanus.tools.context import operation_id_for
     from excelmanus.workbook.snapshot import SnapshotError, validate_selection_target
     from excelmanus.workbook_commit import commit_workbook_batch
@@ -2791,7 +2813,11 @@ def format_spreadsheet(
     path: str = "",
     content_version: str | None = None,
 ) -> ToolResult:
-    """一次原子请求：字体/填充/边框/对齐、合并、行列尺寸、冻结窗格。"""
+    """一次原子请求：样式、合并、行列尺寸、冻结窗格和打印布局。
+
+    appearance（含 print_settings）描述修改后的内存状态，采集于序列化和
+    公式重算之前；它不是最终提交文件的快照。
+    """
     file_path = file_path or path
     expected_version = expected_version or content_version
     operations = _coerce_operations(operations)
@@ -2813,10 +2839,16 @@ def format_spreadsheet(
 
     applied: list[str] = []
     skipped_merged_non_anchors: list[str] = []
-    appearance: dict[str, Any] = {"sheets": []}
+    appearance: dict[str, Any] = {
+        "source": "mutation_preview",
+        "phase": "before_serialization",
+        "note": "print_settings 等布局信息采集于序列化和公式重算前，不代表最终提交文件的快照。",
+        "sheets": [],
+    }
 
     def mutate(wb: Any) -> None:
         touched: list[str] = []
+        print_sheets: set[str] = set()
         for index, raw in enumerate(operations):
             if not isinstance(raw, dict):
                 raise MutationAborted(_invalid(f"operations[{index}] 必须是对象"))
@@ -2831,6 +2863,8 @@ def format_spreadsheet(
             sheet = _op_get(raw, "sheet", "sheet_name")
             if sheet:
                 touched.append(str(sheet))
+                if label == "print_layout":
+                    print_sheets.add(str(sheet))
             else:
                 address = _op_get(raw, "range", "cell_range")
                 if address:
@@ -2856,6 +2890,10 @@ def format_spreadsheet(
                     "column_widths_truncated": len(ws.column_dimensions) > 16,
                 }
             )
+            if ws.title in print_sheets:
+                from excelmanus.workbook.data import _collect_print_settings
+
+                sheets_info[-1]["print_settings"] = _collect_print_settings(ws)
         appearance["sheets"] = sheets_info
 
     committed = _commit(
@@ -3104,6 +3142,16 @@ def inspect_spreadsheet(
     )
     if mode_err is not None:
         return mode_err
+
+    if chosen == "objects":
+        from excelmanus.workbook.snapshot import open_snapshot
+        from excelmanus.workbook.objects import list_workbook_objects
+        snapshot = open_snapshot(target, expected_version=args.get("expected_version"))
+        wb = snapshot.open_workbook(data_only=False, read_only=False)
+        try:
+            return _success({"status":"success", "file_path":target,"content_version":snapshot.content_version,"objects":list_workbook_objects(wb,args.get("sheet_name"))})
+        finally:
+            wb.close()
 
     if chosen == "capabilities":
         return _success(dict(_MODEL_CAPABILITIES))
@@ -3479,18 +3527,15 @@ def compare_spreadsheets(
             return _invalid("compare 需要 file_b，或在同一文件内提供不同的 sheet_a 与 sheet_b")
     align = str(args.get("alignment") or "position").strip().lower()
     keys = args.get("key_columns") or args.get("keyColumns")
-    if not bool(args.get("ignore_style", True)):
-        return _invalid(
-            "当前不支持样式对比。请省略 ignore_style 或设为 true。",
-            next_step="run_code",
-        )
+    if not bool(args.get("ignore_style", True)) and current_call() is None:
+        return _invalid("样式和对象对比需要绑定工作区上下文；在直接脚本中使用 run_code 或工具调用入口", next_step="run_code")
     if align == "key" and not keys:
         return _invalid("alignment=key 需要 key_columns")
     if align == "position" and keys:
         return _invalid("alignment=position 不能同时提供 key_columns；按键对齐请用 alignment=key")
     from excelmanus.workbook.data import compare_excel
 
-    return compare_excel(
+    result = compare_excel(
             file_a=left,
             file_b=right,
             sheet_a=str(args.get("sheet_a") or args.get("sheet") or ""),
@@ -3500,6 +3545,23 @@ def compare_spreadsheets(
             key_columns=list(keys) if keys else None,
             max_diffs=int(args.get("max_diffs") or args.get("maxDifferences") or 500),
         )
+    if result.success and not bool(args.get("ignore_style", True)):
+        from excelmanus.workbook.snapshot import open_snapshot
+        from excelmanus.workbook.appearance import compare_appearance
+        sa = open_snapshot(left)
+        sb = open_snapshot(right)
+        wa = sa.open_workbook(data_only=False, read_only=False)
+        try:
+            wb = sb.open_workbook(data_only=False, read_only=False)
+            try:
+                appearance = compare_appearance(wa, wb, args.get("sheet_a"), args.get("sheet_b"), int(args.get("max_diffs") or 500))
+            finally:
+                wb.close()
+        finally:
+            wa.close()
+        return _success({**result.value, "appearance":appearance, "appearance_versions":{"left":sa.content_version,"right":sb.content_version}})
+    return result
+
 
 
 def manage_spreadsheet_objects(
@@ -3533,20 +3595,24 @@ def manage_spreadsheet_objects(
     for index, raw in enumerate(ops):
         if not isinstance(raw, dict):
             return _invalid(f"operations[{index}] 必须是对象")
+        kind = str(_op_get(raw, "kind", "action") or "chart")
+        from excelmanus.workbook.objects import KINDS as object_kinds, FIELDS as object_fields
         try:
-            _reject_operation_fields(raw, f"objects.operations[{index}]", _CHART_FIELDS)
+            _reject_operation_fields(raw, f"objects.operations[{index}]", object_fields if kind in object_kinds else _CHART_FIELDS)
         except MutationAborted as exc:
             return exc.result
         kind = str(_op_get(raw, "kind", "action") or "chart")
-        if kind not in {"chart", "create_chart", "update_chart", "delete_chart"}:
+        if kind not in {"chart", "create_chart", "update_chart", "delete_chart"} | object_kinds:
             return _invalid(
                 f"不支持的 object.kind={kind}。当前仅支持 chart；"
                 "合并单元格请用 format_spreadsheet",
             )
         chart_type = str(_op_get(raw, "chart_type", "chartType") or "")
         data_range = str(_op_get(raw, "data_range", "dataRange") or "")
-        if kind in {"chart", "create_chart", "update_chart"} and (not chart_type or not data_range):
+        if kind in {"chart", "create_chart"} and (not chart_type or not data_range):
             return _invalid("chart 需要 chart_type 与 data_range")
+        if kind == "image" and str(_op_get(raw, "action") or "create") in {"create", "update"} and not _op_get(raw, "image_path"):
+            return _invalid("image 对象需要 image_path；当前富对象工具也支持 chart、Table 和其他对象，但不能凭空创建图片")
         prepared_ops.append(raw)
 
     applied: list[str] = []
@@ -3555,6 +3621,24 @@ def manage_spreadsheet_objects(
 
     def mutate(wb: Any) -> None:
         for index, raw in enumerate(prepared_ops):
+            kind = str(_op_get(raw, "kind", "action") or "chart")
+            if kind in object_kinds:
+                from excelmanus.workbook.objects import apply_object_operation
+                try:
+                    meta = apply_object_operation(wb, raw, guard=_get_guard())
+                except (ValueError, TypeError, KeyError) as exc:
+                    _abort_operation(MutationAborted(_invalid(str(exc), code=getattr(exc, "code", "INVALID_ARGS"))), index, kind)
+                objects.append(meta)
+                applied.append(f"{kind}:{meta.get('action', 'create')}:{meta.get('name') or meta.get('cell') or ''}")
+                continue
+            if kind == "update_chart":
+                from excelmanus.workbook.charts import update_chart_in_workbook
+                try:
+                    meta = update_chart_in_workbook(wb, raw)
+                except (ValueError, TypeError, KeyError) as exc:
+                    _abort_operation(MutationAborted(_invalid(str(exc))), index, kind)
+                objects.append(meta); last_meta.update(meta); applied.append(f"update_chart:{meta['target_sheet']}:{meta['index']}")
+                continue
             try:
                 if kind in {"chart", "create_chart", "update_chart"}:
                     _require_explicit_sheet(
@@ -4101,7 +4185,7 @@ def get_tools() -> list[ToolDef]:
                     "request": {"type": "object", "description": "可选；与平铺字段合并"},
                     "mode": {
                         "type": "string",
-                        "enum": ["overview", "range", "search", "capabilities"],
+                        "enum": ["overview", "range", "search", "capabilities", "objects"],
                         "description": "默认 overview",
                     },
                     "file_path": {
@@ -4131,7 +4215,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "overview 可用 columns/preview/dtypes/styles/charts/images/formulas/column_widths/merges/freeze_panes/conditional_formatting/data_validation/print_settings/tables；"
+                            "overview 可用 columns/preview/dtypes/styles/charts/images/formulas/column_widths/row_heights/merges/freeze_panes/conditional_formatting/data_validation/print_settings/tables；"
                             "range 仅 formulas"
                         ),
                     },
@@ -4325,7 +4409,7 @@ def get_tools() -> list[ToolDef]:
                     "ignore_style": {
                         "type": "boolean",
                         "default": True,
-                        "description": "必须为 true。false 会返回不支持样式对比。",
+                        "description": "false 时额外按坐标比较样式、布局、规则和对象。",
                     },
                 },
             },
@@ -4561,6 +4645,7 @@ def get_tools() -> list[ToolDef]:
                             "kind=merge|unmerge: range；"
                             "kind=size: columns/rows 或 auto_fit=true；"
                             "kind=freeze: freeze_panes=A2 冻结首行，空字符串取消；"
+                            "kind=print_layout: print_layout 对象设置打印区域、方向、纸张和缩放；"
                             "kind=conditional_format: range + rule 对象；type=formula 用 formula（或 formula1），例如 =$D2=\"未匹配\"；cell_value 用 operator/value，样式用 font/fill；"
                             "kind=data_validation: range + rule 对象（type=list/whole/decimal/date/time/textLength/custom，"
                             "list 用 values 数组或 formula1 引用，数值类用 operator+value/value2）；"
@@ -4573,7 +4658,7 @@ def get_tools() -> list[ToolDef]:
                             "properties": {
                                 "kind": {
                                     "type": "string",
-                                    "enum": ["format", "merge", "unmerge", "size", "freeze", "conditional_format", "data_validation"],
+                                    "enum": ["format", "merge", "unmerge", "size", "freeze", "print_layout", "conditional_format", "data_validation"],
                                 },
                                 "sheet": {"type": "string"},
                                 "sheet_name": {"type": "string"},
@@ -4595,6 +4680,7 @@ def get_tools() -> list[ToolDef]:
                                 "column_widths": {"description": "columns 的别名（kind=size）"},
                                 "rows": _format_size_axis_schema("rows"),
                                 "row_heights": {"description": "rows 的别名（kind=size）"},
+                                "print_layout": _print_layout_param_schema(),
                                 "auto_fit": {"type": "boolean"},
                                 "autoFit": {"type": "boolean", "description": "auto_fit 的别名"},
                                 "axis": {"type": "string"},
@@ -4867,7 +4953,10 @@ def _enrich_intent_schemas(tools: list[ToolDef]) -> list[ToolDef]:
             spec_param["type"] = ["object", "string"]
             spec_param["description"] = (
                 "创建用 WorkbookSpec，与 operations 互斥。必填 sheets 与 uncertainties；"
-                "可传对象或等价 JSON 字符串。嵌套字段用 introspect_capability 查询。"
+                "每张表含 name/dimensions；值用 value_blocks(start,values)，公式用 formula_blocks(start,formulas)。"
+                "uncertainties 无疑项为 []，否则每项含 location/reason。首选直接传对象；"
+                "仅为兼容旧调用接受等价 JSON 字符串，不要把完整规格重复编码成 JSON-in-JSON；"
+                "examples 是可直接修改的完整示例；更多字段用 introspect_capability 查询。"
             )
             props["workbook_spec"] = spec_param
             schema["$defs"] = {**(schema.get("$defs") or {}), **defs}
@@ -4875,6 +4964,11 @@ def _enrich_intent_schemas(tools: list[ToolDef]) -> list[ToolDef]:
             items = (props.get("operations") or {}).get("items") if isinstance(props.get("operations"), dict) else {}
             op_props = items.get("properties") if isinstance(items, dict) else None
             if isinstance(op_props, dict):
+                from excelmanus.workbook.operations import schema_fields
+                op_props.update(schema_fields())
+                op_props["start"] = {}
+                op_props["kind"]["enum"] += [k for k in [*_RANGE_KINDS, "pivot_refresh"] if k not in op_props["kind"]["enum"]]
+                op_props["refresh"] = {"type":"boolean"}
                 op_props["join"] = _join_param_schema()
                 op_props["values"] = {
                     "type": ["array", "string"],
@@ -4921,4 +5015,11 @@ def _enrich_intent_schemas(tools: list[ToolDef]) -> list[ToolDef]:
             props["expected_version"] = _version_param_schema()
         elif tool.name in {"manage_spreadsheet_objects", "manage_spreadsheet_versions"}:
             props["expected_version"] = _version_param_schema()
+            if tool.name == "manage_spreadsheet_objects":
+                from excelmanus.workbook.objects import object_schema_fields, KINDS
+                fields = props["operations"]["items"]["properties"]
+                added = object_schema_fields()
+                fields.update({k:v for k,v in added.items() if k not in {"kind","action"}})
+                fields["kind"]["enum"] += sorted(KINDS)
+                fields["action"] = {"type":"string", "enum":["create","update","resize","delete","refresh"], "description":"对象动作；图表优先使用 kind=create_chart/update_chart/delete_chart"}
     return tools

@@ -55,7 +55,7 @@ def write_runtime(data: dict[str, Any]) -> Path:
         **data,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_json(path, payload)
     return path
 
 
@@ -64,7 +64,9 @@ def read_runtime() -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        # Windows PowerShell 5's Set-Content -Encoding UTF8 includes a BOM.
+        # Accept existing launcher records as well as new BOM-free records.
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError):
         return None

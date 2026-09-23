@@ -130,6 +130,7 @@ _orig_os_lstat = os.lstat if hasattr(os, "lstat") else None
 
 
 def _safe_realpath(path):
+    path = str(path).replace("\\", "/")
     # posixpath.realpath 内部会调 os.lstat；当 os.lstat 被守卫后，
     # 直接调 realpath 会与本守卫互递归。这里临时还原原实现。
     if _orig_os_lstat is not None and getattr(os, "lstat", None) is not _orig_os_lstat:
@@ -167,8 +168,10 @@ def _path_is_inside(root, resolved):
         resolved = _safe_realpath(str(resolved))
     except OSError:
         resolved = os.path.normpath(str(resolved))
-    prefix = root + os.sep
-    return resolved == root or resolved.startswith(prefix)
+    try:
+        return os.path.commonpath([os.path.normcase(root), os.path.normcase(resolved)]) == os.path.normcase(root)
+    except ValueError:
+        return False
 
 def _rel_of(resolved):
     ws = _safe_realpath(_WORKSPACE_ROOT)
@@ -176,11 +179,9 @@ def _rel_of(resolved):
         resolved = _safe_realpath(str(resolved))
     except OSError:
         resolved = os.path.normpath(str(resolved))
-    prefix = ws + os.sep
-    if resolved == ws:
-        return ""
-    if resolved.startswith(prefix):
-        return resolved[len(prefix):].replace("\\", "/")
+    if _path_is_inside(ws, resolved):
+        rel = os.path.relpath(resolved, ws).replace("\\", "/")
+        return "" if rel == "." else rel
     raise PermissionError(
         "文件写入被安全策略禁止：路径不在工作区内 [等级: %s]" % _TIER
     )
@@ -538,12 +539,8 @@ def _env_read_allowed(resolved):
 
 
 def _workspace_rel(resolved):
-    ws = _safe_realpath(_WORKSPACE_ROOT)
-    if resolved == ws:
-        return ""
-    prefix = ws + os.sep
-    if resolved.startswith(prefix):
-        return resolved[len(prefix):].replace("\\", "/")
+    if _path_is_inside(_WORKSPACE_ROOT, resolved):
+        return _rel_of(resolved)
     return None
 
 
@@ -908,6 +905,11 @@ def _resolve_pending_read(resolved):
     return resolved
 
 def _guarded_os_stat(path, *args, **kwargs):
+    # os.stat(fd) is fstat, not a lookup of a file named after the descriptor.
+    # Opening the descriptor was already guarded; preserve native validation
+    # of dir_fd/follow_symlinks and invalid/closed descriptors as well.
+    if isinstance(path, int):
+        return _orig_os_stat(path, *args, **kwargs)
     resolved = _safe_realpath(str(path))
     if _metadata_hidden(resolved):
         raise FileNotFoundError(2, "路径不存在或不可见", str(path))
@@ -916,6 +918,8 @@ def _guarded_os_stat(path, *args, **kwargs):
 os.stat = _guarded_os_stat
 if _orig_os_lstat is not None:
     def _guarded_os_lstat(path, *args, **kwargs):
+        if isinstance(path, int):
+            return _orig_os_lstat(path, *args, **kwargs)
         resolved = _safe_realpath(str(path))
         if _metadata_hidden(resolved):
             raise FileNotFoundError(2, "路径不存在或不可见", str(path))
@@ -926,6 +930,8 @@ if _orig_os_lstat is not None:
 # 需逐个投影；getsize/getmtime 等 Python 实现已由上面的 os.stat 补丁覆盖。
 def _wrap_path_probe(fn):
     def _guarded(path, *args, **kwargs):
+        if isinstance(path, int):
+            return fn(path, *args, **kwargs)
         resolved = _safe_realpath(str(path))
         if _metadata_hidden(resolved):
             return False
@@ -1087,6 +1093,10 @@ _BENCH_PROTECTED_DIRS = [
 <<<PENDING_WRITE_RUNTIME>>>
 
 def _guarded_open(file, mode="r", *args, **kwargs):
+    # Pipes and descriptors opened through guarded os.open already have an
+    # owner. Preserve Python's fd semantics (including closefd and EBADF).
+    if isinstance(file, int):
+        return _original_open(file, mode, *args, **kwargs)
     resolved = _safe_realpath(str(file))
     if any(c in str(mode) for c in "wax+"):
         _deny_protected_target(resolved)
@@ -1198,6 +1208,8 @@ _BENCH_PROTECTED_DIRS = [
 <<<PENDING_WRITE_RUNTIME>>>
 
 def _guarded_open(file, mode="r", *args, **kwargs):
+    if isinstance(file, int):
+        return _original_open(file, mode, *args, **kwargs)
     resolved = _safe_realpath(str(file))
     if any(c in str(mode) for c in "wax+"):
         _deny_protected_target(resolved)

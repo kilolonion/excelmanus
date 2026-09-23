@@ -419,7 +419,7 @@ export function ProfileEditorForm() {
                       ? (listOpen ? `在 ${remoteModels.length} 个模型中搜索` : "输入，再点一次展开列表")
                       : addingSibling
                         ? "检测后可从列表选择，或直接填写"
-                        : "例如：claude-sonnet-5"
+                        : "例如：claude-sonnet-4"
                   }
                   spellCheck={false}
                 />

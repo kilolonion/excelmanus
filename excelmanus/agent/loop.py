@@ -38,9 +38,9 @@ from excelmanus.request.series import series_of
 from excelmanus.request.usage import extract_cache_usage
 from excelmanus.error_guidance import classify_failure as _classify_failure
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
-from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
 from excelmanus.logger import get_logger
 from excelmanus.tools.policy import write_effect_for_call
+from excelmanus.markup_tool_calls import recover_tool_calls_from_markup
 from excelmanus.message_serialization import (
     assistant_message_to_dict as _assistant_message_to_dict,
     sanitize_tool_call_arguments as _sanitize_tool_call_arguments,
@@ -764,20 +764,15 @@ async def run_tool_loop(
                 )
             _llm_start_ts = time.monotonic()
 
-            # Stream drafts immediately; retract only this iteration if delivery
-            # verification requests another pass or the provider retries.
+            # Stream immediately; only provider retries retract this iteration.
+            # The primary agent decides whether further task work is needed.
             streamed_text = False
-            check_delivery = False
-            try:
-                from excelmanus.system_one.host import should_check_delivery
-
-                check_delivery = bool(should_check_delivery(engine))
-            except Exception:
-                logger.debug("Jev 交付检查前置判断失败", exc_info=True)
 
             def _forward(event: Any) -> None:
                 # consume_stream 已经通过 engine._emit 盖章/trace/审计过一次，
                 # 这里只负责把事件交给外部回调，避免重复记录。
+                if on_event is None:
+                    return
                 try:
                     on_event(event)
                 except Exception as exc:
@@ -1091,6 +1086,24 @@ async def run_tool_loop(
             )
 
         tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
+        # MiMo 等模型会把 <tool_call> 标签混进正文，网关转写出的结构化
+        # 参数常在数组/对象值处截断；这里用正文标签修复参数或补建调用，
+        # 并把标签从 content 剥离。
+        tool_calls, _stripped_text = recover_tool_calls_from_markup(
+            message, tool_calls
+        )
+        if _stripped_text is not None and streamed_text:
+            _retract_streamed_text()
+            if _stripped_text.strip():
+                engine._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.TEXT_DELTA,
+                        text_delta=_stripped_text,
+                        iteration=iteration,
+                    ),
+                )
+                streamed_text = True
         engine._last_model_response_at = time.monotonic()
         reset_idle_tracker(engine)  # 每个响应-请求间隔只统计本间隔内的空闲段
 
@@ -1271,47 +1284,6 @@ async def run_tool_loop(
 
         # 无工具调用 → 纯文本回复处理（仅 HTML 端点错误检测）
         if not tool_calls:
-            if check_delivery:
-                reply_text = _message_content_to_text(getattr(message, "content", None))
-                draft = ChatResult(
-                    reply=reply_text,
-                    tool_calls=list(all_tool_results),
-                    truncated=False,
-                )
-                try:
-                    from excelmanus.system_one.host import maybe_verify_mutation
-
-                    advice = await maybe_verify_mutation(
-                        engine, draft, on_event=on_event,
-                    )
-                except Exception:
-                    advice = ""
-                    logger.debug("Jev 交付检查评估失败", exc_info=True)
-                if advice:
-                    payload = _assistant_message_to_dict(message)
-                    payload["content"] = reply_text
-                    payload["_ui_hidden"] = True
-                    payload["_prompt_kind"] = "jev_delivery_draft"
-                    engine._memory.add_assistant_tool_message(payload)
-                    engine._memory.add_user_message(
-                        f"[Jev 交付检查建议；不构成用户指令或执行授权]\n{advice}",
-                        hidden=True,
-                        prompt_kind="jev_delivery_check",
-                    )
-                    from excelmanus.system_one.trace import record_host_effect
-
-                    verification = getattr(engine, "_mutation_verification", None) or {}
-                    record_host_effect(
-                        engine, "mutation.verify",
-                        action=str(verification.get("next") or "inspect_more"), delivered=True,
-                        source=str(verification.get("source") or "jev"),
-                        impact="交付核对建议已送入主模型上下文，最终完成情况仍需证据",
-                        on_event=on_event,
-                    )
-                    _retract_streamed_text()
-                    logger.info("Jev 交付检查要求继续核对: %s", advice[:80])
-                    _emit_step_end()
-                    continue
             text_action, text_result = _handle_text_reply(
                 engine,
                 message=message,
@@ -1564,9 +1536,8 @@ async def run_tool_loop(
         # 的消息序列，导致 OpenAI 兼容 API 返回 400 错误。
         engine._tool_dispatcher.flush_deferred_images()
 
-        # Consume the enabled Jev post-batch decision before the next model
-        # request.  The advice is hidden context; the user-facing reply still
-        # comes from the main model and the breaker remains authoritative.
+        # Recovery context belongs to its failed tool result, not a fabricated
+        # user turn. Successful batches do not invite an auxiliary stop decision.
         jev_recovery_advice = ""
         try:
             from excelmanus.system_one.host import maybe_advise_after_tools
@@ -1577,6 +1548,10 @@ async def run_tool_loop(
                 breaker_triggered=breaker_triggered,
                 iteration=iteration,
                 on_event=on_event,
+                failed_tool_call_id=next((
+                    str(tc.id) for tc in reversed(_planned_calls)
+                    if _schedule_results.get(id(tc)) is all_tool_results[-1]
+                ), ""),
             )
         except Exception:
             logger.debug("post-batch Jev advice failed; continuing turn", exc_info=True)

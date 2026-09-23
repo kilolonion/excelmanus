@@ -51,6 +51,7 @@ interface VersionInfo {
   has_update: boolean;
   commits_behind: number;
   release_notes: string;
+  release_url?: string;
   check_method: string;
   check_failed?: boolean;
   error?: string;
@@ -70,6 +71,15 @@ interface InstallationEntry {
   installed_at?: string;
   last_seen?: string;
   platform?: string;
+  exists?: boolean;
+  is_current?: boolean;
+  status?: "current" | "available" | "missing";
+}
+
+interface InstallationListResponse {
+  installations: InstallationEntry[];
+  current_path?: string;
+  stale_count?: number;
 }
 
 function formatTimestamp(ts: string): string {
@@ -100,6 +110,7 @@ export function VersionTab() {
   const [checking, setChecking] = useState(false);
   const [deletingBackup, setDeletingBackup] = useState<string | null>(null);
   const [deletingInstall, setDeletingInstall] = useState<string | null>(null);
+  const [cleaningInstallations, setCleaningInstallations] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [upgradeCapability, setUpgradeCapability] = useState<WebUpgradeCapability | null>(null);
   const [cleaningUp, setCleaningUp] = useState(false);
@@ -127,18 +138,22 @@ export function VersionTab() {
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
+    setChecking(true);
     setActionMsg(null);
+    // Remote checks must not block local capability, backups and settings.
+    const versionRequest = apiGet<VersionInfo>("/version/check")
+      .then(setVersion)
+      .catch(() => setActionMsg({ type: "err", text: "版本信息加载失败，请重试。" }))
+      .finally(() => setChecking(false));
     try {
-      const v = await apiGet<VersionInfo>("/version/check");
-      setVersion(v);
       // A packaged app has no source checkout, deployment tools or source
       // installation registry. Do not invoke those endpoints from Desktop.
-      if (window.excelManusDesktop || v.check_method === "desktop_installer") return;
+      if (window.excelManusDesktop) return;
       const [b, i, ds, manifest, capability] = await Promise.all([
         // Servers may allow upgrades but intentionally deny local backup and
         // installation-management endpoints. Those must not hide capability.
         apiGet<{ backups: BackupEntry[] }>("/version/backups").catch(() => ({ backups: [] })),
-        apiGet<{ installations: InstallationEntry[] }>("/version/installations").catch(() => ({ installations: [] })),
+        apiGet<InstallationListResponse>("/version/installations").catch(() => ({ installations: [] })),
         fetchDeployStatus().catch(() => null),
         fetchVersionManifest().catch(() => null),
         apiGet<WebUpgradeCapability>("/version/upgrade/capability", { cache: "no-store" }).catch(() => null),
@@ -154,6 +169,7 @@ export function VersionTab() {
     } finally {
       setLoading(false);
     }
+    await versionRequest;
   }, []);
 
   useEffect(() => {
@@ -171,12 +187,14 @@ export function VersionTab() {
         showMsg("err", v.error ? `检查更新失败: ${v.error}` : "检查更新失败");
       } else if (v.has_update) {
         const label =
-          v.latest && v.latest !== v.current
+          v.check_method.startsWith("github_release_")
+            ? `发现新的正式发布 v${v.latest}`
+            : v.latest && v.latest !== v.current
             ? `发现新版本 ${v.latest}（落后 ${v.commits_behind} 个提交）`
             : `发现 ${v.commits_behind} 个新提交`;
         showMsg("ok", label);
       } else {
-        showMsg("ok", "已是最新版本");
+        showMsg("ok", v.check_method.startsWith("github_release_") ? "暂无更新的正式发布" : "已是最新版本");
       }
     } catch {
       showMsg("err", "检查更新失败");
@@ -199,11 +217,31 @@ export function VersionTab() {
   };
 
   const handleDeleteInstallation = async (path: string) => {
+    const installation = installations.find((item) => item.path === path);
+    if (installation?.is_current) {
+      showMsg("err", "当前正在运行的安装不能移除");
+      return;
+    }
+    const missing = installation?.status === "missing" || installation?.exists === false;
+    const prompt = missing
+      ? `移除失效的安装记录？\n\n${path}\n\n只会清理记录，不会删除其他文件。`
+      : `删除旧安装及其目录？\n\n${path}\n\n将递归删除该路径下的程序和文件，此操作不可撤销。当前安装不会被删除。`;
+    if (!confirm(prompt)) return;
     setDeletingInstall(path);
     try {
-      await apiPost("/version/installations/delete", { path });
+      const result = await apiPost<{ directory_deleted?: boolean }>("/version/installations/delete", {
+        path,
+        delete_directory: !missing,
+      });
       setInstallations((prev) => prev.filter((i) => i.path !== path));
-      showMsg("ok", "已移除安装记录");
+      showMsg(
+        "ok",
+        result?.directory_deleted
+          ? "已删除旧安装目录和记录"
+          : missing
+            ? "已移除失效安装记录"
+            : "已移除安装记录，目录未删除",
+      );
     } catch {
       showMsg("err", "移除安装记录失败");
     } finally {
@@ -211,10 +249,26 @@ export function VersionTab() {
     }
   };
 
+  const handleCleanupInstallations = async () => {
+    const staleCount = installations.filter((item) => item.status === "missing" || item.exists === false).length;
+    if (!staleCount || !confirm(`清理 ${staleCount} 条已不存在的安装记录？\n\n不会删除任何磁盘目录。`)) return;
+    setCleaningInstallations(true);
+    try {
+      const result = await apiPost<{ removed_count?: number }>("/version/installations/cleanup", {});
+      const removedCount = result?.removed_count ?? staleCount;
+      setInstallations((prev) => prev.filter((item) => item.status !== "missing" && item.exists !== false));
+      showMsg("ok", `已清理 ${removedCount} 条失效安装记录`);
+    } catch {
+      showMsg("err", "清理失效安装记录失败");
+    } finally {
+      setCleaningInstallations(false);
+    }
+  };
+
   const handleApplyUpdate = async () => {
     const blocked = appRefreshBlocker();
     if (blocked) { showMsg("err", blocked); return; }
-    if (!confirm("更新 ExcelManus 前后端？会先备份应用数据，再更新程序并重建网页。期间短暂断开连接，完成后自动恢复。不会删除、移动或清空工作区和用户文件；设置和会话会保留。源码存在未提交修改时会停止更新。")) return;
+    if (!confirm("更新当前源码分支的前后端？这会获取当前分支的最新提交，可能包含尚未正式发布的改动。会先备份应用数据，再更新程序并重建网页。期间短暂断开连接，完成后自动恢复。不会删除、移动或清空工作区和用户文件；设置和会话会保留。源码存在未提交修改时会停止更新。")) return;
     setUpdating(true);
     try {
       const result = await startVersionUpgrade({ useMirror: false });
@@ -381,28 +435,36 @@ export function VersionTab() {
                 </Badge>
               </div>
               <div className="text-[11px] text-muted-foreground mt-0.5">
-                {version?.check_method === "desktop_installer" ? (
+                {checking ? (
+                  "正在检查正式发布…"
+                ) : !version ? (
+                  "尚未获取版本信息，请重试"
+                ) : version?.check_method === "desktop_installer" ? (
                   "桌面版通过新版安装包更新，用户数据会保留"
                 ) : version?.has_update ? (
                   <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
                     <ArrowUpCircle className="h-3 w-3" />
-                    {version.latest && version.latest !== version.current
+                    {version.check_method.startsWith("github_release_")
+                      ? `发现新的正式发布 v${version.latest}`
+                      : version.latest && version.latest !== version.current
                       ? `可更新到 v${version.latest}（${version.commits_behind} 个新提交）`
                       : `有 ${version.commits_behind} 个新提交可更新`}
                   </span>
                 ) : version?.check_failed ? (
                   <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
                     <AlertCircle className="h-3 w-3" />
-                    版本检查失败，请点击「检查更新」重试
+                    {version.error || "版本检查失败，请点击「检查更新」重试"}
                   </span>
                 ) : (
-                  "已是最新版本"
+                  version.check_method.startsWith("github_release_")
+                    ? `暂无更新的正式发布（最新发布 v${version.latest}）`
+                    : "已是最新版本"
                 )}
               </div>
             </div>
           </div>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-2 shrink-0 mt-2 sm:mt-0">
-            {version?.has_update && upgradeCapability?.supported && (
+            {upgradeCapability?.supported && (
               <Button
                 variant="default"
                 size="sm"
@@ -415,7 +477,7 @@ export function VersionTab() {
                 ) : (
                   <Download className="h-3.5 w-3.5" />
                 )}
-                一键更新前后端
+                更新当前源码分支
               </Button>
             )}
             {version?.has_update && !upgradeCapability?.supported && (
@@ -440,7 +502,8 @@ export function VersionTab() {
           </div>
         </div>
         <div className="mt-3 space-y-1 text-xs leading-relaxed text-muted-foreground">
-          <p>网页热更新会更新 ExcelManus 前后端并自动恢复连接，设置和会话继续沿用。不会删除、搬迁或清空工作区、表格、文档及其他用户文件。</p>
+          <p>检查更新查询 GitHub 正式发布。更新当前源码分支会获取该分支的最新提交、更新前后端并自动恢复连接，可能包含尚未正式发布的改动。设置和会话继续沿用，工作区和用户文件会保留。</p>
+          {version?.release_url && <p><a href={version.release_url} target="_blank" rel="noopener noreferrer" className="underline">查看 GitHub Release 与下载</a></p>}
           <p>服务器发布新版后，当前页面也会提示刷新；未保存的表格修改和运行中的任务会阻止刷新。</p>
           {!upgradeCapability?.supported && <p className="text-amber-700 dark:text-amber-400">{upgradeCapability?.reason || "当前服务尚未提供网页更新能力，请先升级服务端。"}</p>}
         </div>
@@ -559,8 +622,21 @@ export function VersionTab() {
             安装记录
           </h3>
           <span className="text-[10px] text-muted-foreground ml-auto">
-            {installations.length} 个安装
+            {installations.length} 个记录
           </span>
+          {installations.some((item) => item.status === "missing" || item.exists === false) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[11px] text-muted-foreground hover:text-destructive gap-1"
+              disabled={cleaningInstallations}
+              onClick={handleCleanupInstallations}
+              title="清理已不存在的安装记录"
+            >
+              {cleaningInstallations ? <Loader2 className="h-3 w-3 animate-spin" /> : <Eraser className="h-3 w-3" />}
+              清理失效记录
+            </Button>
+          )}
         </div>
 
         {installations.length === 0 ? (
@@ -572,15 +648,28 @@ export function VersionTab() {
             {installations.map((inst) => (
               <div
                 key={inst.path}
-                className="flex items-center gap-3 rounded-lg border border-border px-3 py-2.5 group"
+                className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 group ${
+                  inst.status === "missing" || inst.exists === false
+                    ? "border-dashed border-amber-300/70 dark:border-amber-700/70"
+                    : "border-border"
+                }`}
               >
-                <MapPin className="h-4 w-4 text-muted-foreground shrink-0" />
+                <MapPin className={`h-4 w-4 shrink-0 ${inst.status === "missing" || inst.exists === false ? "text-amber-600" : "text-muted-foreground"}`} />
                 <div className="flex-1 min-w-0">
                   <div className="text-sm font-medium font-mono break-all">{inst.path}</div>
                   <div className="text-[11px] text-muted-foreground flex items-center gap-2">
                     <Badge variant="outline" className="text-[10px] h-4 px-1">
                       v{inst.version}
                     </Badge>
+                    {inst.is_current && (
+                      <Badge variant="secondary" className="text-[10px] h-4 px-1">
+                        当前
+                      </Badge>
+                    )}
+                    {!inst.is_current && inst.status === "missing" && (
+                      <span className="text-amber-600 dark:text-amber-400">路径不存在</span>
+                    )}
+                    {!inst.is_current && inst.status === "available" && <span>可用</span>}
                     {inst.platform && <span>{inst.platform}</span>}
                     {inst.last_seen && (
                       <span>最后活跃: {formatTimestamp(inst.last_seen)}</span>
@@ -590,11 +679,21 @@ export function VersionTab() {
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7 text-muted-foreground hover:text-destructive opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0"
-                  disabled={deletingInstall === inst.path}
+                  className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
+                  aria-label={
+                    inst.is_current
+                      ? "当前安装"
+                      : inst.status === "missing"
+                        ? "移除安装记录"
+                        : "删除旧安装"
+                  }
+                  title={inst.is_current ? "当前安装不能删除" : inst.status === "missing" ? "移除失效安装记录" : "删除旧安装目录和记录"}
+                  disabled={inst.is_current || deletingInstall === inst.path}
                   onClick={() => handleDeleteInstallation(inst.path)}
                 >
-                  {deletingInstall === inst.path ? (
+                  {inst.is_current ? (
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                  ) : deletingInstall === inst.path ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
                     <Trash2 className="h-3.5 w-3.5" />
@@ -822,7 +921,8 @@ export function VersionTab() {
         </p>
         <p className="mt-1">
           <strong>安装记录</strong>：记录本机所有安装路径，便于多版本共存时定位数据。
-          删除记录不影响实际安装。
+          当前安装会标记为“当前”且不能删除；其他仍存在的旧路径会连同安装目录一起删除，
+          失效路径可清理记录。删除前会拒绝根目录、当前目录和包含 junction/符号链接的路径。
         </p>
         <p className="mt-1">
           <strong>数据迁移</strong>：将项目内的数据文件迁移到系统集中位置，

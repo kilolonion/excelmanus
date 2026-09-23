@@ -100,6 +100,7 @@ _LIST_SHEETS_DIMENSIONS = (
     "print_settings",
     "tables",
     "column_widths",
+    "row_heights",
     "styles",
     "merges",
     "formulas",
@@ -316,6 +317,7 @@ def list_sheets(
                 from excelmanus.workbook.data import (
                     _collect_charts,
                     _collect_column_widths,
+                    _collect_row_heights,
                     _collect_conditional_formatting,
                     _collect_freeze_panes,
                     _collect_images,
@@ -339,6 +341,8 @@ def list_sheets(
                     info["tables"] = [{"name": table.name, "range": table.ref} for table in ws.tables.values()]
                 if "column_widths" in include_set:
                     info["column_widths"] = _collect_column_widths(ws)
+                if "row_heights" in include_set:
+                    info["row_heights"] = _collect_row_heights(ws)
                 if "styles" in include_set:
                     info["styles"] = _collect_compact_styles(ws)
                 if "merges" in include_set:

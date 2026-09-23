@@ -846,6 +846,7 @@ class WorkspaceFileService:
         路径（而非 ident.relative），防止 mkdir/write 穿透符号链接
         逃逸到非预期位置。
         """
+        raw = str(raw).replace("\\", "/").removeprefix("<path>/")
         literal = os.path.normpath(
             raw if os.path.isabs(raw) else os.path.join(self.root, raw)
         )
@@ -859,7 +860,7 @@ class WorkspaceFileService:
         cursor = self.root
         for i, part in enumerate(parts):
             cursor = cursor / part
-            if os.path.islink(cursor):
+            if os.path.islink(cursor) or getattr(os.path, "isjunction", lambda p: False)(cursor):
                 raise CommitError(
                     "PATH_INVALID",
                     f"路径包含符号链接组件：{raw}",

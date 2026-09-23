@@ -51,7 +51,7 @@ export default function Home() {
     stopGeneration();
   };
 
-  const hasMessages = messageOrder.length > 0;
+  const hasMessages = loadedSessionId === activeSessionId && messageOrder.length > 0;
   // 会话恢复中：activeSessionId 已从 localStorage 恢复但消息尚未加载
   // 不展示 WelcomePage，避免闪烁
   const isRestoringSession = !!activeSessionId && !hasMessages

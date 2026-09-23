@@ -2594,7 +2594,7 @@ def read_excel(
     # 分发 include 维度采集（需要用 openpyxl 打开，CSV 不支持）
     _CSV_UNSUPPORTED_DIMS = {"styles", "charts", "images", "freeze_panes",
                              "conditional_formatting", "data_validation",
-                             "print_settings", "column_widths", "formulas",
+                             "print_settings", "column_widths", "row_heights", "formulas",
                              "merges"}
     if include_set and _is_csv_file(safe_path):
         skipped = include_set & _CSV_UNSUPPORTED_DIMS
@@ -3981,8 +3981,9 @@ def _pivot_frame(
     return table, None
 
 
-def dataframe_from_worksheet(ws: Any, header_row: int | None = 1) -> "pd.DataFrame":
-    rows = list(ws.iter_rows(values_only=True))
+def dataframe_from_worksheet(ws: Any, header_row: int | None = 1, *, cached_formulas: bool = False) -> "pd.DataFrame":
+    from excelmanus.workbook.formula_values import analysis_rows
+    rows = analysis_rows(ws) if cached_formulas else list(ws.iter_rows(values_only=True))
     if not rows:
         return pd.DataFrame()
     hdr_idx = max(int(header_row or 1) - 1, 0)
@@ -4912,6 +4913,7 @@ INCLUDE_DIMENSIONS = (
     "data_validation",
     "print_settings",
     "column_widths",
+    "row_heights",
     "formulas",
     "categorical_summary",
     "summary",
@@ -5323,6 +5325,10 @@ def _collect_data_validation(ws: Any) -> list[dict[str, Any]]:
 def _collect_print_settings(ws: Any) -> dict[str, Any]:
     """收集打印设置信息。"""
     info: dict[str, Any] = {}
+    setup = ws.sheet_properties.pageSetUpPr
+    fit_to_page = bool(setup is not None and setup.fitToPage)
+    info["fit_to_page"] = fit_to_page
+    info["scaling_mode"] = "fit_to_page" if fit_to_page else "scale"
     if ws.print_area:
         info["print_area"] = ws.print_area
     ps = ws.page_setup
@@ -5341,16 +5347,59 @@ def _collect_print_settings(ws: Any) -> dict[str, Any]:
         info["repeat_rows"] = ws.print_title_rows
     if ws.print_title_cols:
         info["repeat_columns"] = ws.print_title_cols
+    # Preserve legacy OOXML fields above; this named subset can be passed
+    # directly to format_spreadsheet(kind=print_layout). Never collapse
+    # multiple print areas into a single range or activate inactive fit sizes.
+    layout: dict[str, Any] = {"fit_to_page": fit_to_page}
+    from openpyxl.worksheet.print_settings import PrintArea
+
+    ranges = sorted(str(area) for area in PrintArea.from_string(str(ws.print_area)).ranges) if ws.print_area else []
+    unsupported: list[str] = []
+    if len(ranges) <= 1:
+        layout["print_area"] = ranges[0] if ranges else ""
+    else:
+        unsupported.append("multiple_print_areas")
+    if ps.orientation in {"portrait", "landscape"}:
+        layout["orientation"] = ps.orientation
+    paper = {"1": "Letter", "5": "Legal", "8": "A3", "9": "A4", "11": "A5"}.get(str(ps.paperSize))
+    if paper:
+        layout["paper_size"] = paper
+    elif ps.paperSize is not None:
+        unsupported.append("paper_size")
+    if fit_to_page:
+        for key, value in (("fit_to_width", ps.fitToWidth), ("fit_to_height", ps.fitToHeight)):
+            if value is not None and 0 <= value <= 32767:
+                layout[key] = value
+    elif ps.scale is not None:
+        if 10 <= ps.scale <= 400:
+            layout["scale"] = ps.scale
+        else:
+            unsupported.append("scale")
+    info["print_layout"] = layout
+    if unsupported:
+        info["print_layout_omitted"] = unsupported
     return info
 
 
 def _collect_column_widths(ws: Any) -> dict[str, float]:
     """收集非默认列宽映射。"""
     widths: dict[str, float] = {}
+    from openpyxl.utils.cell import column_index_from_string, get_column_letter
+
     for col_letter, dim in ws.column_dimensions.items():
-        if dim.width is not None and dim.width != 8.0:
-            widths[col_letter] = round(dim.width, 2)
+        if dim.width is not None:
+            first = dim.min or column_index_from_string(col_letter)
+            last = dim.max or first
+            for col in range(first, min(last, 16384) + 1):
+                widths[get_column_letter(col)] = round(dim.width, 2)
     return widths
+
+
+def _collect_row_heights(ws: Any) -> dict[str, float]:
+    return {
+        str(row): round(dim.height, 2)
+        for row, dim in ws.row_dimensions.items() if dim.height is not None
+    }
 
 
 def _collect_formulas(ws: Any, max_rows: int = 200) -> dict[str, Any]:
@@ -5412,6 +5461,9 @@ def _dispatch_include_dimensions(
 
     if "column_widths" in include_set:
         extra["column_widths"] = _collect_column_widths(ws_for_include)
+
+    if "row_heights" in include_set:
+        extra["row_heights"] = _collect_row_heights(ws_for_include)
 
     if "formulas" in include_set:
         extra["formulas"] = _collect_formulas(ws_for_include, max_rows=max_style_scan_rows)
@@ -5509,31 +5561,11 @@ def _collect_vba_info(file_path: Any, *, extract_source: bool = True) -> dict[st
 
 
 def _coerce_numeric(series: pd.Series) -> pd.Series:
-    """尝试将含文本格式的数值列转换为 float。
-
-    处理常见格式：千分位逗号 "1,234.56"、带单位后缀 "1,234.56元"、
-    百分号 "16.36%"。无法转换的值保留 NaN。
-    """
+    from excelmanus.workbook.numeric import parse_number
     if pd.api.types.is_numeric_dtype(series):
         return series
+    return series.map(parse_number)
 
-    cleaned = series.astype(str).str.strip()
-    # 移除常见中文单位后缀
-    cleaned = cleaned.str.replace(r'[元万亿份个台件套]$', '', regex=True)
-    # 移除百分号并标记
-    is_pct = cleaned.str.endswith('%')
-    cleaned = cleaned.str.replace('%', '', regex=False)
-    # 移除千分位逗号
-    cleaned = cleaned.str.replace(',', '', regex=False)
-    # 转换为数值
-    result = pd.to_numeric(cleaned, errors='coerce')
-    # 百分比列除以 100
-    if is_pct.any() and not is_pct.all():
-        # 混合格式，不做百分比转换
-        pass
-    elif is_pct.all():
-        result = result / 100
-    return result
 
 
 

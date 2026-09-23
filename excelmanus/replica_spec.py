@@ -9,6 +9,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from excelmanus.workbook.layout import PrintLayout, apply_print_layout
+
 _EXCEL_MAX_ROWS = 1_048_576
 _EXCEL_MAX_COLS = 16_384
 
@@ -298,7 +300,7 @@ class SheetSpec(BaseModel):
         description="{file_path, encoding?, skip_rows?, start?} 导入工作区 CSV/TSV",
     )
     freeze_panes: str | None = None
-    print_layout: Any | None = None
+    print_layout: PrintLayout | None = None
     cells: list[CellSpec] = Field(default_factory=list, description="单格；公式用 value='=A1' 且 value_type=formula")
     value_blocks: list[ValueBlock] = Field(default_factory=list)
     formula_blocks: list[FormulaBlock] = Field(default_factory=list)
@@ -989,6 +991,8 @@ def compile_replica_to_bytes(replica: ReplicaSpec) -> tuple[bytes, dict[str, Any
             from excelmanus.workbook.styles import apply_freeze_panes
 
             apply_freeze_panes(ws, sheet.freeze_panes)
+        if sheet.print_layout is not None:
+            apply_print_layout(ws, sheet.print_layout)
         for cf_index, cf_rule in enumerate(sheet.conditional_formats or []):
             try:
                 from excelmanus.workbook.styles import build_conditional_format_rule
@@ -1041,6 +1045,9 @@ def compile_spec_text_to_bytes(text: str) -> tuple[bytes, dict[str, Any]]:
 def workbook_spec_json_schema() -> dict[str, Any]:
     """从 Pydantic 模型生成供工具 schema / 字段查询使用的结构。"""
     schema = WorkbookSpec.model_json_schema(mode="validation")
+    from excelmanus.tools.workbook_examples import workbook_creation_example
+
+    schema["examples"] = [workbook_creation_example()]
     schema["description"] = (
         "创建用 WorkbookSpec，与 operations 互斥。必填 sheets 与 uncertainties。"
         "规范输入见 properties；字符串字体、列宽字典、CSV 省略 dimensions 等兼容形由校验器接受。"

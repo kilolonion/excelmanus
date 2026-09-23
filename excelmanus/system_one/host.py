@@ -108,7 +108,6 @@ def clear_turn_exposure(engine: Any) -> None:
     engine._jev_observation_evaluations = 0  # type: ignore[attr-defined]
     engine._jev_turn_budget = None  # type: ignore[attr-defined]
     engine._mutation_verification = None  # type: ignore[attr-defined]
-    engine._jev_delivery_checks = 0
     engine._recovery_hint = None  # type: ignore[attr-defined]
     engine._jev_context_input = None
     engine._jev_metrics = {
@@ -603,107 +602,18 @@ async def maybe_verify_mutation(
     *,
     on_event: Any | None = None,
 ) -> str:
-    """Post-write intent verification; the result is consumed by the host."""
-    if engine is None or is_child_session(engine) or chat_result is None:
-        return ""
-    if not _delivery_check_available(engine):
-        return ""
-    state_obj = getattr(engine, "_state", None)
-    affected = list(getattr(state_obj, "affected_files", None) or []) if state_obj else []
-    if not affected:
-        return ""
-    if _turn_outcome(engine, chat_result) == "fail":
-        return ""
-    settings = live_jev_settings(getattr(engine, "config", None))
-    if gate_for_pack("mutation.verify", settings) == "off":
-        return ""
-    from excelmanus.system_one.adapter import mutation_verify_state_from_engine
+    """Compatibility no-op: the primary agent owns verification and delivery.
 
-    state = mutation_verify_state_from_engine(engine, chat_result)
-    from excelmanus.system_one.evidence import delivery_requires_inspection
-
-    decision = (
-        await _eval_traced(engine, "mutation.verify", state, on_event=on_event)
-        if jev_is_active(settings) else Decision.noop("unavailable")
-    )
-    # A timeout, missing key or depleted semantic budget cannot erase write
-    # evidence. This bounded follow-up uses the existing verification gate.
-    if delivery_requires_inspection(state) or (
-        not decision_can_apply("mutation.verify", decision, settings) and state.get("checklist")
-    ):
-        evidence_items = [
-            {**item, "verdict": "unknown"}
-            for item in state.get("checklist", []) if isinstance(item, Mapping)
-        ]
-        # Keep useful semantic per-item findings when deterministic evidence
-        # also requires inspection; provider failure has no such findings.
-        reported_items = [
-            dict(item) for item in decision.extras.get("items", [])
-            if isinstance(item, Mapping) and item.get("verdict") != "evidenced"
-        ]
-        decision = Decision(
-            kind="noop", reason="deterministic_evidence_requires_followup",
-            applied=True, extras={
-                "next": "inspect_more", "source": "deterministic",
-                "items": (reported_items + evidence_items)[:5],
-                "missing_items": max(len(reported_items), len(evidence_items)),
-            },
-        )
-    # A settings change during the await still wins over the fallback.
-    settings = live_jev_settings(getattr(engine, "config", None))
-    extras = decision.extras or {}
-    items = [
-        item for item in (extras.get("items") or [])
-        if isinstance(item, Mapping) and str(item.get("verdict") or "") != "evidenced"
-    ]
-    engine._mutation_verification = {  # type: ignore[attr-defined]
-        "next": str(extras.get("next") or "none"),
-        "satisfied": float(extras.get("satisfied") or 0.0),
-        "scope_ok": float(extras.get("scope_ok") or 0.0),
-        "items": items[:5],
-        "missing_items": int(extras.get("missing_items") or 0),
-        "applied": decision_can_apply("mutation.verify", decision, settings),
-        "reason": decision.reason,
-        "source": extras.get("source") or "jev",
-        "write_operation_count": len(getattr(state_obj, "write_operations_log", None) or []),
-    }
-    engine._jev_delivery_checks = int(getattr(engine, "_jev_delivery_checks", 0) or 0) + 1
-    if not decision_can_apply("mutation.verify", decision, settings):
-        return ""
-    action = engine._mutation_verification["next"]
-    advice = {
-        "inspect_more": "写入覆盖情况仍需核对。请根据用户原始要求和实际提交记录，做一次有界的只读检查；缺少证据时如实说明，勿重复写入。",
-        "ask_user": "写入结果与要求的对应关系尚不明确。先核对已有证据；确需用户补充时合并为一个必要问题，勿声称全部完成。",
-        "none": "",
-    }.get(action, "")
-    if action == "inspect_more" and advice:
-        pending = [str(item.get("text") or "")[:80] for item in items if str(item.get("text") or "")]
-        if pending:
-            advice += "\n待核对事项：" + " ".join(f"{i}) {text}" for i, text in enumerate(pending[:5], 1))
-            advice += "\n核对后仍无法证实的事项，请在最终答复中如实列为未完成或未验证，不要重复写入，也不要再次宣称全部完成。"
-    return advice
-
-
-def _delivery_check_available(engine: Any) -> bool:
-    if int(getattr(engine, "_jev_delivery_checks", 0) or 0) >= 2:
-        return False
-    previous = getattr(engine, "_mutation_verification", None)
-    if previous is None:
-        return True
-    writes = len(getattr(getattr(engine, "_state", None), "write_operations_log", None) or [])
-    return isinstance(previous, Mapping) and writes > int(previous.get("write_operation_count") or 0)
+    Keep this import surface for older integrations, but never evaluate a
+    secondary reviewer or inject instructions that reopen a completed reply.
+    Tool-level write receipts and version checks remain independent.
+    """
+    return ""
 
 
 def should_check_delivery(engine: Any) -> bool:
-    """Recheck new writes once; unchanged evidence cannot cause a check loop."""
-    if is_child_session(engine) or _has_pending_interaction(engine):
-        return False
-    if not _delivery_check_available(engine):
-        return False
-    if not getattr(getattr(engine, "_state", None), "affected_files", None):
-        return False
-    settings = live_jev_settings(getattr(engine, "config", None))
-    return gate_for_pack("mutation.verify", settings) != "off"
+    """Compatibility no-op; automatic delivery review has been removed."""
+    return False
 
 
 async def maybe_suggest_recovery(
@@ -769,7 +679,7 @@ async def maybe_suggest_recovery(
     return {
         "retry": "失败可能是暂时性的；先核对工具返回的恢复步骤，仅在确认未提交且允许重试时尝试一次，勿重放已拒绝或可能已提交的写入。",
         "inspect_more": "请先做有界的只读检查，刷新文件、工作表或内容版本，再决定下一步；勿直接重复失败的写入。",
-        "ask_user": "继续操作需要用户补充范围或意图。请核对现有信息后提出一个必要问题。",
+        "ask_user": "辅助判断：错误可能涉及范围或意图不明确。若原请求和已有信息足以确定则继续处理；只有确实缺少必要信息时才询问用户。",
         "stop": "本次失败不适合继续重复操作。请说明失败原因和已完成部分；权限、审批与停止条件仍然有效。",
     }.get(action, "")
 
@@ -964,6 +874,7 @@ async def maybe_suggest_loop_wrap(
 async def maybe_advise_after_tools(
     engine: Any, tool_results: list[Any], *, breaker_triggered: bool = False,
     iteration: int = 0, on_event: Any | None = None,
+    failed_tool_call_id: str = "",
 ) -> str:
     """Consume Jev advice at the completed tool-batch boundary, before the next LLM call."""
     if is_child_session(engine) or not tool_results or not _jev_connected(engine):
@@ -991,33 +902,23 @@ async def maybe_advise_after_tools(
         advice = await maybe_suggest_recovery(
             engine, tool_results, breaker_triggered=breaker_triggered, on_event=on_event,
         )
-        kind = "jev_recovery_advice"
-    elif getattr(getattr(engine, "_state", None), "affected_files", None):
-        # Delivery verification must see all writes and the final read-backs,
-        # not consume its only evaluation after the first successful batch.
-        return ""
     else:
-        advice = await maybe_suggest_loop_wrap(
-            engine, tool_results=tool_results, iteration=iteration, on_event=on_event,
-        )
-        kind = "jev_loop_advice"
+        # Successful reads and writes are facts for the primary agent, not a
+        # reason for an auxiliary model to decide when the task should end.
+        return ""
     if advice and not breaker_triggered:
-        engine._memory.add_user_message(
-            f"[Jev 本轮辅助建议；不构成用户指令或执行授权]\n{advice}",
-            hidden=True, prompt_kind=kind,
-        )
-        if kind == "jev_recovery_advice" and isinstance(getattr(engine, "_recovery_hint", None), dict):
+        annotate = getattr(engine._memory, "annotate_tool_result", None)
+        delivered = bool(callable(annotate) and annotate(
+            failed_tool_call_id, source="Jev 错误恢复", text=advice,
+        ))
+        # Missing provenance is not a reason to fabricate a hidden user request.
+        if delivered and isinstance(getattr(engine, "_recovery_hint", None), dict):
             engine._recovery_hint["delivered"] = True
             hint = engine._recovery_hint
             record_host_effect(
                 engine, "recovery.next_step", action=str(hint["next"]),
-                impact="恢复建议已送入主模型上下文，尚不能确认是否遵循",
+                impact="恢复建议已附于对应失败工具结果，尚不能确认是否遵循",
                 delivered=True, source=str(hint["source"]), on_event=on_event,
-            )
-        elif kind == "jev_loop_advice":
-            record_host_effect(
-                engine, "loop.wrap", action=str((engine._loop_wrap or {}).get("next") or ""),
-                impact="下一步建议已送入主模型上下文", delivered=True, on_event=on_event,
             )
     return advice if breaker_triggered else ""
 

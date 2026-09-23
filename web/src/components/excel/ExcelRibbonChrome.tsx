@@ -66,8 +66,8 @@ export function ExcelRibbonChrome({
   onToggleStyles: () => void;
   onRefresh: () => void;
   onDownload: () => void;
-  onExpand: () => void;
-  onClose: () => void;
+  onExpand?: () => void;
+  onClose?: () => void;
   expandTitle?: string;
 }) {
   return (
@@ -121,13 +121,13 @@ export function ExcelRibbonChrome({
         <RibbonIconButton onClick={onDownload} title="下载文件">
           <Download className="h-3.5 w-3.5" />
         </RibbonIconButton>
-        <RibbonDivider />
-        <RibbonIconButton onClick={onExpand} title={expandTitle}>
+        {(onExpand || onClose) && <RibbonDivider />}
+        {onExpand && <RibbonIconButton onClick={onExpand} title={expandTitle}>
           <Maximize2 className="h-3.5 w-3.5" />
-        </RibbonIconButton>
-        <RibbonIconButton onClick={onClose} title="关闭">
+        </RibbonIconButton>}
+        {onClose && <RibbonIconButton onClick={onClose} title="关闭">
           <X className="h-3.5 w-3.5" />
-        </RibbonIconButton>
+        </RibbonIconButton>}
       </div>
     </>
   );

@@ -20,6 +20,9 @@ from excelmanus.vision_capability import keyword_implies_vision
     "kimi-k2.5",
     "glm-5.3",
     "MiniMax-M3",
+    "mimo-v2.5",
+    "mimo-v2.6-flash",
+    "mimo-v2-omni",
 ])
 def test_vision_models(model: str) -> None:
     assert keyword_implies_vision(model) is True
@@ -37,6 +40,10 @@ def test_vision_models(model: str) -> None:
     "llama-3.2-3b-instruct",
     "step-3.5-flash",
     "glm-4.7",
+    "mimo-v2.5-pro",
+    "mimo-v2.5-asr",
+    "mimo-v2.5-tts",
+    "mimo-v2-flash",
     "some-unknown-text-model",
 ])
 def test_non_vision_models(model: str) -> None:

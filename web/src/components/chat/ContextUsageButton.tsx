@@ -43,6 +43,10 @@ function formatTokens(n: number): string {
 
 export function ContextUsageButton() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const hasHistory = useSessionStore((s) => {
+    const session = s.sessions.find((item) => item.id === s.activeSessionId);
+    return Boolean(session && (session.messageCount > 0 || session.inFlight));
+  });
   const [compaction, setCompaction] = useState<CompactionStatus | null>(null);
   const [compacting, setCompacting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -53,7 +57,7 @@ export function ContextUsageButton() {
   const requestRef = useRef<AbortController | null>(null);
 
   const poll = useCallback(async () => {
-    if (!activeSessionId) {
+    if (!activeSessionId || !hasHistory) {
       setCompaction(null);
       return;
     }
@@ -67,7 +71,7 @@ export function ContextUsageButton() {
         `/sessions/${activeSessionId}/status`,
         { signal: controller.signal },
       );
-      setCompaction(data.compaction);
+      if (!controller.signal.aborted && requestRef.current === controller) setCompaction(data.compaction);
     } catch {
       // 会话可能尚未在后端创建，静默忽略。
     } finally {
@@ -76,12 +80,14 @@ export function ContextUsageButton() {
         requestRef.current = null;
       }
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, hasHistory]);
 
   useEffect(() => {
+    if (!hasHistory) { setCompaction(null); return; }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const schedule = () => {
+      clearTimeout(timer);
       if (cancelled || document.hidden) return;
       timer = setTimeout(async () => {
         await poll();
@@ -89,6 +95,7 @@ export function ContextUsageButton() {
       }, 8000);
     };
     const onVisible = () => {
+      clearTimeout(timer);
       if (document.hidden || cancelled) return;
       void poll().finally(schedule);
     };
@@ -101,7 +108,7 @@ export function ContextUsageButton() {
       requestRef.current?.abort();
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [poll]);
+  }, [poll, hasHistory]);
 
   useEffect(() => {
     setLastCompactResult(null);

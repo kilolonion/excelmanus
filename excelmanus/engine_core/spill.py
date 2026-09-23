@@ -1469,19 +1469,76 @@ def spill_result_text(
     return spilled.model_text, spilled
 
 
+def _same_json_array(left: Any, right: Any) -> bool:
+    """Compare aliases without treating JSON booleans as numeric values."""
+    if not isinstance(left, list) or not isinstance(right, list):
+        return False
+    if left is right:
+        return True
+    return json.dumps(left, ensure_ascii=False, default=str, separators=(",", ":")) == json.dumps(
+        right, ensure_ascii=False, default=str, separators=(",", ":"),
+    )
+
+
+def _project_spreadsheet_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Remove proven aliases only from a spreadsheet result's wrapper.
+
+    Do not walk cell values, records, metadata or other arbitrary dictionaries:
+    ``data`` and ``values`` can be real user column names there. Alias metadata
+    describes the model projection; the structured value retains every field.
+    """
+    projected = dict(payload)
+    if "model_field_aliases" in payload:
+        return projected
+    aliases: dict[str, str] = {}
+    for alias, canonical in (("data", "values"), ("formula_grid", "formulas")):
+        if alias in payload and canonical in payload and _same_json_array(payload[alias], payload[canonical]):
+            projected.pop(alias)
+            aliases[alias] = canonical
+
+    areas = payload.get("areas")
+    if (
+        isinstance(areas, list)
+        and areas
+        and isinstance(payload.get("range"), str)
+        and all(isinstance(area, dict) and isinstance(area.get("range"), str) for area in areas)
+    ):
+        projected["areas"] = [_project_spreadsheet_fields(area) for area in areas]
+        # A union read repeats all grids both at the top and in its areas.
+        # Keep each area's coordinates with its grid, and expose the aggregate
+        # names as aliases only when every area's original data agrees.
+        for canonical in ("values", "formulas"):
+            if all(canonical in area for area in areas) and _same_json_array(
+                payload.get(canonical), [area[canonical] for area in areas],
+            ):
+                target = f"areas[*].{canonical}"
+                projected.pop(canonical, None)
+                aliases[canonical] = target
+                for alias, source in list(aliases.items()):
+                    if source == canonical:
+                        aliases[alias] = target
+    if aliases:
+        projected["model_field_aliases"] = aliases
+    return projected
+
+
 def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore, project_large: bool = True) -> ToolResult:
     """Keep native tool results as usable as their SDK value, with bounded text.
 
-    Small results carry the actual payload; large results carry an opaque
-    handle to that same payload. Never spill only a preview while calling it
-    the complete result. The existing read_text_file path retrieves handles.
+    Small results carry all facts once, with equivalent compatibility fields
+    declared as aliases. Decide whether to spill using this model projection,
+    so duplicate grids do not force another tool call. Large results carry an
+    opaque handle to the *original* payload. SDK values and UI stay untouched.
+    The existing read_text_file path retrieves the complete original JSON.
     """
     if not isinstance(result.value, dict) or (result.coverage or {}).get("spill_retrieve"):
         return result
     payload = result.value
+    projected = _project_spreadsheet_fields(payload)
+    model_text = json.dumps(projected, ensure_ascii=False, default=str, separators=(",", ":"))
+    if not project_large or not should_spill(model_text):
+        return result.with_model_text(model_text)
     raw = json.dumps(payload, ensure_ascii=False, default=str)
-    if not project_large or not should_spill(raw):
-        return result.with_model_text(raw)
     locator = store.put(raw)
     envelope = {
         "result_spill": str(locator),
@@ -1499,7 +1556,6 @@ def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore, project_l
             envelope[key] = payload[key]
     # A short summary is navigation only; the complete structured payload is
     # always recoverable, including artifact lists, selections and warnings.
-    envelope["preview"] = result.model_text[:DEFAULT_PREVIEW_CHARS]
+    envelope["preview"] = model_text[:DEFAULT_PREVIEW_CHARS]
     envelope["result_projection"] = "partial; full payload in result_spill"
-    value = {**payload, "result_spill": str(locator)}
-    return replace(result, value=value, model_text=json.dumps(envelope, ensure_ascii=False, default=str))
+    return result.with_model_text(json.dumps(envelope, ensure_ascii=False, default=str))

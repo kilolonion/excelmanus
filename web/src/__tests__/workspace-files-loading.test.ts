@@ -47,6 +47,17 @@ describe("workspace file scans", () => {
     expect(scan).toHaveBeenCalledTimes(3);
   });
 
+  it("reuses the file snapshot when switching conversations in the same workspace", async () => {
+    scan.mockResolvedValue(result("one.xlsx"));
+    await refresh()("a");
+    useSessionStore.getState().patchSession("b", { workspaceId: "ws-a" });
+    useSessionStore.getState().setActiveSession("b");
+    await refresh()("b", { cached: true });
+    expect(scan).toHaveBeenCalledOnce();
+    expect(useExcelStore.getState().workspaceFilesSessionId).toBe("b");
+    expect(useExcelStore.getState().workspaceFiles[0].path).toBe("one.xlsx");
+  });
+
   it("does not let a slower old-session scan overwrite the current workspace", async () => {
     let resolveA!: (value: WorkspaceFileList) => void;
     scan.mockImplementationOnce(() => new Promise((done) => { resolveA = done; }));

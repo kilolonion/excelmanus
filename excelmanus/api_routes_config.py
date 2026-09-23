@@ -8,10 +8,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -973,7 +972,7 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     # 优先尝试当前用户的运行时凭据（如订阅 OAuth access token），
     # 以便能通过上游端点执行真实探测并写入缓存。
     # 注意用带前缀的原始 model 解析：前缀匹配优先于裸模型名匹配。
-    _resolver = getattr(getattr(request, "app", None).state, "credential_resolver", None)
+    _resolver = getattr(request.app.state, "credential_resolver", None)
     _extra_headers: dict[str, str] | None = None
     if _resolver is not None:
         try:
@@ -1203,7 +1202,7 @@ async def create_probe_job(request: Request) -> JSONResponse:
         cache_model = model
         api_model = strip_managed_prefix(model)
 
-        _resolver = getattr(getattr(request, "app", None).state, "credential_resolver", None)
+        _resolver = getattr(request.app.state, "credential_resolver", None)
         _extra_headers: dict[str, str] | None = None
         if _resolver is not None:
             try:
@@ -1271,7 +1270,7 @@ async def cancel_probe_job(request: Request, job_id: str) -> JSONResponse:
 
 
 @router.get("/api/v1/config/models/capabilities/jobs/{job_id}/events")
-async def probe_job_events(request: Request, job_id: str) -> StreamingResponse:
+async def probe_job_events(request: Request, job_id: str) -> Response:
     """SSE 事件流：实时推送探测任务进度。"""
     mgr = _get_probe_job_mgr()
 
@@ -1472,14 +1471,6 @@ _PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
     (
         "minimax",
         [
-            {"id": "MiniMax-M3"},
-            {"id": "MiniMax-M2.7"},
-            {"id": "MiniMax-M2.7-highspeed"},
-            {"id": "MiniMax-M2.5"},
-            {"id": "MiniMax-M2.5-highspeed"},
-            {"id": "MiniMax-M2.1"},
-            {"id": "MiniMax-M2.1-highspeed"},
-            {"id": "MiniMax-M2.1-lightning"},
             {"id": "MiniMax-M2"},
             {"id": "M2-her"},
         ],
@@ -1489,12 +1480,6 @@ _PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
     (
         "generativelanguage.googleapis.com",
         [
-            {"id": "gemini-3.8-flash"},
-            {"id": "gemini-3.7-flash"},
-            {"id": "gemini-3.6-flash"},
-            {"id": "gemini-3.5-flash"},
-            {"id": "gemini-3.5-flash-lite"},
-            {"id": "gemini-3.1-pro-preview"},
             {"id": "gemini-2.5-pro"},
             {"id": "gemini-2.5-flash"},
             {"id": "gemini-2.5-flash-lite"},
@@ -1504,31 +1489,20 @@ _PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
     (
         "bigmodel.cn",
         [
-            {"id": "glm-5.3"},
-            {"id": "glm-5.3-flash"},
-            {"id": "glm-5-turbo"},
-            {"id": "glm-5.2"},
-            {"id": "glm-5.1"},
-            {"id": "glm-5"},
             {"id": "glm-4.7"},
             {"id": "glm-4.6v"},
+            {"id": "glm-4.5"},
         ],
         "\u667a\u8c31 GLM /models \u7aef\u70b9\u8def\u5f84\u4e0e\u6807\u51c6 OpenAI \u4e0d\u540c\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
     ),
     (
         "dashscope.aliyuncs.com",
         [
-            {"id": "qwen3.8-max"},
-            {"id": "qwen3.8-flash"},
-            {"id": "qwen3.7-plus"},
-            {"id": "qwen3.7-flash"},
-            {"id": "qwen3.7-max"},
             {"id": "qwen-max"},
             {"id": "qwen-plus"},
             {"id": "qwen-flash"},
             {"id": "qwen-turbo"},
             {"id": "qwen-long"},
-            {"id": "qwen3-coder-plus"},
             {"id": "qwen-coder-plus"},
         ],
         "\u963f\u91cc\u4e91\u767e\u70bc DashScope /models \u679a\u4e3e\u901a\u5e38\u9700\u8981\u7279\u5b9a\u6743\u9650\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
@@ -1536,9 +1510,6 @@ _PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
     (
         "moonshot.cn",
         [
-            {"id": "kimi-k3"},
-            {"id": "kimi-k2.7-code"},
-            {"id": "kimi-k2.7-code-highspeed"},
             {"id": "kimi-k2.6"},
         ],
         "Kimi (Moonshot) /models \u7aef\u70b9\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
@@ -1546,35 +1517,34 @@ _PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
     (
         "deepseek.com",
         [
-            {"id": "deepseek-flash"},
-            {"id": "deepseek-v4-pro"},
-            {"id": "deepseek-v4-flash"},
+            {"id": "deepseek-v3"},
+            {"id": "deepseek-r1"},
+            {"id": "deepseek-v3.2"},
         ],
         "DeepSeek /models \u7aef\u70b9\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
     ),
     (
         "volces.com",
         [
-            {"id": "doubao-seed-2.1-pro"},
-            {"id": "doubao-seed-2.1-turbo"},
-            {"id": "doubao-seed-2.0-pro"},
-            {"id": "doubao-seed-2.0-code"},
-            {"id": "doubao-seed-2.0-lite"},
-            {"id": "doubao-seed-2.0-mini"},
-            {"id": "doubao-seed-evolving"},
+            {"id": "doubao-seed-1.6"},
         ],
         "\u706b\u5c71\u65b9\u821f /models \u679a\u4e3e\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002\u82e5\u4f7f\u7528\u63a5\u5165\u70b9\uff0c\u8bf7\u586b\u5199 ep- \u5f00\u5934\u7684 Model ID\u3002",
     ),
     (
         "api.x.ai",
         [
-            {"id": "grok-4.6"},
-            {"id": "grok-4.5"},
-            {"id": "grok-4.3"},
-            {"id": "grok-4-fast-reasoning"},
+            {"id": "grok-4"},
             {"id": "grok-code-fast-1"},
         ],
         "xAI /models \u679a\u4e3e\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
+    ),
+    (
+        "xiaomimimo.com",
+        [
+            {"id": "mimo-v2.6-flash"},
+            {"id": "mimo-v2.6-pro"},
+        ],
+        "小米 MiMo /models 枚举不可用时，已回退为推荐模型列表。",
     ),
 ]
 

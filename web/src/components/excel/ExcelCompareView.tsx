@@ -113,35 +113,41 @@ export function ExcelCompareView() {
   const sharedColumns = compareRelationship?.sharedColumns ?? [];
 
   // 加载对比数据（sheet 列表 + 关系）
-  const loadCompareData = useCallback(async () => {
-    if (!compareFileA || !compareFileB) return;
+  const loadCompareData = useCallback(() => {
+    if (!compareFileA || !compareFileB) return undefined;
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
-    try {
-      const data = await fetchExcelCompare(compareFileA, compareFileB, {
-        sessionId: activeSessionId ?? undefined,
-        workspaceId: activeWorkspaceId,
-      });
-      setSheetsA(data.file_a.sheets || []);
-      setSheetsB(data.file_b.sheets || []);
-      if (data.file_a.sheets?.length) setActiveTabA((prev) => prev ?? data.file_a.sheets[0]);
-      if (data.file_b.sheets?.length) setActiveTabB((prev) => prev ?? data.file_b.sheets[0]);
-      if (data.relationships?.shared_columns?.length) {
-        setCompareRelationship({
-          fileA: compareFileA,
-          fileB: compareFileB,
-          sharedColumns: data.relationships.shared_columns as SharedColumn[],
+    void (async () => {
+      try {
+        const data = await fetchExcelCompare(compareFileA, compareFileB, {
+          sessionId: activeSessionId ?? undefined,
+          workspaceId: activeWorkspaceId,
+          signal: controller.signal,
         });
+        if (controller.signal.aborted) return;
+        setSheetsA(data.file_a.sheets || []);
+        setSheetsB(data.file_b.sheets || []);
+        if (data.file_a.sheets?.length) setActiveTabA((prev) => prev ?? data.file_a.sheets[0]);
+        if (data.file_b.sheets?.length) setActiveTabB((prev) => prev ?? data.file_b.sheets[0]);
+        if (data.relationships?.shared_columns?.length) {
+          setCompareRelationship({
+            fileA: compareFileA,
+            fileB: compareFileB,
+            sharedColumns: data.relationships.shared_columns as SharedColumn[],
+          });
+        }
+      } catch (err: unknown) {
+        if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "加载失败");
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "加载失败");
-    } finally {
-      setLoading(false);
-    }
+    })();
+    return () => controller.abort();
   }, [compareFileA, compareFileB, activeSessionId, activeWorkspaceId, setCompareRelationship]);
 
   useEffect(() => {
-    loadCompareData();
+    return loadCompareData();
   }, [loadCompareData]);
 
   const handleClose = useCallback(() => {

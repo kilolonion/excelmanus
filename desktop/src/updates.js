@@ -87,24 +87,34 @@ function parseReleaseAssets(html, releaseUrl) {
   return assets;
 }
 
-async function checkFromReleasePage({ current, platform, arch, fetchImpl }) {
+async function checkFromReleasePage({ current, platform, arch, fetchImpl, timeoutMs }) {
+  // One deadline covers both the redirect and asset body, rather than a fresh
+  // 15-second wait at each step.
+  const signal = AbortSignal.timeout(timeoutMs);
   let latestResponse;
   try {
     latestResponse = await fetchImpl(LATEST_RELEASE_PAGE, {
       headers: { Accept: "text/html", "User-Agent": `ExcelManus/${current}` },
-      signal: AbortSignal.timeout(15_000),
+      signal,
       redirect: "manual",
     });
   } catch { throw new Error("发布页面不可用"); }
   const location = responseHeader(latestResponse, "location");
-  const releaseUrl = location
+  const releaseUrl = location && [301, 302, 303, 307, 308].includes(latestResponse.status)
     ? trustedReleaseUrl(new URL(location, LATEST_RELEASE_PAGE).href)
     : (latestResponse?.status === 200 ? trustedReleaseUrl(latestResponse.url) : null);
   const tag = releaseUrl && releaseTagFromUrl(releaseUrl);
   if (!tag) throw new Error("发布页面没有可用的正式版本");
+  if (parseVersion(tag).prerelease) throw new Error("发布信息无效，请到下载页面查看");
+  const checked = {
+    current, latest: tag.replace(/^v/, ""),
+    hasUpdate: isNewer(tag, current), releaseNotes: "", releaseUrl,
+    downloadUrl: null, installerName: null, platform,
+  };
+  if (!checked.hasUpdate) return { installer: null, checked };
   const assetsResponse = await fetchImpl(`${RELEASES_URL}/expanded_assets/${encodeURIComponent(tag)}`, {
     headers: { Accept: "text/html", "User-Agent": `ExcelManus/${current}` },
-    signal: AbortSignal.timeout(15_000),
+    signal,
     redirect: "error",
   });
   if (!assetsResponse?.ok || typeof assetsResponse.text !== "function") {
@@ -113,15 +123,14 @@ async function checkFromReleasePage({ current, platform, arch, fetchImpl }) {
   const assets = parseReleaseAssets(await assetsResponse.text(), releaseUrl);
   const installer = selectInstaller(assets, platform, arch);
   return { installer, checked: {
-    current, latest: tag.replace(/^v/, ""),
-    hasUpdate: isNewer(tag, current), releaseNotes: "", releaseUrl,
+    ...checked,
     downloadUrl: installer?.browser_download_url || null,
     installerName: installer?.name || null, platform,
   } };
 }
 
 function createUpdateService({ current, platform = process.platform, arch = process.arch, fetchImpl = fetch,
-  downloadDirectory, installImpl, onStatus = () => {}, idleTimeoutMs }) {
+  downloadDirectory, installImpl, onStatus = () => {}, idleTimeoutMs, checkTimeoutMs = 4_000 }) {
   let checked = null;
   let installer = null;
   let pending = null;
@@ -144,30 +153,30 @@ function createUpdateService({ current, platform = process.platform, arch = proc
         // Clear stale downloads when a later check fails.
         checked = null;
         installer = null;
-        let response;
+        let release;
         try {
-          response = await fetchImpl(RELEASE_API, {
+          const response = await fetchImpl(RELEASE_API, {
             headers: { Accept: "application/vnd.github+json", "User-Agent": `ExcelManus/${current}` },
-            signal: AbortSignal.timeout(15_000),
+            signal: AbortSignal.timeout(checkTimeoutMs),
             redirect: "error",
           });
-        } catch {
-          throw new Error("无法连接更新服务，请检查网络后重试，或打开发布页面下载");
-        }
-        if (response.status === 404) throw new Error("尚未发布可用的正式版本，请稍后重试或查看下载页面");
-        if (response.status === 403 || response.status === 429) {
+          if (response.status === 404) throw new Error("尚未发布可用的正式版本");
+          if (response.status === 403 || response.status === 429) throw new Error("更新服务访问受限或请求频率超限");
+          if (!response.ok) throw new Error(`无法检查更新（HTTP ${response.status}）`);
+          try { release = await response.json(); }
+          catch { throw new Error("更新服务返回了无效数据"); }
+        } catch (apiError) {
           try {
-            const fallback = await checkFromReleasePage({ current, platform, arch, fetchImpl });
+            const fallback = await checkFromReleasePage({ current, platform, arch, fetchImpl, timeoutMs: checkTimeoutMs * 2 });
             installer = fallback.installer;
             checked = fallback.checked;
             return checked;
           } catch {
-            throw new Error("更新服务请求频率超限，请稍后重试，或打开发布页面下载");
+            const reason = apiError.name === "TimeoutError" || apiError.name === "AbortError"
+              ? "连接更新服务超时" : apiError instanceof TypeError ? "无法连接更新服务" : apiError.message;
+            throw new Error(`${reason}；GitHub 发布页回退也失败，请检查网络或系统代理后重试，或打开发布页面下载`);
           }
         }
-        if (!response.ok) throw new Error(`无法检查更新（HTTP ${response.status}），请稍后重试`);
-        let release;
-        try { release = await response.json(); } catch { throw new Error("更新服务返回了无效数据，请检查网络代理后重试"); }
         if (!release || typeof release.tag_name !== "string") throw new Error("发布信息无效，请到下载页面查看");
         const releaseUrl = trustedReleaseUrl(release.html_url);
         if (release.draft || release.prerelease || !releaseUrl || parseVersion(release.tag_name).prerelease) {
