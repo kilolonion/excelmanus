@@ -468,8 +468,19 @@ class ToolDispatcher:
         self._call_budget = max_calls
         self._call_count = 0
         self._call_budget_reason = reason
-        self._readonly_replay_cache.clear()
-        self._readonly_replay_expiry.clear()
+        # A few lightweight callers construct the dispatcher with ``__new__``
+        # to exercise budget accounting in isolation.  Keep this reset path
+        # compatible with that form as well as the normal constructor.
+        cache = getattr(self, "_readonly_replay_cache", None)
+        if cache is None:
+            self._readonly_replay_cache = {}
+        else:
+            cache.clear()
+        expiry = getattr(self, "_readonly_replay_expiry", None)
+        if expiry is None:
+            self._readonly_replay_expiry = {}
+        else:
+            expiry.clear()
 
     def begin_nested_call_budget(self) -> tuple[int | None, int, str]:
         """run_code 内层预算：重置计数但不丢弃父消耗。"""

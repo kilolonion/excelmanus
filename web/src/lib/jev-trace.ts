@@ -14,6 +14,7 @@ export const JEV_PACKS = [
 export type JevPackId = (typeof JEV_PACKS)[number]["id"];
 export type JevGate = "off" | "enforce";
 export type JevTransport = "gateway" | "typesafe" | "unavailable";
+export type JevProbabilities = Record<string, Record<string, number>>;
 
 export interface JevTrace {
   id: string;
@@ -26,6 +27,7 @@ export interface JevTrace {
   kind: string;
   reason: string;
   answers: Record<string, string | number | boolean>;
+  probabilities: JevProbabilities;
   impact: string;
   stage?: string;
   evaluated?: boolean;
@@ -64,6 +66,24 @@ function asAnswers(raw: unknown): Record<string, string | number | boolean> {
   return out;
 }
 
+function asProbabilities(raw: unknown): JevProbabilities {
+  if (!raw || typeof raw !== "object") return {};
+  const out: JevProbabilities = {};
+  for (const [question, value] of Object.entries(raw as Record<string, unknown>).slice(0, 16)) {
+    if (/secret|token|api[_-]?key|authorization/i.test(question)) continue;
+    if (!value || typeof value !== "object") continue;
+    const options: Record<string, number> = {};
+    for (const [option, probability] of Object.entries(value as Record<string, unknown>).slice(0, 8)) {
+      const numeric = Number(probability);
+      if (!Number.isFinite(numeric) || numeric < 0 || numeric > 1) continue;
+      const label = option.slice(0, 80);
+      if (label && !/secret|token|api[_-]?key|authorization/i.test(label)) options[label] = numeric;
+    }
+    if (Object.keys(options).length) out[question.slice(0, 80)] = options;
+  }
+  return out;
+}
+
 export function parseJevTrace(data: Record<string, unknown>, id: string): JevTrace | null {
   const pack = String(data.pack || "");
   if (!pack || pack.length > 64) return null;
@@ -79,6 +99,7 @@ export function parseJevTrace(data: Record<string, unknown>, id: string): JevTra
     kind: String(data.kind || "noop").slice(0, 40),
     reason: String(data.reason || "").slice(0, 200),
     answers: asAnswers(data.answers),
+    probabilities: asProbabilities(data.probabilities),
     impact: String(data.impact || "").slice(0, 200),
     stage: String(data.stage || (data.kind === "outcome" ? "outcome" : "legacy")),
     evaluated: data.stage === "evaluation" && data.evaluated === true,

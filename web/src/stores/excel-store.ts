@@ -253,6 +253,10 @@ interface ExcelState {
   // 用户明确关闭的路径，在重挂载间保留，以便自动发现（工作区扫描/会话恢复）不会再次加入。
   dismissedPaths: Set<string>;
 
+  // Closing a view is a navigation choice, not removal from the file list.
+  // Keep it for this conversation until the next user message is accepted.
+  autoOpenSuppressedSessionId: string | null;
+
   // 工作区系统文件可见性（默认隐藏，用户可在侧栏开关切换）
   showSystemFiles: boolean;
 
@@ -411,6 +415,7 @@ export const useExcelStore = create<ExcelState>()(
   pendingTemplateMessage: null,
   draggingFileCount: 0,
   dismissedPaths: new Set<string>(),
+  autoOpenSuppressedSessionId: null,
   showSystemFiles: false,
   workspaceFilesVersion: 0,
   workspaceFiles: [],
@@ -474,7 +479,10 @@ export const useExcelStore = create<ExcelState>()(
 
   setHistorySubview: (view) => set({ historySubview: view }),
 
-  closePanel: () => set({ panelOpen: false }),
+  closePanel: () => set((state) => ({
+    panelOpen: false,
+    ...(state.panelOpen ? { autoOpenSuppressedSessionId: activeSessionId() } : {}),
+  })),
 
   setActiveSheet: (sheet) => set({ activeSheet: sheet }),
 
@@ -837,7 +845,8 @@ export const useExcelStore = create<ExcelState>()(
         conversation.setShowSheet(session.id, Boolean(get().fullViewPath));
       } else conversation.detach(session.id);
     }
-    set({ activeFilePath: focused?.path ?? null, activeSheet: focused?.sheet ?? null,
+    set({ autoOpenSuppressedSessionId: session?.id ?? null,
+      activeFilePath: focused?.path ?? null, activeSheet: focused?.sheet ?? null,
       fullViewPath: get().fullViewPath ? primary?.path ?? null : null,
       fullViewSheet: get().fullViewPath ? primary?.sheet ?? null : null,
       panelOpen: primary ? get().panelOpen : false, liveSelection: null, draftRange: null, selectionMode: false });
@@ -848,6 +857,7 @@ export const useExcelStore = create<ExcelState>()(
     const sessionId = activeSessionId();
     if (sessionId) useWorkbookConversationStore.getState().setShowSheet(sessionId, false);
     set({
+      ...(get().fullViewPath ? { autoOpenSuppressedSessionId: sessionId } : {}),
       fullViewPath: null,
       fullViewSheet: null,
     });
@@ -1142,6 +1152,7 @@ export const useExcelStore = create<ExcelState>()(
     const key = workbookWorkspaceKey(session?.id, workspaceKeyFromSession(session));
     const primary = useWorkbookWorkspaceStore.getState().workspaces[key]?.files[0];
     set((state) => ({
+      ...(state.compareMode ? { autoOpenSuppressedSessionId: session?.id ?? null } : {}),
       ...(state.compareMode && state.compareReturnPath ? {
         fullViewPath: primary?.path ?? state.compareReturnPath, fullViewSheet: primary?.sheet ?? null,
       } : {}),

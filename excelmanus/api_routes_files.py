@@ -308,31 +308,23 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
     # ── CSV 快捷路径 ──────────────────────────────────────
     if os.path.splitext(resolved)[1].lower() == ".csv":
         try:
-            import csv as _csv
-
             snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
-            csv_bytes, bound_version = snap.read_bytes(), snap.content_version
-            _enc = "utf-8"
-            decoded = ""
-            for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
-                try:
-                    decoded = csv_bytes.decode(_try_enc)
-                    _enc = _try_enc
-                    break
-                except (UnicodeDecodeError, LookupError):
-                    continue
-            if not decoded and csv_bytes:
-                decoded = csv_bytes.decode("latin-1")
+            bound_version = snap.content_version
 
-            import io as _io
+            # Build/reuse the immutable CSV index, then parse only the header
+            # and requested preview window.  The old path materialized every
+            # logical row into a Python list even when max_rows was 50, which
+            # made large CSV previews consume tens of MB and scale with the
+            # entire file on every request.
+            from excelmanus.workbook.csv_index import csv_index
 
-            reader = _csv.reader(_io.StringIO(decoded))
-            all_rows_raw: list[list[str]] = list(reader)
-            total_rows = len(all_rows_raw)
-            total_cols = max((len(r) for r in all_rows_raw), default=0)
-            headers = all_rows_raw[0] if all_rows_raw else []
+            index = csv_index(snap)
+            total_rows = index.rows
+            total_cols = index.columns
+            sampled_rows = list(index.window(1, min(total_rows, max_rows + 1)))
+            headers = sampled_rows[0] if sampled_rows else []
             col_letters = [chr(65 + i) if i < 26 else f"A{chr(65 + i - 26)}" for i in range(min(total_cols, 100))]
-            data_rows = all_rows_raw[1: min(max_rows + 1, total_rows)]
+            data_rows = sampled_rows[1:]
             # 将纯数字字符串转换为数字
             converted_rows: list[list[Any]] = []
             for dr in data_rows:

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -37,6 +38,9 @@ from excelmanus.system_one.trace import emit_jev_trace, record_host_effect
 
 logger = get_logger("system_one.host")
 _MAX_OBSERVATION_EVALUATIONS_PER_TURN = 3
+# UI navigation is a tail enhancement.  It must not hold a completed answer
+# behind the provider's general Jev timeout (which users may configure higher).
+_UI_HINT_MAX_WAIT_SECONDS = 0.5
 
 # 第一期 E 只覆盖这三类；Tier B 写表不进此集合。
 _E_APPROVAL_TOOLS = frozenset({"run_shell", "delete_file", "run_code"})
@@ -107,6 +111,31 @@ def clear_turn_exposure(engine: Any) -> None:
     engine._jev_delivery_checks = 0
     engine._recovery_hint = None  # type: ignore[attr-defined]
     engine._jev_context_input = None
+    engine._jev_metrics = {
+        "evaluated": 0,
+        "effects": 0,
+        "outcomes": 0,
+        "unavailable": 0,
+        "latency_ms": 0.0,
+    }
+
+
+def jev_turn_metrics(engine: Any) -> dict[str, Any]:
+    """Return a bounded per-turn metric snapshot for diagnostics only."""
+    raw = getattr(engine, "_jev_metrics", None)
+    if not isinstance(raw, Mapping):
+        return {}
+    try:
+        latency = round(max(0.0, float(raw.get("latency_ms", 0.0) or 0.0)), 1)
+    except (TypeError, ValueError):
+        latency = 0.0
+    return {
+        "evaluated": max(0, int(raw.get("evaluated", 0) or 0)),
+        "effects": max(0, int(raw.get("effects", 0) or 0)),
+        "outcomes": max(0, int(raw.get("outcomes", 0) or 0)),
+        "unavailable": max(0, int(raw.get("unavailable", 0) or 0)),
+        "latency_ms": latency,
+    }
 
 
 def remember_turn_tools(engine: Any, chat_result: Any) -> None:
@@ -149,18 +178,25 @@ async def maybe_record_turn_exposure(
     *,
     on_event: Any | None = None,
     budget: Any = None,
+    reset: bool = True,
 ) -> None:
     """片 I：控制命令之后、USER_PROMPT_SUBMIT 落定后，选择工具预加载类别。
 
     片 K 复用本评估的 mode_hint；工具调用方式由主模型逐步选择。
     """
-    clear_turn_exposure(engine)
     from excelmanus.system_one.budget import JevTurnBudget
 
-    if isinstance(budget, JevTurnBudget):
+    if reset:
+        clear_turn_exposure(engine)
+        if isinstance(budget, JevTurnBudget):
+            engine._jev_turn_budget = budget
+        else:
+            reset_turn_budget(engine)
+    elif isinstance(budget, JevTurnBudget):
+        # The concurrent entry path initializes the turn once before creating
+        # both tasks.  A caller-supplied budget still wins without clearing the
+        # context decision produced by the sibling task.
         engine._jev_turn_budget = budget
-    else:
-        reset_turn_budget(engine)
     if is_child_session(engine):
         return
     if not _jev_connected(engine):
@@ -501,7 +537,22 @@ async def maybe_emit_ui_hint(
     state = ui_surface_state_from_engine(engine, chat_result, turn_outcome=outcome)
     if not state.get("candidate_files"):
         return
-    decision = await _eval_traced(engine, "ui.surface", state, on_event=on_event)
+    try:
+        decision = await asyncio.wait_for(
+            _eval_traced(engine, "ui.surface", state, on_event=on_event),
+            timeout=min(_UI_HINT_MAX_WAIT_SECONDS, max(0.05, float(settings.timeout_seconds))),
+        )
+    except asyncio.TimeoutError:
+        # A late navigation preference is disposable.  Keep the timeout
+        # visible in the JEV timeline, but let the completed reply continue
+        # without a UI_HINT event.
+        decision = Decision.noop("timeout", transport="unavailable")
+        record_jev_decision(
+            pack_id="ui.surface",
+            gate=gate_for_pack("ui.surface", settings),
+            decision=decision,
+        )
+        emit_jev_trace(engine, decision, pack_id="ui.surface", on_event=on_event)
     if not decision_can_apply("ui.surface", decision, settings):
         return
     extras = decision.extras or {}
@@ -1108,6 +1159,27 @@ def approval_gate_action(decision: Decision | None) -> str:
 
 def _stamp_host_approval(decision: Decision, settings: Any) -> Decision:
     applied = bool(decision.applied) and decision_is_applied("approval.tool_call", settings)
+    # A Jev ``auto`` answer changes authorization.  Keep deny fail-closed and
+    # allow ASK/deny under the normal pack gate, but require the explicit
+    # calibration switch before an answer can skip the human approval card.
+    auto_calibrated = False
+    if applied and decision.kind == "auto":
+        try:
+            from excelmanus.system_one.calibration import calibration_allows_enforce
+
+            auto_calibrated = calibration_allows_enforce("approval.tool_call", settings)
+        except Exception:
+            auto_calibrated = False
+    if applied and decision.kind == "auto" and not auto_calibrated:
+        extras = dict(decision.extras or {})
+        extras["auto_blocked"] = "uncalibrated_or_unsigned"
+        return Decision(
+            kind="ask",
+            reason="auto_requires_calibration",
+            evaluation=decision.evaluation,
+            extras=extras,
+            applied=True,
+        )
     if applied == decision.applied:
         return decision
     return Decision(

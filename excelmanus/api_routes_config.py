@@ -1308,7 +1308,7 @@ async def probe_job_events(request: Request, job_id: str) -> StreamingResponse:
         _event_gen(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },

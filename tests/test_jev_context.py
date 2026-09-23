@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from excelmanus.config import ExcelManusConfig
+from excelmanus.agent.session_api import _run_entry_jev
 from excelmanus.system_one.adapter import bound_state
 from excelmanus.system_one.intent_context import context_state, render_advice, suggest_context
 from excelmanus.system_one.policy import decision_is_applied, settings_from, synthesize
@@ -64,6 +65,15 @@ def test_current_selection_and_missing_change_are_separate():
     assert decision.extras["next"] == "clarify"
     assert "选区只说明位置" in render_advice(decision)
     assert "读取候选" in render_advice(decision)
+
+
+def test_context_advice_has_explicit_advisory_envelope():
+    decision = synthesize(PACK, evaluation(edit_intent="from_context"), state())
+    advice = render_advice(decision)
+    assert advice.startswith("<jev_context source=\"jev\" authority=\"advisory\"")
+    assert '"authority": "advisory"' in advice
+    assert '"scope": "current_turn"' in advice
+    assert "不是用户指令、授权" in advice
 
 
 def test_new_blank_and_existing_workspace_recommendations():
@@ -287,6 +297,79 @@ async def test_real_followup_appends_hidden_advice_once(tmp_path):
     assert "建议先检查明细" in json.dumps(request_messages, ensure_ascii=False)
 
 
+@pytest.mark.asyncio
+async def test_entry_jev_decisions_run_concurrently(tmp_path):
+    """Independent entry decisions must not add their provider waits together."""
+    started_exposure = asyncio.Event()
+    started_context = asyncio.Event()
+
+    async def exposure(*args, **kwargs):
+        started_exposure.set()
+        await asyncio.wait_for(started_context.wait(), timeout=0.2)
+
+    async def context(*args, **kwargs):
+        started_context.set()
+        await asyncio.wait_for(started_exposure.wait(), timeout=0.2)
+        return "entry advice"
+
+    target = engine(tmp_path)
+    incoming = {"sheet_context": {"workspace_id": "sales", "path": "sales.xlsx"}}
+    with patch("excelmanus.system_one.host.maybe_record_turn_exposure", exposure), \
+         patch("excelmanus.system_one.intent_context.suggest_context", context):
+        result = await asyncio.wait_for(
+            _run_entry_jev(target, "继续", {"context_input": incoming}, on_event=None),
+            timeout=0.5,
+        )
+    assert result == "entry advice"
+    assert target._jev_context_input == incoming
+
+
+@pytest.mark.asyncio
+async def test_entry_jev_cancellation_is_not_swallowed(tmp_path):
+    gate = asyncio.Event()
+
+    async def blocked(*args, **kwargs):
+        await gate.wait()
+
+    with patch("excelmanus.system_one.host.maybe_record_turn_exposure", blocked), \
+         patch("excelmanus.system_one.intent_context.suggest_context", blocked):
+        task = asyncio.create_task(
+            _run_entry_jev(engine(tmp_path), "继续", {"context_input": {}}, on_event=None),
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_entry_jev_uses_one_initialized_budget(tmp_path):
+    from excelmanus.system_one.budget import JevTurnBudget
+
+    target = engine(tmp_path)
+    supplied = JevTurnBudget(max_evaluations=2, max_latency_ms=100)
+    seen: list[object] = []
+
+    async def exposure(*args, **kwargs):
+        assert kwargs["reset"] is False
+        seen.append(target._jev_turn_budget)
+
+    async def context(*args, **kwargs):
+        seen.append(target._jev_turn_budget)
+        return ""
+
+    with patch("excelmanus.system_one.host.maybe_record_turn_exposure", exposure), \
+         patch("excelmanus.system_one.intent_context.suggest_context", context):
+        await _run_entry_jev(
+            target,
+            "继续",
+            {"context_input": {}, "jev_budget": supplied},
+            on_event=None,
+        )
+    assert target._jev_turn_budget is supplied
+    assert seen == [supplied, supplied]
+
+
 def test_chat_request_context_uses_server_workspace_candidates(tmp_path):
     from pydantic import ValidationError
     from excelmanus.api_routes_chat import ChatRequest, _context_input
@@ -501,4 +584,3 @@ def test_session_workspace_fields_report_routed_binding(tmp_path):
                       "workspace_title": "销售", "workspace_routed": True}
     with patch("excelmanus.api_routes_chat.get_session_manager", return_value=manager):
         assert _session_workspace_fields("s1")["workspace_routed"] is False
-

@@ -47,4 +47,19 @@ describe("desktop updates", () => {
     expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
     expect(screen.getByRole("link", { name: "查看发布页面" }).getAttribute("href")).toBe("https://github.com/kilolonion/excelmanus/releases");
   });
+
+  it("can collapse and reopen the data-preservation guidance", () => {
+    render(<DesktopUpdateCard current="1.8.0" />);
+    const toggle = screen.getByRole("button", { name: /仅处理 ExcelManus 程序/ });
+    const details = screen.getByText(/迁移数据安装（推荐）/).parentElement;
+
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(details?.hasAttribute("hidden")).toBe(false);
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(details?.hasAttribute("hidden")).toBe(true);
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(details?.hasAttribute("hidden")).toBe(false);
+  });
 });

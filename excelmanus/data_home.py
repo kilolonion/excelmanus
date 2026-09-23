@@ -27,6 +27,7 @@ import shutil
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -574,16 +575,30 @@ def migrate_data_from_project(
         if not src.is_dir():
             continue
         dst = data_home / name
-        count = 0
+        pending: list[tuple[Path, Path]] = []
         for item in src.rglob("*"):
-            if item.is_file():
-                rel = item.relative_to(src)
-                target = dst / rel
-                if target.exists() and not force:
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(item), str(target))
-                count += 1
+            if not item.is_file():
+                continue
+            rel = item.relative_to(src)
+            target = dst / rel
+            if target.exists() and not force:
+                continue
+            pending.append((item, target))
+
+        def _copy_one(pair: tuple[Path, Path]) -> None:
+            item, target = pair
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(item), str(target))
+
+        # Migration is on the startup path for old project-local data.  A
+        # small bounded pool cuts the many-file metadata/open/close overhead
+        # without turning this into an unbounded disk pressure source.
+        if len(pending) > 1:
+            with ThreadPoolExecutor(max_workers=min(4, len(pending)), thread_name_prefix="data-migrate") as pool:
+                list(pool.map(_copy_one, pending))
+        elif pending:
+            _copy_one(pending[0])
+        count = len(pending)
         if count:
             stats[name] = count
             logger.info("迁移 %s/: %d 个文件 → %s", name, count, dst)

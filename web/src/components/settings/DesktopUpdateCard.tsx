@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Download, Loader2, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
+import { useId, useState } from "react";
+import { ChevronDown, Download, Loader2, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useDesktopUpdate } from "@/hooks/use-desktop-update";
@@ -12,6 +12,8 @@ export function DesktopUpdateCard({ current }: { current: string }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [preservationInfoOpen, setPreservationInfoOpen] = useState(true);
+  const preservationInfoId = useId();
   const status = useDesktopUpdate();
   const active = busy || ["downloading", "verifying", "installing"].includes(status?.phase || "");
   const canCheck = typeof window !== "undefined" && !!window.excelManusDesktop?.checkUpdate;
@@ -64,11 +66,23 @@ export function DesktopUpdateCard({ current }: { current: string }) {
     {message && <p role="status" className="text-sm">{message}</p>}
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     {update?.hasUpdate && !update.downloadUrl && <p className="text-sm text-muted-foreground">该版本尚未发布适用于本机的安装包，请稍后重试或查看发布页面。</p>}
-    <div className="rounded-md bg-muted/40 p-3 space-y-2 text-xs leading-relaxed">
-      <p className="flex items-center gap-1.5 font-medium"><ShieldCheck className="h-4 w-4" />仅处理 ExcelManus 程序，保留你的数据和文件</p>
-      <p><strong>迁移数据安装（推荐）</strong>：替换旧程序，继续使用现有设置、会话和快捷方式。数据保留原位，无需移动工作区。</p>
-      <p><strong>卸载后安装</strong>：移除旧程序后重新安装，重新创建快捷方式，同样保留设置和会话。</p>
-      <p>两种方式都不会删除、移动或修改工作区、表格、文档和其他用户文件。macOS 会打开已下载的 DMG，请在 Finder 中将新版应用替换到原有位置。系统权限或安全确认仍需你操作。</p>
+    <div className="rounded-md bg-muted/40 p-3 text-xs leading-relaxed">
+      <button
+        type="button"
+        aria-expanded={preservationInfoOpen}
+        aria-controls={preservationInfoId}
+        onClick={() => setPreservationInfoOpen((open) => !open)}
+        className="flex w-full items-center gap-1.5 text-left font-medium hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-muted"
+      >
+        <ShieldCheck className="h-4 w-4 shrink-0" />
+        <span>仅处理 ExcelManus 程序，保留你的数据和文件</span>
+        <ChevronDown className={`ml-auto h-4 w-4 shrink-0 text-muted-foreground transition-transform ${preservationInfoOpen ? "rotate-180" : ""}`} aria-hidden="true" />
+      </button>
+      <div id={preservationInfoId} hidden={!preservationInfoOpen} className="space-y-2 pt-2">
+        <p><strong>迁移数据安装（推荐）</strong>：替换旧程序，继续使用现有设置、会话和快捷方式。数据保留原位，无需移动工作区。</p>
+        <p><strong>卸载后安装</strong>：移除旧程序后重新安装，重新创建快捷方式，同样保留设置和会话。</p>
+        <p>两种方式都不会删除、移动或修改工作区、表格、文档和其他用户文件。macOS 会打开已下载的 DMG，请在 Finder 中将新版应用替换到原有位置。系统权限或安全确认仍需你操作。</p>
+      </div>
     </div>
     {update?.hasUpdate && update.releaseNotes && <details className="text-sm">
       <summary className="cursor-pointer">查看更新说明</summary>

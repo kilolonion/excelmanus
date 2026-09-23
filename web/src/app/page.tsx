@@ -56,13 +56,15 @@ export default function Home() {
   // 不展示 WelcomePage，避免闪烁
   const isRestoringSession = !!activeSessionId && !hasMessages
     && (loadedSessionId !== activeSessionId || isLoadingMessages);
+  const composerReady = !activeSessionId
+    || (loadedSessionId === activeSessionId && !isLoadingMessages);
 
   return (
     <div className="flex flex-col h-full">
       <WorkspaceViewHost composer={
         <div className="em-composer-dock relative z-30 pt-6 -mt-6 pointer-events-none flex-shrink-0">
           <div className="mx-auto w-full max-w-4xl pointer-events-auto">
-            <ChatInput onSend={handleSend} onCommandResult={cmdResult.show} disabled={false}
+            <ChatInput onSend={handleSend} onCommandResult={cmdResult.show} disabled={!composerReady}
               isStreaming={isStreaming} onStop={handleStop} composerDraft={composerDraft} />
           </div>
         </div>

@@ -425,6 +425,7 @@ export async function fetchSessionDetail(
   return {
     id: (data.id as string) ?? sessionId,
     messageCount: (data.message_count as number) ?? 0,
+    historyRevision: typeof data.history_revision === "string" ? data.history_revision : "",
     inFlight: (data.in_flight as boolean) ?? false,
     activeStreamId: (data.active_stream_id as string | null) ?? null,
     latestSeq: (data.latest_seq as number) ?? 0,

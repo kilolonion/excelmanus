@@ -9,9 +9,11 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -146,35 +148,98 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
     intentionally best-effort and bounded; callers can expose the status in
     their result contract instead of pretending cached values are fresh.
     """
+    requested_suffix = str(suffix or ".xlsx").lower()
+    if requested_suffix not in {".xlsx", ".xltx"}:
+        return data, {"status": "unsupported_format", "engine": None, "errors": []}
     if os.environ.get("EXCELMANUS_FORMULA_RECALC", "auto").strip().lower() in {"0", "false", "off", "never"}:
         return data, {"status": "disabled", "engine": None, "errors": []}
     executable = shutil.which("soffice") or shutil.which("libreoffice")
     if not executable:
         return data, {"status": "unavailable", "engine": None, "errors": []}
-    ext = suffix if str(suffix).lower() in {".xlsx", ".xlsm", ".xltx", ".xltm"} else ".xlsx"
+    ext = requested_suffix
+    try:
+        timeout_seconds = float(os.environ.get("EXCELMANUS_FORMULA_RECALC_TIMEOUT", "30"))
+    except (TypeError, ValueError):
+        timeout_seconds = 30.0
+    timeout_seconds = max(5.0, min(timeout_seconds, 300.0))
     with tempfile.TemporaryDirectory(prefix="excelmanus-recalc-") as raw_dir:
         root = Path(raw_dir)
         source = root / f"input{ext}"
         out_dir = root / "out"
         out_dir.mkdir()
+        # LibreOffice keeps a per-user profile lock.  A unique profile makes
+        # concurrent tool calls independent and prevents a stale desktop
+        # profile from turning a headless conversion into an interactive wait.
+        profile = root / "profile"
+        profile.mkdir()
         source.write_bytes(data)
+        started = time.monotonic()
+        process: subprocess.Popen[str] | None = None
         try:
-            completed = subprocess.run(
-                [executable, "--headless", "--convert-to", "xlsx", "--outdir", str(out_dir), str(source)],
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            if os.name == "nt":
+                creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+            process = subprocess.Popen(
+                [
+                    executable,
+                    "--headless",
+                    "--nolockcheck",
+                    "--nodefault",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    f"-env:UserInstallation={profile.as_uri()}",
+                    "--convert-to", "xlsx", "--outdir", str(out_dir), str(source),
+                ],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=30, check=False,
-                creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+                text=True, creationflags=creationflags,
             )
+            try:
+                stdout, stderr = process.communicate(timeout=timeout_seconds)
+                return_code = process.returncode
+            except subprocess.TimeoutExpired:
+                # ``subprocess.run(timeout=...)`` raises without killing the
+                # child.  LibreOffice may have spawned a helper process, so
+                # enforce the deadline on the complete session here.
+                pid = int(process.pid or 0)
+                if os.name != "nt" and pid:
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                else:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+                stdout, stderr = process.communicate()
+                return data, {
+                    "status": "failed",
+                    "engine": executable,
+                    "errors": [f"LibreOffice 重算超时（>{timeout_seconds:g}s）"],
+                    "error_count": 1,
+                    "formula_count": None,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                }
         except (OSError, subprocess.SubprocessError) as exc:
             return data, {"status": "failed", "engine": executable, "errors": [str(exc)]}
         converted = out_dir / "input.xlsx"
-        if completed.returncode != 0 or not converted.is_file():
-            detail = (completed.stderr or completed.stdout or "LibreOffice conversion failed").strip()
+        if return_code != 0 or not converted.is_file():
+            detail = (stderr or stdout or "LibreOffice conversion failed").strip()
             return data, {"status": "failed", "engine": executable, "errors": [detail[:500]]}
         result = converted.read_bytes()
         errors: list[str] = []
+        formula_count = 0
         try:
             from openpyxl import load_workbook
+            formula_wb = load_workbook(converted, data_only=False, read_only=True)
+            try:
+                for ws in formula_wb.worksheets:
+                    for row in ws.iter_rows():
+                        for cell in row:
+                            if isinstance(cell.value, str) and cell.value.startswith("="):
+                                formula_count += 1
+            finally:
+                formula_wb.close()
             wb = load_workbook(converted, data_only=True, read_only=True)
             try:
                 for ws in wb.worksheets:
@@ -193,7 +258,14 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
                 wb.close()
         except Exception as exc:
             errors.append(f"verification: {exc}")
-        return result, {"status": "recalculated", "engine": executable, "errors": errors}
+        return result, {
+            "status": "recalculated",
+            "engine": executable,
+            "errors": errors,
+            "error_count": len(errors),
+            "formula_count": formula_count,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
 
 
 def lock_path_for(dest: Path) -> Path:
@@ -443,24 +515,27 @@ def commit_workbook(
             fresh_default_sheets = list(wb.sheetnames)
         else:
             wb = load_workbook(BytesIO(before), keep_vba=suffix in {".xlsm", ".xlsb"})
-        mutate_fn(wb)
-        # 新建簿自带的默认空表（如 "Sheet"）若全程未动且已有其它表，剔除免留空壳。
-        if fresh_default_sheets and len(wb.sheetnames) > 1:
-            for name in fresh_default_sheets:
-                if name not in wb.sheetnames:
-                    continue
-                ws = wb[name]
-                if ws.max_row <= 1 and ws.max_column <= 1 and ws["A1"].value is None:
-                    del wb[name]
-        buf = BytesIO()
-        wb.save(buf)
-        data = buf.getvalue()
-        has_formula = any(
-            isinstance(cell.value, str) and cell.value.startswith("=")
-            for sheet in wb.worksheets
-            for row in sheet.iter_rows()
-            for cell in row
-        )
+        try:
+            mutate_fn(wb)
+            # 新建簿自带的默认空表（如 "Sheet"）若全程未动且已有其它表，剔除免留空壳。
+            if fresh_default_sheets and len(wb.sheetnames) > 1:
+                for name in fresh_default_sheets:
+                    if name not in wb.sheetnames:
+                        continue
+                    ws = wb[name]
+                    if ws.max_row <= 1 and ws.max_column <= 1 and ws["A1"].value is None:
+                        del wb[name]
+            buf = BytesIO()
+            wb.save(buf)
+            data = buf.getvalue()
+            has_formula = any(
+                isinstance(cell.value, str) and cell.value.startswith("=")
+                for sheet in wb.worksheets
+                for row in sheet.iter_rows()
+                for cell in row
+            )
+        finally:
+            wb.close()
         if has_formula:
             if suffix in {".xlsx", ".xltx"}:
                 nonlocal recalc_info
@@ -505,6 +580,7 @@ def commit_workbook_batch(
     guard: FileAccessGuard,
     workbooks: list[dict[str, Any]],
     operation_id: str | None = None,
+    read_dependencies: list[Any] | dict[str, str] | None = None,
 ) -> list[CommitResult]:
     """Atomically commit several workbook builders under one workspace lock.
 
@@ -514,37 +590,238 @@ def commit_workbook_batch(
     a stale dependency aborts the complete batch.
     """
     from io import BytesIO
-    from excelmanus.workspace.file_service import TargetSpec, receipt_to_commit_result, service_for_guard
+
+    from excelmanus.workspace.file_service import (
+        ReadDependency,
+        TargetSpec,
+        service_for_guard,
+    )
 
     if not workbooks:
         raise CommitError("INVALID_ARGS", "workbooks 不能为空")
+    service = service_for_guard(guard)
+
+    def results_for_receipt(
+        receipt: Any,
+        infos: list[dict[str, Any]],
+    ) -> list[CommitResult]:
+        results: list[CommitResult] = []
+        for index, target in enumerate(receipt.targets):
+            path = target.to_path or target.path
+            live = guard.workspace_root / path
+            bytes_written = live.stat().st_size if live.is_file() else 0
+            info = infos[index] if index < len(infos) else {
+                "status": "replayed", "engine": None, "errors": [],
+            }
+            extra = {
+                "receipt": receipt.to_dict(),
+                "lineage_id": target.lineage_id,
+                "formula_recalculation": info,
+                "batch_index": index,
+                "batch_size": len(receipt.targets),
+            }
+            results.append(
+                CommitResult(
+                    path=path,
+                    content_version=target.after_version or "",
+                    previous_version=target.before_version,
+                    status="committed",
+                    warnings=(receipt.history_state,) if receipt.history_state != "recorded" else (),
+                    bytes_written=bytes_written,
+                    extra=extra,
+                )
+            )
+        return results
+
+    # A create-then-retry call sees the files as existing on disk.  Resolve an
+    # existing receipt before choosing create/update specs so idempotent replay
+    # does not accidentally turn into a different intent.
+    if operation_id:
+        existing = service.get_receipt(operation_id, recover=True)
+        if existing is not None:
+            if existing.state != "committed":
+                raise CommitError(
+                    existing.error_code or "SAVE_FAILED",
+                    existing.message or existing.state,
+                    fields={"receipt": existing.to_dict()},
+                )
+            requested_paths: list[str] = []
+            for index, item in enumerate(workbooks):
+                if not isinstance(item, dict):
+                    raise CommitError("INVALID_ARGS", f"workbooks[{index}] 必须是对象")
+                if not callable(item.get("mutate_fn")):
+                    raise CommitError("INVALID_ARGS", f"workbooks[{index}] 缺少 mutate_fn")
+                try:
+                    dest = guard.resolve_and_validate(str(item.get("file_path") or ""))
+                except SecurityViolationError as exc:
+                    raise CommitError("PATH_INVALID", str(exc)) from exc
+                requested_paths.append(str(dest.relative_to(guard.workspace_root)).replace("\\", "/"))
+            receipt_paths = [target.to_path or target.path for target in existing.targets]
+            if requested_paths != receipt_paths:
+                raise CommitError(
+                    "OPERATION_ID_REUSED",
+                    f"operation_id {operation_id} 已用于不同工作簿批次",
+                    fields={"paths": receipt_paths},
+                )
+            return results_for_receipt(
+                existing,
+                [{"status": "replayed", "engine": None, "errors": []} for _ in requested_paths],
+            )
     specs: list[TargetSpec] = []
-    for item in workbooks:
+    recalc_infos: list[dict[str, Any]] = []
+    deps_by_path: dict[str, ReadDependency] = {}
+
+    def add_dependency(raw: Any) -> None:
+        if isinstance(raw, ReadDependency):
+            dep = raw
+        elif isinstance(raw, dict):
+            path = str(raw.get("path") or raw.get("file_path") or "").strip()
+            version = str(raw.get("version") or raw.get("content_version") or "").strip()
+            if not path or not version:
+                raise CommitError("INVALID_ARGS", "read_dependencies 的 path/version 不能为空")
+            dep = ReadDependency(path=path, version=version)
+        else:
+            raise CommitError("INVALID_ARGS", "read_dependencies 必须是 ReadDependency 或对象")
+        old = deps_by_path.get(dep.path)
+        if old is not None and old.version != dep.version:
+            raise CommitError("INVALID_ARGS", f"读取依赖 {dep.path} 同时指定了多个版本")
+        deps_by_path[dep.path] = dep
+
+    if isinstance(read_dependencies, dict):
+        for path, version in read_dependencies.items():
+            add_dependency({"path": path, "version": version})
+    else:
+        for dep in read_dependencies or []:
+            add_dependency(dep)
+
+    for item_index, item in enumerate(workbooks):
+        if not isinstance(item, dict):
+            raise CommitError("INVALID_ARGS", f"workbooks[{item_index}] 必须是对象")
         raw_path = str(item.get("file_path") or "")
-        dest = guard.resolve_and_validate(raw_path)
+        try:
+            dest = guard.resolve_and_validate(raw_path)
+        except SecurityViolationError as exc:
+            raise CommitError("PATH_INVALID", str(exc)) from exc
         rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
         mutate_fn = item.get("mutate_fn")
         if not callable(mutate_fn):
             raise CommitError("INVALID_ARGS", f"{rel} 缺少 mutate_fn")
         expected = item.get("expected_version")
         create = bool(item.get("create"))
+        if not dest.exists() and expected:
+            raise CommitError(
+                "VERSION_CONFLICT",
+                f"{rel} 不存在，创建写入不能带 expected_version",
+                fields={"path": rel, "expected_version": expected},
+            )
 
-        def builder(before: bytes | None, *, _fn=mutate_fn, _suffix=dest.suffix.lower()) -> bytes:
+        item_dependencies = item.get("read_dependencies") or item.get("dependencies") or []
+        if isinstance(item_dependencies, dict):
+            item_dependencies = [
+                {"path": path, "version": version}
+                for path, version in item_dependencies.items()
+            ]
+        for raw_dep in item_dependencies:
+            add_dependency(raw_dep)
+        source_versions = item.get("source_versions")
+        if isinstance(source_versions, dict):
+            for path, version in source_versions.items():
+                add_dependency({"path": path, "version": version})
+
+        recalc_info: dict[str, Any] = {
+            "status": "not_needed", "engine": None, "errors": [],
+        }
+        recalc_infos.append(recalc_info)
+
+        def builder(
+            before: bytes | None,
+            *,
+            _fn=mutate_fn,
+            _suffix=dest.suffix.lower(),
+            _recalc=recalc_info,
+        ) -> bytes:
             from openpyxl import Workbook, load_workbook
+
+            fresh_default_sheets: list[str] = []
             if before is None:
                 wb = Workbook()
+                fresh_default_sheets = list(wb.sheetnames)
             else:
                 wb = load_workbook(BytesIO(before), keep_vba=_suffix == ".xlsm")
-            _fn(wb)
-            out = BytesIO()
-            wb.save(out)
-            return out.getvalue()
+            try:
+                _fn(wb)
+                if fresh_default_sheets and len(wb.sheetnames) > 1:
+                    for name in fresh_default_sheets:
+                        if name not in wb.sheetnames:
+                            continue
+                        ws = wb[name]
+                        if ws.max_row <= 1 and ws.max_column <= 1 and ws["A1"].value is None:
+                            del wb[name]
+                out = BytesIO()
+                wb.save(out)
+                data = out.getvalue()
+                has_formula = any(
+                    isinstance(cell.value, str) and cell.value.startswith("=")
+                    for sheet in wb.worksheets
+                    for row in sheet.iter_rows()
+                    for cell in row
+                )
+            finally:
+                wb.close()
+            if has_formula:
+                if _suffix in {".xlsx", ".xltx"}:
+                    recalculated, info = recalculate_workbook_bytes(data, suffix=_suffix)
+                    _recalc.clear()
+                    _recalc.update(info)
+                    data = recalculated
+                else:
+                    _recalc.clear()
+                    _recalc.update({
+                        "status": "unsupported_format", "engine": None, "errors": [],
+                    })
+            return data
 
         if dest.is_file() or not create:
-            specs.append(TargetSpec(op="update", path=rel, builder=builder, expected_version=expected))
+            specs.append(
+                TargetSpec(
+                    op="update",
+                    path=rel,
+                    builder=builder,
+                    expected_version=expected,
+                    intent=item.get("intent") or {
+                        "kind": "workbook_builder",
+                        "path": rel,
+                        "batch_index": item_index,
+                    },
+                )
+            )
         else:
-            specs.append(TargetSpec(op="create", path=rel, builder=builder))
-    receipt = service_for_guard(guard).apply_batch(specs, operation_id=operation_id)
+            specs.append(
+                TargetSpec(
+                    op="create",
+                    path=rel,
+                    builder=builder,
+                    intent=item.get("intent") or {
+                        "kind": "workbook_builder",
+                        "path": rel,
+                        "batch_index": item_index,
+                    },
+                )
+            )
+    receipt = service.apply_batch(
+        specs,
+        operation_id=operation_id,
+        actor="workbook_batch",
+        read_dependencies=list(deps_by_path.values()),
+    )
     if receipt.state != "committed":
-        raise CommitError(receipt.error_code or "SAVE_FAILED", receipt.message or receipt.state)
-    return [receipt_to_commit_result(receipt) for _ in specs]
+        raise CommitError(
+            receipt.error_code or "SAVE_FAILED",
+            receipt.message or receipt.state,
+            fields={"receipt": receipt.to_dict()},
+        )
+
+    # ``MutationReceipt.to_commit_result`` intentionally reports its primary
+    # target for legacy callers.  A batch caller needs one accurate result per
+    # destination, including its own CAS predecessor and formula status.
+    return results_for_receipt(receipt, recalc_infos)

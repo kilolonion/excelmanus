@@ -7,6 +7,7 @@ import logging
 import re
 import shutil
 import sqlite3
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -591,8 +592,21 @@ class Database:
         self._backend = Backend.SQLITE
         self._adapter = create_sqlite_adapter(db_path)
         self._db_path = db_path
-        self._ensure_schema_version_table()
-        self._migrate()
+        # Multiple uvicorn workers can open the same SQLite file at once.  A
+        # schema migration must be serialized outside SQLite's transaction;
+        # otherwise both workers can observe the same version and race on an
+        # ALTER TABLE (for example, duplicate canonical_model columns).
+        lock_context = nullcontext()
+        if db_path and str(db_path) != ":memory:":
+            from excelmanus.data_home import _file_lock
+
+            lock_context = _file_lock(
+                f"{Path(db_path).expanduser()}.schema.lock",
+                timeout=30.0,
+            )
+        with lock_context:
+            self._ensure_schema_version_table()
+            self._migrate()
 
     @property
     def conn(self) -> ConnectionAdapter:

@@ -3,13 +3,33 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 
 const parts = (root, file) => relative(root, file).replaceAll('\\', '/').split('/');
 
+// The packaged interpreter is headless and never creates virtualenvs or
+// installs packages. Keep the standard library needed by application code,
+// while leaving GUI/developer payloads out of the installer.
+const unusedStdlib = new Set([
+  '__phello__', 'idlelib', 'ensurepip', 'tkinter', 'turtledemo',
+  'venv', 'lib2to3', 'pydoc_data',
+]);
+const unusedRuntimeRoots = new Set([
+  'include', 'share', 'tcl8', 'tcl8.6', 'tk8', 'tk8.6', 'itcl4.2.4',
+]);
+const unusedBinFiles = new Set([
+  '2to3', '2to3-3.12', 'idle3', 'idle3.12', 'pydoc3', 'pydoc3.12',
+  'pip', 'pip3', 'pip3.12', 'python-config', 'python3-config',
+  'python3.12-config',
+]);
+
 export function pythonBaseFilter(root, file) {
   const path = parts(root, file);
   const site = path.indexOf('site-packages');
   // Populate a clean site-packages from the locked runtime group, without the
   // managed interpreter's pip, setuptools or build-environment packages.
   if (site >= 0 && site < path.length - 1) return false;
-  return !path.some(part => ['__pycache__', 'idlelib', 'ensurepip'].includes(part))
+  if (path[0]?.toLowerCase() === 'bin' && unusedBinFiles.has(path[1])) return false;
+  if (path.some(part => unusedRuntimeRoots.has(part.toLowerCase()))) return false;
+  const stdlib = site >= 0 ? path.slice(0, site) : path;
+  return !stdlib.some(part => unusedStdlib.has(part.toLowerCase()))
+    && !path.some(part => part === '__pycache__')
     && !path.some((part, i) => part === 'test' && /^(lib|python3\.\d+)$/i.test(path[i - 1] || ''));
 }
 

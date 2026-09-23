@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -39,11 +40,16 @@ def drain_guide_messages(engine) -> list[str]:
     """取出并清空未认领的 next-step（兼容旧 API）。"""
     return engine._driver.inbox.drain_unclaimed("next-step")
 
-def push_interrupt_message(engine, message: str) -> None:
+def push_interrupt_message(
+    engine,
+    message: str,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> None:
     """飞行中的用户后续：inbox next-turn，当前 turn 不进入组装。"""
     text = str(message or "").strip()
     if text:
-        engine._driver.enqueue_followup(text)
+        engine._driver.enqueue_followup(text, extra=extra)
 
 def drain_interrupt_messages(engine) -> list[str]:
     """取出并清空未认领的 next-turn（兼容旧 API）。"""
@@ -192,6 +198,83 @@ async def followup(
     )
     result = await engine._driver.wait_for_item(item)
     return result if isinstance(result, ChatResult) else ChatResult(reply="")
+
+
+async def _run_entry_jev(
+    engine: Any,
+    user_message: str,
+    extra: dict[str, Any],
+    *,
+    on_event: EventCallback | None,
+) -> str:
+    """Run the independent entry decisions without serializing their waits."""
+    from excelmanus.system_one.budget import JevTurnBudget, reset_turn_budget
+    from excelmanus.system_one.host import clear_turn_exposure, maybe_record_turn_exposure
+    from excelmanus.system_one.intent_context import suggest_context
+
+    # Both decisions read bounded snapshots prepared for this turn and neither
+    # consumes the other's answer.  The first task establishes the shared
+    # budget synchronously before its provider await; reservations themselves
+    # are synchronous, so concurrent tasks cannot overspend it.
+    # Initialize shared per-turn state before either task is scheduled.  The
+    # exposure evaluator normally performs this reset itself, but doing it
+    # inside one concurrent task would race with context.resolve's decision and
+    # could make the two calls reserve against different budget objects.
+    clear_turn_exposure(engine)
+    budget = extra.get("jev_budget")
+    if isinstance(budget, JevTurnBudget):
+        engine._jev_turn_budget = budget
+    else:
+        reset_turn_budget(engine)
+    engine._jev_context_input = extra.get("context_input") or {}
+
+    async def _run_exposure() -> Exception | None:
+        try:
+            await maybe_record_turn_exposure(
+                engine,
+                user_message,
+                on_event=on_event,
+                budget=budget,
+                reset=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # keep the independent context decision alive
+            return exc
+        return None
+
+    async def _run_context() -> str | Exception:
+        try:
+            return await suggest_context(
+                engine,
+                user_message,
+                extra.get("context_input"),
+                on_event=on_event,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # keep the main turn fail-open
+            return exc
+
+    exposure_task = asyncio.create_task(
+        _run_exposure(),
+    )
+    context_task = asyncio.create_task(
+        _run_context(),
+    )
+    exposure_result, context_result = await asyncio.gather(
+        exposure_task,
+        context_task,
+    )
+    if isinstance(exposure_result, Exception):
+        logger.debug("Jev 回合入口评估失败；继续主流程", exc_info=exposure_result)
+    if isinstance(context_result, Exception):
+        logger.debug("Jev 上下文评估失败；继续主流程", exc_info=context_result)
+        context_advice = ""
+    else:
+        context_advice = context_result if isinstance(context_result, str) else ""
+    return context_advice
+
 
 async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     """认领后才路由并写入 memory。返回 ChatResult 表示短路径结束本 turn。"""
@@ -351,13 +434,12 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
             return ChatResult(reply=reply, tool_calls=[], iterations=1, truncated=False)
 
     engine._turn_image_count = len(normalized_images)
-    from excelmanus.system_one.host import maybe_record_turn_exposure
-
-    await maybe_record_turn_exposure(engine, user_message, on_event=on_event, budget=extra.get("jev_budget"))
-    engine._jev_context_input = extra.get("context_input") or {}
-    from excelmanus.system_one.intent_context import suggest_context
-
-    context_advice = await suggest_context(engine, user_message, extra.get("context_input"), on_event=on_event)
+    context_advice = await _run_entry_jev(
+        engine,
+        user_message,
+        extra,
+        on_event=on_event,
+    )
 
     from excelmanus.prompt.skill_catalog import prepare_skill_followup
     route_result, skill_invocation = prepare_skill_followup(
@@ -451,6 +533,8 @@ def finalize_driver_turn(
         _latest = engine._state.prompt_injection_snapshots[-1]
         if _latest.get("session_turn") == engine._session_turn:
             _injection_summary_for_diag = _latest.get("summary", [])
+    from excelmanus.system_one.host import jev_turn_metrics
+    _jev_metrics = jev_turn_metrics(engine)
     engine._session_diagnostics.append({
         "session_turn": engine._session_turn,
         "tool_access": chat_result.tool_access,
@@ -463,6 +547,7 @@ def finalize_driver_turn(
         "write_guard_triggered": chat_result.write_guard_triggered,
         "turn_diagnostics": [d.to_dict() for d in engine._turn_diagnostics],
         "prompt_injection_summary": _injection_summary_for_diag,
+        "jev_metrics": _jev_metrics,
     })
 
     elapsed = time.monotonic() - chat_start
@@ -480,10 +565,7 @@ def finalize_driver_turn(
             total_tokens=chat_result.total_tokens,
         ),
     )
-    from excelmanus.system_one.host import (
-        emit_recovery_outcome,
-        remember_turn_tools,
-    )
+    from excelmanus.system_one.host import emit_recovery_outcome, remember_turn_tools
 
     remember_turn_tools(engine, chat_result)
     try:

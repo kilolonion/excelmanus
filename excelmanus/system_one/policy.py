@@ -502,6 +502,21 @@ def _synthesize_ui(evaluation: Evaluation, state: Mapping[str, Any]) -> Decision
             evaluation=evaluation,
             extras={"surface": "stay", "suppress_heuristic": False},
         )
+    wants_to_see = noul_of(evaluation.answers.get("wants_to_see"), default=0.5)
+    if chosen not in {"stay", "none"} and wants_to_see < T_SUGGEST:
+        # Navigation is a user-facing side effect.  If the request did not ask
+        # to view/open/compare the artifact, keep the current surface and stop
+        # the generic post-mutation auto-open heuristic when confidence is high.
+        return Decision(
+            kind="noop",
+            reason="user_did_not_request_surface",
+            evaluation=evaluation,
+            extras={
+                "surface": "stay",
+                "suppress_heuristic": surface.confidence >= T_CODE,
+                "wants_to_see": wants_to_see,
+            },
+        )
     suppress = chosen == "stay" and surface.confidence >= T_CODE
     candidates = list(state.get("candidate_files") or [])
     index_map = {"first": 0, "second": 1, "third": 2}

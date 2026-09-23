@@ -30,7 +30,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   useSessionStore.setState({ activeSessionId: "s1", sessions: [session] });
   useChatStore.setState({ pendingQuestion: question });
-  useExcelStore.setState({ activeWorkspaceKey: "id:w1", fullViewPath: null, panelOpen: false, activeFilePath: null, selectionMode: false, draftRange: null, pendingSelection: null });
+  useExcelStore.setState({ activeWorkspaceKey: "id:w1", fullViewPath: null, panelOpen: false, activeFilePath: null, selectionMode: false, draftRange: null, pendingSelection: null, autoOpenSuppressedSessionId: null, dismissedPaths: new Set() });
   useWorkbookInteractionStore.setState({ request: null, presentation: null });
   useWorkbookFocusStore.getState().clear();
 });
@@ -134,5 +134,26 @@ describe("workbook questions", () => {
     useExcelStore.getState().closePanel();
     dispatchSSEEvent({ event: "tool_call_end", data: { tool_name: "show_workbook", tool_call_id: "show1", success: true, result: JSON.stringify(presentation) } }, { ...ctx, fromReplay: true });
     expect(useExcelStore.getState().panelOpen).toBe(false);
+  });
+
+  it("honors a user close across later presentations and completion, but lets the user reopen", () => {
+    const ctx: SSEHandlerContext = { assistantMsgId: "m1", effectiveSessionId: "s1", isFirstSend: true, thinkingInProgress: false, hadStreamError: false,
+      batcher: { pushText() {}, pushThinking() {}, flush() {}, dispose() {}, hasPendingContent: () => false } };
+    useChatStore.getState().setMessages([]);
+    useChatStore.getState().addAssistantMessage("m1");
+    useChatStore.getState().setPendingQuestion(null);
+    const presentation = { kind: "workbook_presentation", target, stage: "changed", summary: "已处理金额" };
+    const event = { event: "tool_call_end", data: { tool_name: "show_workbook", success: true, result: JSON.stringify(presentation) } };
+    dispatchSSEEvent(event, ctx);
+    expect(useExcelStore.getState().panelOpen).toBe(true);
+    useExcelStore.getState().closePanel();
+    dispatchSSEEvent(event, { ...ctx, suppressAutoOpen: false });
+    expect(useExcelStore.getState().panelOpen).toBe(false);
+    useChatStore.getState().addAffectedFiles("m1", [target.file_path]);
+    dispatchSSEEvent({ event: "done", data: {} }, { ...ctx, suppressAutoOpen: false });
+    expect(useExcelStore.getState().panelOpen).toBe(false);
+    render(<WorkbookPresentationCard result={JSON.stringify(presentation)} />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(useExcelStore.getState().panelOpen).toBe(true);
   });
 });

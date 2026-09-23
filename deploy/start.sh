@@ -715,6 +715,19 @@ _start_frontend() {
   if [[ "$PRODUCTION" == true ]]; then
     # 优先使用 standalone 模式（Next.js 16 + output: "standalone"）
     if [[ -f "web/.next/standalone/server.js" ]]; then
+      # `next build` writes `.next/static` beside (rather than inside) the
+      # standalone tree.  Source checkouts often start the server directly,
+      # without the deployment packaging step that normally copies these
+      # assets, which otherwise makes every browser chunk return 404.
+      if [[ ! -d "web/.next/standalone/.next/static" ]] ||
+         [[ -z "$(find web/.next/standalone/.next/static -type f -print -quit 2>/dev/null)" ]]; then
+        if [[ -d "web/.next/static" ]]; then
+          mkdir -p "web/.next/standalone/.next"
+          cp -a "web/.next/static" "web/.next/standalone/.next/"
+        else
+          warn "检测到 standalone/server.js，但缺少 web/.next/static，前端 chunk 可能无法加载"
+        fi
+      fi
       mode_label="standalone"
       run_cmd="node .next/standalone/server.js"
     else
@@ -727,6 +740,12 @@ _start_frontend() {
 
   # 将后端端口传递给 Next.js rewrite 代理（next.config.ts 读取 BACKEND_INTERNAL_URL）
   export BACKEND_INTERNAL_URL="http://127.0.0.1:${BACKEND_PORT}"
+  # 流式 SSE 必须绕过 Next.js rewrite，否则开发代理会把多个事件合并
+  # 后再转发，浏览器只能在很久以后一次性看到整段回复。桌面/生产部署
+  # 会显式提供自己的运行时地址；本地开发模式直接使用本次启动的端口。
+  if [[ "$PRODUCTION" != true && -z "${EXCELMANUS_RUNTIME_BACKEND_ORIGIN:-}" ]]; then
+    export EXCELMANUS_RUNTIME_BACKEND_ORIGIN="http://127.0.0.1:${BACKEND_PORT}"
+  fi
 
   if [[ -n "$LOG_DIR" ]]; then
     (cd web && HOSTNAME=127.0.0.1 PORT=${FRONTEND_PORT} exec $run_cmd >> "${LOG_DIR}/frontend.log" 2>&1) &

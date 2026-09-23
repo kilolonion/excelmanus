@@ -128,14 +128,15 @@ npm run prepare:backend
 
 `prepare:assets` includes the Web build and Python runtime preparation. Calling `prepare:frontend` and `prepare:runtime` alone does not produce a complete package.
 
-The staging script currently selects the official Node.js v22.23.2 distribution and checks it against the upstream SHA-256 manifest. The Python runtime is copied from uv's managed distribution and populated from the locked `desktop-runtime` dependency group: spreadsheet, document, analysis, plotting and VBA libraries. API/model/MCP dependencies remain in the frozen backend and are not duplicated in this interpreter. The managed interpreter's pip, IDLE, ensurepip and standard-library tests are excluded. Known dependency test suites and bytecode caches are removed; datasets, fonts, native libraries, runtime testing helpers and license metadata remain. Preparation runs offline feature checks before accepting the runtime. The frozen backend executable must not be used as a Python interpreter for `run_code`.
+The staging script currently selects the official Node.js v22.23.2 distribution and checks it against the upstream SHA-256 manifest. The Python runtime is copied from uv's managed distribution and populated from the locked `desktop-runtime` dependency group: spreadsheet, document, plotting and VBA libraries. Optional scientific-analysis extras remain available to source deployments but are not duplicated in the desktop installer. API/model/MCP dependencies remain in the frozen backend. The managed interpreter's pip, IDLE, ensurepip, GUI libraries and standard-library tests are excluded. Known dependency test suites and bytecode caches are removed; datasets, fonts, native libraries, runtime testing helpers and license metadata remain. Preparation runs offline feature checks before accepting the runtime. The frozen backend executable must not be used as a Python interpreter for `run_code`.
 
 The frozen API backend excludes optional plotting/scientific/GUI integrations
 that pandas and Pillow can pull in during analysis. NumPy, pandas, Pillow and
-spreadsheet/document engines remain in the backend; SciPy, sklearn, Matplotlib,
-Seaborn, Plotly and Tk remain in the separate interpreter. Frozen smoke checks
-execute scientific analysis and chart creation through the real sandboxed
-`run_code` path, in addition to checking the interpreter's standalone features.
+spreadsheet/document engines remain in the backend; Matplotlib is kept in the
+separate interpreter for local chart creation, while SciPy, sklearn, Seaborn,
+Plotly and Tk remain source-deployment or host-only extras. Frozen smoke checks
+execute workbook reads and chart creation through the real sandboxed `run_code`
+path, in addition to checking the interpreter's standalone features.
 ExcelManus source files and executable skill scripts remain available; redundant
 source copies of FastAPI, Uvicorn and tiktoken are omitted from the backend.
 

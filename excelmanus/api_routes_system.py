@@ -26,6 +26,7 @@ from excelmanus.api_app_state import (
     get_draining,
     get_file_registry as _get_file_registry,
     get_restart_reason,
+    get_runtime,
     get_session_manager,
     get_skillpack_loader,
     get_tool_registry,
@@ -583,6 +584,8 @@ async def health(request: Request) -> dict:
             "status": "draining",
             "version": excelmanus.__version__,
             "restart_reason": get_restart_reason(),
+            "worker_id": get_runtime().worker_id,
+            "worker_count": get_runtime().worker_count,
         }
 
     details = request.query_params.get("details", "").strip() in {"1", "true", "yes"}
@@ -634,4 +637,7 @@ async def health(request: Request) -> dict:
         "deploy_mode": _config.deploy_mode if _config is not None else "standalone",
         "auth_required": access_enabled(),
         "authenticated": True,
+        "worker_id": get_runtime().worker_id,
+        "worker_count": get_runtime().worker_count,
+        "state_backend": "sqlite+workspace-transactions",
     }

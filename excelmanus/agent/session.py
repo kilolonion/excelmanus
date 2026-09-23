@@ -1215,9 +1215,14 @@ class AgentEngine:
         return _impl(self)
 
 
-    def push_interrupt_message(self, message: str) -> None:
+    def push_interrupt_message(
+        self,
+        message: str,
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         from excelmanus.agent.session_api import push_interrupt_message as _impl
-        return _impl(self, message)
+        return _impl(self, message, extra=extra)
 
 
     def drain_interrupt_messages(self) -> list[str]:

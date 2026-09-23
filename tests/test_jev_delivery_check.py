@@ -1,4 +1,4 @@
-"""Jev 交付检查接线：写入回合的纯文本答复先暂存，核对通过才放行。禁止打网。"""
+"""Jev 交付检查保持实时流式输出，仅撤回未通过的草稿。禁止打网。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -78,8 +78,8 @@ def _written_engine(**overrides: object) -> AgentEngine:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("emit_events", [True, False])
-async def test_delivery_check_holds_text_and_reasks(emit_events: bool) -> None:
-    """inspect_more：草稿的 TEXT_DELTA 不外发，注入隐藏建议后再跑一迭代。"""
+async def test_delivery_check_retracts_draft_and_reasks(emit_events: bool) -> None:
+    """inspect_more：已流式展示的草稿撤回，建议仍注入下一迭代。"""
     engine = _written_engine()
     mocked_create = _queue_streams(engine, ["草稿答复", "核对后的最终答复"])
     events: list = []
@@ -94,8 +94,11 @@ async def test_delivery_check_holds_text_and_reasks(emit_events: bool) -> None:
         )
     mocked_eval.assert_awaited_once()
     assert mocked_create.await_count == 2
-    # 草稿文本被暂存后丢弃，最终答复正常流式发出
-    assert _text_deltas(events) == (["核对后的最终答复"] if emit_events else [])
+    assert _text_deltas(events) == (["草稿答复", "核对后的最终答复"] if emit_events else [])
+    retractions = [event for event in events if event.event_type == EventType.RETRACT_TEXT]
+    assert len(retractions) == (1 if emit_events else 0)
+    if emit_events:
+        assert retractions[0].iteration == 1
     assert result.reply == "核对后的最终答复"
     # 草稿进了记忆但不展示；隐藏建议消息已注入
     hidden = [
@@ -106,16 +109,23 @@ async def test_delivery_check_holds_text_and_reasks(emit_events: bool) -> None:
     assert hidden[0].get("_ui_hidden") is True
     assert "交付检查" in hidden[0]["content"]
     assert engine._mutation_verification["next"] == "inspect_more"
+    draft = next(m for m in engine._memory.messages if m.get("_prompt_kind") == "jev_delivery_draft")
+    from excelmanus.chat_history import ChatHistoryStore
+    assert ChatHistoryStore._durable_payload(draft)["_ui_hidden"] is True
 
 
 @pytest.mark.asyncio
-async def test_delivery_check_pass_flushes_held_text() -> None:
-    """next=none：暂存的 TEXT_DELTA 按原顺序在最终答复前放出。"""
+async def test_delivery_check_does_not_buffer_live_text() -> None:
+    """第一段须在第二段生成前到达 UI，且核对期间无需等待整段刷新。"""
     engine = _written_engine()
     events: list = []
-    engine._client.chat.completions.create = AsyncMock(
-        side_effect=lambda **_kw: _multi_chunk_stream(),
-    )
+    async def live_stream():
+        yield StreamDelta(content_delta="第一部分")
+        assert _text_deltas(events) == ["第一部分"]
+        yield StreamDelta(content_delta="第二部分")
+        assert _text_deltas(events) == ["第一部分", "第二部分"]
+        yield StreamDelta(finish_reason="stop", usage={"prompt_tokens": 2, "completion_tokens": 2})
+    engine._client.chat.completions.create = AsyncMock(side_effect=lambda **_kw: live_stream())
     initial = [ToolCallResult("edit_spreadsheet", {"file_path": "a.xlsx"}, "ok", True)]
     initial[0].structured = ToolResult(success=True, model_text="ok", value={
         "meta": {"write_verification": {"status": "success", "sheet": "Sheet1"}},
@@ -131,6 +141,7 @@ async def test_delivery_check_pass_flushes_held_text() -> None:
     mocked_eval.assert_awaited_once()
     assert _text_deltas(events) == ["第一部分", "第二部分"]
     assert result.reply == "第一部分第二部分"
+    assert not any(event.event_type == EventType.RETRACT_TEXT for event in events)
 
 
 async def _multi_chunk_stream():
@@ -179,8 +190,8 @@ async def test_delivery_check_lists_unevidenced_items() -> None:
     assert "待核对事项" in content
     assert "汇总 B 列" in content
     assert "如实列为未完成" in content
-    # 第二次答复不再被拦：暂存文本正常放出
-    assert _text_deltas(events) == ["最终答复"]
+    assert _text_deltas(events) == ["草稿答复", "最终答复"]
+    assert sum(event.event_type == EventType.RETRACT_TEXT for event in events) == 1
     assert result.reply == "最终答复"
 
 

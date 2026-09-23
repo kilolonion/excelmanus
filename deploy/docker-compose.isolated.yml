@@ -1,0 +1,13 @@
+services:
+  excelmanus:
+    group_add:
+      - "${DOCKER_GID:-999}"
+    environment:
+      # The API container itself remains unprivileged.  The opt-in Docker
+      # code runner requires the host Docker socket and a custom runtime image
+      # that contains pandas/openpyxl; do not enable this override on shared
+      # multi-tenant hosts without a socket broker.
+      EXCELMANUS_EXECUTION_ISOLATION: docker
+      EXCELMANUS_DOCKER_IMAGE: excelmanus/runtime:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

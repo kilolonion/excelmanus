@@ -1219,7 +1219,18 @@ class SessionManager:
                 and self._chat_history is not None
                 and self._chat_history.session_exists(session_id)
             ):
-                history_messages = self._chat_history.load_messages(session_id)
+                # Event-log sessions rebuild their surface from the durable
+                # event stream inside _create_engine_with_history.  Loading
+                # the messages snapshot here as well only to discard it later
+                # doubled cold-restore JSON/SQLite work for long sessions.
+                # Some lightweight test/bench stores expose a truthy mock
+                # instead of a real bool; only an explicit True means the
+                # event-log surface is authoritative.
+                has_event_log = bool(getattr(self._config, "session_log_enabled", True)) and (
+                    self._chat_history.has_events(session_id) is True
+                )
+                if not has_event_log:
+                    history_messages = self._chat_history.load_messages(session_id)
                 restored = True
             elif self._chat_history is not None and not self._chat_history.session_exists(new_id):
                 path, ws_id = self.default_workspace_binding()
@@ -1687,7 +1698,13 @@ class SessionManager:
             entry = self._sessions.get(session_id)
             return entry.in_flight if entry is not None else False
 
-    async def enqueue_user_interrupt(self, session_id: str, message: str) -> bool:
+    async def enqueue_user_interrupt(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
         """飞行中用户消息入 next-turn。成功入队返回 True，否则 False。"""
         text = str(message or "").strip()
         if not session_id or not text:
@@ -1696,7 +1713,7 @@ class SessionManager:
             entry = self._sessions.get(session_id)
             if entry is None or not entry.in_flight:
                 return False
-            entry.engine.push_interrupt_message(text)
+            entry.engine.push_interrupt_message(text, extra=extra)
             logger.info("会话 %s 插话已入队（%d 字）", session_id[:8], len(text))
             return True
 
@@ -1887,6 +1904,24 @@ class SessionManager:
 
         # ── 锁外：序列化（可能耗时但不阻塞其他会话） ──
         if engine is not None:
+            history_revision = ""
+            active_stream_id: str | None = None
+            latest_seq = 0
+            try:
+                if self._chat_history is not None:
+                    meta = self._chat_history.get_session_meta(session_id) or {}
+                    history_revision = str(meta.get("updated_at") or "")
+            except Exception:
+                logger.debug("读取会话历史版本失败", exc_info=True)
+            try:
+                from excelmanus.api_app_state import get_runtime
+
+                stream = get_runtime().session_stream_states.get(session_id)
+                if stream is not None:
+                    active_stream_id = str(getattr(stream, "stream_id", "") or "") or None
+                    latest_seq = int(getattr(stream, "current_seq", 0) or 0)
+            except Exception:
+                logger.debug("读取会话流状态失败", exc_info=True)
             messages = []
             if include_messages and hasattr(engine, "raw_messages"):
                 raw_messages = list(engine.raw_messages)
@@ -1953,6 +1988,9 @@ class SessionManager:
                 "id": session_id,
                 "message_count": len(engine.raw_messages) if hasattr(engine, "raw_messages") else 0,
                 "in_flight": in_flight,
+                "history_revision": history_revision,
+                "active_stream_id": active_stream_id,
+                "latest_seq": latest_seq,
                 "messages": messages,
                 "full_access_enabled": engine.full_access_enabled,
                 "auto_approve_enabled": engine.auto_approve_enabled,
@@ -1975,6 +2013,13 @@ class SessionManager:
                 if include_messages
                 else self._chat_history.get_message_count(session_id)
             )
+            history_revision = ""
+            try:
+                history_revision = str(
+                    (self._chat_history.get_session_meta(session_id) or {}).get("updated_at") or ""
+                )
+            except Exception:
+                logger.debug("读取历史会话版本失败", exc_info=True)
             _fa = False
             _uc = self._resolve_user_config_store()
             if _uc is not None and hasattr(_uc, "get_full_access"):
@@ -1983,6 +2028,9 @@ class SessionManager:
                 "id": session_id,
                 "message_count": message_count,
                 "in_flight": False,
+                "history_revision": history_revision,
+                "active_stream_id": None,
+                "latest_seq": 0,
                 "messages": messages,
                 "full_access_enabled": _fa,
                 "auto_approve_enabled": (

@@ -324,6 +324,8 @@ if "%BACKEND_ONLY%"=="1" goto :skip_frontend
 
 REM 将后端端口传递给 Next.js rewrite 代理（next.config.ts 读取 BACKEND_INTERNAL_URL）
 set "BACKEND_INTERNAL_URL=http://127.0.0.1:%BACKEND_PORT%"
+REM 开发模式下让 SSE 直连后端，避免 Next.js rewrite 合并事件后再转发。
+if "%PRODUCTION%"=="0" if not defined EXCELMANUS_RUNTIME_BACKEND_ORIGIN set "EXCELMANUS_RUNTIME_BACKEND_ORIGIN=http://127.0.0.1:%BACKEND_PORT%"
 
 if "%PRODUCTION%"=="1" (
     echo [--] 启动 Next.js 前端 [start] [端口 %FRONTEND_PORT%]...

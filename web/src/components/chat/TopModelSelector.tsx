@@ -97,6 +97,7 @@ export function TopModelSelector() {
   const [open, setOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const modelsRequestRef = useRef(0);
+  const capabilitiesLoadedRef = useRef(false);
   const isMobile = useIsMobile();
 
   const fetchModels = () => {
@@ -114,26 +115,47 @@ export function TopModelSelector() {
       .catch(() => {});
   };
 
-  useEffect(() => {
-    fetchModels();
-    // 加载模型健康状态
+  const fetchCapabilities = () => {
+    if (capabilitiesLoadedRef.current) return;
+    capabilitiesLoadedRef.current = true;
     apiGet<{ items: ModelCapabilitySummary[] }>("/config/models/capabilities/all")
       .then((data) => {
         const map: Record<string, { healthy: boolean | null; health_error: string }> = {};
         for (const item of data.items) {
           if (item.capabilities) {
-            map[item.name] = { healthy: item.capabilities.healthy, health_error: item.capabilities.health_error };
+            map[item.name] = {
+              healthy: item.capabilities.healthy,
+              health_error: item.capabilities.health_error,
+            };
           }
         }
         setCapsMap(map);
       })
-      .catch(() => {});
+      .catch(() => {
+        capabilitiesLoadedRef.current = false;
+      });
+  };
+
+  useEffect(() => {
+    fetchModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Health details are only needed while choosing a model.  Keeping this out
+  // of the initial workspace request fan-out makes the chat surface usable
+  // before the (potentially large) profile capability list is read.
+  useEffect(() => {
+    if (open) fetchCapabilities();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   // 当 Settings 页 profile 变更时自动刷新模型列表
   useEffect(() => {
-    if (modelProfileVersion > 0) fetchModels();
+    if (modelProfileVersion > 0) {
+      capabilitiesLoadedRef.current = false;
+      setCapsMap({});
+      fetchModels();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelProfileVersion]);
 

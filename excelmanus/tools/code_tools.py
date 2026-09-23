@@ -234,6 +234,12 @@ def _resolve_candidate_executable(command: list[str]) -> str | None:
             resolved = str(Path(executable).expanduser().resolve())
         else:
             resolved = shutil.which(executable)
+            if resolved:
+                # ``shutil.which`` may return a symlink (the desktop runtime
+                # commonly exposes python/python3 as aliases).  Normalize
+                # both explicit and PATH candidates to the same real binary
+                # before de-duplicating probes.
+                resolved = str(Path(resolved).expanduser().resolve())
     except OSError:
         return None
     if not resolved:
@@ -1084,10 +1090,15 @@ def _execute_script(
 
     # ── 沙盒 wrapper 注入（所有安全等级均注入） ──
     temp_wrapper: Path | None = None
+    from excelmanus.execution_isolation import docker_enabled, prepare_command
+
+    # The wrapper performs path checks itself.  Its root must match the mount
+    # point when Docker is enabled rather than the host's absolute path.
+    wrapper_workspace_root = "/workspace" if docker_enabled() else str(guard.workspace_root)
     from excelmanus.security.sandbox_hook import generate_wrapper_script
     wrapper_src = generate_wrapper_script(
         sandbox_tier,
-        str(guard.workspace_root),
+        wrapper_workspace_root,
         allow_external_files=allow_external_files,
     )
     temp_dir = guard.workspace_root / "scripts" / "temp"
@@ -1095,6 +1106,13 @@ def _execute_script(
     temp_wrapper = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
     temp_wrapper.write_text(wrapper_src, encoding="utf-8")
     command = [*sandbox_python_cmd, str(temp_wrapper), str(script_safe), *safe_args]
+    command, process_cwd, process_env, _containerized = prepare_command(
+        command,
+        workspace_root=guard.workspace_root,
+        workdir=workdir_safe,
+        env=sandbox_env,
+        allow_network=allow_network,
+    )
 
     started = time.time()
     timed_out = False
@@ -1106,6 +1124,7 @@ def _execute_script(
     from excelmanus.tools.runtime import (
         current_execution,
         register_killable_process,
+        _terminate_process_tree,
         terminate_killable_processes,
         unregister_killable_process,
     )
@@ -1114,14 +1133,14 @@ def _execute_script(
 
     try:
         run_kwargs: dict[str, Any] = {
-            "cwd": workdir_safe,
+            "cwd": process_cwd,
             "capture_output": True,
             "text": True,
             "encoding": "utf-8",
             "errors": "replace",
             "timeout": timeout_seconds,
             "check": False,
-            "env": sandbox_env,
+            "env": process_env if _containerized else sandbox_env,
             "stdin": subprocess.DEVNULL,
             "close_fds": True,
             "start_new_session": True,
@@ -1150,11 +1169,7 @@ def _execute_script(
                 if execution_id:
                     terminate_killable_processes(execution_id)
                 else:
-                    try:
-                        process.kill()
-                        process.wait(timeout=3)
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
+                    _terminate_process_tree(process)
                 stdout, stderr = process.communicate()
                 if not stdout:
                     stdout = (
@@ -1299,6 +1314,8 @@ def _execute_script(
         "pending_discarded": pending_discarded,
         "sandbox_tier": sandbox_tier,
     }
+    from excelmanus.execution_isolation import isolation_mode
+    result["execution_isolation"] = isolation_mode()
 
     if readonly_exec:
         notes = list(discarded_targets)

@@ -167,6 +167,18 @@ async def test_e_signed_auto_uses_audit(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_e_auto_without_calibration_keeps_human_approval() -> None:
+    engine, pending = _ask_engine(jev_enabled="enforce", jev_calibrated=False)
+    handler = HighRiskApprovalHandler(engine=engine, dispatcher=MagicMock())
+    with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=_auto())):
+        outcome = await handler.handle("delete_file", "c1", {"file_path": "a.xlsx"})
+    engine.approval.create_pending.assert_called_once()
+    engine.execute_tool_with_audit.assert_not_called()
+    assert outcome.pending_approval is True
+    assert outcome.approval_id == pending.approval_id
+
+
+@pytest.mark.asyncio
 async def test_e_child_does_not_evaluate(monkeypatch: pytest.MonkeyPatch) -> None:
     _sign(monkeypatch)
     engine, _pending = _ask_engine(jev_enabled="enforce", jev_calibrated=True)

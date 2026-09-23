@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.pyc
+web/node_modules
+node_modules
+desktop/dist*
+outputs
+uploads
+logs
+.pytest_cache
+.hypothesis
+.excelmanus
+.tmp

@@ -18,6 +18,10 @@
 | `EXCELMANUS_DEPLOY_MODE` | `auto`/`standalone`/`server`；`auto` 与未知值均为 standalone；`server` 必须显式指定 | `auto` |
 | `EXCELMANUS_API_HOST` / `EXCELMANUS_API_PORT` / `EXCELMANUS_BACKEND_PORT` / `EXCELMANUS_FRONTEND_PORT` | 监听地址与端口 | 见启动脚本 |
 | `EXCELMANUS_WEB_WORKERS` | uvicorn worker 数；`>1` 时 API 会提示会话与缓存可能分散到多个进程。单机保持 `1` | 由 `deploy/start.*` 设置，默认 `1` |
+| `EXCELMANUS_EXECUTION_ISOLATION` | `local`（默认）或 `docker`；Docker 模式将 `run_code` 放入短生命周期容器，并按 CPU、内存、PID 和网络策略限制 | `local` |
+| `EXCELMANUS_DOCKER_IMAGE` | Docker 代码运行镜像，需包含 Python 及所需 Excel 依赖 | `excelmanus/runtime:latest` |
+| `EXCELMANUS_DOCKER_NETWORK` | Docker 代码运行网络策略，默认 `none` | `none` |
+| `EXCELMANUS_DOCKER_CPUS` / `EXCELMANUS_DOCKER_MEMORY` / `EXCELMANUS_DOCKER_PIDS_LIMIT` | 单次 Docker 代码运行的资源上限 | `2` / `2g` / `256` |
 | `EXCELMANUS_MANAGE_TOKEN` | 可选的自动化/桌面访问令牌，至少 16 字符；兼容 `Authorization: Bearer` 或 `X-ExcelManus-Token`，不支持 URL 查询参数 | 空 |
 | `EXCELMANUS_LOGIN_USERNAME` | 首次部署的单管理员账号；设置 → 安全保存的账号优先 | `admin` |
 | `EXCELMANUS_LOGIN_PASSWORD` | 首次部署的管理员密码，至少 12 字符；设置 → 安全保存的密码优先 | 空（本机默认不启用） |
@@ -387,12 +391,12 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 | `EXCELMANUS_JEV_ACTIVE_PROVIDER` | 当前决策提供商 id（`typesafe` / `vercel` / `custom-*`） | — |
 | `EXCELMANUS_JEV_PROVIDERS` | 决策提供商列表（含密钥，Fernet 加密） | `[]` |
 | `EXCELMANUS_JEV_TIMEOUT_SECONDS` | 单次评估超时 | `1.5` |
-| `EXCELMANUS_JEV_CALIBRATED` | 旧版标定字段，保留用于兼容，运行时不再作为生效门槛 | `false` |
+| `EXCELMANUS_JEV_CALIBRATED` | 高风险审批自动放行的标定开关；还需要 approval pack 的签名标定；未满足时 Jev 仍可拒绝或给出建议，但不能跳过人工确认 | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe 直连密钥（与提供商列表同步） | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway 密钥（与提供商列表同步） | — |
 | `EXCELMANUS_MODEL_CANONICAL_MATCH` | 「模型 → 模型配置」的模型名智能匹配：保存档案时按置信度把 Model ID 绑定到已知规范模型名，继承其上下文窗口与能力配置；不改写发给上游的 Model ID，开启时会为已有档案补绑 | `true` |
 
-这是可选的决策模型功能，需要 `system-one` extra。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。旧配置中的 `shadow` 会在读取时迁移为 `enforce`，`EXCELMANUS_JEV_CALIBRATED` 不再阻止已开启环节生效。
+这是可选的决策模型功能，需要 `system-one` extra。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。高风险审批另有一层保护：只有 `EXCELMANUS_JEV_CALIBRATED=true` 且 approval pack 已通过签名标定时，Jev 才能把高风险调用从人工确认改为自动放行；拒绝和普通建议不受此开关阻断。旧配置中的 `shadow` 会在读取时迁移为 `enforce`。
 
 ## 加密配置
 
@@ -439,6 +443,8 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 4. FileRegistry 扫描会跳过名为 `users` 的目录，避免把归档残骸扫进工作区。
 
 ## 变更记录
+
+- 2026-09-23：Jev 入口评估改为共享预算并行执行；高风险自动放行需要签名标定；上下文建议增加 advisory 信任封装；时间线补充概率分布和回合指标；界面建议超时不再阻塞主回复。
 
 - 2026-09-21：新增 `EXCELMANUS_WEB_UPGRADE_ENABLED` 服务器网页更新开关、Agent 自我管理（`EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED`）与模型名智能匹配（`EXCELMANUS_MODEL_CANONICAL_MATCH`）说明。
 

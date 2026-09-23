@@ -34,7 +34,11 @@ def _decision() -> Decision:
     evaluation = Evaluation(
         pack_id="exposure.turn",
         answers={
-            "domain": ChoiceAnswer("chitchat", confidence=0.91),
+            "domain": ChoiceAnswer(
+                "chitchat",
+                probabilities={"chitchat": 0.5, "spreadsheet_write": 0.3, "mixed": 0.2},
+                confidence=0.91,
+            ),
             "needs_write": NoulAnswer(0.02),
             "mode_mismatch": ChoiceAnswer("keep", confidence=0.8),
         },
@@ -80,6 +84,8 @@ def test_payload_shape_is_bounded_and_has_impact() -> None:
     assert payload["answers"]["domain"] == "chitchat"
     assert payload["answers"]["needs_write"] == pytest.approx(0.02)
     assert payload["answers"]["mode_hint"] == "keep"
+    assert payload["probabilities"]["domain"]["chitchat"] == pytest.approx(0.5)
+    assert payload["probabilities"]["needs_write"]["true"] == pytest.approx(0.02)
     assert payload["evaluated"] is True
     assert payload["stage"] == "evaluation"
     assert "后续执行记录" in payload["impact"]
@@ -129,6 +135,21 @@ def test_emit_sends_jev_trace_on_enforce() -> None:
     assert traces
     assert traces[0].jev_trace["pack"] == "exposure.turn"
     assert traces[0].jev_trace["gate"] == "enforce"
+
+
+def test_emit_updates_bounded_turn_metrics() -> None:
+    captured: list[ToolCallEvent] = []
+    engine = SimpleNamespace(
+        config=_config(jev_enabled="enforce", jev_exposure="enforce"),
+        _subagent_config=None,
+        _is_host_session=True,
+        _driver=SimpleNamespace(_on_event=None),
+        _jev_metrics={"evaluated": 0, "effects": 0, "outcomes": 0, "unavailable": 0, "latency_ms": 0.0},
+        _emit=lambda on_event, event: captured.append(event) or (on_event and on_event(event)),
+    )
+    emit_jev_trace(engine, _decision(), pack_id="exposure.turn", on_event=captured.append)
+    assert engine._jev_metrics["evaluated"] == 1
+    assert engine._jev_metrics["latency_ms"] == pytest.approx(312.4)
 
 
 def test_emit_is_silent_when_jev_is_inactive() -> None:

@@ -48,6 +48,7 @@ export interface WorkspaceFolder {
 export interface SessionDetail {
   id: string;
   messageCount: number;
+  historyRevision?: string;
   inFlight: boolean;
   activeStreamId: string | null;
   latestSeq: number;
@@ -135,7 +136,7 @@ export interface SessionTaskList {
 
 export type AssistantBlock =
   | { type: "thinking"; content: string; duration?: number; startedAt?: number }
-  | { type: "text"; content: string }
+  | { type: "text"; content: string; iteration?: number }
   | {
       type: "tool_call";
       toolCallId?: string;

@@ -694,8 +694,17 @@ class WorkspaceFileService:
                     stack.callback(_release_lock, handle)
                 for dep in deps:
                     path = self.root / self._canonical(dep.path)
-                    if not path.is_file() or content_version_of(path.read_bytes()) != dep.version:
-                        raise CommitError("VERSION_CONFLICT", f"读取依赖已变化：{dep.path}")
+                    actual = content_version_of(path.read_bytes()) if path.is_file() else None
+                    if actual != dep.version:
+                        raise CommitError(
+                            "VERSION_CONFLICT",
+                            f"读取依赖已变化：{dep.path}",
+                            fields={
+                                "path": self._canonical(dep.path),
+                                "expected_version": dep.version,
+                                "content_version": actual or "",
+                            },
+                        )
                 prepared = [self._prepare_target(spec) for spec in specs]
                 targets = [p.rel for p in prepared]
                 sources = [p.from_rel for p in prepared if p.from_rel]

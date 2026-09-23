@@ -59,6 +59,8 @@ import { registerChatFileUpload } from "./chat-upload-bridge";
 import { shouldCancelComposerNativeDrop } from "./chat-drop";
 import { ComposerRecoveryBar } from "./ComposerRecoveryBar";
 import { useExcelStore } from "@/stores/excel-store";
+import { useWordStore } from "@/stores/word-store";
+import { resolveWorkspaceSurface } from "@/lib/workspace-surface";
 import { findLastRetryableFailure } from "@/lib/failure-recovery";
 
 interface ChatInputProps {
@@ -70,7 +72,13 @@ interface ChatInputProps {
   composerDraft?: { seq: number; text: string; files: File[] } | null;
 }
 
-export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onStop, composerDraft }: ChatInputProps) {
+export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: streamingProp, onStop, composerDraft }: ChatInputProps) {
+  const liveStream = useChatStore((s) => s.isStreaming || s.abortController !== null);
+  const isStreaming = liveStream || Boolean(streamingProp);
+  const fullViewPath = useExcelStore((s) => s.fullViewPath);
+  const compareMode = useExcelStore((s) => s.compareMode);
+  const wordFullViewPath = useWordStore((s) => s.fullViewPath);
+  const showWorkbookContext = resolveWorkspaceSurface({ fullViewPath, compareMode, wordFullViewPath }) !== "excel";
   const sendPendingRef = useRef(false);
   const [text, setText] = useState("");
   const latestTextRef = useRef(text);
@@ -595,6 +603,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
   const handleSend = async () => {
     if (sendPendingRef.current) return;
+    if (disabled) {
+      nudgeInput("正在切换对话，请稍候");
+      return;
+    }
     if (configBlocked) {
       nudgeInput(getConfigBlockedHint());
       return;
@@ -826,6 +838,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (disabled) {
+        nudgeInput("正在切换对话，请稍候");
+        return;
+      }
       if (isStreaming && !pendingQuestion) {
         nudgeInput("助手正在回复，请稍候");
         return;
@@ -853,7 +869,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       highlighted={draftHighlight}
     >
       <ChatSelectionChip insertMentionTokens={insertMentionTokens} />
-      <WorkbookContextChip />
+      {showWorkbookContext && <WorkbookContextChip />}
       <ChatLiveSelectionChip />
       <ChatMentionList
         popover={popover}
@@ -1100,34 +1116,23 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         </div>
 
         <div className="flex-shrink-0">
-          <AnimatePresence mode="wait" initial={false}>
             {isStreaming && !pendingQuestion ? (
-              <motion.div
-                key="stop"
-                initial={{ scale: 0, rotate: -90 }}
-                animate={{ scale: 1, rotate: 0 }}
-                exit={{ scale: 0, rotate: 90 }}
-                transition={{ duration: 0.15, ease: "easeOut" }}
-              >
                 <Button
+                  key="stop"
                   data-coach-id="coach-stop-btn"
+                  aria-label="停止生成"
+                  title="停止生成"
                   size="icon"
                   className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full bg-foreground hover:bg-foreground/80"
                   onClick={onStop}
                 >
                   <Square className="h-3 w-3 fill-background text-background" />
                 </Button>
-              </motion.div>
             ) : (
-              <motion.div
-                key="send"
-                initial={{ scale: 0, rotate: 90 }}
-                animate={{ scale: 1, rotate: 0 }}
-                exit={{ scale: 0, rotate: -90 }}
-                transition={{ duration: 0.15, ease: "easeOut" }}
-              >
                 <Button
+                  key="send"
                   data-coach-id="coach-send-btn"
+                  aria-label={pendingQuestion ? "发送回答" : "发送消息"}
                   size="icon"
                   className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
@@ -1140,9 +1145,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                     <ArrowUp className="h-3.5 w-3.5" />
                   )}
                 </Button>
-              </motion.div>
             )}
-          </AnimatePresence>
         </div>
       </div>
       <UndoPanel open={undoPanelOpen} onClose={() => setUndoPanelOpen(false)} />

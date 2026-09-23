@@ -27,7 +27,7 @@ type RuntimeSnippet = {
 };
 
 const PICKER_TRIGGER_CLASS =
-  "inline-flex items-center gap-2 h-9 w-[clamp(9rem,42vw,13.75rem)] shrink-0 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed";
+  "em-model-picker-trigger inline-flex items-center gap-2 h-9 w-[clamp(9rem,42vw,13.75rem)] shrink-0 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed";
 
 function ModelPicker({
   valueLabel,
@@ -163,7 +163,7 @@ export function RoleModelSection() {
     >
       <div className="px-3 pb-3">
         <div className="rounded-lg border border-border/70 divide-y divide-border/70 overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-3">
+          <div className="em-model-role-row flex items-center gap-2 px-3 py-3">
             <div className="flex items-start gap-2 flex-1 min-w-0">
               <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0">
@@ -171,7 +171,7 @@ export function RoleModelSection() {
                 <p className="text-[11px] text-muted-foreground">处理日常对话、子代理与上下文压缩</p>
               </div>
             </div>
-            <div className="flex items-center justify-end gap-2">
+            <div className="em-model-role-picker flex items-center justify-end gap-2">
               {busy && activatingProfile && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
               <ModelPicker
                 valueLabel={active ? formatModelIdForDisplay(active.model) : "未选择"}
@@ -185,7 +185,7 @@ export function RoleModelSection() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 px-3 py-3">
+          <div className="em-model-role-row flex items-center gap-2 px-3 py-3">
             <div className="flex items-start gap-2 flex-1 min-w-0">
               <Brain className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0">
@@ -193,7 +193,7 @@ export function RoleModelSection() {
                 <p className="text-[11px] text-muted-foreground">用于记忆维护；可跟随聊天模型</p>
               </div>
             </div>
-            <div className="flex items-center justify-end gap-2">
+            <div className="em-model-role-picker flex items-center justify-end gap-2">
               {memorySaving && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
               <ModelPicker
                 valueLabel={

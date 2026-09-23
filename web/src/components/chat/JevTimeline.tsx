@@ -27,6 +27,12 @@ function statusIcon(trace: JevTrace, tone: ReturnType<typeof cardTone>) {
   return TONE_ICON[tone];
 }
 
+function probabilityText(question: string, options: Record<string, number>): string {
+  return Object.entries(options)
+    .map(([key, value]) => `${formatContextAnswer(question, key)} ${formatConfidence(value) ?? "—"}`)
+    .join(" · ");
+}
+
 function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
   const status = traceStatus(trace);
   const tone = cardTone(trace);
@@ -35,6 +41,7 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
     ? trace.impact : traceActionLabel(trace);
   const confidence = formatConfidence(trace.answers.confidence);
   const answers = Object.entries(trace.answers).filter(([key]) => ANSWER_LABELS[key] && key !== "confidence");
+  const probabilities = Object.entries(trace.probabilities ?? {});
   return (
     <article className="min-w-0 rounded-xl border border-border/70 bg-background p-3.5">
       <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -72,6 +79,19 @@ function DecisionCard({ trace, index }: { trace: JevTrace; index: number }) {
               <dd className="min-w-0 break-words text-right">{formatContextAnswer(key, value)}</dd>
             </div>
           ))}
+          {probabilities.length > 0 && (
+            <div className="border-t border-border/50 pt-2">
+              <dt className="text-muted-foreground">概率分布</dt>
+              <dd className="mt-1 space-y-1 break-words">
+                {probabilities.map(([key, options]) => (
+                  <div key={key}>
+                    <span className="text-muted-foreground">{ANSWER_LABELS[key] || key}</span>
+                    <span className="ml-2">{probabilityText(key, options)}</span>
+                  </div>
+                ))}
+              </dd>
+            </div>
+          )}
           {trace.source && (
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">记录来源</dt>

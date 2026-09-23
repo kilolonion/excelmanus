@@ -4,7 +4,9 @@
 
 [文档导航](README.md) · [运维手册](ops-manual.md) · [English operations guide](ops-manual_en.md)
 
-ExcelManus 当前有桌面应用、本机 Git 源码和服务器三种运行形态。升级会影响正在执行的任务，应在合适的时间进行；当前流程不承诺无中断切换。
+ExcelManus 当前有桌面应用、本机 Git 源码和服务器三种运行形态。升级会影响正在执行的任务，应在合适的时间进行。服务器部署可使用候选实例健康检查后切换的 blue/green 辅助流程；桌面和本机 Git 更新仍使用原有停机流程。
+
+服务器滚动切换可使用 `deploy/rolling_upgrade.sh`：它先启动候选后端并轮询 `/api/v1/health`，健康检查失败时保留旧实例；只有 nginx 配置检查和 reload 成功后才终止旧 PID。通过 `EXCELMANUS_NGINX_CONF` 指向实际配置，并让新旧实例共享 `EXCELMANUS_HOME` 与工作区卷。
 
 ## 桌面应用
 
@@ -90,7 +92,7 @@ bash ./deploy/deploy.sh rollback-to --commit COMMIT_SHA
 uv run python -m excelmanus.workspace.migrate /path/to/workspace --force
 ```
 
-`--force` 表示重新执行迁移；运行前先备份该工作区。当前不提供 Docker 安装流程、应用内蓝绿切换或多 worker 无中断滚动升级。
+`--force` 表示重新执行迁移；运行前先备份该工作区。Docker 部署入口位于 `deploy/docker-compose.yml`，默认启动两个 API worker、共享持久卷并提供容器健康检查。需要动态代码的强隔离时，再叠加 `docker-compose.isolated.yml` 并配置包含 pandas/openpyxl 的 `EXCELMANUS_DOCKER_IMAGE`；该模式需要 Docker socket，适合受控单租户主机。
 
 ## 验证范围
 

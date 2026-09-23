@@ -1,0 +1,20 @@
+services:
+  excelmanus:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      EXCELMANUS_DEPLOY_MODE: server
+      EXCELMANUS_WEB_WORKERS: "2"
+      EXCELMANUS_EXECUTION_ISOLATION: local
+    volumes:
+      - excelmanus_home:/var/lib/excelmanus/home
+      - excelmanus_workspace:/var/lib/excelmanus/workspace
+
+volumes:
+  excelmanus_home:
+  excelmanus_workspace:
+

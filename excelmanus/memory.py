@@ -28,6 +28,7 @@ _INJECTED_USER_PREFIXES = (
     "<mention_context>",
     "## Hook 上下文",
     "<sourced-context",
+    "<jev_context",
 )
 
 # role → 事件 kind（无 _event_kind 标记时的兜底映射）。

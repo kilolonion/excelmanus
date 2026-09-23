@@ -65,12 +65,29 @@ describe("jev-trace", () => {
           api_key: "vck_should_not_appear",
           user_text: "你好",
         },
+        probabilities: {
+          domain: { chitchat: 1 },
+          api_key: { "vck_secret": 1 },
+        },
       },
       "jev-2",
     );
     expect(trace?.answers.domain).toBe("chitchat");
     expect(trace?.answers.api_key).toBeUndefined();
     expect(trace?.answers.user_text).toBeUndefined();
+    expect(trace?.probabilities.api_key).toBeUndefined();
+  });
+
+  it("keeps bounded probability distributions separate from confidence", () => {
+    const trace = makeTrace({
+      probabilities: {
+        domain: { chitchat: 0.5, spreadsheet_write: 0.3, mixed: 0.2 },
+        needs_write: { true: 0.02, false: 0.98 },
+      },
+    });
+    expect(trace?.probabilities.domain.chitchat).toBe(0.5);
+    expect(trace?.probabilities.needs_write.false).toBe(0.98);
+    expect(trace?.answers.confidence).toBe(0.91);
   });
 
   it("uses Chinese pack titles and answer labels", () => {

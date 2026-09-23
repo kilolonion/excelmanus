@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useState } from "react";
 import dynamic from "next/dynamic";
-import { Check, FileSpreadsheet, Maximize2, Star, X } from "lucide-react";
+import { Check } from "lucide-react";
 import { buildExcelFileUrl, downloadFile } from "@/lib/api";
 import { fileBaseName } from "@/lib/revision-display";
 import { fileRefFromSession, normalizeRelativePath } from "@/lib/workspace-file-ref";
-import { hasPendingWorkbookEdits, isWorkbookEditPaused, subscribeWorkbookEdits } from "@/lib/excel-cell-edit";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWorkbookConversationStore, type WorkbookViewState } from "@/stores/workbook-conversation-store";
@@ -49,8 +48,6 @@ export function WorkbookPane({ path, active, focused, onClose, onExpand, expandT
   const operations = useExcelStore((state) => state.operations);
   const { handleCellEdit, conflict, writeError, reloadAfterConflict } = useExcelCellEdit(path);
   const [withStyles, setWithStyles] = useState(true);
-  const editStatus = useSyncExternalStore(subscribeWorkbookEdits,
-    () => isWorkbookEditPaused(file) ? "保存需要处理" : hasPendingWorkbookEdits(file) ? "正在保存…" : "", () => "");
   const focus = () => useExcelStore.getState().focusWorkbook(path);
   const reportView = useCallback((view: WorkbookViewState) => {
     if (!session || useSessionStore.getState().activeSessionId !== session.id) return;
@@ -68,38 +65,9 @@ export function WorkbookPane({ path, active, focused, onClose, onExpand, expandT
   }, [path]);
   const filename = fileBaseName(path);
   const navigation = workspace.linkSelection && !focused && workspace.navigation?.source !== path ? workspace.navigation : undefined;
-  const saveState = editStatus || (sheet ? "已同步" : "读取中");
-  const saveStateKind = editStatus === "保存需要处理" ? "error" : editStatus ? "pending" : sheet ? "ready" : "loading";
 
   return <section className={styles.pane} data-workbook-pane={path} data-focused={focused}
     aria-label={`${primary ? "主表" : "参考表"}：${filename}`} onPointerDownCapture={focus} onFocusCapture={focus}>
-    <div className={styles.paneHeader}>
-      <div className={styles.paneIdentity}>
-        <div className={styles.paneIcon} aria-hidden="true"><FileSpreadsheet size={15} /></div>
-        <div className={styles.paneTitleStack}>
-          <div className={styles.paneRole} data-primary={primary}>
-            <span>{primary ? "主表" : "参考表"}</span>
-            {focused && <span className={styles.focusedMark}>当前聚焦</span>}
-          </div>
-          <div className={styles.paneFileName} title={path}>{filename}</div>
-          <div className={styles.paneSheet}>{sheet ? `${sheet} 工作表` : "正在读取工作表…"}</div>
-        </div>
-      </div>
-      <div className={styles.paneActions}>
-        <span className={styles.saveState} data-state={saveStateKind} role="status">
-          <span className={styles.saveStateDot} aria-hidden="true" />{saveState}
-        </span>
-        {!primary && <button type="button" onClick={() => useExcelStore.getState().setPrimaryWorkbook(path)} title="设为主表" aria-label={`将 ${filename} 设为主表`} className={styles.paneAction}>
-          <Star className="h-3.5 w-3.5" />
-        </button>}
-        <button type="button" onClick={onExpand} title={expandTitle} aria-label={expandTitle} className={styles.paneAction}>
-          <Maximize2 className="h-3.5 w-3.5" />
-        </button>
-        <button type="button" onClick={onClose} aria-label={`关闭 ${filename}`} title="关闭此表格" className={`${styles.paneAction} ${styles.paneClose}`}>
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    </div>
     <div className={styles.paneBody}>
       <UniverSheet fitContainer active={active && !historyActive} focused={focused} fileUrl={buildExcelFileUrl(path, session?.id, session?.workspaceId)}
         fileRef={file} sessionId={session?.id} viewGeneration={generation} initialSheet={sheet}

@@ -98,6 +98,7 @@ class StreamRenderer:
             EventType.APPROVAL_RESOLVED: self._render_approval_resolved,
             EventType.THINKING_DELTA: self._render_thinking_delta,
             EventType.TEXT_DELTA: self._render_text_delta,
+            EventType.RETRACT_TEXT: self._render_retract_text,
             EventType.MODE_CHANGED: self._render_mode_changed,
             EventType.EXCEL_PREVIEW: self._render_excel_preview,
             EventType.EXCEL_DIFF: self._render_excel_diff,
@@ -226,6 +227,11 @@ class StreamRenderer:
                 style=f"{THEME.DIM} italic",
             )
         self._console.print(event.thinking_delta, end="", style=f"{THEME.DIM} italic")
+
+    def _render_retract_text(self, event: ToolCallEvent) -> None:
+        self._text_buffer.clear()
+        self._streaming_text = False
+        self._console.print("\n  正在重新核对，以下面的更新答复为准。", style=THEME.DIM)
 
     def _render_text_delta(self, event: ToolCallEvent) -> None:
         if not event.text_delta:

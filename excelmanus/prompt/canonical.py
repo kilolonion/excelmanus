@@ -33,7 +33,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "edit_spreadsheet": (
         "原子编辑：写值或公式、插入或删除行列、表结构、透视写入、清洗变换，"
-        "或传入 workbook_spec 创建新簿。已有文件应带精确 content_version；"
+        "或传入 workbook_spec 创建新簿；workbooks 可把多个文件的 operations 放进同一原子事务。"
+        "已有文件应带精确 content_version；"
         "省略时仅回退到本轮已观察版本，selection/restore 不允许省略。"
         "selection 可直接消费 inspect/analyze 的可写回句柄；copy 会复制样式并平移可维护的相对公式；"
         "pivot 覆盖非空目标表须 overwrite=true；去重/分列不能维护公式和对象时拒绝，单列规范化只改目标列；"

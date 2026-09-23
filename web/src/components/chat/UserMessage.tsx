@@ -167,7 +167,11 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     if (isStreaming) return;
     const bubbleEl = columnRef.current?.querySelector(".user-bubble") as HTMLElement | null;
     const measured = (bubbleEl ?? columnRef.current)?.getBoundingClientRect().width ?? 0;
-    setEditWidth(Math.max(Math.ceil(measured), 260));
+    // The message column already provides the available width. A fixed
+    // 260px floor overflows on compact phones (and makes the whole chat
+    // viewport shift horizontally), so keep the measured width and let the
+    // flex column constrain it naturally.
+    setEditWidth(Math.ceil(measured));
     clearEditMentionState();
     setEditText(content);
     setRetainedFiles(files ?? []);
@@ -332,11 +336,12 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           className={`min-w-0 max-w-full flex flex-col items-start ${
             editing ? "w-full" : "w-max"
           }`}
-          style={
-            editing && editWidth
-              ? { width: editWidth, minWidth: editWidth, flexShrink: 0 }
-              : undefined
-          }
+          style={editing ? {
+            width: "100%",
+            maxWidth: editWidth ? `${editWidth}px` : undefined,
+            minWidth: 0,
+            flexShrink: 1,
+          } : undefined}
         >
         {editing ? (
           <div className="w-full min-w-0 space-y-2">

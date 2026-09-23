@@ -616,6 +616,30 @@ async def get_session_messages(session_id: str, request: Request) -> JSONRespons
     normalized_messages: list[dict[str, Any]] = []
     total = await session_manager.get_session_message_count(session_id)
     page_offset = max(0, total - len(messages)) if tail else offset
+
+    # A provider turn can span assistant tool-call rows and one or more tool
+    # result rows.  Do not cut exactly through that pair: the UI can only
+    # render a completed tool card when the adjacent row is present.  The
+    # extra rows are deliberately bounded; the normal page metadata still
+    # reports the original logical offset/total and the client de-duplicates
+    # overlapping message ids when it loads older pages.
+    if messages:
+        first = messages[0] if isinstance(messages[0], dict) else {}
+        if first.get("role") == "tool" and page_offset > 0:
+            extra = min(20, page_offset)
+            prefix = await session_manager.get_session_messages(
+                session_id, limit=extra, offset=page_offset - extra, tail=False
+            )
+            messages = [*prefix, *messages]
+            page_offset -= extra
+        last = messages[-1] if isinstance(messages[-1], dict) else {}
+        tool_calls = last.get("tool_calls") if isinstance(last, dict) else None
+        if last.get("role") == "assistant" and isinstance(tool_calls, list):
+            end = page_offset + len(messages)
+            suffix = await session_manager.get_session_messages(
+                session_id, limit=20, offset=end, tail=False
+            )
+            messages = [*messages, *suffix]
     for idx, message in enumerate(messages):
         if isinstance(message, dict):
             normalized = dict(message)
@@ -1016,6 +1040,9 @@ async def get_session(session_id: str, request: Request) -> JSONResponse:
             "id": session_id,
             "message_count": 0,
             "in_flight": False,
+            "history_revision": "",
+            "active_stream_id": None,
+            "latest_seq": 0,
             "messages": [],
             "full_access_enabled": False,
             "auto_approve_enabled": False,

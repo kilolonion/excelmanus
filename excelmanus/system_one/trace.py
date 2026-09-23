@@ -176,6 +176,45 @@ def curated_answers(pack_id: str, decision: Decision) -> dict[str, str | float |
     return out
 
 
+def curated_probabilities(decision: Decision) -> dict[str, dict[str, float]]:
+    """Expose bounded answer distributions without sending evaluation state.
+
+    Confidence describes concentration, while these values describe the
+    probability assigned to each declared answer.  Keeping both fields makes
+    the timeline useful for calibration review without exposing prompts,
+    workbook content, or provider metadata.
+    """
+    evaluation = decision.evaluation
+    if evaluation is None:
+        return {}
+    allowed = set(_ANSWER_KEYS) | {"mode_mismatch", "needs_skill", "destructive"}
+    out: dict[str, dict[str, float]] = {}
+    for qid, answer in (evaluation.answers or {}).items():
+        if qid not in allowed:
+            continue
+        if isinstance(answer, NoulAnswer):
+            value = max(0.0, min(1.0, float(answer.noul)))
+            out[qid] = {"true": round(value, 3), "false": round(1.0 - value, 3)}
+            continue
+        raw = answer.probabilities if isinstance(answer, (ChoiceAnswer, ScoreAnswer)) else {}
+        if not isinstance(raw, Mapping):
+            continue
+        bounded: dict[str, float] = {}
+        for key, value in list(raw.items())[:8]:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= numeric <= 1:
+                continue
+            label = str(key)[:80]
+            if label:
+                bounded[label] = round(numeric, 3)
+        if bounded:
+            out["mode_hint" if qid == "mode_mismatch" else qid] = bounded
+    return out
+
+
 def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
     reason = str(decision.reason or "")
     extras = decision.extras or {}
@@ -234,6 +273,7 @@ def build_jev_trace_payload(
         "kind": str(decision.kind or "noop"),
         "reason": str(decision.reason or "")[:200],
         "answers": curated_answers(pack_id, decision),
+        "probabilities": curated_probabilities(decision),
         "impact": impact_sentence(pack_id, decision, gate),
         "evaluated": evaluated,
         "advice_delivered": delivered,
@@ -297,6 +337,19 @@ def emit_jev_trace(
         gate=gate,
         transport=transport,
     )
+    metrics = getattr(engine, "_jev_metrics", None)
+    if isinstance(metrics, dict):
+        stage = str(payload.get("stage") or "")
+        reason = str(payload.get("reason") or "")
+        if stage == "evaluation" and payload.get("evaluated"):
+            metrics["evaluated"] = int(metrics.get("evaluated", 0) or 0) + 1
+            metrics["latency_ms"] = float(metrics.get("latency_ms", 0.0) or 0.0) + float(payload.get("latency_ms", 0.0) or 0.0)
+        elif stage == "effect":
+            metrics["effects"] = int(metrics.get("effects", 0) or 0) + 1
+        elif stage == "outcome":
+            metrics["outcomes"] = int(metrics.get("outcomes", 0) or 0) + 1
+        if reason.startswith(("unavailable", "error:", "timeout", "budget_exhausted", "provider_cooldown")):
+            metrics["unavailable"] = int(metrics.get("unavailable", 0) or 0) + 1
     driver = getattr(engine, "_driver", None)
     prepared = getattr(engine, "_prepared_request", None)
     payload.update(

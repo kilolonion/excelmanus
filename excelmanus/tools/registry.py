@@ -216,7 +216,11 @@ def normalize_tool_aliases(
     仅当 schema 含规范名时才折叠，避免把只接受 ``path`` 的工具改坏。
     未传 schema 时保持无条件折叠，供单测直接断言冲突。
     """
-    args = dict(arguments)
+    from excelmanus.tools.reference_contract import normalize_structured_references
+
+    args, reference_error = normalize_structured_references(dict(arguments), schema=schema)
+    if reference_error is not None:
+        return reference_error
     accepted = _schema_property_names(schema)
     if accepted is not None and "request" in accepted and isinstance(args.get("request"), dict):
         nested = args.pop("request")
@@ -557,12 +561,15 @@ class ToolDef:
         self, mode: OpenAISchemaMode = "responses"
     ) -> dict[str, Any]:
         """转换为 OpenAI 工具 schema。"""
+        from excelmanus.tools.reference_contract import augment_reference_schema
+
+        parameters = augment_reference_schema(self.input_schema)
         if mode == "responses":
             return {
                 "type": "function",
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.input_schema,
+                "parameters": parameters,
             }
         if mode == "chat_completions":
             return {
@@ -570,7 +577,7 @@ class ToolDef:
                 "function": {
                     "name": self.name,
                     "description": self.description,
-                    "parameters": self.input_schema,
+                    "parameters": parameters,
                 },
             }
         raise ValueError(f"不支持的 OpenAI schema 模式: {mode!r}")
@@ -1036,7 +1043,12 @@ class ToolRegistry:
             scope = set(tool_scope)
             tools = [tool for name, tool in self._tools.items() if name in scope]
         tools.sort(key=lambda tool: tool.name)
-        return [tool.to_openai_schema(mode=mode) for tool in tools]
+        from excelmanus.tools.catalog import _prune_wire_parameters
+
+        return [
+            _prune_wire_parameters(tool.to_openai_schema(mode=mode), schema_name=tool.name)
+            for tool in tools
+        ]
 
     def get_tiered_schemas(
         self,

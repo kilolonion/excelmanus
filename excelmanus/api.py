@@ -270,6 +270,35 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
 
     set_draining(False)
+    # Lifespan-owned background jobs must be retained and cancelled on
+    # shutdown.  A bare fire-and-forget task can otherwise outlive the test
+    # loop/process and emit ``Task was destroyed but it is pending`` while
+    # also keeping its executor work alive during a restart.
+    _lifespan_tasks: set[asyncio.Task[Any]] = set()
+
+    def _spawn_lifespan_task(coro: Any, *, name: str) -> None:
+        try:
+            task = asyncio.create_task(coro, name=name)
+        except RuntimeError:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            return
+        _lifespan_tasks.add(task)
+
+        def _forget(done: asyncio.Task[Any]) -> None:
+            _lifespan_tasks.discard(done)
+            if done.cancelled():
+                return
+            try:
+                exc = done.exception()
+            except Exception:
+                return
+            if exc is not None:
+                logger.debug("生命周期后台任务 %s 失败: %s", name, exc)
+
+        task.add_done_callback(_forget)
 
     # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
     bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
@@ -520,6 +549,26 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
         len(loaded_skillpacks),
     )
 
+    # The first AgentEngine normally imports the provider and workbook SDKs on
+    # demand.  Those imports are pure CPU/module-cache work, so move them off
+    # the request path while the browser is still loading the workspace.  This
+    # keeps /health fast while removing the cold-start penalty from the first
+    # user message when the warmup wins the race.
+    async def _background_sdk_warmup() -> None:
+        try:
+            await asyncio.to_thread(
+                __import__,
+                "openai",
+            )
+            await asyncio.to_thread(
+                __import__,
+                "openpyxl",
+            )
+        except Exception:
+            logger.debug("启动时 SDK 预热失败（首个会话会按需加载）", exc_info=True)
+
+    _spawn_lifespan_task(_background_sdk_warmup(), name="sdk_warmup")
+
     # ── 后台静默检查更新（非阻塞） ──────────────────────
     async def _background_update_check() -> None:
         try:
@@ -538,7 +587,7 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
             logger.debug("启动时后台版本检查失败（非致命）", exc_info=True)
 
     if os.environ.get("EXCELMANUS_DESKTOP") != "1":
-        _fire_and_forget(_background_update_check(), name="update_check")
+        _spawn_lifespan_task(_background_update_check(), name="update_check")
 
     # ── 附件派生缓存清理（非阻塞，只动可再生数据） ─────────
     async def _background_attachment_sweep() -> None:
@@ -551,7 +600,7 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.debug("启动时附件缓存清理失败（非致命）", exc_info=True)
 
-    _fire_and_forget(_background_attachment_sweep(), name="attachment_sweep")
+    _spawn_lifespan_task(_background_attachment_sweep(), name="attachment_sweep")
 
     # ── 号池快照聚合后台任务（每 5 分钟） ──────────────────
     _pool_snapshot_task: asyncio.Task | None = None
@@ -680,6 +729,12 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     # ── Graceful Shutdown ──────────────────────────────────────
+    if _lifespan_tasks:
+        for task in tuple(_lifespan_tasks):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tuple(_lifespan_tasks), return_exceptions=True)
+        _lifespan_tasks.clear()
     if not mcp_init_task.done():
         mcp_init_task.cancel()
         try:

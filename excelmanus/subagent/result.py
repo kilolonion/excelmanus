@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from excelmanus.subagent.models import (
@@ -53,6 +54,20 @@ def bound_diagnostic(text: str) -> str:
 def _paths_from_args(arguments: dict[str, Any] | None, tool_name: str) -> list[str]:
     if not isinstance(arguments, dict):
         return []
+    batch = arguments.get("workbooks")
+    if isinstance(batch, str):
+        try:
+            batch = json.loads(batch)
+        except (TypeError, ValueError):
+            batch = None
+    if tool_name == "edit_spreadsheet" and isinstance(batch, list):
+        batch_paths = [
+            str(item.get("file_path") or item.get("path") or "").strip()
+            for item in batch
+            if isinstance(item, dict) and (item.get("file_path") or item.get("path"))
+        ]
+        if batch_paths:
+            return batch_paths
     keys = AUDIT_TARGET_ARG_RULES_ALL.get(tool_name, _PATH_KEYS)
     paths: list[str] = []
     for key in keys:

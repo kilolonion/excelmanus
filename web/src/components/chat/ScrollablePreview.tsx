@@ -29,6 +29,7 @@ export function ScrollablePreview({
   autoScroll = false,
 }: ScrollablePreviewProps) {
   const innerRef = useRef<HTMLDivElement>(null);
+  const autoFollowRef = useRef(true);
   const [overflows, setOverflows] = useState(false);
   const [mode, setMode] = useState<"collapsed" | "scroll" | "expanded">("collapsed");
   const [canScrollUp, setCanScrollUp] = useState(false);
@@ -62,8 +63,9 @@ export function ScrollablePreview({
     if (!el) return;
     // 使用 MutationObserver 监听子节点变化（流式追加行）
     const scrollToBottom = () => {
+      if (!autoFollowRef.current) return;
       requestAnimationFrame(() => {
-        el.scrollTop = el.scrollHeight;
+        if (autoFollowRef.current) el.scrollTop = el.scrollHeight;
       });
     };
     const mo = new MutationObserver(scrollToBottom);
@@ -96,6 +98,7 @@ export function ScrollablePreview({
   }, [mode, syncScroll]);
 
   const handleCollapse = useCallback(() => {
+    autoFollowRef.current = true;
     if (innerRef.current) innerRef.current.scrollTop = 0;
     setMode("collapsed");
   }, []);
@@ -128,7 +131,16 @@ export function ScrollablePreview({
       <div className="relative">
         <div
           ref={innerRef}
-          className={`transition-[max-height] duration-300 ease-in-out ${
+          onScroll={(event) => {
+            const target = event.currentTarget;
+            autoFollowRef.current = target.scrollHeight - target.scrollTop - target.clientHeight <= 16;
+            syncScroll();
+          }}
+          onWheelCapture={(event) => {
+            if (event.deltaY < 0) autoFollowRef.current = false;
+          }}
+          onTouchStart={() => { autoFollowRef.current = false; }}
+          className={`transition-[max-height] duration-300 ease-in-out overscroll-contain ${
             isActive ? "overflow-y-auto overflow-x-auto" : "overflow-hidden"
           }`}
           style={{ maxHeight: maxH, touchAction: "pan-x pan-y" }}

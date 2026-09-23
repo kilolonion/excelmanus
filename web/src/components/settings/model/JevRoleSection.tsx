@@ -169,7 +169,7 @@ export function JevRoleSection() {
                 <div role="group" aria-label="Jev 介入方式" className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {MODES.map((mode) => <button key={mode.value} type="button" aria-pressed={draft.jev_enabled === mode.value} onClick={() => handleMasterGateChange(mode.value)} className={cn("rounded-xl border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", draft.jev_enabled === mode.value ? "border-[var(--em-primary)] bg-[var(--em-primary-alpha-06)]" : "border-border hover:bg-muted/40")}><span className="flex items-center justify-between gap-2 text-xs font-semibold">{mode.title}{draft.jev_enabled === mode.value && <Check className="size-3.5 text-[var(--em-primary)]" />}</span><span className="mt-1.5 block text-[11px] leading-5 text-muted-foreground">{mode.description}</span></button>)}
                 </div>
-                {draft.jev_enabled === "enforce" && <p className="mt-3 flex items-start gap-2 rounded-lg bg-muted/50 p-2.5 text-xs leading-5 text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" />上下文、工具、审批、结果整理、恢复和界面建议都会按下方环节开关直接接入。</p>}
+                {draft.jev_enabled === "enforce" && <p className="mt-3 flex items-start gap-2 rounded-lg bg-muted/50 p-2.5 text-xs leading-5 text-muted-foreground"><Info className="mt-0.5 size-3.5 shrink-0" />上下文、工具、审批、结果整理、恢复和界面建议都会按下方环节开关直接接入。高风险自动放行还需要 approval pack 完成签名标定。</p>}
                 {draft.jev_enabled === "off" && <p className="mt-3 text-xs text-muted-foreground">总开关已关闭，下方配置将在重新开启后使用。</p>}
               </div>
 

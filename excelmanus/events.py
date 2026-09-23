@@ -46,6 +46,7 @@ class EventType(Enum):
     PLAN_CREATED = "plan_created"
     VERIFICATION_REPORT = "verification_report"  # 仅用于读取历史，不再产生
     RETRACT_THINKING = "retract_thinking"
+    RETRACT_TEXT = "retract_text"
     BATCH_PROGRESS = "batch_progress"  # 批量任务进度
     STAGING_UPDATED = "staging_updated"  # 历史 replay only；overlay 已删除，不再发射
     LLM_RETRY = "llm_retry"  # LLM 调用重试通知

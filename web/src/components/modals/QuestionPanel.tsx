@@ -10,6 +10,7 @@ import type { Question } from "@/lib/types";
 import { useEffect, useRef } from "react";
 import { openWorkbookQuestion } from "@/lib/workbook-interaction";
 import { useWorkbookInteractionStore } from "@/stores/workbook-interaction-store";
+import { useExcelStore } from "@/stores/excel-store";
 
 /** Options with these labels are treated as "free-text fallback" and hidden from chips. */
 const OTHER_LABELS = new Set(["Other", "其他", "other"]);
@@ -30,7 +31,9 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
   const sessionId = useSessionStore((s) => s.activeSessionId);
   const lastOpened = useRef("");
   useEffect(() => {
-    if (question.selection && question.autoOpen !== false && sessionId && (!question.sessionId || question.sessionId === sessionId)) {
+    if (question.selection && question.autoOpen !== false && sessionId
+      && useExcelStore.getState().autoOpenSuppressedSessionId !== sessionId
+      && (!question.sessionId || question.sessionId === sessionId)) {
       const key = `${sessionId}:${question.id}`;
       if (lastOpened.current === key) return;
       const current = useWorkbookInteractionStore.getState().request;

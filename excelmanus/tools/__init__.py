@@ -9,6 +9,10 @@ from excelmanus.tools.registry import (
     ToolRegistry,
     ToolRegistryError,
 )
+from excelmanus.tools.reference_contract import (
+    augment_reference_schema,
+    normalize_structured_references,
+)
 
 __all__ = [
     "OpenAISchemaMode",
@@ -18,4 +22,6 @@ __all__ = [
     "ToolNotFoundError",
     "ToolRegistry",
     "ToolRegistryError",
+    "augment_reference_schema",
+    "normalize_structured_references",
 ]

@@ -86,7 +86,7 @@ export function ExcelRibbonChrome({
         历史
       </button>
       <div className="flex-1 min-w-2" />
-      <div className="flex items-center gap-0.5 shrink-0">
+      <div className="em-ribbon-actions flex items-center gap-0.5 shrink-0">
         {selectionMode && (
           <button
             type="button"

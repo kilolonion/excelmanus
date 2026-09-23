@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -264,6 +265,30 @@ async def test_emit_failure_is_silent(monkeypatch: pytest.MonkeyPatch) -> None:
         AsyncMock(return_value=_surface_decision()),
     ):
         await maybe_emit_ui_hint(engine, _ok_result(), on_event=_boom)
+
+
+@pytest.mark.asyncio
+async def test_slow_ui_hint_does_not_hold_completed_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _stub(
+        config=_config(
+            jev_enabled="enforce",
+            jev_ui_hint=True,
+            jev_calibrated=True,
+        ),
+    )
+    captured: list[ToolCallEvent] = []
+
+    async def slow(*_args, **_kwargs):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr("excelmanus.system_one.host._UI_HINT_MAX_WAIT_SECONDS", 0.01)
+    with patch("excelmanus.system_one.host._eval_traced", slow):
+        await maybe_emit_ui_hint(engine, _ok_result(), on_event=captured.append)
+    assert _hints(captured) == []
+    traces = _traces(captured)
+    assert traces and traces[-1].jev_trace["reason"] == "timeout"
 
 
 def test_ui_hint_not_buffered_for_replay() -> None:

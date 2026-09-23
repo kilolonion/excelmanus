@@ -81,7 +81,6 @@ export function SubagentBlock({
 }: SubagentBlockProps) {
   const [disclosure, setDisclosure] = useState<{ phase: string; expanded: boolean } | null>(null);
   const [showAllTools, setShowAllTools] = useState(false);
-  const timelineEndRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
@@ -101,12 +100,6 @@ export function SubagentBlock({
     }, 1000);
     return () => clearInterval(timer);
   }, [isRunning]);
-
-  useEffect(() => {
-    if (!isDone && timelineEndRef.current) {
-      timelineEndRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    }
-  }, [tools.length, isDone]);
 
   // 聊天流结束后可能收不到工具结束事件；任务已结束时不继续显示旧的执行动画。
   const incompleteDetails = isDone && tools.some((tool) => tool.status === "running");
@@ -221,7 +214,6 @@ export function SubagentBlock({
                   isLast={i === visibleTools.length - 1}
                 />
               ))}
-              <div ref={timelineEndRef} />
             </div>
           )}
 

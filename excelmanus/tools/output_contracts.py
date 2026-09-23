@@ -173,7 +173,8 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
         {
             "applied", "operations", "warnings", "skipped", "summary",
             "build_summary", "verification", "uncertainties",
-            "data_loss_warnings",
+            "data_loss_warnings", "committed", "transaction", "files",
+            "formula_recalculation",
         },
         arg_mode_key="workbook_spec",
         arg_branches={

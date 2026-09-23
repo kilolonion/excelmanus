@@ -66,7 +66,7 @@ class ChatHistoryStore:
         payload = {k: v for k, v in msg.items() if not str(k).startswith("_")}
         # Compaction metadata describes durable history, not a request projection.
         # Preserve it in messages-table restores when session_events is disabled.
-        if msg.get("_prompt_kind") == "compaction":
+        if msg.get("_prompt_kind") in {"compaction", "jev_delivery_draft"}:
             for key in ("_prompt_kind", "_ui_hidden", "_compaction_handoff", "_source_message_ids"):
                 if key in msg:
                     payload[key] = msg[key]
@@ -420,7 +420,7 @@ class ChatHistoryStore:
         self, session_id: str, limit: int = 10000, offset: int = 0
     ) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT id, content FROM messages WHERE session_id = ? "
+            "SELECT id, content, created_at FROM messages WHERE session_id = ? "
             "ORDER BY id ASC LIMIT ? OFFSET ?",
             (session_id, limit, offset),
         ).fetchall()
@@ -429,13 +429,15 @@ class ChatHistoryStore:
             message = self._deserialize_message(row)
             if not message.get("message_id"):
                 message["message_id"] = f"db:{row['id']}"  # type: ignore[index]
+            if row["created_at"] and "created_at" not in message:  # type: ignore[index]
+                message["created_at"] = str(row["created_at"])  # type: ignore[index]
             messages.append(message)
         return messages
 
     def load_messages_tail(self, session_id: str, limit: int = 100) -> list[dict]:
         """Load the newest message page while preserving chronological order."""
         rows = self._conn.execute(
-            "SELECT id, content FROM messages WHERE session_id = ? "
+            "SELECT id, content, created_at FROM messages WHERE session_id = ? "
             "ORDER BY id DESC LIMIT ?",
             (session_id, limit),
         ).fetchall()
@@ -444,6 +446,8 @@ class ChatHistoryStore:
             message = self._deserialize_message(row)
             if not message.get("message_id"):
                 message["message_id"] = f"db:{row['id']}"  # type: ignore[index]
+            if row["created_at"] and "created_at" not in message:  # type: ignore[index]
+                message["created_at"] = str(row["created_at"])  # type: ignore[index]
             messages.append(message)
         return messages
 

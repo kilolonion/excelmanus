@@ -85,6 +85,17 @@ export async function consumeSSE(
     currentDataLines = [];
   };
 
+  const processLine = (rawLine: string) => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line.startsWith("event:")) {
+      currentEvent = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      currentDataLines.push(line.slice(5).replace(/^ /, ""));
+    } else if (line === "") {
+      emitEvent();
+    }
+  };
+
   try {
     while (true) {
       let readResult: ReadableStreamReadResult<Uint8Array>;
@@ -101,22 +112,23 @@ export async function consumeSSE(
         );
       }
       const { done, value } = readResult;
-      if (done) break;
+      if (done) {
+        // Flush a final split UTF-8 code point and process every unterminated
+        // SSE line. Some proxies close immediately after a multi-line event
+        // without sending the customary trailing blank line.
+        buffer += decoder.decode();
+        if (buffer) {
+          for (const finalLine of buffer.split("\n")) processLine(finalLine);
+          buffer = "";
+        }
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
 
-      for (const rawLine of lines) {
-        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-        if (line.startsWith("event:")) {
-          currentEvent = line.slice(6).trim();
-        } else if (line.startsWith("data:")) {
-          currentDataLines.push(line.slice(5).replace(/^ /, ""));
-        } else if (line === "") {
-          emitEvent();
-        }
-      }
+      for (const rawLine of lines) processLine(rawLine);
     }
 
     // 部分服务端可能未以空行结尾，EOF 时补一次 flush。

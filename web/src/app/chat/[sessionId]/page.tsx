@@ -20,6 +20,7 @@ function ChatPage() {
   const messageOrder = useChatStore((s) => s.messageOrder);
   const messageLoadError = useChatStore((s) => s.messageLoadError);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
+  const loadedSessionId = useChatStore((s) => s.loadedSessionId);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const compareMode = useExcelStore((s) => s.compareMode);
   const cmdResult = useCommandResult();
@@ -60,7 +61,7 @@ function ChatPage() {
             <ChatInput
               onSend={handleSend}
               onCommandResult={cmdResult.show}
-              disabled={false}
+              disabled={loadedSessionId !== sessionId || isLoadingMessages}
               isStreaming={isStreaming}
               onStop={stopGeneration}
             />

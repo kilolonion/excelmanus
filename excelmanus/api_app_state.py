@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,13 @@ from dataclasses import dataclass, field
 from excelmanus.logger import get_logger
 
 logger = get_logger("api.state")
+
+
+def _configured_worker_count() -> int:
+    try:
+        return max(1, int(os.environ.get("EXCELMANUS_WEB_WORKERS", "1") or "1"))
+    except (TypeError, ValueError):
+        return 1
 
 
 @dataclass
@@ -42,6 +50,11 @@ class AppRuntime:
     cap_probe_job_manager: Any = None
     active_chat_tasks: dict[str, Any] = field(default_factory=dict)
     session_stream_states: dict[str, Any] = field(default_factory=dict)
+    # Multi-worker deployments use the same durable SQLite/file transaction
+    # layer; expose the process identity so operators can verify routing and
+    # diagnose a cache miss without leaking session data.
+    worker_id: str = field(default_factory=lambda: f"pid-{os.getpid()}")
+    worker_count: int = field(default_factory=_configured_worker_count)
 
 
 _runtime: ContextVar[AppRuntime | None] = ContextVar("excelmanus_app_runtime", default=None)

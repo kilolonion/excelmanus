@@ -18,6 +18,8 @@ The process may use a few **locators** to find the data volume and bind ports. S
 | `EXCELMANUS_DEPLOY_MODE` | `auto`/`standalone`/`server`. `auto` and unknown values are standalone; `server` must be set explicitly | `auto` |
 | `EXCELMANUS_API_HOST` / `EXCELMANUS_API_PORT` / `EXCELMANUS_BACKEND_PORT` / `EXCELMANUS_FRONTEND_PORT` | Bind address and ports | See start scripts |
 | `EXCELMANUS_WEB_WORKERS` | uvicorn worker count; API warns about process-local session and cache state when `>1`. Keep `1` on a single host | Set by `deploy/start.*`, default `1` |
+| `EXCELMANUS_EXECUTION_ISOLATION` | `local` (default) or `docker`; moves `run_code` into a short-lived container with resource and network limits | `local` |
+| `EXCELMANUS_DOCKER_IMAGE` | Image used by Docker code execution; it must include the required spreadsheet runtime | `excelmanus/runtime:latest` |
 | `EXCELMANUS_MANAGE_TOKEN` | Optional automation/desktop token, at least 16 characters; accepts `Authorization: Bearer` or `X-ExcelManus-Token`, not URL query parameters | empty |
 | `EXCELMANUS_LOGIN_USERNAME` | Initial administrator username; Settings → Security takes precedence | `admin` |
 | `EXCELMANUS_LOGIN_PASSWORD` | Initial administrator password, at least 12 characters; Settings → Security takes precedence | empty (local protection off by default) |
@@ -399,12 +401,12 @@ Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Verce
 | `EXCELMANUS_JEV_ACTIVE_PROVIDER` | Active decision provider id (`typesafe` / `vercel` / `custom-*`) | — |
 | `EXCELMANUS_JEV_PROVIDERS` | Decision provider list (keys included, Fernet-encrypted) | `[]` |
 | `EXCELMANUS_JEV_TIMEOUT_SECONDS` | Per-evaluation timeout | `1.5` |
-| `EXCELMANUS_JEV_CALIBRATED` | Legacy calibration field retained for compatibility; it no longer gates runtime application | `false` |
+| `EXCELMANUS_JEV_CALIBRATED` | Calibration switch for high-risk approval auto-allow; the approval pack must also have signed calibration provenance | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe direct key (synced with the provider list) | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway key (synced with the provider list) | — |
 | `EXCELMANUS_MODEL_CANONICAL_MATCH` | Model-name matching under Model → Model roles: saving a profile binds the Model ID to a known canonical name when confidence is high enough, inheriting its context window and capability settings; the upstream Model ID is never rewritten, and enabling it back-fills existing profiles | `true` |
 
-This optional feature requires the `system-one` extra. `off` disables the master gate or the selected pack; `enforce` applies enabled packs directly, with no observation-only runtime. Enabling the master gate fills omitted pack switches as enabled, while an explicitly disabled child switch still stops that pack. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. Legacy `shadow` values are migrated to `enforce` when read, and `EXCELMANUS_JEV_CALIBRATED` no longer blocks enabled packs.
+This optional feature requires the `system-one` extra. `off` disables the master gate or the selected pack; `enforce` applies enabled packs directly, with no observation-only runtime. Enabling the master gate fills omitted pack switches as enabled, while an explicitly disabled child switch still stops that pack. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. High-risk approval has a separate safety layer: Jev can change a high-risk call from human approval to automatic execution only when `EXCELMANUS_JEV_CALIBRATED=true` and the approval pack has signed calibration provenance; deny and ordinary advisory decisions are unaffected. Legacy `shadow` values are migrated to `enforce` when read.
 
 ## Encryption Configuration
 
@@ -451,6 +453,8 @@ Do not auto-merge multiple `users/{id}` trees. If old isolation directories rema
 4. FileRegistry still skips directories named `users` so leftover archives are not scanned.
 
 ## Changelog
+
+- 2026-09-23: Jev entry evaluations now share one turn budget and run concurrently; high-risk auto-allow requires signed calibration; context advice carries an explicit advisory trust envelope; the timeline exposes bounded probability distributions and turn metrics; UI hints time out without delaying the main reply.
 
 - 2026-09-21: Added the `EXCELMANUS_WEB_UPGRADE_ENABLED` server web-upgrade switch, agent self-management (`EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED`), and canonical model-name matching (`EXCELMANUS_MODEL_CANONICAL_MATCH`).
 

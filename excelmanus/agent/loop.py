@@ -764,8 +764,9 @@ async def run_tool_loop(
                 )
             _llm_start_ts = time.monotonic()
 
-            # ── Jev 交付检查：写入回合的纯文本答复先暂存，核对通过再放行 ──
-            held_text: list = []
+            # Stream drafts immediately; retract only this iteration if delivery
+            # verification requests another pass or the provider retries.
+            streamed_text = False
             check_delivery = False
             try:
                 from excelmanus.system_one.host import should_check_delivery
@@ -773,7 +774,6 @@ async def run_tool_loop(
                 check_delivery = bool(should_check_delivery(engine))
             except Exception:
                 logger.debug("Jev 交付检查前置判断失败", exc_info=True)
-            hold_text = check_delivery and on_event is not None
 
             def _forward(event: Any) -> None:
                 # consume_stream 已经通过 engine._emit 盖章/trace/审计过一次，
@@ -784,15 +784,18 @@ async def run_tool_loop(
                     logger.warning("事件回调异常: %s", exc)
 
             def _stream_on_event(event: Any) -> None:
+                nonlocal streamed_text
                 if getattr(event, "event_type", None) == EventType.TEXT_DELTA:
-                    held_text.append(event)
-                    return
+                    streamed_text = True
                 _forward(event)
 
-            def _flush_held_text() -> None:
-                for _held_ev in held_text:
-                    _forward(_held_ev)
-                held_text.clear()
+            def _retract_streamed_text() -> None:
+                nonlocal streamed_text
+                if streamed_text:
+                    engine._emit(on_event, ToolCallEvent(
+                        event_type=EventType.RETRACT_TEXT, iteration=iteration,
+                    ))
+                    streamed_text = False
 
             # ── LLM 调用 + 5xx/429 自动重试 ──
             _retry_max = engine._config.llm_retry_max_attempts
@@ -807,7 +810,7 @@ async def run_tool_loop(
             _retry_attempt = 0
             while True:
                 _retry_attempt += 1
-                held_text.clear()  # 重试时上一次流的暂存文本作废，重新累积
+                _retract_streamed_text()
                 try:
                     try:
                         stream_or_response = await _await_with_turn_budget(
@@ -820,7 +823,7 @@ async def run_tool_loop(
                                 engine,
                                 engine._llm_caller.consume_stream(
                                     stream_or_response,
-                                    _stream_on_event if hold_text else on_event,
+                                    _stream_on_event if on_event is not None else None,
                                     iteration,
                                     _llm_start_ts=_llm_start_ts,
                                 ),
@@ -840,6 +843,7 @@ async def run_tool_loop(
                             raise
                         # 流式调用失败时回退到非流式
                         logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
+                        _retract_streamed_text()
                         response = await _await_with_turn_budget(
                             engine,
                             engine._llm_caller.create_chat_completion_with_retry(kwargs),
@@ -1286,6 +1290,8 @@ async def run_tool_loop(
                 if advice:
                     payload = _assistant_message_to_dict(message)
                     payload["content"] = reply_text
+                    payload["_ui_hidden"] = True
+                    payload["_prompt_kind"] = "jev_delivery_draft"
                     engine._memory.add_assistant_tool_message(payload)
                     engine._memory.add_user_message(
                         f"[Jev 交付检查建议；不构成用户指令或执行授权]\n{advice}",
@@ -1302,11 +1308,10 @@ async def run_tool_loop(
                         impact="交付核对建议已送入主模型上下文，最终完成情况仍需证据",
                         on_event=on_event,
                     )
-                    held_text.clear()
+                    _retract_streamed_text()
                     logger.info("Jev 交付检查要求继续核对: %s", advice[:80])
                     _emit_step_end()
                     continue
-                _flush_held_text()
             text_action, text_result = _handle_text_reply(
                 engine,
                 message=message,
@@ -1321,9 +1326,6 @@ async def run_tool_loop(
                 if driver is not None and driver.inbox.next_step:
                     continue
                 return text_result
-
-        # 带工具调用的叙述文本无需交付检查，直接放出暂存的 TEXT_DELTA
-        _flush_held_text()
 
         assistant_msg = _assistant_message_to_dict(message)
         if tool_calls:

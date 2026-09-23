@@ -101,12 +101,20 @@ export const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
           maxHeight: needsExpand && !expanded && !isStreamingText ? `${MAX_COLLAPSED_HEIGHT_ASSISTANT}px` : undefined,
         }}
       >
-        <ReactMarkdown
-          remarkPlugins={remarkPluginsStable}
-          components={markdownComponents}
-        >
-          {content}
-        </ReactMarkdown>
+        {isStreamingText ? (
+          // Parsing the entire accumulated Markdown document on every token
+          // batch is much more expensive than painting the delta.  Keep the
+          // stream responsive and perform the full Markdown pass once the
+          // assistant message is complete.
+          <div className="whitespace-pre-wrap break-words">{content}</div>
+        ) : (
+          <ReactMarkdown
+            remarkPlugins={remarkPluginsStable}
+            components={markdownComponents}
+          >
+            {content}
+          </ReactMarkdown>
+        )}
       </div>
       {needsExpand && !expanded && !isStreamingText && (
         <div className="relative -mt-8 pt-8 bg-gradient-to-t from-background to-transparent">

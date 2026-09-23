@@ -116,9 +116,12 @@ class ChatRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Image-only turns are valid for vision-capable models.  The route-level
+    # validator rejects an actually empty request, while preserving the
+    # distinction between "no text" and a whitespace-only message.
     message: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1)
-    ]
+        str, StringConstraints(strip_whitespace=True, max_length=200000)
+    ] = ""
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ] | None = None
@@ -134,6 +137,12 @@ class ChatRequest(BaseModel):
     def workbook_action_requires_plan(self):
         if self.workbook_action is not None and self.chat_mode != "plan":
             raise ValueError("表格操作交接必须先生成可确认的计划")
+        return self
+
+    @model_validator(mode="after")
+    def message_or_attachment_required(self):
+        if not self.message and not self.images:
+            raise ValueError("消息内容不能为空。")
         return self
 
 
@@ -505,14 +514,17 @@ def _persist_failure_guidance_message(
         return
     try:
         raw_messages = getattr(engine, "raw_messages", None)
-        if (
-            isinstance(raw_messages, list)
-            and raw_messages
-            and isinstance(raw_messages[-1], dict)
-            and raw_messages[-1].get("role") == "assistant"
-        ):
-            return
-        engine.memory.add_assistant_message(_failure_guidance_text(guidance))
+        failure_text = _failure_guidance_text(guidance)
+        if isinstance(raw_messages, list) and raw_messages:
+            last = raw_messages[-1]
+            if isinstance(last, dict) and last.get("role") == "assistant":
+                # A tool-call shell or an empty optimistic assistant message
+                # is not a durable failure acknowledgement.  Only suppress a
+                # duplicate when the same diagnostic text is already present.
+                existing = str(last.get("content") or "")
+                if existing.strip() == failure_text.strip():
+                    return
+        engine.memory.add_assistant_message(failure_text)
         get_session_manager().flush_messages_sync(session_id)
     except Exception:
         logger.debug("会话 %s 失败引导消息持久化失败", session_id, exc_info=True)
@@ -619,9 +631,17 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             routed_session_id or request.session_id,
         )
     except SessionBusyError:
+        # The non-streaming compatibility endpoint has no live browser event
+        # owner.  Keep its historical queue behavior; the resulting turn is
+        # durable and the session revision lets clients pick it up on poll.
         queued = await get_session_manager().enqueue_user_interrupt(
-            request.session_id or "",
+            routed_session_id or request.session_id or "",
             request.message,
+            extra={
+                "chat_mode": request.chat_mode,
+                "images": _serialize_images(request.images),
+                "context_input": context_input,
+            },
         )
         if queued:
             return ChatResponse(
@@ -850,17 +870,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 )
                 acquired = True
             except SessionBusyError:
-                queued = await get_session_manager().enqueue_user_interrupt(
-                    request.session_id or "",
-                    request.message,
-                )
-                if queued:
-                    yield _sse_format("pipeline_progress", {
-                        "stage": "queued",
-                        "message": "已加入下一轮，当前回合结束后再生效。",
-                    })
-                    yield _sse_format("done", {"queued": True})
-                    return
+                # A second request used to be placed into the driver's inbox
+                # without a new SSE owner.  It could execute after this stream
+                # closed and leave the user with no visible result.  Fail
+                # explicitly so the client can retry with a fresh stream.
                 raise
             except Exception as exc:
                 _mark_session_attempted(request.session_id)
@@ -930,6 +943,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             yield _sse_format("stream_init", {
                 "stream_id": stream_state.stream_id,
+                # Kept at 1 for wire compatibility.  The browser treats this
+                # metadata event as non-replayable and does not advance its
+                # after_seq cursor from it.
                 "seq": 1,
             })
 
@@ -1022,6 +1038,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 """后台 chat 任务完成后清理活跃任务映射与流状态。"""
                 if _app_state.get_runtime().active_chat_tasks.get(session_id) is done_task:
                     _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
+                if stream_state is not None and done_task.done() and not done_task.cancelled():
+                    try:
+                        result = done_task.result()
+                    except Exception:
+                        result = None
+                    if result is not None:
+                        stream_state.mark_completed(result)
+                        state_ref = stream_state
+                        def _expire_completed_state() -> None:
+                            runtime = _app_state.get_runtime()
+                            if runtime.session_stream_states.get(session_id) is state_ref:
+                                runtime.session_stream_states.pop(session_id, None)
+                        asyncio.get_running_loop().call_later(120, _expire_completed_state)
                 try:
                     done_task.result()
                 except asyncio.CancelledError:
@@ -1082,6 +1111,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             # chat 任务完成：获取结果
             chat_result = chat_task.result()
+            stream_state.mark_completed(chat_result)
             normalized_reply = guard_public_reply((chat_result.reply or "").strip())
             yield _build_reply_sse(chat_result, engine)
 
@@ -1202,7 +1232,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             if chat_task is not None and chat_task.done():
                 if _app_state.get_runtime().active_chat_tasks.get(session_id) is chat_task:
                     _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
-                _app_state.get_runtime().session_stream_states.pop(session_id, None)
+                # Keep a completed terminal result briefly.  A browser can
+                # disconnect after the producer finishes but before the
+                # unsequenced reply reaches it; subscribe can then replay the
+                # terminal response and the TTL bounds memory use.
+                if stream_state is not None and getattr(stream_state, "completed_result", None) is not None:
+                    state_ref = stream_state
+                    def _expire_stream_state() -> None:
+                        runtime = _app_state.get_runtime()
+                        if runtime.session_stream_states.get(session_id) is state_ref:
+                            runtime.session_stream_states.pop(session_id, None)
+                    asyncio.get_running_loop().call_later(120, _expire_stream_state)
+                else:
+                    _app_state.get_runtime().session_stream_states.pop(session_id, None)
             await _cancel_task(queue_get_task)
             # 安全网：确保 in_flight 锁被释放（正常路径已在 _run_chat_inner 中释放）
             if acquired and session_id is not None:
@@ -1215,7 +1257,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
         _event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
@@ -1385,6 +1427,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
         EventType.THINKING_DELTA,
         EventType.ITERATION_START,
         EventType.RETRACT_THINKING,
+        EventType.RETRACT_TEXT,
     }
     _REPLAY_SKIP_TYPES = TRANSIENT_SSE_TYPES
 
@@ -1400,7 +1443,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
             gen,
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-cache, no-transform",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
@@ -1414,12 +1457,38 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 "status": "completed",
                 "buffered_count": 0,
             })
+            yield _sse_format("resume_failed", {
+                "reason": "stream_unavailable",
+                "after_seq": after_seq,
+            })
             yield _sse_format("done", {})
 
         _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
         return _streaming_response(_done_stream())
 
     _sid = stream_state.stream_id
+
+    if request.stream_id and request.stream_id != _sid:
+        async def _stream_mismatch() -> AsyncIterator[str]:
+            yield _sse_format("session_init", {"session_id": session_id})
+            yield _sse_format("resume_failed", {
+                "reason": "stream_mismatch",
+                "stream_id": _sid,
+                "after_seq": after_seq,
+            })
+            yield _sse_format("done", {})
+        return _streaming_response(_stream_mismatch())
+
+    if stream_state.subscriber_queue is not None:
+        async def _already_connected() -> AsyncIterator[str]:
+            yield _sse_format("session_init", {"session_id": session_id})
+            yield _sse_format("resume_failed", {
+                "reason": "stream_already_connected",
+                "stream_id": _sid,
+                "after_seq": after_seq,
+            })
+            yield _sse_format("done", {})
+        return _streaming_response(_already_connected())
 
     # ── 检测 gap：after_seq 精确补发 + 缓冲溢出检测 ──
     # 当事件曾被丢弃且缓冲中最早 seq 大于客户端期望的下一个 seq 时，
@@ -1436,6 +1505,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
     # ── chat 任务已完成：重放缓冲后结束 ──
     if chat_task is None or chat_task.done():
         replay_items = stream_state.drain_buffer(after_seq=after_seq)
+        completed_result = getattr(stream_state, "completed_result", None)
 
         async def _completed_stream() -> AsyncIterator[str]:
             try:
@@ -1462,6 +1532,13 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     sse = _sse_event_to_sse(event)
                     if sse is not None:
                         yield _inject_seq(sse, seq, _sid)
+                if completed_result is not None:
+                    try:
+                        engine = get_session_manager().get_engine(session_id) if get_session_manager() else None
+                        if engine is not None:
+                            yield _build_reply_sse(completed_result, engine)
+                    except Exception:
+                        logger.debug("重连补发终态回复失败", exc_info=True)
                 yield _sse_format("done", {})
             finally:
                 _app_state.get_runtime().active_chat_tasks.pop(session_id, None)

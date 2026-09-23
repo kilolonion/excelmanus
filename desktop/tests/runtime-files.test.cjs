@@ -21,8 +21,8 @@ test('runtime pruning keeps executable dependencies and data while removing buil
     assert.ok(existsSync(join(python, 'Lib/json/__init__.py')));
     for (const file of ['Lib/test', 'Lib/ensurepip', 'Lib/idlelib', 'Lib/site-packages/pip']) assert.ok(!existsSync(join(python, file)), file);
     const retained = [
-      'numpy/testing/__init__.py', 'pandas/_testing/__init__.py', 'scipy/_lib/_testutils.py',
-      'sklearn/datasets/data/iris.csv', 'matplotlib/mpl-data/fonts/ttf/font.ttf',
+      'numpy/testing/__init__.py', 'pandas/_testing/__init__.py',
+      'matplotlib/mpl-data/fonts/ttf/font.ttf',
       'numpy.libs/openblas.dll', 'numpy-1.dist-info/licenses/LICENSE',
       'custom_library/tests/runtime.py', 'custom_library/sourceless.pyc',
     ];
@@ -32,6 +32,20 @@ test('runtime pruning keeps executable dependencies and data while removing buil
     assert.equal(stats.files, removed.length);
     for (const file of retained) assert.equal(readFileSync(join(python, 'Lib/site-packages', file), 'utf8'), `Lib/site-packages/${file}`);
     for (const file of removed) assert.ok(!existsSync(join(python, 'Lib/site-packages', file)), file);
+
+    for (const file of [
+      'Lib/tkinter/__init__.py', 'Lib/venv/__init__.py', 'Lib/pydoc_data/topics.py',
+      'bin/pip', 'bin/idle3.12', 'bin/2to3', 'bin/python3-config',
+      'include/python.h', 'share/man/python.1', 'lib/tcl8.6/init.tcl',
+      'lib/tk8.6/init.tcl', 'lib/itcl4.2.4/init.tcl',
+    ]) put(source, file);
+    const leanPython = join(work, 'lean-python');
+    cpSync(source, leanPython, { recursive: true, filter: file => pythonBaseFilter(source, file) });
+    for (const file of [
+      'Lib/tkinter', 'Lib/venv', 'Lib/pydoc_data', 'bin/pip', 'bin/idle3.12',
+      'bin/2to3', 'bin/python3-config',
+      'include', 'share', 'lib/tcl8.6', 'lib/tk8.6', 'lib/itcl4.2.4',
+    ]) assert.ok(!existsSync(join(leanPython, file)), file);
 
     const frontend = join(work, 'frontend');
     const kept = ['server.js', '.next/server/app/tests/page.js', 'public/test/data.json', 'node_modules/next/server.js', 'node_modules/next/package.json', 'node_modules/@img/sharp/lib.dll', 'node_modules/next/LICENSE'];

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid as _uuid
 from typing import Any, Callable
 
@@ -76,6 +77,8 @@ class SessionStreamState:
         "_overflow_warned",
         "_dropped_count",
         "_next_seq",
+        "completed_result",
+        "completed_at",
     )
 
     def __init__(self, buffer_limit: int = 500) -> None:
@@ -86,6 +89,15 @@ class SessionStreamState:
         self._overflow_warned = False
         self._dropped_count = 0
         self._next_seq: int = 1
+        # The final ChatResult is kept briefly after the producer finishes so
+        # a browser that disconnects between the last tool event and `reply`
+        # can reconnect without losing the terminal response.
+        self.completed_result: Any | None = None
+        self.completed_at: float | None = None
+
+    def mark_completed(self, result: Any) -> None:
+        self.completed_result = result
+        self.completed_at = time.monotonic()
 
     def deliver(self, event: ToolCallEvent) -> int:
         """投递事件：有订阅者时入队，否则缓冲。返回分配的 seq。"""
@@ -231,6 +243,7 @@ def sse_event_to_sse(
         EventType.FILE_DOWNLOAD: "file_download",
         EventType.VERIFICATION_REPORT: "verification_report",  # 仅用于读取历史，不再产生
         EventType.RETRACT_THINKING: "retract_thinking",
+        EventType.RETRACT_TEXT: "retract_text",
         EventType.STAGING_UPDATED: "staging_updated",
         EventType.MODE_CHANGED: "mode_changed",
         EventType.BATCH_PROGRESS: "batch_progress",
@@ -623,7 +636,7 @@ def sse_event_to_sse(
             "filename": sanitize_external_text(event.download_filename, max_len=260),
             "description": sanitize_external_text(event.download_description, max_len=500),
         }
-    elif event.event_type == EventType.RETRACT_THINKING:
+    elif event.event_type in (EventType.RETRACT_THINKING, EventType.RETRACT_TEXT):
         data = {"iteration": event.iteration}
     elif event.event_type == EventType.STAGING_UPDATED:
         data = {

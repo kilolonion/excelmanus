@@ -335,7 +335,29 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
 
 /* 功能区给「历史 / 操作 / 关闭」留右侧：原生标签靠左 */
 [data-univer-container] [role="tablist"][aria-label="ribbon.menu"] {
+  display: flex !important;
+  align-items: center !important;
+  flex-wrap: nowrap !important;
   justify-content: flex-start !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  scrollbar-width: none;
+}
+
+/* A narrow desktop side panel has the same constraints as a phone. */
+[data-univer-container] [role="tablist"][aria-label="ribbon.menu"] > [role="tab"] {
+  flex: 0 0 auto !important;
+  min-width: max-content !important;
+  width: auto !important;
+  white-space: nowrap !important;
+  word-break: keep-all !important;
+  writing-mode: horizontal-tb !important;
+}
+
+[data-univer-container] [role="tablist"][aria-label="ribbon.menu"]::-webkit-scrollbar {
+  display: none;
 }
 
 /* 移动端 Univer.js：保持功能区横向可滚动，避免标签被压成竖排。
@@ -2237,6 +2259,17 @@ body {
 
 @media (min-width: 768px) {
   @container em-topbar (max-width: 620px) {
+    /* Tablet layouts can leave the main column narrower than the desktop
+       three-part toolbar. Keep the actions visible and let the leading title
+       take the remaining space instead of clipping the middle tabs. */
+    .em-topbar-toolbar {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .em-workspace-tabs {
+      display: none;
+    }
+
     .em-topbar-actions .em-model-selector-label {
       display: none;
     }
@@ -2453,9 +2486,32 @@ body {
     padding-inline: 10px;
   }
 
+  /* Keep the leading title and the action cluster inside the viewport. The
+     action cluster may contain four independent controls, so it must be
+     allowed to shrink and scroll instead of pushing the title off-canvas. */
+  .em-topbar-leading,
+  .em-topbar-actions {
+    min-width: 0;
+  }
+
+  .em-topbar-actions {
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .em-topbar-actions::-webkit-scrollbar {
+    display: none;
+  }
+
+  .em-topbar-actions > * {
+    flex: 0 0 auto;
+  }
+
   .em-model-selector-trigger {
-    min-width: 128px;
-    max-width: 40vw;
+    min-width: 0;
+    max-width: min(40vw, 170px);
   }
 
   .em-model-selector-label {
@@ -2482,6 +2538,51 @@ body {
   }
 
 
+}
+
+/* A 390px phone cannot fit the title, model selector and all utility
+   actions on one row. Give the toolbar a second row at this breakpoint so
+   every control keeps its hit area and the title stays readable. */
+@media (max-width: 430px) {
+  .em-topbar-toolbar {
+    min-height: 84px;
+    flex-wrap: wrap;
+    align-content: center;
+    row-gap: 4px;
+  }
+
+  .em-topbar-leading {
+    flex: 1 1 auto;
+  }
+
+  .em-topbar-actions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+
+  .em-model-selector-trigger {
+    max-width: min(44vw, 170px);
+  }
+
+  /* Settings role pickers are readable as a stacked field on compact phones;
+     keeping the 9rem trigger beside its description leaves only a few dozen
+     pixels for the label and causes the row to look misaligned. */
+  .em-model-role-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .em-model-role-picker {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .em-model-role-picker .em-model-picker-trigger {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+  }
 }
 
 
@@ -2571,6 +2672,24 @@ body {
   padding-inline: clamp(12px, 2vw, 20px);
   border-color: var(--em-line) !important;
   background: var(--em-panel-soft) !important;
+}
+
+@media (max-width: 767px) {
+  /* Full-screen Word and compare views share this chrome. Let a long file
+     name occupy a fresh line rather than squeezing the action buttons. */
+  .em-surface-header {
+    flex-wrap: wrap;
+    row-gap: 4px;
+    padding-block: 6px;
+  }
+
+  .em-surface-header > .flex-1 {
+    min-width: 0;
+  }
+
+  .em-surface-note {
+    padding-inline: 12px;
+  }
 }
 
 .em-surface-tabs {
@@ -3006,6 +3125,16 @@ body {
 
 .em-ribbon-ask-button:hover {
   background: var(--em-primary-alpha-12) !important;
+}
+
+.em-ribbon-actions {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.em-ribbon-actions::-webkit-scrollbar {
+  display: none;
 }
 
 .em-slide-panel {

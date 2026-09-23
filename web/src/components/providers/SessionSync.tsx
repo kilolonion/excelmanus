@@ -220,6 +220,7 @@ export function SessionSync() {
     const controller = new AbortController();
     const prevInFlightRef = { current: false };
     let snapshotValidated = false;
+    let previousHistoryRevision = "";
     let polling = false;
     let notFoundCount = 0;
     const NOT_FOUND_THRESHOLD = 2;
@@ -299,6 +300,12 @@ export function SessionSync() {
         const chat = useChatStore.getState();
         const detailStreamId = detail.activeStreamId ?? null;
         const detailLatestSeq = Math.max(0, detail.latestSeq ?? 0);
+        const historyRevision = detail.historyRevision ?? "";
+        const historyRevisionChanged = Boolean(
+          historyRevision
+          && previousHistoryRevision
+          && historyRevision !== previousHistoryRevision,
+        );
         if (!chat.abortController) {
           if (detail.inFlight && detailStreamId) {
             chat.setStreamState(detailStreamId, Math.max(chat.latestSeq, detailLatestSeq));
@@ -315,7 +322,7 @@ export function SessionSync() {
           // 仅在快照校验失败时回源，避免常态全量刷新。
           if (detail.inFlight) {
             snapshotValidated = false;
-          } else if (!snapshotValidated) {
+          } else if (!snapshotValidated || historyRevisionChanged) {
             snapshotValidated = true;
             const latestChat = useChatStore.getState();
             if (latestChat.abortController === null && !latestChat.isStreaming
@@ -325,7 +332,7 @@ export function SessionSync() {
               // newest page is present locally. Comparing against visible rows
               // would otherwise re-fetch the tail on every poll.
               const localCount = latestChat.loadedMessageTotal ?? latestChat.messageOrder.length;
-              if (remoteCount !== localCount) {
+              if (remoteCount !== localCount || historyRevisionChanged) {
                 await refreshSessionMessagesFromBackend(activeSessionId);
               }
             } else {
@@ -349,6 +356,7 @@ export function SessionSync() {
           } else if (detail.inFlight !== chat.isStreaming) {
             chat.setStreaming(detail.inFlight);
           }
+          if (!detail.inFlight && historyRevision) previousHistoryRevision = historyRevision;
 
           // 娉ㄦ剰锛歳efreshSessionMessagesFromBackend 宸叉洿鏂?store锛岄渶閲嶆柊鑾峰彇鏈€鏂扮姸鎬?
           const freshChat = useChatStore.getState();

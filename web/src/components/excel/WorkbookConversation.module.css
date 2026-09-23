@@ -1,0 +1,123 @@
+.page {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+  padding: clamp(20px, 4vw, 42px) clamp(18px, 5vw, 56px) 28px;
+  container: workbook-welcome / inline-size;
+  background:
+    radial-gradient(circle at 92% 4%, var(--em-primary-alpha-08), transparent 30%),
+    linear-gradient(180deg, var(--em-page), color-mix(in srgb, var(--em-page) 88%, var(--em-primary-alpha-04)));
+  color: var(--em-ink);
+  scrollbar-width: thin;
+}
+
+.hero {
+  position: relative;
+  isolation: isolate;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--em-primary-alpha-15);
+  border-radius: 24px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--em-primary) 10%, var(--em-panel)), color-mix(in srgb, var(--em-primary) 3%, var(--em-panel)) 62%, var(--em-panel));
+  box-shadow: 0 14px 35px color-mix(in srgb, var(--em-primary) 7%, transparent);
+}
+
+.heroContent { position: relative; z-index: 1; max-width: 620px; padding: clamp(22px, 4vw, 34px); }
+.eyebrow, .sectionEyebrow { display: inline-flex; align-items: center; gap: 6px; color: var(--em-primary); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.eyebrow svg { width: 14px; height: 14px; }
+.hero h1 { max-width: 560px; margin: 12px 0 10px; font-size: clamp(25px, 4vw, 40px); font-weight: 700; line-height: 1.13; letter-spacing: -.045em; }
+.hero h1 span { color: var(--em-primary); }
+.heroDescription { max-width: 480px; margin: 0; color: var(--em-muted); font-size: 14px; line-height: 1.7; }
+
+.workbookCard { display: flex; align-items: center; gap: 10px; max-width: min(100%, 440px); margin-top: 22px; padding: 10px 12px; border: 1px solid var(--em-primary-alpha-15); border-radius: 14px; background: color-mix(in srgb, var(--em-panel) 80%, transparent); }
+.workbookIcon { display: grid; flex: 0 0 32px; width: 32px; height: 32px; place-items: center; border-radius: 10px; background: var(--em-primary-alpha-10); color: var(--em-primary); }
+.workbookIcon svg { width: 17px; height: 17px; }
+.workbookMeta { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+.workbookMeta strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.workbookMeta span { overflow: hidden; color: var(--em-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.workbookArrow { width: 15px; height: 15px; flex: 0 0 auto; color: var(--em-primary-light); }
+.heroGlow { position: absolute; top: -96px; right: -80px; width: 220px; height: 220px; border: 1px solid var(--em-primary-alpha-15); border-radius: 50%; box-shadow: 0 0 0 24px var(--em-primary-alpha-04), 0 0 0 48px var(--em-primary-alpha-02); }
+.heroPattern { position: absolute; right: 28px; bottom: 22px; display: flex; align-items: end; gap: 5px; opacity: .7; transform: rotate(-15deg); }
+.heroPattern span { display: block; width: 7px; border-radius: 5px; background: var(--em-primary-alpha-20); }
+.heroPattern span:nth-child(1) { height: 26px; }
+.heroPattern span:nth-child(2) { height: 44px; }
+.heroPattern span:nth-child(3) { height: 64px; background: var(--em-primary-alpha-30); }
+
+.tasksSection { display: flex; flex-direction: column; gap: 13px; }
+.sectionHeading { display: flex; align-items: end; justify-content: space-between; gap: 12px; }
+.sectionHeading h2 { margin: 3px 0 0; font-size: 18px; font-weight: 680; letter-spacing: -.025em; }
+.sectionHeading > span { padding-bottom: 2px; color: var(--em-muted); font-size: 11px; }
+.taskGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.taskCard { display: flex; align-items: center; min-width: 0; gap: 10px; padding: 13px 12px; border: 1px solid var(--em-line); border-radius: 15px; background: color-mix(in srgb, var(--em-panel) 94%, transparent); color: var(--em-ink); text-align: left; cursor: pointer; transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease, box-shadow 160ms ease; }
+.taskCard:hover { border-color: var(--em-primary-light); background: var(--em-primary-alpha-04); box-shadow: 0 7px 18px var(--em-primary-alpha-06); transform: translateY(-1px); }
+.taskCard:focus-visible { outline: 2px solid var(--em-primary); outline-offset: 2px; }
+.taskIcon { display: grid; flex: 0 0 32px; width: 32px; height: 32px; place-items: center; border-radius: 10px; background: var(--em-fill); color: var(--em-primary); }
+.taskIcon svg { width: 16px; height: 16px; }
+.taskCopy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.taskCopy strong { overflow: hidden; font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.taskCopy span { overflow: hidden; color: var(--em-muted); font-size: 11px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.taskArrow { width: 15px; height: 15px; flex: 0 0 auto; color: var(--em-muted); transition: color 160ms ease, transform 160ms ease; }
+.taskCard:hover .taskArrow { color: var(--em-primary); transform: translateX(2px); }
+
+.tipStrip { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid var(--em-line); border-radius: 14px; background: var(--em-fill); }
+.tipIcon { display: grid; flex: 0 0 28px; width: 28px; height: 28px; place-items: center; border-radius: 9px; background: color-mix(in srgb, var(--em-gold) 15%, transparent); color: var(--em-gold); }
+.tipIcon svg { width: 15px; height: 15px; }
+.tipStrip > div:last-child { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.tipStrip strong { font-size: 11px; font-weight: 650; }
+.tipStrip span { overflow: hidden; color: var(--em-muted); font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+
+.discussion { display: flex; align-items: center; min-width: 0; gap: 6px; margin: auto 0 0; padding-top: 2px; color: var(--em-muted); font-size: 11px; }
+.discussion > svg { width: 14px; height: 14px; flex: 0 0 auto; }
+.discussion strong { min-width: 0; overflow: hidden; color: var(--em-ink); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.discussion button { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; flex: 0 0 auto; border-radius: 7px; padding: 4px 6px; color: var(--em-primary); font-size: 11px; }
+.discussion button:hover { background: var(--em-primary-alpha-08); }
+.discussion button svg { width: 12px; height: 12px; }
+
+@media (max-width: 640px) {
+  .page { gap: 16px; padding: 18px 16px 22px; }
+  .heroContent { padding: 22px 20px; }
+  .hero h1 { font-size: clamp(24px, 8vw, 34px); }
+  .heroPattern { right: 16px; bottom: 16px; }
+  .taskGrid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 420px) {
+  .sectionHeading { align-items: start; flex-direction: column; gap: 4px; }
+  .sectionHeading > span { display: none; }
+  .tipStrip span { white-space: normal; }
+  .discussion { flex-wrap: wrap; }
+  .discussion button { margin-left: 20px; }
+}
+
+/* The chat can become narrower than the browser viewport when the sheet is
+   shown beside it. Use the actual panel width for the compact layout. */
+@container workbook-welcome (max-width: 420px) {
+  .page { gap: 14px; padding: 16px 12px 20px; }
+  .heroContent { padding: 19px 16px; }
+  .hero h1 { font-size: 25px; line-height: 1.18; }
+  .heroDescription { font-size: 12px; line-height: 1.55; }
+  .heroPattern { display: none; }
+  .sectionHeading { align-items: start; flex-direction: column; gap: 3px; }
+  .sectionHeading > span { display: none; }
+  .taskGrid { grid-template-columns: minmax(0, 1fr); }
+  .tipStrip span { white-space: normal; }
+}
+
+@container workbook-welcome (max-width: 280px) {
+  .heroContent { padding: 16px 13px; }
+  .eyebrow { font-size: 10px; }
+  .hero h1 { margin-top: 9px; font-size: 22px; }
+  .workbookCard { margin-top: 15px; padding: 8px; }
+  .taskCard { padding: 10px; }
+  .taskIcon { flex-basis: 28px; width: 28px; height: 28px; }
+  .discussion { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .taskCard, .taskArrow { transition: none; animation: none; }
+}

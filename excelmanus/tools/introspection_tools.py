@@ -338,7 +338,9 @@ def _compute_match_score(keywords: list[str], tool_desc: str) -> float:
 
 
 def _schema_kind_enums(tool: ToolDef) -> dict[str, list[str]]:
-    schema = tool.input_schema if isinstance(getattr(tool, "input_schema", None), dict) else {}
+    from excelmanus.tools.reference_contract import augment_reference_schema
+
+    schema = augment_reference_schema(tool.input_schema) if isinstance(getattr(tool, "input_schema", None), dict) else {}
     props = schema.get("properties") or {}
     found: dict[str, list[str]] = {}
     mode_spec = props.get("mode")
@@ -363,7 +365,9 @@ def _mode_field_map(tool_name: str) -> dict[str, frozenset[str]] | None:
 
 
 def _summarize_tool_schema(tool: ToolDef) -> str:
-    schema = tool.input_schema if isinstance(getattr(tool, "input_schema", None), dict) else {}
+    from excelmanus.tools.reference_contract import augment_reference_schema
+
+    schema = augment_reference_schema(tool.input_schema) if isinstance(getattr(tool, "input_schema", None), dict) else {}
     props = schema.get("properties") or {}
     required = schema.get("required") or []
     lines = [f"必填: {', '.join(str(item) for item in required) or '无'}"]
@@ -389,6 +393,17 @@ def _summarize_tool_schema(tool: ToolDef) -> str:
 
 def _handle_tool_detail(tool_name: str) -> str:
     """从当前有效目录获取 ToolDef。默认短摘要；点名字段才展开该节点。"""
+    if str(tool_name).startswith("schema_v1_"):
+        from excelmanus.tools.schema_registry import get_schema
+
+        bundled = get_schema(str(tool_name))
+        if bundled is None:
+            return f"未知 schema 引用: {tool_name}；请重新查询对应工具的 tool_detail。"
+        return (
+            f"Schema 引用: {tool_name}\n"
+            "这是当前进程的只读参数合同，不授予额外工具权限。\n"
+            + json.dumps(bundled, ensure_ascii=False, indent=2, default=str)
+        )
     tool_name, _, field_path = tool_name.partition(".")
     source = _source_tools()
     tool_def = source.get(tool_name)
@@ -431,8 +446,20 @@ def _handle_tool_detail(tool_name: str) -> str:
     if not field_path:
         from excelmanus.code_mode import _sdk_signature_line
         from excelmanus.tools.output_contracts import contract_summary
+        from excelmanus.tools.catalog import _schema_ref_id
+        from excelmanus.tools.reference_contract import augment_reference_schema
 
         lines.append("\n" + _summarize_tool_schema(tool_def))
+        full_schema = augment_reference_schema(tool_def.input_schema) if isinstance(tool_def.input_schema, dict) else {}
+        try:
+            schema_size = len(json.dumps(full_schema, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            schema_size = 0
+        if schema_size > 7500:
+            lines.append(
+                f"\nSchema 引用: {_schema_ref_id(tool_name, full_schema)}；"
+                f"完整字段按 tool_detail {tool_name}.字段路径继续查询。"
+            )
         if tool_name != "run_code":
             lines.append("\nPython SDK（import em）:\n- em." + _sdk_signature_line(tool_def).removeprefix("- "))
             lines.append("签名中的 ... 表示省略参数；None 仅在合同含 null 时表示显式空值。")
@@ -441,7 +468,9 @@ def _handle_tool_detail(tool_name: str) -> str:
         lines.append("\n输出合同:\n" + (summary or "未声明，不推断返回类型；按实际返回值处理。"))
         lines.append("可用 tool_detail 查询 工具名.字段 缩小范围；不要把 A1 语法整段当参数。")
     else:
-        schema = tool_def.input_schema if isinstance(tool_def.input_schema, dict) else {}
+        from excelmanus.tools.reference_contract import augment_reference_schema
+
+        schema = augment_reference_schema(tool_def.input_schema) if isinstance(tool_def.input_schema, dict) else {}
         from excelmanus.tools.schema_walk import compact_node, walk_schema_path
         from excelmanus.workbook.refs import describe_for_schema
 
@@ -571,7 +600,10 @@ def _schema_route_hits(query: str, source: dict[str, ToolDef]) -> list[str]:
         enums = _schema_kind_enums(tool)
         kinds = set(enums.get("operations.kind") or [])
         modes = set(enums.get("mode") or [])
-        props = ((tool.input_schema or {}).get("properties") or {}) if isinstance(tool.input_schema, dict) else {}
+        from excelmanus.tools.reference_contract import augment_reference_schema
+
+        schema = augment_reference_schema(tool.input_schema) if isinstance(tool.input_schema, dict) else {}
+        props = (schema.get("properties") or {}) if isinstance(schema, dict) else {}
         op_keys = set(enums.get("operations.keys") or [])
         if any(token in text for token in ("冻结", "冻结窗格", "首行")) or "freeze" in lowered:
             if "freeze" in kinds:

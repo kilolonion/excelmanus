@@ -1477,11 +1477,11 @@ def _apply_delete_rows(wb: Any, op: dict[str, Any]) -> str:
     sel = parse_bound_selection(_op_get(op, "selection"))
     if sel is not None:
         ws = _worksheet(wb, sel.sheet)
+        rows = sorted({int(r) for r in sel.rows}, reverse=True)
         _refuse_unmaintained_structure(
             ws, "delete_rows", target_sheet=sel.sheet, axis="row",
             at=min(rows), count=len(rows),
         )
-        rows = sorted({int(r) for r in sel.rows}, reverse=True)
         for row in rows:
             ws.delete_rows(row, amount=1)
         return f"delete_rows:selection:{len(rows)}"
@@ -2425,6 +2425,196 @@ def _verify_compiled_workbook(dest: Any, spec: Any) -> dict[str, Any]:
     return {"ok": not mismatches, "mismatches": mismatches}
 
 
+def _apply_edit_operations(
+    wb: Any,
+    operations: list[Any],
+    *,
+    file_path: str,
+    create_workbook: bool,
+) -> tuple[list[str], list[str]]:
+    """Apply one edit operation list to an in-memory workbook.
+
+    Keeping this mutation loop independent from the commit wrapper lets the
+    single-file and cross-file entry points share exactly the same operation
+    semantics while the latter publishes all workbooks in one transaction.
+    """
+    applied: list[str] = []
+    mutation_warnings: list[str] = []
+    for index, raw in enumerate(operations):
+        if not isinstance(raw, dict):
+            raise MutationAborted(_invalid(f"operations[{index}] 必须是对象"))
+        kind = str(_op_get(raw, "kind") or "")
+        try:
+            _reject_edit_fields(raw, kind)
+            if kind == "write":
+                applied.append(_apply_write(wb, raw, create_sheet_if_missing=create_workbook))
+            elif kind == "insert":
+                applied.append(_apply_insert(wb, raw))
+            elif kind == "sheet":
+                applied.append(_apply_sheet(wb, raw))
+            elif kind == "copy":
+                applied.append(_apply_copy(wb, raw))
+            elif kind == "delete_rows":
+                applied.append(_apply_delete_rows(wb, raw))
+            elif kind == "delete_columns":
+                applied.append(_apply_delete_columns(wb, raw))
+            elif kind in {"pivot", "pivot_refresh"}:
+                applied.append(_apply_pivot(wb, raw, file_path, mutation_warnings))
+            elif kind == "transform":
+                applied.append(_apply_transform(wb, raw, mutation_warnings))
+            else:
+                raise MutationAborted(
+                    _invalid(
+                        f"不支持的 edit.kind={kind}。"
+                        "值/表结构用 write|insert|sheet|copy|delete_rows|delete_columns|pivot|transform；"
+                        "外观用 format_spreadsheet"
+                    )
+                )
+        except MutationAborted as exc:
+            _abort_operation(exc, index, kind)
+    return applied, mutation_warnings
+
+
+def _edit_spreadsheet_batch(workbooks: Any) -> ToolResult:
+    """Commit several edit_spreadsheet requests under one workspace transaction."""
+    if isinstance(workbooks, str):
+        try:
+            workbooks = json.loads(workbooks)
+        except (TypeError, ValueError) as exc:
+            return _invalid(f"workbooks 必须是对象数组：{exc}")
+    if not isinstance(workbooks, list) or not workbooks:
+        return _invalid("workbooks 必须是非空对象数组")
+
+    from excelmanus.security.source_isolation import is_probe_path, probe_error_message
+    from excelmanus.tools.context import operation_id_for
+    from excelmanus.workbook.snapshot import SnapshotError, validate_selection_target
+    from excelmanus.workbook_commit import commit_workbook_batch
+
+    guard = _get_guard()
+    batch_items: list[dict[str, Any]] = []
+    applied_by_path: dict[str, list[str]] = {}
+    warnings_by_path: dict[str, list[str]] = {}
+    for index, raw_item in enumerate(workbooks):
+        if not isinstance(raw_item, dict):
+            return _invalid(f"workbooks[{index}] 必须是对象")
+        target = str(raw_item.get("file_path") or raw_item.get("path") or "").strip()
+        if not target:
+            return _invalid(f"workbooks[{index}] 缺少 file_path")
+        if is_probe_path(target):
+            return _invalid(probe_error_message(target), code=PROBE_FILE_FORBIDDEN)
+        ops = _coerce_operations(raw_item.get("operations"))
+        if isinstance(ops, ToolResult):
+            return ops
+        if not ops:
+            return _invalid(f"workbooks[{index}] 需要 operations")
+        _normalize_source_rows_ops(ops, target)
+        try:
+            for op in ops:
+                if isinstance(op, dict) and "selection" in op:
+                    validate_selection_target(op["selection"], target, _op_get(op, "sheet", "sheet_name"))
+        except (SnapshotError, ValueError, TypeError) as exc:
+            return _invalid(str(exc), code="SELECTION_STALE")
+        expected = raw_item.get("expected_version") or raw_item.get("content_version")
+        has_sel, sel_ver = _ops_bound_selection_version(ops)
+        if has_sel:
+            if not sel_ver:
+                return _invalid(
+                    f"workbooks[{index}] 的 selection/source_rows 必须带 content_version",
+                    code="SELECTION_STALE",
+                )
+            if expected and expected != sel_ver:
+                return _invalid(
+                    f"workbooks[{index}] expected_version 与选择版本不一致",
+                    code="SELECTION_STALE",
+                )
+            expected = sel_ver
+        try:
+            _safe, rel = prepare_excel_commit_path(guard, target)
+        except (SecurityViolationError, CommitError) as exc:
+            return commit_error_result(exc if isinstance(exc, CommitError) else CommitError("PATH_INVALID", str(exc)))
+        applied_by_path[rel] = []
+        warnings_by_path[rel] = []
+
+        def mutate(
+            wb: Any,
+            *,
+            _ops=ops,
+            _rel=rel,
+            _create=bool(raw_item.get("create_workbook")),
+        ) -> None:
+            applied, warnings = _apply_edit_operations(
+                wb, _ops, file_path=_rel, create_workbook=_create,
+            )
+            applied_by_path[_rel] = applied
+            warnings_by_path[_rel] = warnings
+
+        batch_item: dict[str, Any] = {
+            "file_path": rel,
+            "mutate_fn": mutate,
+            "expected_version": expected,
+            "create": bool(raw_item.get("create_workbook")),
+            "intent": raw_item.get("intent") or {
+                "kind": "edit_spreadsheet_batch",
+                "path": rel,
+                "batch_index": index,
+                "operation_kinds": [str(_op_get(op, "kind") or "") for op in ops],
+            },
+        }
+        if raw_item.get("read_dependencies") is not None:
+            batch_item["read_dependencies"] = raw_item.get("read_dependencies")
+        batch_items.append(batch_item)
+
+    try:
+        results = commit_workbook_batch(
+            guard=guard,
+            workbooks=batch_items,
+            operation_id=operation_id_for("edit_spreadsheet_batch"),
+        )
+    except MutationAborted as exc:
+        return exc.result
+    except CommitError as exc:
+        return commit_error_result(exc)
+    files: list[dict[str, Any]] = []
+    transaction: dict[str, Any] | None = None
+    for result in results:
+        extra = result.extra or {}
+        receipt = extra.get("receipt") or {}
+        if transaction is None:
+            transaction = {
+                "operation_id": receipt.get("operation_id"),
+                "tx_id": receipt.get("tx_id"),
+                "state": receipt.get("state", "committed"),
+            }
+        warnings = list(result.warnings) + warnings_by_path.get(result.path, [])
+        formula_status = extra.get("formula_recalculation")
+        if isinstance(formula_status, dict):
+            if formula_status.get("status") == "unavailable":
+                warnings.append("公式已写入，但当前环境没有可用的重算引擎；缓存值可能仍为旧值。")
+            if formula_status.get("errors"):
+                warnings.append(
+                    f"公式重算后发现 {len(formula_status['errors'])} 个错误值，请检查 formula_recalculation.errors。"
+                )
+        files.append({
+            "file_path": result.path,
+            "content_version": result.content_version,
+            "previous_version": result.previous_version,
+            "applied": applied_by_path.get(result.path, []),
+            "warnings": sorted(set(warnings)),
+            "formula_recalculation": formula_status,
+        })
+    primary = files[0] if files else {}
+    return _success({
+        "committed": True,
+        # Keep the normal edit_spreadsheet top-level contract stable while
+        # exposing the complete per-file receipt below.
+        "file_path": primary.get("file_path", ""),
+        "content_version": primary.get("content_version", ""),
+        "applied": [item for row in files for item in row.get("applied", [])],
+        "transaction": transaction or {},
+        "files": files,
+    })
+
+
 def edit_spreadsheet(
     file_path: str = "",
     operations: list[dict[str, Any]] | None = None,
@@ -2433,8 +2623,13 @@ def edit_spreadsheet(
     expected_version: str | None = None,
     path: str = "",
     content_version: str | None = None,
+    workbooks: list[dict[str, Any]] | str | None = None,
 ) -> ToolResult:
     """一次原子请求：写值/插入行列/改表结构，或编译 WorkbookSpec。"""
+    if workbooks not in (None, "", []):
+        if file_path or path or operations or workbook_spec not in (None, ""):
+            return _invalid("workbooks 批量模式不能同时传 file_path、operations 或 workbook_spec")
+        return _edit_spreadsheet_batch(workbooks)
     file_path = file_path or path
     expected_version = expected_version or content_version
     operations = _coerce_operations(operations)
@@ -2548,40 +2743,14 @@ def edit_spreadsheet(
     mutation_warnings: list[str] = []
 
     def mutate(wb: Any) -> None:
-        for index, raw in enumerate(operations):
-            if not isinstance(raw, dict):
-                raise MutationAborted(_invalid(f"operations[{index}] 必须是对象"))
-            kind = str(_op_get(raw, "kind") or "")
-            try:
-                _reject_edit_fields(raw, kind)
-                if kind == "write":
-                    applied.append(
-                        _apply_write(wb, raw, create_sheet_if_missing=create_workbook)
-                    )
-                elif kind == "insert":
-                    applied.append(_apply_insert(wb, raw))
-                elif kind == "sheet":
-                    applied.append(_apply_sheet(wb, raw))
-                elif kind == "copy":
-                    applied.append(_apply_copy(wb, raw))
-                elif kind == "delete_rows":
-                    applied.append(_apply_delete_rows(wb, raw))
-                elif kind == "delete_columns":
-                    applied.append(_apply_delete_columns(wb, raw))
-                elif kind in {"pivot", "pivot_refresh"}:
-                    applied.append(_apply_pivot(wb, raw, file_path, mutation_warnings))
-                elif kind == "transform":
-                    applied.append(_apply_transform(wb, raw, mutation_warnings))
-                else:
-                    raise MutationAborted(
-                        _invalid(
-                            f"不支持的 edit.kind={kind}。"
-                            "值/表结构用 write|insert|sheet|copy|delete_rows|delete_columns|pivot|transform；"
-                            "外观用 format_spreadsheet"
-                        )
-                    )
-            except MutationAborted as exc:
-                _abort_operation(exc, index, kind)
+        applied_result, warning_result = _apply_edit_operations(
+            wb,
+            operations,
+            file_path=file_path,
+            create_workbook=create_workbook,
+        )
+        applied.extend(applied_result)
+        mutation_warnings.extend(warning_result)
 
     committed = _commit(
         file_path=file_path,
@@ -2704,6 +2873,17 @@ def format_spreadsheet(
         "applied": applied,
         "appearance": appearance,
     }
+    formula_status = (getattr(cr, "extra", {}) or {}).get("formula_recalculation")
+    if formula_status is not None:
+        payload["formula_recalculation"] = formula_status
+        if formula_status.get("status") == "unavailable":
+            payload["warnings"].append(
+                "公式缓存未由本机重算引擎刷新；请在 Excel/LibreOffice 中打开并保存后再读取结果。"
+            )
+        elif formula_status.get("errors"):
+            payload["warnings"].append(
+                f"公式重算后发现 {len(formula_status['errors'])} 个错误值，请检查 formula_recalculation.errors。"
+            )
     if skipped_merged_non_anchors:
         payload["skipped_merged_non_anchors"] = skipped_merged_non_anchors
     return _success(payload)
@@ -3856,11 +4036,22 @@ def split_spreadsheet(
 
     # Use the existing workspace transaction: check all destinations under
     # lock, preserve history, and expose recoverable partial publication.
-    from excelmanus.workspace.file_service import TargetSpec, service_for_guard
+    from excelmanus.workspace.file_service import ReadDependency, TargetSpec, service_for_guard
 
     svc = service_for_guard(guard)
     try:
-        receipt = svc.apply_batch([TargetSpec(op="create", path=rel, data=data) for _, rel, data in rendered]) if rendered else None
+        receipt = (
+            svc.apply_batch(
+                [TargetSpec(op="create", path=rel, data=data) for _, rel, data in rendered],
+                # The source snapshot is a read dependency of every output.
+                # If a user edits the source while rendering is in progress,
+                # abort the complete fan-out instead of publishing stale files.
+                read_dependencies=[ReadDependency(rel_source, snap.content_version)],
+                actor="split_spreadsheet",
+            )
+            if rendered
+            else None
+        )
     except CommitError as exc:
         return commit_error_result(exc)
     if receipt is not None and receipt.state != "committed":
@@ -4306,6 +4497,29 @@ def get_tools() -> list[ToolDef]:
                             "必填 sheets 与 uncertainties。嵌套字段用 introspect_capability 查询。"
                         ),
                     },
+                    "workbooks": {
+                        "type": ["array", "string"],
+                        "description": (
+                            "跨文件原子编辑。每项为 {file_path, operations, expected_version?, "
+                            "create_workbook?, read_dependencies?}；所有工作簿先完成内存构建，"
+                            "任一文件版本冲突或操作失败时整批不发布。"
+                        ),
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "file_path": {"type": "string"},
+                                "path": {"type": "string"},
+                                "operations": {"type": ["array", "string"], "items": {"type": "object"}},
+                                "expected_version": {"type": "string"},
+                                "content_version": {"type": "string"},
+                                "create_workbook": {"type": "boolean"},
+                                "read_dependencies": {"type": ["array", "object", "string"]},
+                                "intent": {"type": "object"},
+                            },
+                            "required": ["file_path", "operations"],
+                        },
+                    },
                     "create_workbook": {
                         "type": "boolean",
                         "default": False,
@@ -4320,7 +4534,11 @@ def get_tools() -> list[ToolDef]:
                     },
                     "content_version": {"type": "string", "description": "expected_version 别名"},
                 },
-                "required": ["file_path"],
+                "anyOf": [
+                    {"required": ["file_path", "operations"]},
+                    {"required": ["file_path", "workbook_spec"]},
+                    {"required": ["workbooks"]},
+                ],
             },
             func=edit_spreadsheet,
             write_effect="workspace_write",

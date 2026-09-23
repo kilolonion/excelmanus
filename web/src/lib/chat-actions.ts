@@ -196,6 +196,7 @@ class DeltaBatcher {
   private _textBuf = "";
   private _thinkingBuf = "";
   private _rafId: number | null = null;
+  private _flushTimer: ReturnType<typeof setTimeout> | null = null;
   private _disposed = false;
 
   constructor(private _onFlush: (text: string, thinking: string) => void) {}
@@ -218,6 +219,10 @@ class DeltaBatcher {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
     }
+    if (this._flushTimer !== null) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
+    }
     this._doFlush();
   }
 
@@ -227,6 +232,10 @@ class DeltaBatcher {
     if (this._rafId !== null) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
+    }
+    if (this._flushTimer !== null) {
+      clearTimeout(this._flushTimer);
+      this._flushTimer = null;
     }
     this._doFlush();
     this._disposed = true;
@@ -243,9 +252,25 @@ class DeltaBatcher {
     if (this._disposed || this._rafId !== null) return;
     this._rafId = requestAnimationFrame(() => {
       if (this._disposed) return;
+      if (this._flushTimer !== null) {
+        clearTimeout(this._flushTimer);
+        this._flushTimer = null;
+      }
       this._rafId = null;
       this._doFlush();
     });
+    // requestAnimationFrame is paused or heavily throttled in background
+    // tabs. Keep a short wall-clock fallback so a live stream cannot retain
+    // all deltas until the tab becomes visible again.
+    this._flushTimer = setTimeout(() => {
+      if (this._disposed) return;
+      if (this._rafId !== null) {
+        cancelAnimationFrame(this._rafId);
+        this._rafId = null;
+      }
+      this._flushTimer = null;
+      this._doFlush();
+    }, 50);
   }
 
   private _doFlush() {
@@ -289,11 +314,15 @@ function applyThinkingDelta(messageId: string, thinkingDelta: string) {
   });
 }
 
-function makeDeltaBatcher(messageId: string) {
-  return new DeltaBatcher((textDelta, thinkingDelta) => {
+function makeDeltaBatcher(messageId: string, controller: AbortController) {
+  const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
+    if (useChatStore.getState().abortController !== controller) return;
     if (textDelta.length > 0) applyTextDelta(messageId, textDelta);
     if (thinkingDelta.length > 0) applyThinkingDelta(messageId, thinkingDelta);
   });
+  // Publish already received text before stopGeneration releases ownership.
+  controller.signal.addEventListener("abort", () => batcher.dispose(), { once: true });
+  return batcher;
 }
 
 function scheduleSessionResync(sessionId: string, delayMs: number) {
@@ -518,6 +547,9 @@ async function streamMessage(
 
   const effectiveSessionId = sessionId || getActiveSessionId();
   handleWorkbookMessageSent(effectiveSessionId);
+  if (!text.trimStart().startsWith("/")) {
+    useExcelStore.setState({ autoOpenSuppressedSessionId: null });
+  }
 
   // 选中态只写 session-store。bindLoadedSession 避免 SessionSync 在消息占位后误切会话清空。
   if (effectiveSessionId && sessionStore.activeSessionId !== effectiveSessionId) {
@@ -585,6 +617,7 @@ async function streamMessage(
       imageAdmitError = err;
       return [] as ChatImagePayload[];
     });
+    if (abortController.signal.aborted || useChatStore.getState().abortController !== abortController) return;
     if (imageAdmitError) {
       useChatStore.getState().appendBlock(assistantMsgId, _buildClientFailureGuidance({
         category: "transport",
@@ -621,7 +654,7 @@ async function streamMessage(
 
   // RAF 批量增量刷新器：累积 text_delta / thinking_delta，
   // 每个动画帧最多应用到 store 一次。
-  const batcher = makeDeltaBatcher(assistantMsgId);
+  const batcher = makeDeltaBatcher(assistantMsgId, abortController);
 
   // ── SSE 事件处理上下文 ───────────────────────────────────
   const sseCtx: SSEHandlerContext = {
@@ -682,8 +715,9 @@ async function streamMessage(
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
+        if (abortController.signal.aborted || S().abortController !== abortController) return;
         // 鏀跺埌浜嬩欢锛岄噸缃仠婊炴娴嬭鏃跺櫒
-        _resetStallTimer();
+        if ((event as SSEEvent).event !== "heartbeat") _resetStallTimer();
 
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
@@ -706,7 +740,7 @@ async function streamMessage(
                 iterations: (data.iterations as number) || 0,
               };
             } else {
-              S().appendBlock(assistantMsgId, {
+              S().upsertBlockByType(assistantMsgId, "token_stats", {
                 type: "token_stats",
                 promptTokens: (data.prompt_tokens as number) || 0,
                 completionTokens: (data.completion_tokens as number) || 0,
@@ -720,6 +754,7 @@ async function streamMessage(
       abortController.signal
     );
   } catch (err) {
+    if (S().abortController !== abortController) return;
     if ((err as Error).name !== "AbortError") {
       sseCtx.hadStreamError = true;
       if (err instanceof SSEError) {
@@ -753,14 +788,13 @@ async function streamMessage(
     if (_stallTimer !== null) clearTimeout(_stallTimer);
     _stallTimer = null;
     try { batcher.dispose(); } catch (e) { console.error("[sendMessage] batcher dispose error:", e); }
-    S().setPipelineStatus(null);
-    try { S().saveCurrentSession(); } catch (e) { console.error("[sendMessage] save session error:", e); }
-    S().setStreaming(false);
-    S().setAbortController(null);
-    useJevStore.getState().finishTurn();
-
-    if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
-      scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
+    if (S().abortController === abortController) {
+      try { S().saveCurrentSession(); } catch (e) { console.error("[sendMessage] save session error:", e); }
+      useChatStore.setState({ pipelineStatus: null, isStreaming: false, abortController: null });
+      useJevStore.getState().finishTurn();
+      if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
+        scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
+      }
     }
   }
 }
@@ -802,7 +836,7 @@ export async function sendContinuation(
   const S = () => useChatStore.getState();
   const msgId = assistantMsgId;
 
-  const batcher = makeDeltaBatcher(msgId);
+  const batcher = makeDeltaBatcher(msgId, abortController);
 
   const sseCtx: SSEHandlerContext = {
     assistantMsgId: msgId,
@@ -833,7 +867,8 @@ export async function sendContinuation(
       buildApiUrl("/chat/stream", { direct: true }),
       { message: text, session_id: effectiveSessionId, chat_mode: useUIStore.getState().chatMode },
       (event) => {
-        _resetContStall();
+        if (abortController.signal.aborted || S().abortController !== abortController) return;
+        if ((event as SSEEvent).event !== "heartbeat") _resetContStall();
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
         dispatchSSEEvent(sseEvent, sseCtx);
@@ -881,7 +916,7 @@ export async function sendContinuation(
                   }));
                 }
               }
-              S().appendBlock(msgId, {
+              S().upsertBlockByType(msgId, "token_stats", {
                 type: "token_stats",
                 promptTokens: accPrompt,
                 completionTokens: accCompletion,
@@ -895,6 +930,7 @@ export async function sendContinuation(
       abortController.signal,
     );
   } catch (err) {
+    if (S().abortController !== abortController) return;
     if ((err as Error).name !== "AbortError") {
       sseCtx.hadStreamError = true;
       if (err instanceof SSEError) {
@@ -928,14 +964,13 @@ export async function sendContinuation(
     if (_contStallTimer !== null) clearTimeout(_contStallTimer);
     _contStallTimer = null;
     try { batcher.dispose(); } catch (e) { console.error("[sendContinuation] batcher dispose error:", e); }
-    S().setPipelineStatus(null);
-    try { S().saveCurrentSession(); } catch (e) { console.error("[sendContinuation] save session error:", e); }
-    S().setStreaming(false);
-    S().setAbortController(null);
-    useJevStore.getState().finishTurn();
-
-    if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
-      scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
+    if (S().abortController === abortController) {
+      try { S().saveCurrentSession(); } catch (e) { console.error("[sendContinuation] save session error:", e); }
+      useChatStore.setState({ pipelineStatus: null, isStreaming: false, abortController: null });
+      useJevStore.getState().finishTurn();
+      if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
+        scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
+      }
     }
   }
 }
@@ -1169,32 +1204,29 @@ export async function retryAssistantMessage(
 
 export function stopGeneration() {
   const store = useChatStore.getState();
-  if (!store.abortController) return;
+  if (!store.abortController && !store.isStreaming) return;
 
   // 1. 閫氱煡鍚庣鍙栨秷鏈嶅姟绔换鍔?
-  const sessionId = getActiveSessionId() || store.loadedSessionId;
+  const sessionId = store.loadedSessionId || getActiveSessionId();
   if (sessionId) {
     import("./api").then(({ abortChat }) => abortChat(sessionId)).catch(() => {});
   }
 
   // 2. 涓柇鍓嶇 SSE 杩炴帴
-  store.abortController.abort();
-  store.setAbortController(null);
-  store.setStreaming(false);
+  store.abortController?.abort();
+  useChatStore.setState({ pipelineStatus: null, abortController: null, isStreaming: false });
+  useJevStore.getState().finishTurn();
 
   // 3. 淇ˉ鏈€鍚庝竴鏉?assistant 娑堟伅锛氬皢杩涜涓殑 block 鏍囪涓哄け璐ワ紝
   //    骞惰拷鍔犲彲瑙佺殑"宸插仠姝?鎸囩ず鍣ㄣ€?
-  const messages = store.messages;
+  const messages = useChatStore.getState().messages;
   const lastMsg = [...messages].reverse().find((m) => m.role === "assistant");
   if (lastMsg && lastMsg.role === "assistant") {
-    let blocksChanged = false;
     const patchedBlocks = lastMsg.blocks.map((block): AssistantBlock => {
-      if (block.type === "tool_call" && block.status === "running") {
-        blocksChanged = true;
+      if (block.type === "tool_call" && (block.status === "running" || block.status === "streaming")) {
         return { ...block, status: "error", error: "已被用户停止" };
       }
       if (block.type === "subagent" && block.status === "running" && !block.background) {
-        blocksChanged = true;
         return { ...block, status: "done", summary: "已被用户停止" };
       }
       return block;
@@ -1273,7 +1305,7 @@ export async function subscribeToSession(sessionId: string) {
 
   const S = () => useChatStore.getState();
 
-  const batcher = makeDeltaBatcher(msgId);
+  const batcher = makeDeltaBatcher(msgId, abortController);
 
   const sseCtx: SSEHandlerContext = {
     assistantMsgId: msgId,
@@ -1308,8 +1340,9 @@ export async function subscribeToSession(sessionId: string) {
         after_seq: subscribeAfterSeq,
       },
       (event) => {
+        if (abortController.signal.aborted || S().abortController !== abortController) return;
         // 鏀跺埌浜嬩欢锛岄噸缃仠婊炴娴嬭鏃跺櫒
-        _resetSubStall();
+        if ((event as SSEEvent).event !== "heartbeat") _resetSubStall();
 
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
@@ -1322,7 +1355,7 @@ export async function subscribeToSession(sessionId: string) {
             S().pendingApproval !== null || S().pendingQuestion !== null;
           const totalTokens = (data.total_tokens as number) || 0;
           if (totalTokens > 0 && !hasPendingInteraction) {
-            S().appendBlock(msgId, {
+            S().upsertBlockByType(msgId, "token_stats", {
               type: "token_stats",
               promptTokens: (data.prompt_tokens as number) || 0,
               completionTokens: (data.completion_tokens as number) || 0,
@@ -1335,6 +1368,7 @@ export async function subscribeToSession(sessionId: string) {
       abortController.signal,
     );
   } catch (err) {
+    if (S().abortController !== abortController) return;
     if ((err as Error).name !== "AbortError") {
       sseCtx.hadStreamError = true;
       if (err instanceof SSEError) {
@@ -1367,15 +1401,16 @@ export async function subscribeToSession(sessionId: string) {
   } finally {
     if (_subStallTimer !== null) clearTimeout(_subStallTimer);
     _subStallTimer = null;
-    _activeSubscribeSessionId = null;
+    if (_activeSubscribeSessionId === sessionId) _activeSubscribeSessionId = null;
     try { batcher.dispose(); } catch (e) { console.error("[subscribeToSession] batcher dispose error:", e); }
-    S().setPipelineStatus(null);
-    S().saveCurrentSession();
-    S().setStreaming(false);
-    S().setAbortController(null);
-    useJevStore.getState().finishTurn();
+    const ownsStream = S().abortController === abortController;
+    if (ownsStream) {
+      S().saveCurrentSession();
+      useChatStore.setState({ pipelineStatus: null, isStreaming: false, abortController: null });
+      useJevStore.getState().finishTurn();
+    }
 
-    if (S().resumeFailedReason) {
+    if (ownsStream && S().resumeFailedReason) {
       const sid = sessionId;
       setTimeout(async () => {
         try {

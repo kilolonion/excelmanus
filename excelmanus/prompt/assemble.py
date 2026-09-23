@@ -273,7 +273,10 @@ def prepare_system_prompts_for_request(
             token_cache.pop(next(iter(token_cache)))
         token_cache[cache_key] = total_tokens
 
-    if system_prompts_token_count(prompts) > threshold:
+    # ``total_tokens`` is already measured above (or served from the small
+    # per-engine cache).  Re-tokenizing the same stable prefix here made every
+    # turn pay a second full BPE pass.
+    if total_tokens > threshold:
         return [], (
             "系统上下文过长，已无法在当前上下文窗口内继续执行。"
             "请减少附加上下文或拆分任务后重试。"

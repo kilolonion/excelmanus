@@ -331,6 +331,36 @@ class TestCheckForUpdates:
         assert info.has_update is True
         assert info.commits_behind == 1
 
+    def test_local_tag_collision_does_not_block_branch_check(self, tmp_path: Path) -> None:
+        from excelmanus.updater import check_for_updates
+
+        repo = tmp_path / "repo"
+        origin = tmp_path / "origin.git"
+        other = tmp_path / "other"
+        _init_repo(repo)
+        (repo / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n', encoding="utf-8")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "ver")
+        subprocess.check_call(["git", "clone", "--bare", str(repo), str(origin)])
+        _git(repo, "remote", "add", "origin", str(origin))
+        subprocess.check_call(["git", "clone", str(origin), str(other)])
+        (other / "README").write_text("remote\n", encoding="utf-8")
+        _git(other, "add", ".")
+        _git(other, "commit", "-m", "remote")
+        _git(other, "tag", "v1.8.0")
+        subprocess.check_call(["git", "push", "origin", "HEAD:main", "v1.8.0"], cwd=other)
+
+        # The same tag name exists locally but points at the old commit.  A
+        # tag-aware fetch rejects this as "would clobber existing tag" even
+        # though the branch is perfectly fetchable.
+        _git(repo, "tag", "v1.8.0")
+
+        info = check_for_updates(repo, force=True)
+        assert not info.check_failed
+        assert info.has_update is True
+        assert info.commits_behind == 1
+        assert info.target_ref == "origin/main"
+
 
 class TestApplyBuildRollback:
     @pytest.mark.parametrize("domestic", [True, False])

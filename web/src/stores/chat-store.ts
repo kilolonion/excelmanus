@@ -88,7 +88,7 @@ function _setMessagesSnapshot(messages: Message[]): Pick<
 }
 
 function _patchMessageById(
-  state: Pick<ChatState, "messageOrder" | "messagesById" | "messageIndexById">,
+  state: Pick<ChatState, "messages" | "messageOrder" | "messagesById" | "messageIndexById">,
   messageId: string,
   updater: (message: Message) => Message,
 ): Pick<ChatState, "messages" | "messagesById"> | null {
@@ -97,8 +97,11 @@ function _patchMessageById(
   const next = updater(current);
   if (next === current) return null;
   const messagesById = { ...state.messagesById, [messageId]: next };
+  const index = state.messageIndexById[messageId];
+  const messages = state.messages.slice();
+  messages[index] = next;
   return {
-    messages: state.messageOrder.map(id => messagesById[id]),
+    messages,
     messagesById,
   };
 }
@@ -427,6 +430,18 @@ function _resolveBackendMessageId(msg: Record<string, unknown>): string {
   return messageId || _nextId();
 }
 
+function _resolveBackendTimestamp(msg: Record<string, unknown>): number | undefined {
+  const raw = msg.created_at ?? msg.timestamp;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw > 10_000_000_000 ? raw : raw * 1000;
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
 function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
   const resolvedToolCallIds = new Set<string>();
   const toolResultByCallId = new Map<string, string>();
@@ -450,6 +465,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
   const recoveredFilePaths = new Set<string>();
   for (const item of raw) {
     const msg = item as Record<string, unknown>;
+    if (msg.role === "assistant" && msg._ui_hidden === true) continue;
     const backendMessageId = _resolveBackendMessageId(msg);
     const role = msg.role as string;
     if (role === "user") {
@@ -485,7 +501,12 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
       const extracted = _extractFileAttachmentsFromContent(content);
       const visible = stripInjectedUserPromptBlocks(extracted.content);
       if (!visible && extracted.files.length === 0) continue;
-      const userMsg: Message = { id: backendMessageId, role: "user", content: visible };
+      const userMsg: Message = {
+        id: backendMessageId,
+        role: "user",
+        content: visible,
+        timestamp: _resolveBackendTimestamp(msg),
+      };
       const action = msg._workbook_action;
       if (action && typeof action === "object" && typeof (action as Record<string, unknown>).operation === "string") {
         userMsg.workbookAction = action as import("@/lib/workbook-handoff").WorkbookActionContext;
@@ -590,7 +611,12 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
           prev.affectedFiles = mergeAffectedFiles(prev.affectedFiles ?? [], Array.from(affectedFilePaths));
         }
       } else {
-        const newMsg: Message = { id: backendMessageId, role: "assistant", blocks };
+        const newMsg: Message = {
+          id: backendMessageId,
+          role: "assistant",
+          blocks,
+          timestamp: _resolveBackendTimestamp(msg),
+        };
         if (affectedFilePaths.size > 0) {
           (newMsg as Extract<Message, { role: "assistant" }>).affectedFiles = mergeAffectedFiles(
             [],
@@ -616,7 +642,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
     let currentTurn = -1;
     for (const m of result) {
       if (m.role === "user") currentTurn++;
-      m.timestamp = baseTime + currentTurn * TURN_GAP;
+      if (!m.timestamp) m.timestamp = baseTime + currentTurn * TURN_GAP;
     }
   }
   return {
@@ -642,6 +668,7 @@ function _mergeMessagePages(older: Message[], newer: Message[]): Message[] {
       merged[merged.length - 1] = {
         ...previous,
         blocks: [...previous.blocks, ...message.blocks],
+        timestamp: previous.timestamp ?? message.timestamp,
         affectedFiles: mergeAffectedFiles(previous.affectedFiles ?? [], message.affectedFiles ?? []),
       };
       indexById.set(message.id, merged.length - 1);
@@ -658,6 +685,9 @@ function _mergeRecoveredExcelState(
   recoveredFilePaths: string[],
   sessionId: string,
 ): void {
+  // ExcelStore is global, so an old history request must never publish its
+  // recovered diffs into the newly selected conversation.
+  if (useChatStore.getState().loadedSessionId !== sessionId) return;
   if (recoveredDiffs.length === 0 && recoveredFilePaths.length === 0) return;
   const excelStore = useExcelStore.getState();
   // 文件路径相对来源会话的工作区，按来源会话键入桶，避免会话切换期间错挂。
@@ -877,6 +907,11 @@ async function _loadMessagesAsyncWithOptions(
       recoveredDiffs,
       recoveredFilePaths,
     } = _convertBackendMessages(raw);
+    if (useChatStore.getState().loadedSessionId !== sessionId) {
+      // Keep the per-session cache warm, but do not mutate visible/global UI
+      // state after the user has switched conversations.
+      return;
+    }
     _mergeRecoveredExcelState(recoveredDiffs, recoveredFilePaths, sessionId);
     // 鏇挎崲鍙娑堟伅鏃讹紝浠庡綋鍓?store 甯﹀嚭浠?SSE 鐨勫潡锛坱hinking銆乮teration銆乤pproval_action锛夛紝
     // 閬垮厤鍚庣鍒锋柊鏃惰涓㈠純銆?

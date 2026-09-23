@@ -51,6 +51,20 @@ class FileRef:
     relative: str
     observed_version: str | None = None
 
+    def __post_init__(self) -> None:
+        relative = str(self.relative or "").replace("\\", "/").strip()
+        if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+            raise ValueError("FileRef.relative must be a workspace-relative path")
+        object.__setattr__(self, "relative", relative)
+
+    def to_dict(self) -> dict[str, str]:
+        result = {"path": self.relative}
+        if self.observed_version:
+            result["version"] = self.observed_version
+        if self.workspace.workspace_id:
+            result["workspace_id"] = self.workspace.workspace_id
+        return result
+
 
 @dataclass(frozen=True)
 class VersionToken:
@@ -67,6 +81,9 @@ class VersionToken:
     def __str__(self) -> str:
         return self.value
 
+    def to_dict(self) -> dict[str, str]:
+        return {"version": self.value}
+
 
 @dataclass(frozen=True)
 class SheetRef:
@@ -80,6 +97,12 @@ class SheetRef:
         if not name:
             raise ValueError("SheetRef.name cannot be empty")
         object.__setattr__(self, "name", name)
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"file": self.file.to_dict(), "name": self.name}
+        if self.file.observed_version:
+            result["version"] = self.file.observed_version
+        return result
 
 
 @dataclass(frozen=True)
@@ -98,3 +121,11 @@ class RangeRef:
 
     def qualified(self) -> str:
         return f"{self.sheet.name}!{self.address}"
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"sheet": self.sheet.to_dict(), "address": self.address}
+        if self.version is not None:
+            result["version"] = self.version.value
+        elif self.sheet.file.observed_version:
+            result["version"] = self.sheet.file.observed_version
+        return result

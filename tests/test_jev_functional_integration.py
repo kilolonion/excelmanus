@@ -172,11 +172,24 @@ def test_ui_uses_selected_file_and_rejects_ambiguous_comparison():
     state = {"candidate_files": ["./a.xlsx", "./b.xlsx"]}
     evaluation = Evaluation("ui.surface", {
         "surface": ChoiceAnswer("side_panel", confidence=0.95),
+        "wants_to_see": NoulAnswer(0.95),
         "file_pick": ChoiceAnswer("second", confidence=0.95),
     })
     assert synthesize("ui.surface", evaluation, state).extras["file_path"] == "./b.xlsx"
     comparison = replace(evaluation, answers={**evaluation.answers, "surface": ChoiceAnswer("compare", confidence=0.95)})
     assert synthesize("ui.surface", comparison, state).extras["surface"] == "stay"
+
+
+def test_ui_does_not_navigate_when_user_did_not_request_viewing():
+    state = {"candidate_files": ["./a.xlsx"]}
+    evaluation = Evaluation("ui.surface", {
+        "surface": ChoiceAnswer("side_panel", confidence=0.95),
+        "wants_to_see": NoulAnswer(0.1),
+    })
+    decision = synthesize("ui.surface", evaluation, state)
+    assert decision.reason == "user_did_not_request_surface"
+    assert decision.extras["surface"] == "stay"
+    assert decision.extras["suppress_heuristic"] is True
 
 
 def test_path_binding_never_truncates_valid_identity():

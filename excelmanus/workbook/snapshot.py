@@ -30,6 +30,13 @@ _live_backings: WeakValueDictionary[int, "SnapshotBacking"] = WeakValueDictionar
 _workbook_views: ReadCache[tuple[Any, Any, threading.Lock]] = ReadCache(
     max_bytes=256 * 1024 * 1024, max_entries=4
 )
+# Opening a view still needs an immutable snapshot, but hashing the same live
+# file for every viewport/page request defeats the workbook cache above.  The
+# stat tuple is only a fast identity hint; the first miss still computes the
+# authoritative content version and materializes the immutable backing.
+_snapshot_cache: ReadCache["WorkbookSnapshot"] = ReadCache(
+    max_bytes=128 * 1024 * 1024, max_entries=64
+)
 _materialize_locks: dict[str, threading.Lock] = {}
 _materialize_locks_mu = threading.Lock()
 
@@ -501,28 +508,71 @@ def open_snapshot_at(
     path = Path(abs_path)
     if not path.is_file():
         raise SnapshotError(f"文件不存在: {relative or path}", code="PATH_INVALID")
-    data, suffix = _read_and_convert(path, workspace)
-    version = content_version_of(data)
-    if expected_version and expected_version != version:
-        raise SnapshotStale(
-            f"{relative} 版本已变化：期望 {expected_version}，实际 {version}",
-            fields={"expected_version": expected_version, "content_version": version, "path": relative},
+
+    def build() -> tuple[WorkbookSnapshot, int]:
+        data, suffix = _read_and_convert(path, workspace)
+        version = content_version_of(data)
+        if expected_version and expected_version != version:
+            raise SnapshotStale(
+                f"{relative} 版本已变化：期望 {expected_version}，实际 {version}",
+                fields={
+                    "expected_version": expected_version,
+                    "content_version": version,
+                    "path": relative,
+                },
+            )
+        file_ref = FileRef(
+            workspace=workspace,
+            relative=relative.replace("\\", "/"),
+            observed_version=version,
         )
-    file_ref = FileRef(workspace=workspace, relative=relative.replace("\\", "/"), observed_version=version)
-    snap_id = SnapshotId(
-        workspace_key=workspace.identity_key(),
-        relative=file_ref.relative,
-        content_version=version,
+        snap_id = SnapshotId(
+            workspace_key=workspace.identity_key(),
+            relative=file_ref.relative,
+            content_version=version,
+        )
+        backing = _materialize_backing(workspace, data, suffix, version)
+        remember_content_version(file_ref.relative, version)
+        snapshot = WorkbookSnapshot(
+            id=snap_id,
+            file=file_ref,
+            content_version=version,
+            backing=backing,
+            suffix=suffix,
+        )
+        # Small snapshots retain their bytes; large snapshots retain only the
+        # content-addressed backing path.  The cache remains bounded by the
+        # byte budget rather than by an unbounded per-file dictionary.
+        retained_size = len(data) if backing.kind == "bytes" else 1024
+        return snapshot, max(retained_size, 1)
+
+    suffix = path.suffix.lower()
+    if suffix not in {".xlsx", ".xlsm", ".csv", ".tsv", ".txt"}:
+        # Conversion formats may replace the live path; keep their existing
+        # conversion semantics until a converted-path identity is available.
+        return build()[0]
+
+    try:
+        stat = path.stat()
+        # Include ctime/inode as well as mtime/size.  Some editors replace a
+        # file atomically while preserving its size and coarse mtime; the
+        # extra fields prevent a stale snapshot from surviving that operation.
+        stat_key = (
+            int(stat.st_mtime_ns),
+            int(stat.st_ctime_ns),
+            int(getattr(stat, "st_ino", 0)),
+            int(stat.st_size),
+        )
+    except OSError:
+        return build()[0]
+    key = (
+        workspace.identity_key(),
+        str(path.resolve()),
+        relative.replace("\\", "/"),
+        stat_key,
+        expected_version or "",
     )
-    backing = _materialize_backing(workspace, data, suffix, version)
-    remember_content_version(file_ref.relative, version)
-    return WorkbookSnapshot(
-        id=snap_id,
-        file=file_ref,
-        content_version=version,
-        backing=backing,
-        suffix=suffix,
-    )
+    return _snapshot_cache.get_or_create(key, build)
 
 
 def open_snapshot_bytes(

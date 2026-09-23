@@ -18,7 +18,7 @@ import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import { getIsMobile } from "@/hooks/use-mobile";
 import type { AssistantBlock, Session, TaskItem } from "@/lib/types";
 import { instantSessionTitle } from "@/lib/session-title";
-import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
+import { normalizeRelativePath, workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { parseWorkbookTarget, parseWorkbookPresentation, showWorkbookPresentation } from "@/lib/workbook-interaction";
 
 // ---------------------------------------------------------------------------
@@ -90,7 +90,13 @@ function workbenchBusy(): boolean {
 function pathIsDismissed(path: string): boolean {
   if (!path) return false;
   const dismissed = useExcelStore.getState().dismissedPaths;
-  return Boolean(dismissed && dismissed.has(path));
+  return Boolean(dismissed && [...dismissed].some((entry) => normalizeRelativePath(entry) === normalizeRelativePath(path)));
+}
+
+function autoNavigationBlocked(ctx: SSEHandlerContext): boolean {
+  return Boolean(ctx.fromReplay || ctx.suppressAutoOpen
+    || useExcelStore.getState().autoOpenSuppressedSessionId === ctx.effectiveSessionId
+    || (useSessionStore.getState().activeSessionId && useSessionStore.getState().activeSessionId !== ctx.effectiveSessionId));
 }
 
 /** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
@@ -253,7 +259,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     ? data.stream_id
     : null;
 
-  if (eventSeq !== null) {
+  // stream_init carries a historical metadata seq for wire compatibility;
+  // only replayable events advance the resume cursor.
+  if (eventSeq !== null && event.event !== "stream_init") {
     const state = S();
     const streamId = eventStreamId ?? state.activeStreamId;
     if (streamId) {
@@ -264,7 +272,11 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
   switch (event.event) {
     case "stream_init": {
       if (eventStreamId) {
+        // Preserve the historical observable call for integrations that use
+        // stream_init as metadata, then reset the actual replay cursor: this
+        // event is not present in SessionStreamState.event_buffer.
         S().setStreamState(eventStreamId, eventSeq ?? 0);
+        if (eventSeq !== null) S().setStreamState(eventStreamId, 0);
       }
       S().clearResumeFailed();
       break;
@@ -432,10 +444,21 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       S().setPipelineStatus(null);
       const msg = getLastAssistantMessage(S().messages, msgId);
       const lastBlock = msg?.blocks[msg.blocks.length - 1];
-      if (!lastBlock || lastBlock.type !== "text") {
-        S().appendBlock(msgId, { type: "text", content: "" });
+      const iteration = typeof data.iteration === "number" ? data.iteration : undefined;
+      if (!lastBlock || lastBlock.type !== "text" || lastBlock.iteration !== iteration) {
+        ctx.batcher.flush();
+        S().appendBlock(msgId, { type: "text", content: "", ...(iteration !== undefined ? { iteration } : {}) });
       }
       ctx.batcher.pushText(_streamDeltaContent(data));
+      break;
+    }
+
+    case "retract_text": {
+      if (typeof data.iteration !== "number") break;
+      ctx.batcher.flush();
+      S().updateAssistantMessage(msgId, (message) => ({ ...message,
+        blocks: message.blocks.filter((block) => block.type !== "text" || block.iteration !== data.iteration),
+      }));
       break;
     }
 
@@ -540,9 +563,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "tool_call_end": {
-      if (data.tool_name === "show_workbook" && data.success !== false && !ctx.fromReplay) {
+      if (data.tool_name === "show_workbook" && data.success !== false && !autoNavigationBlocked(ctx)) {
         const presentation = parseWorkbookPresentation(data.result as string);
-        if (presentation && showWorkbookPresentation(presentation, ctx.effectiveSessionId)) ctx.suppressAutoOpen = true;
+        if (presentation && !pathIsDismissed(presentation.target.file_path)) showWorkbookPresentation(presentation, ctx.effectiveSessionId);
       }
       const toolCallIdRaw = data.tool_call_id;
       const toolCallId = typeof toolCallIdRaw === "string" ? toolCallIdRaw : null;
@@ -899,7 +922,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       // 跨文件差异自动打开对比视图
       if (edDiffMode === "cross_file" && edEntry.filePathB && edEntry.diffSummary) {
         const es = useExcelStore.getState();
-        if (!ctx.suppressAutoOpen && !es.compareMode && !es.panelOpen) {
+        if (!autoNavigationBlocked(ctx) && !workbenchBusy() && !pathIsDismissed(edFilePath) && !pathIsDismissed(edEntry.filePathB)) {
           es.openCompare(edFilePath, edEntry.filePathB);
           ctx.autoOpenedCompareThisTurn = true;
         }
@@ -1099,6 +1122,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         recordUI("保持当前界面");
         break;
       }
+      if (autoNavigationBlocked(ctx)) {
+        recordUI("用户已收起表格，保持当前界面");
+        break;
+      }
       if (getIsMobile()) {
         recordUI("移动端未执行界面切换");
         break;
@@ -1176,11 +1203,11 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       // ── 自动打开工作台文档 ──
       // 本轮若改了 spreadsheet / word，且用户没在看别的工作台面板，打开最后一个。
       // 高置信 stay 的 ui_hint 会置 suppressAutoOpen，跳过全部自动导航。
-      if (!ctx.suppressAutoOpen) {
+      if (!autoNavigationBlocked(ctx) && !workbenchBusy()) {
         const doneMsg = getLastAssistantMessage(S().messages, msgId);
         const affected = doneMsg?.affectedFiles ?? [];
         const lastSpreadsheet = [...affected].reverse().find(
-          (f) => classifyWorkspaceFile(f) === "spreadsheet",
+          (f) => classifyWorkspaceFile(f) === "spreadsheet" && !pathIsDismissed(f),
         );
         const lastWord = [...affected].reverse().find(
           (f) => classifyWorkspaceFile(f) === "word",

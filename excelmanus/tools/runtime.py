@@ -44,6 +44,11 @@ logger = get_logger("tools.runtime")
 _PROCESS_LOCK = threading.RLock()
 _ACTIVE_PROCESSES: dict[str, set[subprocess.Popen[Any]]] = {}
 _WINDOWS_JOB_HANDLES: dict[int, int] = {}
+# ``Popen.poll()`` reaps the leader.  If the leader has already exited while a
+# descendant is still alive, looking up ``getpgid(pid)`` afterwards fails and
+# the descendant would escape cancellation.  Keep the process-group identity
+# from registration time for the lifetime of the handle.
+_PROCESS_GROUPS: dict[int, int] = {}
 
 
 def _attach_windows_job(process: subprocess.Popen[Any]) -> None:
@@ -100,15 +105,31 @@ def _close_windows_job(process: subprocess.Popen[Any]) -> None:
 
 
 def register_killable_process(execution_id: str | None, process: subprocess.Popen[Any]) -> None:
-    if not execution_id:
-        return
+    pid = int(getattr(process, "pid", 0) or 0)
+    pgid: int | None = None
+    if os.name != "nt" and pid:
+        try:
+            candidate = int(os.getpgid(pid))
+            # Never record the host's own process group.  A caller that did
+            # not request ``start_new_session`` is still safely terminated as
+            # an individual process.
+            if candidate > 1 and candidate != os.getpgrp():
+                pgid = candidate
+        except (OSError, ProcessLookupError):
+            pgid = None
     with _PROCESS_LOCK:
-        _ACTIVE_PROCESSES.setdefault(str(execution_id), set()).add(process)
+        if pgid is not None:
+            _PROCESS_GROUPS[id(process)] = pgid
+        if execution_id:
+            _ACTIVE_PROCESSES.setdefault(str(execution_id), set()).add(process)
     _attach_windows_job(process)
 
 
 def unregister_killable_process(execution_id: str | None, process: subprocess.Popen[Any]) -> None:
+    with _PROCESS_LOCK:
+        _PROCESS_GROUPS.pop(id(process), None)
     if not execution_id:
+        _close_windows_job(process)
         return
     with _PROCESS_LOCK:
         active = _ACTIVE_PROCESSES.get(str(execution_id))
@@ -122,9 +143,9 @@ def unregister_killable_process(execution_id: str | None, process: subprocess.Po
 
 def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     """终止单个子进程及其新会话中的后代（best effort）。"""
-    if process.poll() is not None:
-        return
     pid = int(getattr(process, "pid", 0) or 0)
+    with _PROCESS_LOCK:
+        target_pgid = _PROCESS_GROUPS.get(id(process))
     try:
         with _PROCESS_LOCK:
             job_handle = _WINDOWS_JOB_HANDLES.get(id(process))
@@ -148,27 +169,56 @@ def _terminate_process_tree(process: subprocess.Popen[Any]) -> None:
             )
         elif pid:
             try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                if target_pgid is None:
+                    candidate = int(os.getpgid(pid))
+                    if candidate > 1 and candidate != os.getpgrp():
+                        target_pgid = candidate
+                if target_pgid is not None:
+                    os.killpg(target_pgid, signal.SIGTERM)
+                elif process.poll() is None:
+                    process.terminate()
             except (ProcessLookupError, PermissionError, OSError):
-                process.terminate()
+                if process.poll() is None:
+                    process.terminate()
         else:
-            process.terminate()
+            if process.poll() is None:
+                process.terminate()
     except (OSError, subprocess.SubprocessError):
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+    # Do not return merely because the leader exited: a child may still hold
+    # the recorded group alive.  Give SIGTERM a short grace period, then
+    # enforce the hard deadline with SIGKILL for the whole group.
+    deadline = time.monotonic() + 1.5
+    while process.poll() is None and time.monotonic() < deadline:
         try:
-            process.terminate()
-        except OSError:
+            process.wait(timeout=max(0.05, deadline - time.monotonic()))
+        except (subprocess.TimeoutExpired, OSError):
+            break
+    group_alive = False
+    if os.name != "nt" and target_pgid is not None:
+        try:
+            os.killpg(target_pgid, 0)
+            group_alive = True
+        except (ProcessLookupError, PermissionError, OSError):
+            group_alive = False
+    if group_alive:
+        try:
+            os.killpg(target_pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             pass
-    try:
-        process.wait(timeout=3)
-    except (subprocess.TimeoutExpired, OSError):
+    elif process.poll() is None:
         try:
             process.kill()
         except OSError:
             pass
-        try:
-            process.wait(timeout=3)
-        except (subprocess.TimeoutExpired, OSError):
-            logger.warning("进程终止未在期限内完成: pid=%s", pid)
+    try:
+        process.wait(timeout=1.5)
+    except (subprocess.TimeoutExpired, OSError):
+        logger.warning("进程终止未在期限内完成: pid=%s", pid)
 
 
 def terminate_killable_processes(execution_id: str | None) -> int:

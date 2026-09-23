@@ -10,6 +10,7 @@ const SKILL_CATALOG_TRAILER_RE =
   /\n*(?:This catalog contains summaries only|If the user already invoked a skill with \/name|If the user names a skill, or the task clearly matches a skill's description)[\s\S]*$/;
 const SKILL_INVOCATION_BLOCK_RE =
   /<skill-invocation\b[\s\S]*?<\/skill-invocation>/g;
+const JEV_CONTEXT_BLOCK_RE = /<jev_context\b[\s\S]*?<\/jev_context>/g;
 
 export function stripInjectedUserPromptBlocks(content: string): string {
   return content
@@ -17,6 +18,7 @@ export function stripInjectedUserPromptBlocks(content: string): string {
     .replace(AVAILABLE_SKILLS_BLOCK_RE, "")
     .replace(SKILL_CATALOG_TRAILER_RE, "")
     .replace(SKILL_INVOCATION_BLOCK_RE, "")
+    .replace(JEV_CONTEXT_BLOCK_RE, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -27,7 +29,8 @@ export function isPureInjectedUserPrompt(content: string): boolean {
   if (
     !trimmed.startsWith("<available_skills>") &&
     !trimmed.startsWith("<system-reminder>") &&
-    !trimmed.startsWith("<skill-invocation")
+    !trimmed.startsWith("<skill-invocation") &&
+    !trimmed.startsWith("<jev_context")
   ) {
     return false;
   }

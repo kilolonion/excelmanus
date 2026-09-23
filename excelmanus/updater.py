@@ -291,12 +291,36 @@ def check_for_updates(
 
     if _is_git_repo(project_root):
         info.check_method = "git"
-        rc, _, _ = _run_cmd(["git", "fetch", "origin", "--tags"], cwd=project_root, timeout=30)
+        # Resolve the checked-out branch before fetching it.  Fetching with
+        # ``--tags`` made an unrelated local tag collision fail the whole
+        # update check even when the remote branch itself was fetched
+        # successfully (for example, an old v1.8.0 tag pointing at a
+        # different commit).  Version checks only need the branch commit, so
+        # skip tag negotiation entirely.
+        _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
+        branch = branch or "main"
+        if branch == "HEAD":
+            info.check_failed = True
+            info.latest = info.current
+            info.error = "当前源码处于 detached HEAD，请切换到要更新的分支后重试"
+            _version_check_cache = info
+            _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
+            return info
+
+        rc, _, _ = _run_cmd(
+            ["git", "fetch", "origin", branch, "--no-tags"],
+            cwd=project_root,
+            timeout=30,
+        )
         # origin 失败时尝试 GitHub 备用源
         git_remote = "origin"
         if rc != 0:
             _ensure_github_remote(project_root)
-            rc, _, _ = _run_cmd(["git", "fetch", "github", "--tags"], cwd=project_root, timeout=30)
+            rc, _, _ = _run_cmd(
+                ["git", "fetch", "github", branch, "--no-tags"],
+                cwd=project_root,
+                timeout=30,
+            )
             if rc == 0:
                 git_remote = "github"
         if rc != 0:
@@ -308,13 +332,6 @@ def check_for_updates(
             _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
             return info
         # fetch 成功，比较版本
-        _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
-        branch = branch or "main"
-        if branch == "HEAD":
-            info.check_failed = True
-            info.latest = info.current
-            info.error = "当前源码处于 detached HEAD，请切换到要更新的分支后重试"
-            return info
         remote_ref = f"{git_remote}/{branch}"
         rc_ref, target_commit, ref_err = _run_cmd(
             ["git", "rev-parse", "--verify", remote_ref], cwd=project_root,

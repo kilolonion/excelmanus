@@ -734,6 +734,11 @@ function Start-Frontend {
 
     # 将后端端口传递给 Next.js rewrite 代理（next.config.ts 读取 BACKEND_INTERNAL_URL）
     $env:BACKEND_INTERNAL_URL = "http://127.0.0.1:${BackendPort}"
+    # 开发模式下让 SSE 直连后端，避免 Next.js rewrite 合并事件后再转发。
+    # 生产模式可由反向代理统一提供 same-origin SSE。
+    if (-not $Production -and [string]::IsNullOrWhiteSpace($env:EXCELMANUS_RUNTIME_BACKEND_ORIGIN)) {
+        $env:EXCELMANUS_RUNTIME_BACKEND_ORIGIN = "http://127.0.0.1:${BackendPort}"
+    }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     # npm is npm.cmd on Windows; .cmd files need cmd.exe to execute with UseShellExecute=false

@@ -1,5 +1,6 @@
 const RELEASES_URL = "https://github.com/kilolonion/excelmanus/releases";
 const RELEASE_API = "https://api.github.com/repos/kilolonion/excelmanus/releases/latest";
+const LATEST_RELEASE_PAGE = `${RELEASES_URL}/latest`;
 const { downloadInstaller, verifyInstaller } = require("./update-download");
 
 function parseVersion(value) {
@@ -42,6 +43,83 @@ function selectInstaller(assets, platform, arch) {
   });
 }
 
+function responseHeader(response, name) {
+  if (typeof response?.headers?.get === "function") return response.headers.get(name);
+  return response?.headers?.[name] || response?.headers?.[name.toLowerCase()] || null;
+}
+
+function decodeHtml(value) {
+  return value.replace(/&(?:amp|quot|lt|gt|#39);/g, entity => ({
+    "&amp;": "&", "&quot;": '"', "&lt;": "<", "&gt;": ">", "&#39;": "'",
+  }[entity]));
+}
+
+function releaseTagFromUrl(value) {
+  try {
+    const url = new URL(value);
+    const match = /^\/kilolonion\/excelmanus\/releases\/tag\/([^/]+)$/.exec(url.pathname);
+    return match ? decodeURIComponent(match[1]) : null;
+  } catch { return null; }
+}
+
+// GitHub's public release page exposes the same asset digest as the REST API,
+// but does not consume the anonymous REST API quota. Keep the parser narrow:
+// only release asset rows for the already trusted tag are accepted.
+function parseReleaseAssets(html, releaseUrl) {
+  const tag = releaseTagFromUrl(releaseUrl);
+  if (!tag || typeof html !== "string") return [];
+  const prefix = `/kilolonion/excelmanus/releases/download/${encodeURIComponent(tag)}/`;
+  const rows = html.match(/<li\b[^>]*class="[^"]*\bBox-row\b[^"]*"[^>]*>[\s\S]*?<\/li>/gi) || [];
+  const assets = [];
+  for (const row of rows) {
+    const hrefMatch = /<a\b[^>]*href="([^"]*\/releases\/download\/[^\"]+)"/i.exec(row);
+    if (!hrefMatch) continue;
+    let url;
+    try { url = new URL(decodeHtml(hrefMatch[1]), "https://github.com"); } catch { continue; }
+    if (!trustedReleaseUrl(url.href, true) || !url.pathname.startsWith(prefix)) continue;
+    let name;
+    try { name = decodeURIComponent(url.pathname.slice(prefix.length)); } catch { continue; }
+    if (!name || name.includes("/") || /[<>:"\\|?*\x00-\x1f]/.test(name)) continue;
+    const digest = row.match(/sha256:[a-f0-9]{64}/i)?.[0]?.toLowerCase();
+    if (!digest) continue;
+    assets.push({ name, state: "uploaded", browser_download_url: url.href, digest });
+  }
+  return assets;
+}
+
+async function checkFromReleasePage({ current, platform, arch, fetchImpl }) {
+  let latestResponse;
+  try {
+    latestResponse = await fetchImpl(LATEST_RELEASE_PAGE, {
+      headers: { Accept: "text/html", "User-Agent": `ExcelManus/${current}` },
+      signal: AbortSignal.timeout(15_000),
+      redirect: "manual",
+    });
+  } catch { throw new Error("发布页面不可用"); }
+  const location = responseHeader(latestResponse, "location");
+  const releaseUrl = location
+    ? trustedReleaseUrl(new URL(location, LATEST_RELEASE_PAGE).href)
+    : (latestResponse?.status === 200 ? trustedReleaseUrl(latestResponse.url) : null);
+  const tag = releaseUrl && releaseTagFromUrl(releaseUrl);
+  if (!tag) throw new Error("发布页面没有可用的正式版本");
+  const assetsResponse = await fetchImpl(`${RELEASES_URL}/expanded_assets/${encodeURIComponent(tag)}`, {
+    headers: { Accept: "text/html", "User-Agent": `ExcelManus/${current}` },
+    signal: AbortSignal.timeout(15_000),
+    redirect: "error",
+  });
+  if (!assetsResponse?.ok || typeof assetsResponse.text !== "function") {
+    throw new Error("发布页资产不可用");
+  }
+  const assets = parseReleaseAssets(await assetsResponse.text(), releaseUrl);
+  const installer = selectInstaller(assets, platform, arch);
+  return { installer, checked: {
+    current, latest: tag.replace(/^v/, ""),
+    hasUpdate: isNewer(tag, current), releaseNotes: "", releaseUrl,
+    downloadUrl: installer?.browser_download_url || null,
+    installerName: installer?.name || null, platform,
+  } };
+}
+
 function createUpdateService({ current, platform = process.platform, arch = process.arch, fetchImpl = fetch,
   downloadDirectory, installImpl, onStatus = () => {}, idleTimeoutMs }) {
   let checked = null;
@@ -78,7 +156,14 @@ function createUpdateService({ current, platform = process.platform, arch = proc
         }
         if (response.status === 404) throw new Error("尚未发布可用的正式版本，请稍后重试或查看下载页面");
         if (response.status === 403 || response.status === 429) {
-          throw new Error("更新服务请求频率超限，请稍后重试，或打开发布页面下载");
+          try {
+            const fallback = await checkFromReleasePage({ current, platform, arch, fetchImpl });
+            installer = fallback.installer;
+            checked = fallback.checked;
+            return checked;
+          } catch {
+            throw new Error("更新服务请求频率超限，请稍后重试，或打开发布页面下载");
+          }
         }
         if (!response.ok) throw new Error(`无法检查更新（HTTP ${response.status}），请稍后重试`);
         let release;
@@ -158,4 +243,7 @@ function createUpdateService({ current, platform = process.platform, arch = proc
   return service;
 }
 
-module.exports = { createUpdateService, isNewer, selectInstaller, trustedReleaseUrl, RELEASES_URL };
+module.exports = {
+  createUpdateService, isNewer, selectInstaller, trustedReleaseUrl, parseReleaseAssets,
+  RELEASES_URL,
+};

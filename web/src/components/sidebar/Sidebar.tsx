@@ -121,9 +121,10 @@ export function Sidebar() {
         aria-hidden={!sidebarOpen}
         inert={!sidebarOpen ? true : undefined}
         className={`em-sidebar flex flex-col ${
-          isMobile ? "fixed inset-y-0 left-0 z-50" : ""
+          isMobile ? "inset-y-0 left-0 z-50" : ""
         }`}
         style={{
+          position: isMobile ? "fixed" : undefined,
           width: isMobile ? mobileSidebarWidth : desktopSidebarWidth,
           minWidth: isMobile ? mobileSidebarWidth : desktopSidebarWidth,
           transform: isMobile ? `translateX(${sidebarOpen ? "0" : "-100%"})` : undefined,

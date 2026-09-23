@@ -20,7 +20,6 @@ from excelmanus.tools.policy import (
     READONLY_TOOL_ACTIONS,
     TOOL_SHORT_DESCRIPTIONS,
     is_catalog_visible,
-    is_mutating_write_effect,
     normalize_write_effect,
 )
 
@@ -166,7 +165,20 @@ def _contains_ref(node: Any) -> bool:
     return False
 
 
-def _prune_parameters_schema(parameters: dict[str, Any]) -> dict[str, Any]:
+_WIRE_SCHEMA_THRESHOLD = 7500
+
+
+def _schema_ref_id(tool_name: str, parameters: dict[str, Any]) -> str:
+    from excelmanus.tools.schema_registry import schema_id
+
+    return schema_id(tool_name, parameters)
+
+
+def _prune_parameters_schema(
+    parameters: dict[str, Any],
+    *,
+    schema_name: str = "",
+) -> dict[str, Any]:
     """input_schema 的出网投影：剥离深层描述，补 tool_detail 指引。原 schema 不变。"""
     if not isinstance(parameters, dict):
         return parameters
@@ -175,6 +187,7 @@ def _prune_parameters_schema(parameters: dict[str, Any]) -> dict[str, Any]:
         return parameters
     out = dict(parameters)
     new_props: dict[str, Any] = {}
+    pruned_any = False
     for name, pspec in properties.items():
         p, pruned = _prune_schema_node(pspec, 1)
         if isinstance(p, dict) and _contains_ref(p):
@@ -194,23 +207,54 @@ def _prune_parameters_schema(parameters: dict[str, Any]) -> dict[str, Any]:
                 "introspect_capability query_type=tool_detail）"
             ).strip()
         new_props[name] = p
+        pruned_any = pruned_any or pruned
     out["properties"] = new_props
     if not _contains_ref(new_props):
         out.pop("$defs", None)
+    try:
+        wire_size = len(_canonical_json(out))
+    except Exception:
+        wire_size = 0
+    if pruned_any or wire_size > _WIRE_SCHEMA_THRESHOLD:
+        from excelmanus.tools.schema_registry import register_schema
+
+        # Keep the handle resolvable even for direct callers that do not pass a
+        # tool name.  Returning a digest without registering it would expose a
+        # dead introspection reference.
+        handle = register_schema(schema_name, parameters)
+        out["x-excelmanus-schema-ref"] = {
+            "id": handle,
+            "version": 1,
+            "tool": schema_name or None,
+            "query": f"tool_detail {schema_name}" if schema_name else "tool_detail <tool>",
+            "note": "完整字段合同按需从 introspect_capability 获取；执行仍使用宿主完整 schema。",
+        }
     return out
 
 
-def _prune_wire_parameters(schema: dict[str, Any]) -> dict[str, Any]:
+def _prune_wire_parameters(schema: dict[str, Any], *, schema_name: str = "") -> dict[str, Any]:
     """对 to_openai_schema 返回的整包 schema 裁剪 parameters 部分。"""
     out = dict(schema)
     fn = out.get("function")
     if isinstance(fn, dict):
         fn = dict(fn)
-        fn["parameters"] = _prune_parameters_schema(fn.get("parameters") or {})
+        fn["parameters"] = _prune_parameters_schema(fn.get("parameters") or {}, schema_name=schema_name)
         out["function"] = fn
     elif "parameters" in out:
-        out["parameters"] = _prune_parameters_schema(out.get("parameters") or {})
+        out["parameters"] = _prune_parameters_schema(out.get("parameters") or {}, schema_name=schema_name)
     return out
+
+
+def _pruned_schema_for_digest(tool: Any) -> dict[str, Any]:
+    """Schema material included in the catalog digest.
+
+    The digest must change when structured-reference fields are enabled, while
+    remaining independent of long prose descriptions that are intentionally
+    removed from the model wire projection.
+    """
+    from excelmanus.tools.reference_contract import augment_reference_schema
+
+    return augment_reference_schema(getattr(tool, "input_schema", None) or {})
 
 
 @dataclass(frozen=True)
@@ -238,13 +282,16 @@ class EffectiveToolCatalog:
             if callable(to_schema):
                 schema = to_schema(mode=schema_mode)
                 if isinstance(schema, dict):
-                    schemas.append(_prune_wire_parameters(schema))
+                    schemas.append(_prune_wire_parameters(schema, schema_name=_tool_name(tool)))
                 continue
             name = _tool_name(tool)
             if not name:
                 continue
+            from excelmanus.tools.reference_contract import augment_reference_schema
+
             parameters = _prune_parameters_schema(
-                getattr(tool, "input_schema", None) or {},
+                augment_reference_schema(getattr(tool, "input_schema", None) or {}),
+                schema_name=name,
             )
             if schema_mode == "chat_completions":
                 schemas.append(
@@ -357,7 +404,7 @@ class EffectiveToolCatalog:
                 {
                     "description": str(getattr(tool, "description", "") or ""),
                     "name": _tool_name(tool),
-                    "schema": getattr(tool, "input_schema", None) or {},
+                    "schema": _pruned_schema_for_digest(tool),
                     "output_schema": output_schema_for(_tool_name(tool), tool_def=tool),
                     "write_effect": _declared_effect(tool),
                 }

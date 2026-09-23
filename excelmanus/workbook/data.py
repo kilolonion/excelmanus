@@ -717,6 +717,32 @@ def _is_form_type_document(
         wb.close()
 
 
+def _workbook_may_have_merged_cells(safe_path: Any) -> bool:
+    """Cheaply detect merge metadata without materializing every worksheet cell.
+
+    ``openpyxl.load_workbook(read_only=False)`` is disproportionately expensive
+    for ordinary workbooks because it binds every cell before callers can inspect
+    ``merged_cells``.  The worksheet XML already contains a small ``mergeCell``
+    marker, so use the ZIP package as a conservative preflight.  Returning
+    ``True`` on any parsing error preserves the old full-scan behaviour.
+    """
+    from pathlib import Path
+    from zipfile import BadZipFile, ZipFile
+
+    try:
+        path = Path(safe_path)
+        with ZipFile(path) as archive:
+            for name in archive.namelist():
+                if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
+                    continue
+                # Avoid parsing XML: this is only a conservative presence check.
+                if b"<mergeCell" in archive.read(name):
+                    return True
+        return False
+    except (BadZipFile, OSError, ValueError):
+        return True
+
+
 def _header_row_score(
     row_values: list[Any],
     row_idx0: int,
@@ -815,7 +841,11 @@ def _detect_header_row(
     """
     try:
         from openpyxl import load_workbook
-        wb = load_workbook(safe_path, read_only=False, data_only=True)
+        # Header detection only needs the first few rows.  The previous full
+        # workbook load bound every cell before looking at those rows, making a
+        # ``read_excel(max_rows=50)`` call scan the entire file.  Read-only mode
+        # keeps the normal data-table path proportional to the header window.
+        wb = load_workbook(safe_path, read_only=True, data_only=True)
     except Exception:
         return None
 
@@ -831,15 +861,20 @@ def _detect_header_row(
         if ws is None:
             return None
 
-        # 收集宽合并行（列跨度 > 50% 总列数）
+        # ReadOnlyWorksheet does not expose merged_cells.  Ambiguous/form
+        # documents still fall back to _is_form_type_document below, which
+        # retains the full merge-aware check; the common confident-header path
+        # never needs to materialize the workbook.
         scan_cols = max(1, min(max_scan_columns, ws.max_column or max_scan_columns))
         wide_merged_rows: set[int] = set()
-        for merged_range in ws.merged_cells.ranges:
-            col_span = merged_range.max_col - merged_range.min_col + 1
-            if col_span > scan_cols * 0.5:
-                for r in range(merged_range.min_row, merged_range.max_row + 1):
-                    if r <= max_scan:
-                        wide_merged_rows.add(r - 1)  # 转为 0-indexed
+        merged_cells = getattr(ws, "merged_cells", None)
+        if merged_cells is not None:
+            for merged_range in merged_cells.ranges:
+                col_span = merged_range.max_col - merged_range.min_col + 1
+                if col_span > scan_cols * 0.5:
+                    for r in range(merged_range.min_row, merged_range.max_row + 1):
+                        if r <= max_scan:
+                            wide_merged_rows.add(r - 1)  # 转为 0-indexed
 
         rows: list[list[Any]] = []
         for row in ws.iter_rows(
@@ -2510,8 +2545,10 @@ def read_excel(
             f"可能是合并标题行导致。建议使用 header_row 参数指定真正的列头行号重新读取。"
         )
 
-    # 合并单元格警告：高合并率时提醒 LLM 注意值传播
-    if not _is_csv_file(safe_path):
+    # 合并单元格警告：高合并率时提醒 LLM 注意值传播。普通工作簿没有
+    # mergeCell 元数据时直接跳过一次昂贵的 full-mode openpyxl 解析；有
+    # 合并区域的文件保留原有完整摘要语义。
+    if not _is_csv_file(safe_path) and _workbook_may_have_merged_cells(safe_path):
         try:
             from openpyxl import load_workbook as _lw
             _wb_mc = _lw(safe_path, read_only=False, data_only=True)
