@@ -70,11 +70,12 @@ export function FlatFileListView(props: FlatFileListViewProps) {
     [flatFiles],
   );
   const pinnedIndex = flatFiles.findIndex((file) => file.path === (menuPath ?? draggingPath));
+  const estimatedRowSize = 56;
   const virtualizer = useVirtualizer({
     count: flatFiles.length,
     getScrollElement: () => props.scrollRef?.current ?? null,
     getItemKey: (index) => flatFiles[index].path,
-    estimateSize: () => 56,
+    estimateSize: () => estimatedRowSize,
     overscan: 5,
     enabled: !!props.scrollRef,
     rangeExtractor: (range) => {
@@ -82,9 +83,15 @@ export function FlatFileListView(props: FlatFileListViewProps) {
       return pinnedIndex < 0 ? indices : [...new Set([...indices, pinnedIndex])].sort((a, b) => a - b);
     },
   });
-  const rows = props.scrollRef
-    ? virtualizer.getVirtualItems()
-    : flatFiles.map((file, index) => ({ key: file.path, index, start: 0 }));
+  // The sidebar's scroll container can still have a zero-sized initial
+  // measurement while its open animation is settling. In that state the
+  // virtualizer has no range yet and returns no rows. Render the complete
+  // list until the first usable range is available; the virtualizer will
+  // trigger a rerender after measuring the container and take over then.
+  const virtualRows = props.scrollRef ? virtualizer.getVirtualItems() : [];
+  const rows = virtualRows.length > 0
+    ? virtualRows
+    : flatFiles.map((file, index) => ({ key: file.path, index, start: index * estimatedRowSize }));
 
   if (flatFiles.length === 0) {
     return (

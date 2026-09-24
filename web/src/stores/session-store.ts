@@ -9,7 +9,9 @@ import {
 interface SessionState {
   sessions: Session[];
   sidebarSessionOrder: Record<string, string[]>;
+  readAtByWorkspace: Record<string, string>;
   setSidebarSessionOrder: (groupKey: string, ids: string[]) => void;
+  markWorkspaceRead: (groupKey: string) => void;
   activeSessionId: string | null;
   lastWorkspaceId: string | null;
   lastWorkspacePath: string | null;
@@ -32,8 +34,12 @@ export const useSessionStore = create<SessionState>()(
     (set, get) => ({
       sessions: [],
       sidebarSessionOrder: {},
+      readAtByWorkspace: {},
       setSidebarSessionOrder: (groupKey, ids) => set((state) => ({
         sidebarSessionOrder: { ...state.sidebarSessionOrder, [groupKey]: [...new Set(ids)] },
+      })),
+      markWorkspaceRead: (groupKey) => set((state) => ({
+        readAtByWorkspace: { ...state.readAtByWorkspace, [groupKey]: new Date().toISOString() },
       })),
       activeSessionId: null,
       lastWorkspaceId: null,
@@ -134,6 +140,7 @@ export const useSessionStore = create<SessionState>()(
       partialize: (state) => ({
         sessions: state.sessions,
         sidebarSessionOrder: state.sidebarSessionOrder,
+        readAtByWorkspace: state.readAtByWorkspace,
         activeSessionId: state.activeSessionId,
         lastWorkspaceId: state.lastWorkspaceId,
         lastWorkspacePath: state.lastWorkspacePath,

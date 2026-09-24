@@ -15,7 +15,7 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.events import EventType
-from excelmanus.tools.intent_tools import get_tools as intent_get_tools
+from excelmanus.tools.workbook_tools import get_tools as intent_get_tools
 from excelmanus.tools.registry import ToolRegistry
 from excelmanus.workbook_commit import content_version_of_file
 
@@ -39,7 +39,7 @@ def _live_registry() -> ToolRegistry:
 
 
 def _inspect_args(path: str) -> dict[str, object]:
-    return {"mode": "range", "file_path": path, "sheet_name": "Sheet1", "max_rows": 8}
+    return {"mode":"range","file_path":path,"sheet":"Sheet1","range":"A1:H8"}
 
 
 def _edit_args(path: str, cell: str, value: object) -> dict[str, object]:
@@ -55,10 +55,10 @@ def _edit_args(path: str, cell: str, value: object) -> dict[str, object]:
 
 
 def _make_engine(tmp_path: Path) -> AgentEngine:
-    from excelmanus.tools import intent_tools
+    from excelmanus.tools import workbook_tools
     from excelmanus.workbook import data as data_tools
 
-    intent_tools.init_guard(str(tmp_path))
+    workbook_tools.init_guard(str(tmp_path))
     data_tools.init_guard(str(tmp_path))
     engine = AgentEngine(_make_config(tmp_path), _live_registry())
     engine._full_access_enabled = True
@@ -95,11 +95,19 @@ async def _sub(
     *,
     root_call_id: str = "live",
 ) -> ToolResult:
-    return await engine._tool_dispatcher.execute_subcall(
+    # Emulate a model explicitly forwarding its latest observed version.
+    versions = getattr(engine, "_test_observed_versions", {})
+    if tool_name == "apply_spreadsheet_changes" and "expected_version" not in arguments and arguments.get("file_path") in versions:
+        arguments = {**arguments, "expected_version":versions[arguments["file_path"]]}
+    result = await engine._tool_dispatcher.execute_subcall(
         tool_name=tool_name,
         arguments=arguments,
         root_call_id=root_call_id,
     )
+    if result.success and isinstance(result.value,dict) and result.value.get("content_version"):
+        versions[arguments["file_path"]] = result.value["content_version"]
+        engine._test_observed_versions = versions
+    return result
 
 
 def _inject_vba(path: Path, marker: bytes) -> None:
@@ -135,20 +143,20 @@ async def test_same_session_read_write_then_reread(tmp_path: Path) -> None:
     engine = _make_engine(tmp_path)
     _seed_book(tmp_path / "book.xlsx", "seen")
 
-    read1 = await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))
+    read1 = await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))
     assert read1.success
     assert str((read1.value or {}).get("content_version") or "").startswith("sha256:")
 
     written = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "agent"),
     )
     assert written.success, written.model_text
     assert (written.value or {}).get("file_path") == "book.xlsx"
     assert _cell(tmp_path / "book.xlsx") == "agent"
 
-    read2 = await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))
+    read2 = await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))
     assert read2.success
     blob = str(read2.value or {})
     assert "agent" in blob
@@ -162,7 +170,7 @@ async def test_human_edit_then_agent_write_conflicts_and_keeps_bytes(
     book = tmp_path / "book.xlsx"
     _seed_book(book, "seen")
 
-    read1 = await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))
+    read1 = await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))
     assert read1.success
 
     outsider = load_workbook(book)
@@ -173,7 +181,7 @@ async def test_human_edit_then_agent_write_conflicts_and_keeps_bytes(
 
     conflict = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "agent"),
     )
     assert not conflict.success
@@ -181,11 +189,11 @@ async def test_human_edit_then_agent_write_conflicts_and_keeps_bytes(
     assert book.read_bytes() == before
     assert _cell(book) == "human"
 
-    refreshed = await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))
+    refreshed = await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))
     assert refreshed.success
     ok = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "after-refresh"),
     )
     assert ok.success, ok.model_text
@@ -199,12 +207,12 @@ async def test_two_engines_second_write_conflicts(tmp_path: Path) -> None:
     book = tmp_path / "book.xlsx"
     _seed_book(book, "shared")
 
-    assert (await _sub(left, "inspect_spreadsheet", _inspect_args("book.xlsx"))).success
-    assert (await _sub(right, "inspect_spreadsheet", _inspect_args("book.xlsx"))).success
+    assert (await _sub(left, "observe_spreadsheet", _inspect_args("book.xlsx"))).success
+    assert (await _sub(right, "observe_spreadsheet", _inspect_args("book.xlsx"))).success
 
     first = await _sub(
         left,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "from-a"),
     )
     assert first.success, first.model_text
@@ -212,7 +220,7 @@ async def test_two_engines_second_write_conflicts(tmp_path: Path) -> None:
 
     second = await _sub(
         right,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "from-b"),
     )
     assert not second.success
@@ -227,16 +235,16 @@ async def test_same_session_rapid_writes_use_new_version(tmp_path: Path) -> None
     book = tmp_path / "book.xlsx"
     _seed_book(book, "v0")
 
-    assert (await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))).success
+    assert (await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))).success
     first = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "v1"),
     )
     assert first.success, first.model_text
     second = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "B1", "v2"),
     )
     assert second.success, second.model_text
@@ -257,18 +265,18 @@ async def test_same_basename_different_dirs_do_not_share_version(
     _seed_book(left, "L")
     _seed_book(right, "R")
 
-    assert (await _sub(engine, "inspect_spreadsheet", _inspect_args("left/book.xlsx"))).success
-    assert (await _sub(engine, "inspect_spreadsheet", _inspect_args("right/book.xlsx"))).success
+    assert (await _sub(engine, "observe_spreadsheet", _inspect_args("left/book.xlsx"))).success
+    assert (await _sub(engine, "observe_spreadsheet", _inspect_args("right/book.xlsx"))).success
 
     written = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("left/book.xlsx", "A1", "L2"),
     )
     assert written.success, written.model_text
     other = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("right/book.xlsx", "A1", "R2"),
     )
     assert other.success, other.model_text
@@ -284,7 +292,7 @@ async def test_write_outside_workspace_is_path_invalid(tmp_path: Path) -> None:
     try:
         result = await _sub(
             engine,
-            "edit_spreadsheet",
+            "apply_spreadsheet_changes",
             _edit_args(str(outsider), "A1", "pwn"),
         )
         assert not result.success
@@ -303,10 +311,10 @@ async def test_xlsm_write_keeps_vba_bytes(tmp_path: Path) -> None:
     _inject_vba(book, marker)
     assert _vba_bytes(book) == marker
 
-    assert (await _sub(engine, "inspect_spreadsheet", _inspect_args("macro.xlsm"))).success
+    assert (await _sub(engine, "observe_spreadsheet", _inspect_args("macro.xlsm"))).success
     written = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("macro.xlsm", "A1", "kept"),
     )
     assert written.success, written.model_text
@@ -318,12 +326,12 @@ async def test_xlsm_write_keeps_vba_bytes(tmp_path: Path) -> None:
 async def test_cancel_rejects_later_subcall_not_just_sleep(tmp_path: Path) -> None:
     engine = _make_engine(tmp_path)
     _seed_book(tmp_path / "book.xlsx", "seen")
-    assert (await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))).success
+    assert (await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))).success
 
     engine._tool_dispatcher.request_cancel()
     blocked = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "nope"),
     )
     assert not blocked.success
@@ -333,7 +341,7 @@ async def test_cancel_rejects_later_subcall_not_just_sleep(tmp_path: Path) -> No
     engine._tool_dispatcher.reset_cancel()
     ok = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "after-reset"),
     )
     assert ok.success, ok.model_text
@@ -346,11 +354,11 @@ async def test_shared_budget_blocks_second_subcall(tmp_path: Path) -> None:
     dispatcher = engine._tool_dispatcher
     dispatcher.begin_call_budget(1)
 
-    first = await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))
+    first = await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))
     assert first.success
     second = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "over"),
     )
     assert not second.success
@@ -363,18 +371,18 @@ async def test_partial_commit_stays_after_cancel(tmp_path: Path) -> None:
     engine = _make_engine(tmp_path)
     book = tmp_path / "book.xlsx"
     _seed_book(book, "seen")
-    assert (await _sub(engine, "inspect_spreadsheet", _inspect_args("book.xlsx"))).success
+    assert (await _sub(engine, "observe_spreadsheet", _inspect_args("book.xlsx"))).success
 
     first = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "A1", "committed"),
     )
     assert first.success, first.model_text
     engine._tool_dispatcher.request_cancel()
     later = await _sub(
         engine,
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         _edit_args("book.xlsx", "B1", "dropped"),
     )
     assert not later.success
@@ -403,20 +411,20 @@ async def test_code_mode_session_read_write_reread(tmp_path: Path) -> None:
             root_call_id="call_compose",
         )
 
-    read1 = await _via_session("inspect_spreadsheet", _inspect_args("book.xlsx"))
+    read1 = await _via_session("observe_spreadsheet", _inspect_args("book.xlsx"))
     written = await _via_session(
-        "edit_spreadsheet",
-        _edit_args("book.xlsx", "A1", "via-sdk"),
+        "apply_spreadsheet_changes",
+        {**_edit_args("book.xlsx", "A1", "via-sdk"), "expected_version":read1.value["content_version"]},
     )
-    read2 = await _via_session("inspect_spreadsheet", _inspect_args("book.xlsx"))
+    read2 = await _via_session("observe_spreadsheet", _inspect_args("book.xlsx"))
 
     assert isinstance(read1, ToolResult) and read1.success
     assert isinstance(written, ToolResult) and written.success, written.model_text
     assert isinstance(read2, ToolResult) and read2.success
     assert _cell(tmp_path / "book.xlsx") == "via-sdk"
     assert "via-sdk" in str(read2.value or {})
-    assert session.allocate_subcall_id("inspect_spreadsheet", "call_compose") != (
-        session.allocate_subcall_id("edit_spreadsheet", "call_compose")
+    assert session.allocate_subcall_id("observe_spreadsheet", "call_compose") != (
+        session.allocate_subcall_id("apply_spreadsheet_changes", "call_compose")
     )
     start_ids = [
         getattr(event, "tool_call_id", None)
@@ -440,7 +448,7 @@ async def test_code_mode_session_honors_cancel(tmp_path: Path) -> None:
     engine._tool_dispatcher.request_cancel()
     blocked = await asyncio.to_thread(
         session._call_dispatcher,
-        tool_name="inspect_spreadsheet",
+        tool_name="observe_spreadsheet",
         arguments=_inspect_args("missing.xlsx"),
         root_call_id="call_cancel",
     )

@@ -1,6 +1,6 @@
 # ExcelManus Web
 
-ExcelManus 的 Web 工作台，基于 Next.js 16、React 19、Tailwind CSS 4 和 Univer 构建。适用版本：1.8.0 源码；更新日期：2026-09-21。
+ExcelManus 的 Web 工作台，基于 Next.js 16、React 19、Tailwind CSS 4 和 Univer 构建。适用版本：1.8.1 源码；更新日期：2026-09-21。
 
 [项目首页](../README.md) · [文档导航](../docs/README.md) · [服务器部署](../docs/ops-manual.md)
 

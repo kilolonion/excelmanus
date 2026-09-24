@@ -227,7 +227,7 @@ async def test_protocol_path_turn_tool_policy_compact_restore_renew() -> None:
     engine.memory.add_assistant_tool_message({
         "role": "assistant",
         "content": None,
-        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "inspect_spreadsheet", "arguments": "{}"}}],
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "observe_spreadsheet", "arguments": "{}"}}],
         "replay_state": {"thinking_blocks": [{"type": "thinking", "thinking": "t", "signature": "sig-1"}]},
         "reasoning_content": "t",
     })

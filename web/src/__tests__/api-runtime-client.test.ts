@@ -4,9 +4,13 @@ const resolveDirectBackendOrigin = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/backend-origin", () => ({ resolveDirectBackendOrigin }));
 
-import { apiFetch, apiGet, buildApiUrl, uploadFile, fetchExcelSnapshot, workspaceCreateFile } from "@/lib/api";
+import { apiFetch, apiGet, apiPost, buildApiUrl, uploadFile, fetchWorkbookView, workspaceCreateFile } from "@/lib/api";
 
 describe("runtime API client", () => {
+  it("retains HTTP status so name conflicts are distinguishable from failed writes", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 409, json: async () => ({ detail: "模型名称已存在" }) }));
+    await expect(apiPost("/config/models/profiles", {})).rejects.toMatchObject({ message: "模型名称已存在", status: 409 });
+  });
   beforeEach(() => {
     resolveDirectBackendOrigin.mockReturnValue("http://127.0.0.1:54321");
     vi.stubGlobal("window", {
@@ -84,7 +88,7 @@ describe("runtime API client", () => {
     const fetchMock = vi.fn().mockImplementation(async () => new Response("{}", { headers: { "Content-Type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
     await uploadFile(new File(["test"], "中文.txt"), "session", "workspace");
-    await fetchExcelSnapshot("报表.xlsx", { sessionId: "session" });
+    await fetchWorkbookView({ path: "报表.xlsx", sessionId: "session", workspaceKey: "_" }).catch(() => {});
     await workspaceCreateFile("新建.txt", "session", "workspace");
     expect(fetchMock).toHaveBeenCalledTimes(3);
     for (const [url, init] of fetchMock.mock.calls) {

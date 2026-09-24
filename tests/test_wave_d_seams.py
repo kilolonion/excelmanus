@@ -270,10 +270,10 @@ async def test_recover_overflow_retries_only_when_surface_advances() -> None:
 
 def test_explorer_write_guard_rejects_mutating_tools() -> None:
     cfg = SubagentConfig(name="explorer", description="x", permission_mode="readOnly")
-    assert reject_readonly_write(cfg, "edit_spreadsheet")
+    assert reject_readonly_write(cfg, "apply_spreadsheet_changes")
     assert reject_readonly_write(cfg, "copy_file")
     assert reject_readonly_write(cfg, "run_code") is None
-    assert reject_readonly_write(cfg, "inspect_spreadsheet") is None
+    assert reject_readonly_write(cfg, "observe_spreadsheet") is None
 
 
 def test_render_available_skills_skips_disable_model_invocation() -> None:

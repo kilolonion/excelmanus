@@ -333,6 +333,7 @@ class ModelProfileCreate(BaseModel):
     description: str = ""
     protocol: str = "auto"
     thinking_mode: str = "auto"
+    service_tier: Literal["", "fast"] = ""
     model_family: str = ""
     custom_extra_body: str = ""
     custom_extra_headers: str = ""
@@ -412,6 +413,7 @@ async def get_model_config(request: Request) -> JSONResponse:
                 "description": p.get("description", ""),
                 "protocol": p.get("protocol", "auto"),
                 "thinking_mode": p.get("thinking_mode", "auto"),
+                "service_tier": p.get("service_tier", ""),
                 "model_family": p.get("model_family", ""),
                 "custom_extra_body": p.get("custom_extra_body", ""),
                 "custom_extra_headers": p.get("custom_extra_headers", ""),
@@ -537,6 +539,7 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
         description=request.description or "",
         protocol=request.protocol or "auto",
         thinking_mode=request.thinking_mode or "auto",
+        service_tier=request.service_tier,
         model_family=model_family,
         custom_extra_body=request.custom_extra_body or "",
         custom_extra_headers=request.custom_extra_headers or "",
@@ -641,6 +644,7 @@ async def update_model_profile(
         description=request.description if "description" in request.model_fields_set else None,
         protocol=request.protocol or None,
         thinking_mode=request.thinking_mode,
+        service_tier=request.service_tier,
         model_family=model_family,
         custom_extra_body=request.custom_extra_body,
         custom_extra_headers=request.custom_extra_headers,
@@ -1110,6 +1114,7 @@ def _build_probe_targets(
     names: list[str] | None = None,
     *,
     probe_all: bool = False,
+    credential_resolver: Any = None,
 ) -> list["ProbeTargetSpec"]:
     """将 profile 名列表或 all=True 解析为 ProbeTargetSpec 列表。"""
     from excelmanus.capability_probe_jobs import ProbeTargetSpec
@@ -1147,8 +1152,23 @@ def _build_probe_targets(
         else:
             continue
 
+        extra_headers: dict[str, str] | None = None
         if managed_provider_for(model) is not None:
-            continue
+            # 订阅档案没有静态 API Key；使用当前登录凭据，不能直接跳过，
+            # 也不能借用其它模型的 Key 探测。
+            if credential_resolver is None:
+                continue
+            try:
+                credential = credential_resolver.resolve_sync(model)
+            except Exception:
+                logger.debug("probe targets 解析订阅凭证失败", exc_info=True)
+                continue
+            if credential is None or not credential.api_key:
+                continue
+            api_key = credential.api_key
+            base_url = credential.base_url or base_url
+            protocol = credential.protocol or protocol
+            extra_headers = credential.extra_headers
 
         cache_model = model
         api_model = strip_managed_prefix(model)
@@ -1166,6 +1186,7 @@ def _build_probe_targets(
             api_key=api_key,
             protocol=protocol,
             thinking_mode=thinking_map.get(name, "auto"),
+            extra_headers=extra_headers,
         ))
 
     return targets
@@ -1193,16 +1214,18 @@ async def create_probe_job(request: Request) -> JSONResponse:
     req_model = body.get("model")
 
     targets: list[ProbeTargetSpec]
+    _resolver = getattr(request.app.state, "credential_resolver", None)
 
     if probe_all or req_name:
         names = [req_name] if req_name and not probe_all else None
-        targets = _build_probe_targets(names, probe_all=probe_all)
+        targets = _build_probe_targets(
+            names, probe_all=probe_all, credential_resolver=_resolver,
+        )
     elif req_model:
         model, base_url, api_key, protocol = _resolve_model_info(None, req_model, body.get("base_url"))
         cache_model = model
         api_model = strip_managed_prefix(model)
 
-        _resolver = getattr(request.app.state, "credential_resolver", None)
         _extra_headers: dict[str, str] | None = None
         if _resolver is not None:
             try:
@@ -1229,7 +1252,9 @@ async def create_probe_job(request: Request) -> JSONResponse:
             extra_headers=_extra_headers,
         )]
     else:
-        targets = _build_probe_targets(None, probe_all=False)
+        targets = _build_probe_targets(
+            None, probe_all=False, credential_resolver=_resolver,
+        )
 
     if not targets:
         return _error_json_response(400, "无可探测的模型")
@@ -1872,6 +1897,7 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     "responses_background_enabled": "EXCELMANUS_RESPONSES_BACKGROUND_ENABLED",
     "turn_token_budget": "EXCELMANUS_TURN_TOKEN_BUDGET",
     "turn_cost_budget_usd": "EXCELMANUS_TURN_COST_BUDGET_USD",
+    "message_dispatch_default": "EXCELMANUS_MESSAGE_DISPATCH_DEFAULT",
     "input_cost_per_1k_usd": "EXCELMANUS_INPUT_COST_PER_1K_USD",
     "output_cost_per_1k_usd": "EXCELMANUS_OUTPUT_COST_PER_1K_USD",
     # ── 执行与安全 ──
@@ -1941,6 +1967,7 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     "tavily_api_key": "EXCELMANUS_TAVILY_API_KEY",
     "brave_api_key": "EXCELMANUS_BRAVE_API_KEY",
     # ── System One / Jev ──
+    "jev_experimental_enabled": "EXCELMANUS_JEV_EXPERIMENTAL_ENABLED",
     "jev_enabled": "EXCELMANUS_JEV_ENABLED",
     "jev_exposure": "EXCELMANUS_JEV_EXPOSURE",
     "jev_mode_hint": "EXCELMANUS_JEV_MODE_HINT",
@@ -1972,6 +1999,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "responses_background_enabled": get_config().responses_background_enabled,
         "turn_token_budget": get_config().turn_token_budget,
         "turn_cost_budget_usd": get_config().turn_cost_budget_usd,
+        "message_dispatch_default": get_config().message_dispatch_default,
         "input_cost_per_1k_usd": get_config().input_cost_per_1k_usd,
         "output_cost_per_1k_usd": get_config().output_cost_per_1k_usd,
         # ── 执行与安全 ──
@@ -2042,6 +2070,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "tavily_api_key": _mask_api_key(get_config().tavily_api_key),
         "brave_api_key": _mask_api_key(get_config().brave_api_key),
         # ── System One / Jev ──
+        "jev_experimental_enabled": get_config().jev_experimental_enabled,
         "jev_enabled": get_config().jev_enabled,
         "jev_exposure": get_config().jev_exposure,
         "jev_mode_hint": get_config().jev_mode_hint,
@@ -2070,11 +2099,12 @@ class RuntimeConfigUpdate(BaseModel):
     responses_background_enabled: bool | None = None
     turn_token_budget: int | None = Field(default=None, ge=0)
     turn_cost_budget_usd: float | None = Field(default=None, ge=0)
+    message_dispatch_default: Literal["steer", "interrupt", "queue"] | None = None
     input_cost_per_1k_usd: float | None = Field(default=None, ge=0)
     output_cost_per_1k_usd: float | None = Field(default=None, ge=0)
     # ── 执行与安全 ──
     subagent_enabled: bool | None = None
-    max_iterations: int | None = None
+    max_iterations: int | None = Field(default=None, ge=0)
     friendly_error_messages: bool | None = None
     # ── 上下文与记忆 ──
     max_context_tokens: int | None = Field(default=None, gt=0)
@@ -2099,7 +2129,7 @@ class RuntimeConfigUpdate(BaseModel):
     agent_self_management_enabled: bool | None = None
     thinking_budget: int | None = Field(default=None, ge=0)
     # ── 子代理 ──
-    subagent_max_iterations: int | None = Field(default=None, gt=0)
+    subagent_max_iterations: int | None = Field(default=None, ge=0)
     subagent_timeout_seconds: int | None = Field(default=None, gt=0)
     subagent_max_consecutive_failures: int | None = Field(default=None, gt=0)
     parallel_subagent_max: int | None = Field(default=None, gt=0)
@@ -2140,6 +2170,7 @@ class RuntimeConfigUpdate(BaseModel):
     tavily_api_key: str | None = None
     brave_api_key: str | None = None
     # ── System One / Jev ──
+    jev_experimental_enabled: bool | None = None
     jev_enabled: Literal["off", "enforce"] | None = None
     jev_exposure: Literal["off", "enforce"] | None = None
     jev_mode_hint: bool | None = None
@@ -2292,6 +2323,8 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
             compaction_threshold_ratio=payload.get("compaction_threshold_ratio"),
         )
     _BUDGET_KEYS = {
+        "max_iterations",
+        "subagent_max_iterations",
         "turn_timeout_seconds",
         "turn_token_budget",
         "turn_cost_budget_usd",

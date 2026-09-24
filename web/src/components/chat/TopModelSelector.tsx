@@ -1,48 +1,26 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown, Check, Loader2, AlertTriangle, Search, Sparkles } from "lucide-react";
+import { ChevronDown, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Popover } from "radix-ui";
 import { useUIStore } from "@/stores/ui-store";
-import { apiGet, apiPut } from "@/lib/api";
-import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
-import type { ModelInfo } from "@/lib/types";
-import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
+import { apiGet } from "@/lib/api";
+import { displayModelLabel } from "@/lib/model-display";
+import { getProviderColor, inferModelBrand } from "@/lib/provider-brand";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
 import { hasProviderLogo, ProviderLogo, providerFallbackInitial } from "@/components/settings/model/ProviderLogo";
-import { applyVisionFromModel } from "@/lib/vision-capability";
-import { SubscriptionSettingsEntry } from "@/components/settings/model/SubscriptionSettingsEntry";
+import { useModelSelection } from "@/hooks/use-model-selection";
+import { ModelPickerContent } from "./ModelPickerContent";
+import styles from "./ModelPickerContent.module.css";
 
 interface ModelCapabilitySummary {
   name: string;
   model: string;
   base_url: string;
   capabilities: { healthy: boolean | null; health_error: string } | null;
-}
-
-interface ProviderGroup {
-  provider: string;
-  models: ModelInfo[];
-}
-
-function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
-  const map = new Map<string, ModelInfo[]>();
-  for (const m of models) {
-    const provider = inferModelBrand(m);
-    if (!map.has(provider)) map.set(provider, []);
-    map.get(provider)!.push(m);
-  }
-  return Array.from(map.entries()).map(([provider, models]) => ({
-    provider,
-    models,
-  }));
 }
 
 function ModelBrandMark({
@@ -86,40 +64,21 @@ function ModelBrandMark({
 }
 
 export function TopModelSelector() {
-  const currentModel = useUIStore((s) => s.currentModel);
-  const setCurrentModel = useUIStore((s) => s.setCurrentModel);
+  const { currentModel, models, switching, loading, loadError, switchError, reload, selectModel } = useModelSelection();
   const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [switching, setSwitching] = useState(false);
-  const [switchError, setSwitchError] = useState<string | null>(null);
   const [capsMap, setCapsMap] = useState<Record<string, { healthy: boolean | null; health_error: string }>>({});
-  const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
-  const searchRef = useRef<HTMLInputElement>(null);
-  const modelsRequestRef = useRef(0);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const capabilitiesLoadedRef = useRef(false);
   const isMobile = useIsMobile();
-
-  const fetchModels = () => {
-    const requestId = ++modelsRequestRef.current;
-    const profileVersion = useUIStore.getState().modelProfileVersion;
-    apiGet<{ models: ModelInfo[] }>("/models")
-      .then((data) => {
-        if (requestId !== modelsRequestRef.current || profileVersion !== useUIStore.getState().modelProfileVersion) return;
-        setModels(data.models);
-        const active = data.models.find((m) => m.active);
-        setCurrentModel(active?.name ?? "");
-        applyVisionFromModel(active);
-        if (!active) useUIStore.getState().setVisionCapable(null);
-      })
-      .catch(() => {});
-  };
 
   const fetchCapabilities = () => {
     if (capabilitiesLoadedRef.current) return;
     capabilitiesLoadedRef.current = true;
+    const version = useUIStore.getState().modelProfileVersion;
     apiGet<{ items: ModelCapabilitySummary[] }>("/config/models/capabilities/all")
       .then((data) => {
+        if (version !== useUIStore.getState().modelProfileVersion) return;
         const map: Record<string, { healthy: boolean | null; health_error: string }> = {};
         for (const item of data.items) {
           if (item.capabilities) {
@@ -136,16 +95,11 @@ export function TopModelSelector() {
       });
   };
 
-  useEffect(() => {
-    fetchModels();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Health details are only needed while choosing a model.  Keeping this out
   // of the initial workspace request fan-out makes the chat surface usable
   // before the (potentially large) profile capability list is read.
   useEffect(() => {
-    if (open) fetchCapabilities();
+    if (open) { fetchCapabilities(); void reload(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -154,303 +108,64 @@ export function TopModelSelector() {
     if (modelProfileVersion > 0) {
       capabilitiesLoadedRef.current = false;
       setCapsMap({});
-      fetchModels();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelProfileVersion]);
 
-  // Auto-focus search input when dropdown opens
-  useEffect(() => {
-    if (open && models.length >= 4) {
-      requestAnimationFrame(() => searchRef.current?.focus());
-    }
-  }, [open, models.length]);
-
   const handleSwitch = async (name: string) => {
-    if (name === currentModel || switching) return;
-    setSwitching(true);
-    setSwitchError(null);
-    try {
-      await apiPut("/models/active", { name });
-      setCurrentModel(name);
-      useUIStore.getState().bumpModelProfiles();
-      applyVisionFromModel(models.find((m) => m.name === name));
-      setOpen(false);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "切换失败";
-      setSwitchError(msg);
-      setTimeout(() => setSwitchError(null), 3000);
-    } finally {
-      setSwitching(false);
-    }
+    if (await selectModel(name)) setOpen(false);
   };
-
-  const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
-
-  const filtered = useMemo(() => {
-    if (!search.trim()) return models;
-    const q = search.toLowerCase();
-    return models.filter(
-      (m) =>
-        m.name.toLowerCase().includes(q) ||
-        m.model.toLowerCase().includes(q) ||
-        m.description?.toLowerCase().includes(q)
-    );
-  }, [models, search]);
-
-  const groups = groupByProvider(filtered);
-  const activeModel = models.find((m) => m.name === currentModel);
-  const displayName = activeModel ? displayModelLabel(activeModel) : currentModel || "模型";
-  const currentModelUnhealthy = currentModel && capsMap[currentModel]?.healthy === false;
+  const activeModel = models.find((model) => model.name === currentModel);
+  const displayName = activeModel ? displayModelLabel(activeModel) : currentModel || "选择模型";
+  const currentModelUnhealthy = Boolean(currentModel && capsMap[currentModel]?.healthy === false);
   const activeProvider = activeModel ? inferModelBrand(activeModel) : "unknown";
-  const showSearch = models.length >= 4;
-
-  // Mobile: bottom sheet handler
-  const handleMobileSelect = async (name: string) => {
-    await handleSwitch(name);
+  const pickerProps = {
+    models, currentModel, capsMap, switching, loading, loadError, switchError,
+    onSelect: handleSwitch,
+    onClose: () => setOpen(false),
+    onReload: () => { void reload(); fetchCapabilities(); },
   };
+  const trigger = (
+    <Button ref={triggerRef} variant="ghost"
+      className="em-model-selector-trigger gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 shadow-sm hover:border-[var(--em-line-strong)] data-[state=open]:bg-[var(--em-primary-alpha-06)] data-[state=open]:border-[var(--em-primary-alpha-25)]"
+      data-coach-id="coach-model-selector" aria-label={`选择模型：${displayName}`}
+      aria-haspopup={isMobile ? "dialog" : undefined} aria-expanded={isMobile ? open : undefined}
+      onClick={isMobile ? () => setOpen(true) : undefined}>
+      <ModelBrandMark provider={activeProvider} label={displayName} unhealthy={currentModelUnhealthy} />
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.span key={currentModel || "_none"}
+          initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}
+          transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
+          className={`em-model-selector-label truncate ${currentModelUnhealthy ? "text-destructive" : ""}`}>
+          {displayName}
+        </motion.span>
+      </AnimatePresence>
+      {switching ? <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+        : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180" />}
+    </Button>
+  );
 
   if (isMobile) {
-    return (
-      <>
-        <Button
-          variant="ghost"
-          className="em-model-selector-trigger gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 overflow-hidden shadow-sm"
-          data-coach-id="coach-model-selector"
-          onClick={() => setOpen(true)}
-        >
-          <ModelBrandMark
-            provider={activeProvider}
-            label={displayName}
-            unhealthy={Boolean(currentModelUnhealthy)}
-          />
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.span
-              key={currentModel || "_none"}
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-              className={`em-model-selector-label truncate ${
-                currentModelUnhealthy ? "text-destructive" : ""
-              }`}
-            >
-              {displayName}
-            </motion.span>
-          </AnimatePresence>
-          {switching ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-          ) : (
-            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-          )}
-        </Button>
-        <ModelListBottomSheet
-          open={open}
-          onOpenChange={setOpen}
-          models={models}
-          currentModel={currentModel}
-          onSelect={handleMobileSelect}
-          mode="switch"
-          capsMap={capsMap}
-          switching={switching}
-          switchError={switchError}
-        />
-      </>
-    );
+    return <>{trigger}<ModelListBottomSheet {...pickerProps} open={open} onOpenChange={setOpen} mode="switch"
+      onCloseAutoFocus={(event) => {
+        event.preventDefault();
+        if (!useUIStore.getState().settingsOpen) triggerRef.current?.focus();
+      }} /></>;
   }
 
   return (
-    <DropdownMenu open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch(""); }}>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="em-model-selector-trigger gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 shadow-sm" data-coach-id="coach-model-selector">
-          <ModelBrandMark
-            provider={activeProvider}
-            label={displayName}
-            unhealthy={Boolean(currentModelUnhealthy)}
-          />
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.span
-              key={currentModel || "_none"}
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
-              transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-              className={`em-model-selector-label truncate ${
-                currentModelUnhealthy ? "text-destructive" : ""
-              }`}
-            >
-              {displayName}
-            </motion.span>
-          </AnimatePresence>
-          {switching ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-          ) : (
-            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180" />
-          )}
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        className="w-80 max-w-[calc(100vw-2rem)] p-0 overflow-hidden"
-      >
-        {/* ── Header ── */}
-        <div className="px-3 pt-2.5 pb-2 border-b border-border/50">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
-            <span className="text-xs font-medium text-foreground/70">模型选择</span>
-            <span className="text-[10px] text-muted-foreground/50 ml-auto tabular-nums">
-              {models.length} 个可用
-            </span>
-          </div>
-        </div>
-
-        {/* ── Search ── */}
-        {showSearch && (
-          <div className="px-2 py-1.5 border-b border-border/30">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/40" />
-              <input
-                ref={searchRef}
-                type="text"
-                placeholder="搜索模型..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full h-8 pl-8 pr-3 text-sm bg-muted/30 rounded-md border-0 outline-none placeholder:text-muted-foreground/40 focus:bg-muted/50 transition-colors"
-                onClick={(e) => e.stopPropagation()}
-                onKeyDown={(e) => e.stopPropagation()}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* ── Model list ── */}
-        <div className="max-h-[50dvh] overflow-y-auto py-1 model-selector-scroll">
-          {/* ── Provider groups ── */}
-          {groups.map((group, gi) => {
-            const color = getProviderColor(group.provider);
-            return (
-              <div key={group.provider}>
-                {gi > 0 && <div className="h-px mx-3 my-1 bg-border/30" />}
-                {/* Provider header */}
-                <div className="flex items-center gap-2 px-3 pt-2.5 pb-1">
-                  <span
-                    className="h-1.5 w-1.5 rounded-full shrink-0"
-                    style={{ backgroundColor: color }}
-                  />
-                  <span
-                    className="text-[10px] font-semibold uppercase tracking-widest"
-                    style={{ color }}
-                  >
-                    {getProviderDisplayName(group.provider)}
-                  </span>
-                </div>
-                {/* Model items */}
-                {group.models.map((m) => {
-                  const isSelected = m.name === currentModel;
-                  const isUnhealthy = capsMap[m.name]?.healthy === false;
-                  const hasHealthData = m.name in capsMap;
-                  return (
-                    <button
-                      key={m.name}
-                      onClick={() => handleSwitch(m.name)}
-                      disabled={switching}
-                      className={[
-                        "w-full text-left px-3 py-2 min-h-[40px] flex items-center gap-3",
-                        "transition-all duration-150 ease-out cursor-pointer",
-                        "border-l-[3px] border-l-transparent",
-                        "hover:bg-accent/50",
-                        isSelected
-                          ? "bg-[var(--em-primary-alpha-06)] !border-l-[var(--em-primary)]"
-                          : "hover:border-l-[color:var(--em-primary-alpha-25)]",
-                        switching ? "opacity-50 pointer-events-none" : "",
-                      ].join(" ")}
-                    >
-                      {/* Health indicator dot */}
-                      <span
-                        className="h-2 w-2 rounded-full shrink-0 mt-0.5 transition-colors duration-200"
-                        style={{
-                          backgroundColor: isUnhealthy
-                            ? "var(--em-error)"
-                            : hasHealthData && capsMap[m.name]?.healthy === true
-                              ? "var(--em-primary)"
-                              : "var(--muted-foreground)",
-                          opacity: hasHealthData ? 1 : 0.25,
-                        }}
-                      />
-                      {/* Model info */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className={`text-sm leading-tight ${
-                              isSelected ? "font-semibold" : "font-medium"
-                            }`}
-                          >
-                            {displayModelLabel(m)}
-                          </span>
-                          {isUnhealthy && (
-                            <span className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-px rounded-full bg-destructive/10 text-destructive font-medium">
-                              <AlertTriangle className="h-2 w-2" />
-                              不可用
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-1 mt-0.5">
-                          {m.name !== resolvedModel(m) && !isUnhealthy && (
-                            <span className="text-[10px] text-muted-foreground/50 font-mono truncate">
-                              {resolvedModel(m)}
-                            </span>
-                          )}
-                          {m.description && (
-                            <span className="text-[10px] text-muted-foreground/40 truncate">
-                              {m.name !== resolvedModel(m) && !isUnhealthy
-                                ? `· ${m.description}`
-                                : m.description}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      {/* Selection check */}
-                      {isSelected && (
-                        <span
-                          className="h-5 w-5 rounded-full flex items-center justify-center shrink-0"
-                          style={{ backgroundColor: "var(--em-primary-alpha-15)" }}
-                        >
-                          <Check className="h-3 w-3" style={{ color: "var(--em-primary)" }} />
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            );
-          })}
-
-          {/* Empty states */}
-          {filtered.length === 0 && models.length > 0 && (
-            <div className="px-3 py-8 text-center">
-              <Search className="h-5 w-5 text-muted-foreground/25 mx-auto mb-2" />
-              <p className="text-xs text-muted-foreground/40">未找到匹配的模型</p>
-            </div>
-          )}
-          {models.length === 0 && (
-            <div className="px-3 py-8 text-center">
-              <Loader2 className="h-5 w-5 text-muted-foreground/25 mx-auto mb-2 animate-spin" />
-              <p className="text-xs text-muted-foreground/40">加载模型列表...</p>
-            </div>
-          )}
-        </div>
-
-        <div className="border-t border-border/60 p-1">
-          <SubscriptionSettingsEntry onNavigate={() => setOpen(false)} />
-        </div>
-        {/* ── Error banner ── */}
-        {switchError && (
-          <div className="px-3 py-2 border-t border-destructive/20 bg-destructive/5 flex items-center gap-2">
-            <AlertTriangle className="h-3 w-3 text-destructive shrink-0" />
-            <span className="text-[11px] text-destructive truncate">{switchError}</span>
-          </div>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>{trigger}</Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content align="start" sideOffset={8} collisionPadding={12} className={styles.popover}
+          aria-label="选择模型"
+          onCloseAutoFocus={(event) => { if (useUIStore.getState().settingsOpen) event.preventDefault(); }}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            (event.currentTarget as HTMLElement).querySelector<HTMLInputElement>("input")?.focus();
+          }}>
+          <ModelPickerContent {...pickerProps} />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

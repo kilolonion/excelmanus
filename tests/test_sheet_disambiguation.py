@@ -7,9 +7,9 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools import intent_tools, reference_tools
+from excelmanus.tools import workbook_tools, reference_tools
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import analyze_spreadsheet
+from excelmanus.tools.workbook_tools import analyze_spreadsheet
 from excelmanus.workbook.snapshot import (
     SheetRequired,
     resolve_sheet_by_columns,
@@ -20,7 +20,7 @@ from excelmanus.workbook.snapshot import (
 def _bind(root: Path) -> None:
     workspace = str(root)
     set_guard(FileAccessGuard(workspace))
-    intent_tools.init_guard(workspace)
+    workbook_tools.init_guard(workspace)
     reference_tools.init_guard(workspace)
 
 
@@ -236,7 +236,7 @@ class TestWorkbookLevel:
         _bind(tmp_path)
         path = _two_sheet_workbook(tmp_path / "w.xlsx")
         res = analyze_spreadsheet(
-            mode="aggregate", file_path=str(path), sheet_name="订单",
+            mode="aggregate", file_path=str(path), sheet="订单",
             group_by="状态", aggregations={"数量": "sum"},
         )
         assert res.success, res.model_text

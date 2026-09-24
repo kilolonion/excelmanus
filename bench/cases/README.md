@@ -1,6 +1,6 @@
 # 套件 JSON
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-21
+适用版本：1.8.1 源码 · 更新日期：2026-09-21
 
 本目录只放 suite 文件。目录约定和怎么跑见上一级 [README.md](../README.md)。
 `python -m excelmanus.bench --all` 会运行本目录下 `include_in_all` 未设为 `false` 的 `*.json`。

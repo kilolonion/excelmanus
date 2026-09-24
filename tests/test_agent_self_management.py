@@ -1,4 +1,4 @@
-"""Exercise the opt-in boundary through real engines, catalogs and tool calls."""
+"""Exercise self-management boundaries through real engines, catalogs and tool calls."""
 
 from dataclasses import replace
 import json
@@ -61,9 +61,12 @@ def call(engine, name="inspect_agent", *, actor="host", mode=None, session_id=No
         reset_call(token)
 
 
-def test_default_is_off_in_config_loader(tmp_path):
+def test_default_is_on_in_config_loader():
     values = {"EXCELMANUS_API_KEY": "test", "EXCELMANUS_BASE_URL": "https://example.test/v1",
               "EXCELMANUS_MODEL": "test"}
+    assert ExcelManusConfig(api_key="test", base_url="https://example.test/v1", model="test").agent_self_management_enabled
+    assert load_config(values=values).agent_self_management_enabled
+    values["EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED"] = "false"
     assert not load_config(values=values).agent_self_management_enabled
     values["EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED"] = "true"
     assert load_config(values=values).agent_self_management_enabled

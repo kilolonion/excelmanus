@@ -328,7 +328,7 @@ class TestToolCallAuditReplay:
             "tool/call_start",
             {
                 "tool_call_id": "child",
-                "tool_name": "inspect_spreadsheet",
+                "tool_name": "observe_spreadsheet",
                 "parent_call_id": "run-1",
             },
         )
@@ -340,7 +340,7 @@ class TestToolCallAuditReplay:
             "tool/call_end",
             {
                 "tool_call_id": "child",
-                "tool_name": "inspect_spreadsheet",
+                "tool_name": "observe_spreadsheet",
                 "parent_call_id": "run-1",
                 "success": True,
             },
@@ -352,10 +352,10 @@ class TestToolCallAuditReplay:
             {"seq": 1, "kind": "tool/call_start",
              "payload": {"tool_call_id": "run-1", "tool_name": "run_code"}},
             {"seq": 2, "kind": "tool/call_start",
-             "payload": {"tool_call_id": "c1", "tool_name": "inspect_spreadsheet",
+             "payload": {"tool_call_id": "c1", "tool_name": "observe_spreadsheet",
                          "parent_call_id": "run-1"}},
             {"seq": 3, "kind": "tool/call_end",
-             "payload": {"tool_call_id": "c1", "tool_name": "inspect_spreadsheet",
+             "payload": {"tool_call_id": "c1", "tool_name": "observe_spreadsheet",
                          "parent_call_id": "run-1", "success": True}},
             {"seq": 4, "kind": "tool/call_end",
              "payload": {"tool_call_id": "run-1", "tool_name": "run_code",

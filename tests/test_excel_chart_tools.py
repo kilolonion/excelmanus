@@ -1,4 +1,4 @@
-"""图表写入走 manage_spreadsheet_objects，不再把 create_excel_chart 当模型面入口。"""
+"""图表写入走 apply_spreadsheet_changes，不再把 create_excel_chart 当模型面入口。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
 from excelmanus.workbook.charts import init_guard as init_chart_guard
-from excelmanus.tools.intent_tools import init_guard, manage_spreadsheet_objects
+from excelmanus.tools.workbook_tools import init_guard, apply_spreadsheet_changes
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
@@ -54,7 +54,7 @@ def _chart(path: Path, **fields: object) -> ToolResult:
     payload = {"kind": "chart", **fields}
     if "sheet" not in payload and "sheet_name" not in payload:
         payload["sheet"] = "数据"
-    return manage_spreadsheet_objects(
+    return apply_spreadsheet_changes(
         file_path=str(path),
         operations=[payload],
         expected_version=content_version_of_file(path),
@@ -74,7 +74,7 @@ class TestCreateExcelChart:
             )
         )
         assert result["status"] == "success"
-        assert result["chart_type"] == "bar"
+        assert result["observation"]["operations"][0]["object"]["chart_info"]["type"] == "bar"
         wb = load_workbook(fp)
         assert len(wb["数据"]._charts) == 1
         wb.close()
@@ -91,7 +91,7 @@ class TestCreateExcelChart:
             )
         )
         assert result["status"] == "success"
-        assert result["target_cell"] == "E1"
+        assert result["observation"]["operations"][0]["object"]["target_cell"] == "E1"
 
     def test_pie_chart(self, tmp_path: Path) -> None:
         fp = _make_chart_data(tmp_path)
@@ -137,7 +137,7 @@ class TestCreateExcelChart:
             )
         )
         assert result["status"] == "success"
-        assert result["target_sheet"] == "图表汇总"
+        assert result["observation"]["operations"][0]["object"]["target_sheet"] == "图表汇总"
         wb = load_workbook(fp)
         assert "图表汇总" in wb.sheetnames
         assert len(wb["图表汇总"]._charts) == 1
@@ -181,7 +181,7 @@ class TestCreateExcelChart:
         )
         assert result.success is False
         assert result.error is not None
-        assert result.error.code == "INVALID_ARGS"
+        assert result.error.code == "SHEET_NOT_FOUND"
         assert "SAVE_FAILED" not in (result.model_text or "")
 
     def test_sheet_qualified_data_range(self, tmp_path: Path) -> None:
@@ -196,4 +196,4 @@ class TestCreateExcelChart:
             )
         )
         assert result["status"] == "success"
-        assert result["chart_type"] == "bar"
+        assert result["observation"]["operations"][0]["object"]["chart_info"]["type"] == "bar"

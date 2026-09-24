@@ -47,7 +47,7 @@ def _engine(*, session_id: str = "sess-1") -> MagicMock:
     engine._prompt_tool_snapshot = [
         {
             "type": "function",
-            "function": {"name": "inspect_spreadsheet", "description": "d", "parameters": {}},
+            "function": {"name": "observe_spreadsheet", "description": "d", "parameters": {}},
         },
         {
             "type": "function",
@@ -74,7 +74,7 @@ def _engine(*, session_id: str = "sess-1") -> MagicMock:
         prompt_injection_snapshots=[],
         injected_context_fingerprint=None,
     )
-    engine._registry.get_tool_names.return_value = ["inspect_spreadsheet", "run_code"]
+    engine._registry.get_tool_names.return_value = ["observe_spreadsheet", "run_code"]
     engine.registry = engine._registry
     engine._child_system_prompt = None
     engine._meta_tool_builder.build_v5_tools.return_value = list(engine._prompt_tool_snapshot)
@@ -218,7 +218,7 @@ async def test_wire_messages_equal_durable_projection_across_steps() -> None:
     second = await _assemble_seal(engine)
     _assert_wire_is_durable_projection(engine, second)
 
-    engine.memory.add_tool_call("c1", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("c1", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("c1", "sheet=Sheet1")
     third = await _assemble_seal(engine)
     _assert_wire_is_durable_projection(engine, third)

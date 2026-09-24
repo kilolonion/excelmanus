@@ -58,3 +58,23 @@ def analysis_rows(ws):
         return rows
     finally:
         cached.close()
+
+
+def snapshot_cache_status(snapshot, sheet, *, max_row=None):
+    """Inspect cached values in a streaming pair; never infer missing formulas as zero."""
+    from excelmanus.workbook.snapshot import _cached_workbook_pair
+    formula, values, lock = _cached_workbook_pair(snapshot, False)
+    missing, columns, count = [], set(), 0
+    with lock:
+        for index, (fr, vr) in enumerate(zip(formula[sheet].iter_rows(max_row=max_row), values[sheet].iter_rows(max_row=max_row))):
+            if index % 512 == 0:
+                from excelmanus.tools.spreadsheet_engine_tools import _cancelled
+                _cancelled()
+            for cell, value in zip(fr, vr):
+                if cell.data_type == 'f' and (value.value is None or value.data_type == 'e'):
+                    count += 1
+                    columns.add(cell.column)
+                    if len(missing) < 100:
+                        missing.append(cell.coordinate)
+    return {"status":"partial" if count else "complete", "missing_or_error_count":count,
+            "cells":missing,"columns":sorted(columns),"scope":"saved_cache", "max_row":max_row}

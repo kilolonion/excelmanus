@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import { apiGet, apiPut, apiPost, apiDelete, testModelConnection, listRemoteModels, getManageToken, buildApiUrl } from "@/lib/api";
+import { apiGet, apiPut, apiPost, testModelConnection, listRemoteModels, getManageToken, buildApiUrl } from "@/lib/api";
 import type { RemoteModelItem } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import type { TestConnectionResult } from "@/lib/api";
@@ -11,17 +11,23 @@ import {
   normalizeThinkingEffortOptions,
   type ThinkingEffort,
 } from "@/lib/thinking";
-import { SECTION_META, CODEX_MODELS } from "./constants";
+import { CODEX_MODELS } from "./constants";
 import {
+  EMPTY_PROFILE_DRAFT,
   isCodexProfile,
+  isSubscriptionProfile,
   subscriptionModelPrefix,
   isMaskedApiKey,
   normalizeFetchedCapabilities,
   siblingDraftFromProfile,
+  profileToDraft,
   uniqueSiblingProfileName,
 } from "./helpers";
-import type { ModelConfig, ModelSection, ModelCapabilities, ProfileEntry, ProbeJobSnapshot } from "./types";
+import type { ModelCapabilities, ProfileEntry, ProbeJobSnapshot } from "./types";
 import type { ProviderPreset } from "./types";
+import type { ModelProfileInput } from "@/lib/model-config";
+import { activateModelProfile, createModelProfile, updateModelProfile, deleteModelProfile } from "@/lib/model-config-api";
+import { useModelConfig } from "./useModelConfig";
 
 type ThinkingSettings = {
   effort: string;
@@ -38,21 +44,25 @@ const CODEX_REMOTE_MODEL_ITEMS: RemoteModelItem[] = CODEX_MODELS.map((m) => ({
 }));
 
 export function useAdminModelSettings() {
-  const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
-  const configRequestRef = useRef(0);
-  const [config, setConfig] = useState<ModelConfig | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState<string | null>(null);
-  const [saved, setSaved] = useState<string | null>(null);
-  const [editDrafts, setEditDrafts] = useState<Record<string, Record<string, string>>>({});
+  const { config, loading, loadError, fetchConfig } = useModelConfig();
+  const mutationPending = useRef(false);
+  const remoteRequest = useRef(0);
+  const connectionRequest = useRef(0);
+  const capabilitiesRequest = useRef(0);
+  const version = useUIStore((state) => state.modelProfileVersion);
+  useEffect(() => () => {
+    remoteRequest.current += 1;
+    connectionRequest.current += 1;
+    capabilitiesRequest.current += 1;
+  }, []);
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
-  const [enabledDrafts, setEnabledDrafts] = useState<Record<string, boolean>>({});
   const [newProfile, setNewProfile] = useState(false);
   const [editingProfile, setEditingProfile] = useState<string | null>(null);
   const [siblingSourceName, setSiblingSourceName] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [highlightProfile, setHighlightProfile] = useState<string | null>(null);
   const [addingProfile, setAddingProfile] = useState(false);
+  const [deletingProfile, setDeletingProfile] = useState<string | null>(null);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [remoteModels, setRemoteModels] = useState<RemoteModelItem[]>([]);
   const [modelDropdownTarget, setModelDropdownTarget] = useState<string | null>(null);
@@ -60,26 +70,14 @@ export function useAdminModelSettings() {
   const [remoteModelHint, setRemoteModelHint] = useState<string | null>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const profileCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const [profileDraft, setProfileDraft] = useState<ProfileEntry>({
-    name: "",
-    model: "",
-    api_key: "",
-    base_url: "",
-    description: "",
-    protocol: "auto",
-    thinking_mode: "auto",
-    model_family: "",
-    custom_extra_body: "",
-    custom_extra_headers: "",
-    canonical_model: "",
-  });
+  const [profileDraft, setProfileDraft] = useState<ProfileEntry>({ ...EMPTY_PROFILE_DRAFT });
   // 按 "model|base_url" 或 profile 名索引的每模型能力
   const [capsMap, setCapsMap] = useState<Record<string, ModelCapabilities>>({});
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
-  const [probeJob, setProbeJob] = useState<ProbeJobSnapshot | null>(null);
   const probeEsRef = useRef<EventSource | null>(null);
   const [activatingProfile, setActivatingProfile] = useState<string | null>(null);
+  const [togglingFastProfile, setTogglingFastProfile] = useState<string | null>(null);
   const [saveToast, setSaveToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   // 折叠/展开状态
@@ -124,7 +122,40 @@ export function useAdminModelSettings() {
     });
   }, [pendingScrollToForm]);
 
+  const resetProfileFormUi = useCallback(() => {
+    remoteRequest.current += 1;
+    connectionRequest.current += 1;
+    setFetchingModels(false);
+    setTestingKey(null);
+    setNewProfile(false);
+    setEditingProfile(null);
+    setProfileDraft({ ...EMPTY_PROFILE_DRAFT });
+    setShowKeys({});
+    setSiblingSourceName(null);
+    setProfileError(null);
+    setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    setRemoteModelError(null);
+    setRemoteModelHint(null);
+    setRemoteModels([]);
+    setModelDropdownTarget(null);
+  }, []);
+
+  const beginNewProfile = useCallback(() => {
+    if (mutationPending.current) return;
+    resetProfileFormUi();
+    setNewProfile(true);
+  }, [resetProfileFormUi]);
+
+  const beginEditProfile = useCallback((profile: ProfileEntry) => {
+    if (mutationPending.current) return;
+    resetProfileFormUi();
+    setProfileDraft(profileToDraft(profile));
+    setEditingProfile(profile.name);
+  }, [resetProfileFormUi]);
+
   const applyPresetToProfileDraft = useCallback((preset: ProviderPreset, customName?: string, customDescription?: string) => {
+    if (mutationPending.current) return;
+    resetProfileFormUi();
     setNewProfile(true);
     setEditingProfile(null);
     setProfileDraft({
@@ -135,6 +166,7 @@ export function useAdminModelSettings() {
       description: customDescription || preset.description,
       protocol: preset.protocol,
       thinking_mode: preset.thinking_mode,
+      service_tier: "",
       model_family: preset.model_family,
       custom_extra_body: "",
       custom_extra_headers: "",
@@ -145,7 +177,7 @@ export function useAdminModelSettings() {
     setRemoteModelHint(null);
     setTestResult((prev) => ({ ...prev, _profile_form: null }));
     scrollToForm();
-  }, [scrollToForm]);
+  }, [scrollToForm, resetProfileFormUi]);
 
   const fetchThinkingConfig = useCallback(async (force = false) => {
     if (!force) {
@@ -200,6 +232,8 @@ export function useAdminModelSettings() {
   }, []);
 
   const fetchAllCapabilities = useCallback(async (force = false) => {
+    const id = ++capabilitiesRequest.current;
+    const snapshot = useUIStore.getState().modelProfileVersion;
     if (!force) {
       const cached = settingsCache.get<Record<string, ModelCapabilities>>("_capsMap");
       if (cached) {
@@ -213,6 +247,7 @@ export function useAdminModelSettings() {
     }
     try {
       const data = await apiGet<{ items: { name: string; model: string; base_url: string; capabilities: ModelCapabilities | null }[] }>("/config/models/capabilities/all", { direct: true });
+      if (capabilitiesRequest.current !== id || snapshot !== useUIStore.getState().modelProfileVersion) return;
       const map: Record<string, ModelCapabilities> = {};
       for (const item of data.items) {
         if (item.capabilities) {
@@ -238,7 +273,6 @@ export function useAdminModelSettings() {
     const onMessage = (e: MessageEvent) => {
       try {
         const snapshot: ProbeJobSnapshot = JSON.parse(e.data);
-        setProbeJob(snapshot);
         for (const t of snapshot.targets) {
           if (t.capabilities) {
             setCapsMap((prev) => {
@@ -250,7 +284,6 @@ export function useAdminModelSettings() {
         }
         if (["succeeded", "partial", "failed", "cancelled"].includes(snapshot.state)) {
           es.close();
-          setProbeJob(null);
           setProbingKey(null);
           setProbingAll(false);
         }
@@ -260,7 +293,6 @@ export function useAdminModelSettings() {
     es.addEventListener("job_update", onMessage);
     es.onerror = () => {
       es.close();
-      setProbeJob(null);
       setProbingKey(null);
       setProbingAll(false);
     };
@@ -290,16 +322,17 @@ export function useAdminModelSettings() {
   }, [subscribeToProbeJob]);
 
   const handleTestConnection = useCallback(async (key: string, opts: { name?: string; model?: string; base_url?: string; api_key?: string }) => {
+    const id = ++connectionRequest.current;
     setTestingKey(key);
     setTestResult((prev) => ({ ...prev, [key]: null }));
     try {
       const apiKey = opts.api_key && !isMaskedApiKey(opts.api_key) ? opts.api_key : undefined;
       const result = await testModelConnection({ ...opts, api_key: apiKey });
-      setTestResult((prev) => ({ ...prev, [key]: result }));
+      if (connectionRequest.current === id) setTestResult((prev) => ({ ...prev, [key]: result }));
     } catch (e) {
-      setTestResult((prev) => ({ ...prev, [key]: { ok: false, error: e instanceof Error ? e.message : "测试失败", model: opts.model || "" } }));
+      if (connectionRequest.current === id) setTestResult((prev) => ({ ...prev, [key]: { ok: false, error: e instanceof Error ? e.message : "测试失败", model: opts.model || "" } }));
     } finally {
-      setTestingKey(null);
+      if (connectionRequest.current === id) setTestingKey(null);
     }
   }, []);
 
@@ -310,6 +343,7 @@ export function useAdminModelSettings() {
     protocol?: string,
     name?: string,
   ) => {
+    const id = ++remoteRequest.current;
     setFetchingModels(true);
     setRemoteModelError(null);
     setRemoteModelHint(null);
@@ -331,6 +365,7 @@ export function useAdminModelSettings() {
         api_key: usableKey,
         protocol: protocol || undefined,
       });
+      if (remoteRequest.current !== id) return;
       if (result.error) {
         setRemoteModelError(result.error);
         setRemoteModelHint(result.hint || null);
@@ -341,26 +376,17 @@ export function useAdminModelSettings() {
         setRemoteModels(result.models);
       }
     } catch (e) {
+      if (remoteRequest.current !== id) return;
       setRemoteModelError(e instanceof Error ? e.message : "检测失败");
       setRemoteModelHint(null);
     } finally {
-      setFetchingModels(false);
+      if (remoteRequest.current === id) setFetchingModels(false);
     }
   }, [config?.profiles]);
 
-  const resetProfileFormUi = useCallback(() => {
-    setNewProfile(false);
-    setEditingProfile(null);
-    setSiblingSourceName(null);
-    setProfileError(null);
-    setTestResult((prev) => ({ ...prev, _profile_form: null }));
-    setRemoteModelError(null);
-    setRemoteModelHint(null);
-    setRemoteModels([]);
-    setModelDropdownTarget(null);
-  }, []);
-
   const beginAddSiblingProfile = useCallback((source: ProfileEntry) => {
+    if (mutationPending.current) return;
+    resetProfileFormUi();
     const codex = isCodexProfile(source);
     const subscription = subscriptionModelPrefix(source) !== null;
     setNewProfile(true);
@@ -385,7 +411,7 @@ export function useAdminModelSettings() {
         source.name,
       );
     }
-  }, [handleFetchRemoteModels, scrollToForm]);
+  }, [handleFetchRemoteModels, scrollToForm, resetProfileFormUi]);
 
   const handleCapToggle = useCallback(async (profileName: string, model: string, base_url: string, field: string, value: boolean) => {
     try {
@@ -406,51 +432,11 @@ export function useAdminModelSettings() {
     }
   }, []);
 
-  const applyConfigData = useCallback((data: ModelConfig) => {
-    setConfig(data);
-    const drafts: Record<string, Record<string, string>> = {};
-    for (const section of SECTION_META) {
-      const sectionData = data[section.key as keyof ModelConfig] as ModelSection;
-      drafts[section.key] = {};
-      for (const field of section.fields) {
-        drafts[section.key][field] = (sectionData as Record<string, string>)?.[field] || "";
-      }
-      drafts[section.key]["protocol"] = sectionData?.protocol || "auto";
-    }
-    setEditDrafts(drafts);
-    setEnabledDrafts({});
-  }, []);
-
-  const fetchConfig = useCallback(async (force = false) => {
-    const requestId = ++configRequestRef.current;
-    const profileVersion = useUIStore.getState().modelProfileVersion;
-    if (!force) {
-      const cached = settingsCache.get<ModelConfig>("/config/models");
-      if (cached) { applyConfigData(cached); return; }
-    }
-    // 仅首次加载时展示 loading 旋转，force 刷新（如保存后）静默更新避免闪屏
-    if (!force) setLoading(true);
-    try {
-      const data = await apiGet<ModelConfig>("/config/models", { direct: true });
-      if (requestId !== configRequestRef.current || profileVersion !== useUIStore.getState().modelProfileVersion) return;
-      settingsCache.set("/config/models", data);
-      applyConfigData(data);
-    } catch {
-      // 后端未就绪
-    } finally {
-      if (requestId === configRequestRef.current) setLoading(false);
-    }
-  }, [applyConfigData]);
-
-  useEffect(() => {
-    fetchConfig(modelProfileVersion > 0);
-  }, [fetchConfig, modelProfileVersion]);
-
   useEffect(() => {
     // 强制刷新能力探测结果，避免 Tab 切换/重进设置页时沿用旧的失败提示
     fetchAllCapabilities(true);
     fetchThinkingConfig();
-  }, [fetchAllCapabilities, fetchThinkingConfig]);
+  }, [fetchAllCapabilities, fetchThinkingConfig, version]);
 
   // 自动消失 saveToast
   useEffect(() => {
@@ -460,297 +446,133 @@ export function useAdminModelSettings() {
   }, [saveToast]);
 
   const handleActivateProfile = useCallback(async (profile: ProfileEntry) => {
+    if (mutationPending.current) return;
+    mutationPending.current = true;
     setActivatingProfile(profile.name);
     try {
-      await apiPut("/models/active", { name: profile.name }, { direct: true });
+      await activateModelProfile(profile.name);
       setSaveToast({ msg: `已激活「${profile.name}」`, type: "success" });
-      fetchAllCapabilities(true);
-      useUIStore.getState().bumpModelProfiles();
     } catch (e) {
       setSaveToast({ msg: e instanceof Error ? e.message : "激活失败", type: "error" });
     } finally {
+      mutationPending.current = false;
       setActivatingProfile(null);
     }
-  }, [fetchAllCapabilities]);
+  }, []);
 
-  const handleSaveSection = async (sectionKey: string) => {
-    setSaving(sectionKey);
-    const sectionLabel = SECTION_META.find((s) => s.key === sectionKey)?.label || sectionKey;
-    try {
-      const draft = editDrafts[sectionKey];
-      const body: Record<string, unknown> = {};
-      for (const [field, value] of Object.entries(draft)) {
-        if (field === "api_key" && isMaskedApiKey(value)) continue;
-        body[field] = value;
-      }
-      await apiPut(`/config/models/${sectionKey}`, body, { direct: true });
-      setSaved(sectionKey);
-      setTimeout(() => setSaved(null), 2000);
-      setSaveToast({ msg: `${sectionLabel} 配置已保存`, type: "success" });
-      fetchConfig(true);
-    } catch (e) {
-      setSaveToast({ msg: e instanceof Error ? e.message : `${sectionLabel} 保存失败`, type: "error" });
-    } finally {
-      setSaving(null);
-    }
-  };
-
-  const handleToggleEnabled = async (sectionKey: string, checked: boolean) => {
-    setEnabledDrafts((prev) => ({ ...prev, [sectionKey]: checked }));
-    const sectionLabel = SECTION_META.find((s) => s.key === sectionKey)?.label || sectionKey;
-    // 立即保存开关状态
-    try {
-      await apiPut(`/config/models/${sectionKey}`, { enabled: checked }, { direct: true });
-      setSaveToast({ msg: `${sectionLabel} 已${checked ? "启用" : "禁用"}`, type: "success" });
-      fetchConfig(true);
-    } catch (e) {
-      // 回滚
-      setEnabledDrafts((prev) => ({ ...prev, [sectionKey]: !checked }));
-      setSaveToast({ msg: e instanceof Error ? e.message : `${sectionLabel} 切换失败`, type: "error" });
-    }
-  };
-
-  const handleAddProfile = async () => {
+  const handleToggleFastMode = useCallback(async (profile: ProfileEntry) => {
+    if (mutationPending.current || isSubscriptionProfile(profile)) return;
+    mutationPending.current = true;
+    setTogglingFastProfile(profile.name);
     setProfileError(null);
-    setAddingProfile(true);
-    const existingNames = (config?.profiles || []).map((profile) => profile.name);
-    const siblingSource = siblingSourceName
-      ? (config?.profiles || []).find((p) => p.name === siblingSourceName)
-      : undefined;
-    const subPrefix = siblingSource ? subscriptionModelPrefix(siblingSource) : null;
-    // 订阅（OAuth）档案的 model 必须带 provider 前缀才会被识别为订阅模型；
-    // 允许用户直接填写裸模型 ID，这里自动补前缀。
-    const modelId = profileDraft.model.trim();
-    const normalizedModel = subPrefix && modelId && !modelId.startsWith(subPrefix)
-      ? `${subPrefix}${modelId}`
-      : modelId;
-    // 订阅档案约定 name = 完整 publicId（provider/xxx），与 OAuth 卡片保持一致。
-    const newName = profileDraft.name.trim()
-      || (subPrefix && normalizedModel && !existingNames.includes(normalizedModel)
-        ? normalizedModel
-        : uniqueSiblingProfileName(normalizedModel, existingNames));
-    const draftSnapshot: Record<string, unknown> = {
-      ...profileDraft,
-      name: newName,
-      model: normalizedModel,
-      ...(siblingSourceName && !profileDraft.api_key.trim() && !subPrefix
-        ? { clone_from: siblingSourceName }
-        : {}),
-    };
-    // canonical_model 留空时不下发，交给后端按置信度自动匹配；
-    // 非空则视为显式指定绑定。
-    if (!profileDraft.canonical_model.trim()) {
-      delete draftSnapshot.canonical_model;
+    const serviceTier = profile.service_tier === "fast" ? "" : "fast";
+    try {
+      await updateModelProfile(profile.name, {
+        ...profileToDraft(profile),
+        service_tier: serviceTier,
+      });
+      if (editingProfile === profile.name) {
+        setProfileDraft((draft) => ({ ...draft, service_tier: serviceTier }));
+      }
+      await fetchConfig(true);
+      setSaveToast({ msg: `「${profile.name}」快速模式已${serviceTier ? "开启" : "关闭"}`, type: "success" });
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "快速模式切换失败，请重试");
+    } finally {
+      mutationPending.current = false;
+      setTogglingFastProfile(null);
     }
+  }, [editingProfile, fetchConfig]);
 
-    // 乐观插入：先在前端列表添加，避免等待网络请求。
-    const sourceKey = siblingSourceName
-      ? (config?.profiles || []).find((profile) => profile.name === siblingSourceName)?.api_key || ""
-      : "";
-    const optimisticEntry: ProfileEntry = {
-      name: newName,
-      model: normalizedModel,
-      api_key: profileDraft.api_key || sourceKey,
-      base_url: profileDraft.base_url,
-      description: profileDraft.description,
-      protocol: profileDraft.protocol || "auto",
-      thinking_mode: profileDraft.thinking_mode || "auto",
-      model_family: profileDraft.model_family || "",
-      custom_extra_body: profileDraft.custom_extra_body || "",
-      custom_extra_headers: profileDraft.custom_extra_headers || "",
-      canonical_model: profileDraft.canonical_model || "",
-    };
-    const prevProfiles = config?.profiles || [];
-    setConfig((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, profiles: [...prev.profiles, optimisticEntry] };
-      settingsCache.set("/config/models", next);
-      return next;
-    });
-    setNewProfile(false);
-    setEditingProfile(null);
-    setSiblingSourceName(null);
-    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "", canonical_model: "" });
-    setTestResult((prev) => ({ ...prev, _profile_form: null }));
-    setRemoteModelError(null);
-    setRemoteModelHint(null);
-    setRemoteModels([]);
-    setModelDropdownTarget(null);
-    setHighlightProfile(newName);
+  const finishProfileSave = (name: string) => {
+    resetProfileFormUi();
+    setHighlightProfile(name);
     setTimeout(() => setHighlightProfile(null), 2000);
     requestAnimationFrame(() => {
-      profileCardRefs.current[newName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      profileCardRefs.current[name]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
+  };
 
+  const saveProfile = async (originalName?: string) => {
+    if (mutationPending.current) return;
+    mutationPending.current = true;
+    setAddingProfile(true);
+    setProfileError(null);
+    const existingNames = (config?.profiles || []).map((profile) => profile.name);
+    const source = (config?.profiles || []).find((p) => p.name === siblingSourceName);
+    const prefix = source ? subscriptionModelPrefix(source) : null;
+    const modelId = profileDraft.model.trim();
+    const model = prefix && modelId && !modelId.startsWith(prefix) ? `${prefix}${modelId}` : modelId;
+    const name = profileDraft.name.trim() || (prefix && !existingNames.includes(model)
+      ? model : uniqueSiblingProfileName(model, existingNames));
+    const payload: ModelProfileInput = { ...profileDraft, name, model };
+    if (!originalName && siblingSourceName && !profileDraft.api_key.trim() && !prefix) {
+      payload.clone_from = siblingSourceName;
+    }
+    const previous = config?.profiles.find((p) => p.name === originalName);
+    if ((!originalName && !profileDraft.canonical_model.trim()) ||
+        (originalName && profileDraft.canonical_model === (previous?.canonical_model || ""))) {
+      delete payload.canonical_model;
+    }
     try {
-      await apiPost("/config/models/profiles", draftSnapshot, { direct: true });
-      setSaveToast({ msg: `模型档案「${newName}」已添加`, type: "success" });
-      // 只有服务端写入成功后才通知会话模型选择器，避免它抢先读到旧列表。
-      useUIStore.getState().bumpModelProfiles();
-    } catch (e) {
-      // 添加失败回滚：恢复到之前的 profiles 列表。
-      setConfig((prev) => {
-        if (!prev) return prev;
-        const next = { ...prev, profiles: prevProfiles };
-        settingsCache.set("/config/models", next);
-        return next;
-      });
-      useUIStore.getState().bumpModelProfiles();
-      setProfileError(e instanceof Error ? e.message : "添加失败，请检查网络或参数");
-      setSaveToast({ msg: e instanceof Error ? e.message : "添加失败", type: "error" });
+      if (originalName) await updateModelProfile(originalName, payload);
+      else await createModelProfile(payload);
+      finishProfileSave(name);
+      setSaveToast({ msg: `模型档案「${name}」已${originalName ? "更新" : "添加"}`, type: "success" });
+    } catch (error) {
+      // Keep the exact draft, credentials and editor open so the user can retry.
+      setProfileError(error instanceof Error ? error.message : "保存失败，请重试");
     } finally {
+      mutationPending.current = false;
       setAddingProfile(false);
     }
   };
 
-  const handleUpdateProfile = async (originalName: string) => {
-    setProfileError(null);
-    const updatedName = profileDraft.name;
-    const draftSnapshot: Record<string, unknown> = { ...profileDraft };
-
-    // 乐观更新：先在前端列表替换，避免等待网络请求。
-    const prevProfiles = config?.profiles || [];
-    const previous = prevProfiles.find((p) => p.name === originalName);
-    // canonical_model 未变更时不下发，后端按新 Model ID 重新匹配；
-    // 被用户改动（含清空）才显式发送以覆盖/解除绑定。
-    if ((profileDraft.canonical_model || "") === (previous?.canonical_model || "")) {
-      delete draftSnapshot.canonical_model;
-    }
-    const optimisticEntry: ProfileEntry = {
-      name: draftSnapshot.name as string,
-      model: draftSnapshot.model as string,
-      api_key: profileDraft.api_key || previous?.api_key || "",
-      base_url: profileDraft.base_url,
-      description: profileDraft.description,
-      protocol: profileDraft.protocol || "auto",
-      thinking_mode: profileDraft.thinking_mode || "auto",
-      model_family: profileDraft.model_family || "",
-      custom_extra_body: profileDraft.custom_extra_body || "",
-      custom_extra_headers: profileDraft.custom_extra_headers || "",
-      canonical_model: profileDraft.canonical_model || "",
-    };
-    setConfig((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, profiles: prev.profiles.map((p) => p.name === originalName ? optimisticEntry : p) };
-      settingsCache.set("/config/models", next);
-      return next;
-    });
-    setEditingProfile(null);
-    setNewProfile(false);
-    setSiblingSourceName(null);
-    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "", canonical_model: "" });
-    setTestResult((prev) => ({ ...prev, _profile_form: null }));
-    setRemoteModelError(null);
-    setRemoteModelHint(null);
-    setRemoteModels([]);
-    setModelDropdownTarget(null);
-    setHighlightProfile(updatedName);
-    setTimeout(() => setHighlightProfile(null), 2000);
-    requestAnimationFrame(() => {
-      profileCardRefs.current[updatedName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-    });
-
-    try {
-      await apiPut(`/config/models/profiles/${encodeURIComponent(originalName)}`, draftSnapshot, { direct: true });
-      setSaveToast({ msg: `模型档案「${updatedName}」已更新`, type: "success" });
-      // 只有服务端写入成功后才通知会话模型选择器，避免它抢先读到旧列表。
-      useUIStore.getState().bumpModelProfiles();
-    } catch (e) {
-      // 更新失败回滚：恢复到之前的 profiles 列表。
-      setConfig((prev) => {
-        if (!prev) return prev;
-        const next = { ...prev, profiles: prevProfiles };
-        settingsCache.set("/config/models", next);
-        return next;
-      });
-      useUIStore.getState().bumpModelProfiles();
-      setProfileError(e instanceof Error ? e.message : "更新失败，请检查网络或参数");
-      setSaveToast({ msg: e instanceof Error ? e.message : "更新失败", type: "error" });
-    }
-  };
-
+  const handleAddProfile = () => saveProfile();
+  const handleUpdateProfile = (name: string) => saveProfile(name);
   const handleDeleteProfile = async (name: string) => {
+    if (mutationPending.current) return;
+    mutationPending.current = true;
+    setDeletingProfile(name);
     setProfileError(null);
-    const currentProfiles = config?.profiles || [];
-    const removedIndex = currentProfiles.findIndex((p) => p.name === name);
-    const removedProfile = removedIndex >= 0 ? currentProfiles[removedIndex] : null;
-
-    // 乐观删除：先从前端列表移除，避免等待网络请求。
-    if (removedProfile) {
-      setConfig((prev) => {
-        if (!prev) return prev;
-        const next = { ...prev, profiles: prev.profiles.filter((p) => p.name !== name) };
-        settingsCache.set("/config/models", next);
-        return next;
-      });
-    }
-
     try {
-      await apiDelete(`/config/models/profiles/${encodeURIComponent(name)}`, { direct: true });
-      // 只有服务端删除成功后才通知会话模型选择器，避免它抢先读到旧列表。
-      useUIStore.getState().bumpModelProfiles();
+      await deleteModelProfile(name);
+      if (editingProfile === name) finishProfileSave("");
       setSaveToast({ msg: `模型档案「${name}」已删除`, type: "success" });
-      // 如果正在编辑被删除的 profile，关闭表单
-      if (editingProfile === name) {
-        setEditingProfile(null);
-        setNewProfile(false);
-        setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "", canonical_model: "" });
-      }
-      // 同步清理缓存中的能力结果，避免保留无效项。
       setCapsMap((prev) => {
-        if (!prev[name]) return prev;
         const next = { ...prev };
         delete next[name];
-        settingsCache.set("_capsMap", next);
         return next;
       });
-    } catch (e) {
-      // 删除失败回滚：恢复被删条目到原位置。
-      if (removedProfile) {
-        setConfig((prev) => {
-          if (!prev) return prev;
-          if (prev.profiles.some((p) => p.name === name)) return prev;
-          const nextProfiles = [...prev.profiles];
-          const insertAt = Math.min(Math.max(removedIndex, 0), nextProfiles.length);
-          nextProfiles.splice(insertAt, 0, removedProfile);
-          const next = { ...prev, profiles: nextProfiles };
-          settingsCache.set("/config/models", next);
-          return next;
-        });
-        useUIStore.getState().bumpModelProfiles();
-      }
-      setProfileError(e instanceof Error ? e.message : "删除失败");
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : "删除失败");
+    } finally {
+      mutationPending.current = false;
+      setDeletingProfile(null);
     }
   };
-
-  const updateDraft = (section: string, field: string, value: string) => {
-    setEditDrafts((prev) => ({
-      ...prev,
-      [section]: { ...prev[section], [field]: value },
-    }));
-  };
-
 
   return {
     config,
     loading,
-    saving,
-    saved,
-    editDrafts,
+    loadError,
     showKeys,
     setShowKeys,
-    enabledDrafts,
     newProfile,
     setNewProfile,
     editingProfile,
     setEditingProfile,
     siblingSourceName,
     setSiblingSourceName,
+    beginNewProfile,
+    beginEditProfile,
     beginAddSiblingProfile,
     profileError,
     setProfileError,
     highlightProfile,
     addingProfile,
+    deletingProfile,
+    profileBusy: addingProfile || !!deletingProfile || !!activatingProfile || !!togglingFastProfile,
     fetchingModels,
     remoteModels,
     modelDropdownTarget,
@@ -766,6 +588,7 @@ export function useAdminModelSettings() {
     probingKey,
     probingAll,
     activatingProfile,
+    togglingFastProfile,
     saveToast,
     setSaveToast,
     expandedSections,
@@ -795,14 +618,12 @@ export function useAdminModelSettings() {
     handleCapToggle,
     fetchConfig,
     handleActivateProfile,
-    handleSaveSection,
-    handleToggleEnabled,
+    handleToggleFastMode,
     handleAddProfile,
     handleUpdateProfile,
     handleDeleteProfile,
     resetProfileFormUi,
     setRemoteModels,
-    updateDraft,
     scrollToForm,
   };
 }

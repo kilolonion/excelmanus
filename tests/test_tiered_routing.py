@@ -12,7 +12,7 @@ from excelmanus.skillpacks.models import SkillMatchResult
 from excelmanus.skillpacks.router import SkillRouter
 from excelmanus.tools.policy import MUTATING_ALL_TOOLS, READ_ONLY_SAFE_TOOLS
 
-_READ_TOOL = "inspect_spreadsheet"
+_READ_TOOL = "observe_spreadsheet"
 _WRITE_TOOL = "write_text_file"
 
 

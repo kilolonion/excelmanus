@@ -97,8 +97,13 @@ export function countFiles(node: TreeNode): number {
 
 /** Directory names considered internal / system (hidden by default). */
 const SYSTEM_DIR_NAMES = new Set([
-  "scripts", "outputs", "backups", "originals",
+  "scripts", "backups", "originals",
   "__pycache__", "node_modules", ".versions",
+]);
+
+/** outputs/ holds deliverables; only its internal subdirectories are hidden. */
+const SYSTEM_OUTPUT_DIR_NAMES = new Set([
+  ...SYSTEM_DIR_NAMES, "audits", "approvals",
 ]);
 
 /** File extensions considered internal / system (hidden by default). */
@@ -114,19 +119,14 @@ export function isSystemFile(entry: { path: string; filename: string; is_dir?: b
   const normalized = normalizePath(entry.path);
   const parts = normalized.split("/").filter(Boolean);
 
-  // Directory: check if top-level dir name is a system dir
-  if (entry.is_dir) {
-    const topDir = parts[0]?.toLowerCase();
-    return SYSTEM_DIR_NAMES.has(topDir ?? "");
-  }
+  // Check directory segments only, so files named "backups" stay visible.
+  const dirs = entry.is_dir ? parts : parts.slice(0, -1);
+  const topDir = dirs[0]?.toLowerCase() ?? "";
+  if (SYSTEM_DIR_NAMES.has(topDir)) return true;
+  if (topDir === "outputs" && SYSTEM_OUTPUT_DIR_NAMES.has(dirs[1]?.toLowerCase() ?? "")) return true;
+  if (entry.is_dir) return false;
 
-  // File inside a system directory
-  if (parts.length >= 2) {
-    const topDir = parts[0].toLowerCase();
-    if (SYSTEM_DIR_NAMES.has(topDir)) return true;
-  }
-
-  // File at root level: check extension
+  // Internal file types stay hidden at every directory depth.
   const name = entry.filename.toLowerCase();
   for (const ext of SYSTEM_EXTENSIONS) {
     if (name.endsWith(ext)) return true;

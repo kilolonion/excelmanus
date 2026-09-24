@@ -11,7 +11,7 @@ from openpyxl import Workbook, load_workbook
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import edit_spreadsheet, init_guard as init_intent_guard
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, init_guard as init_intent_guard
 from excelmanus.workbook_commit import content_version_of_file
 
 
@@ -34,7 +34,7 @@ def test_edit_model_text_is_bounded_and_keeps_version(tmp_path: Path) -> None:
     init_intent_guard(str(tmp_path))
     path = _book(tmp_path / "sales.xlsx")
     version = content_version_of_file(path)
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "B2", "values": [[99]]}],
         expected_version=version,
@@ -54,7 +54,7 @@ def test_existing_file_without_version_conflicts(tmp_path: Path) -> None:
     set_guard(FileAccessGuard(str(tmp_path)))
     init_intent_guard(str(tmp_path))
     path = _book(tmp_path / "sales.xlsx")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "B2", "values": [[1]]}],
     )
@@ -84,15 +84,15 @@ def test_workbook_spec_creates_via_commit(tmp_path: Path) -> None:
         }],
         "uncertainties": [],
     }
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(dest),
         workbook_spec=spec,
-        create_workbook=True,
+        create=True,
     )
     assert result.success, result.model_text
     assert dest.is_file()
     assert result.ui_meta.content_version == content_version_of_file(dest)
-    assert result.value.get("uncertainties") == []
+    assert result.value["document"].get("uncertainties") == []
     wb = load_workbook(dest)
     assert wb["Sheet1"]["A1"].value == "Name"
 
@@ -101,7 +101,7 @@ def test_spec_rejects_existing_path(tmp_path: Path) -> None:
     set_guard(FileAccessGuard(str(tmp_path)))
     init_intent_guard(str(tmp_path))
     path = _book(tmp_path / "exists.xlsx")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         workbook_spec={
             "name": "x",
@@ -112,10 +112,10 @@ def test_spec_rejects_existing_path(tmp_path: Path) -> None:
             }],
             "uncertainties": [],
         },
-        create_workbook=True,
+        create=True,
     )
     assert not result.success
-    assert result.error and result.error.code == "SPEC_NOT_PATCH"
+    assert result.error and result.error.code == "VERSION_CONFLICT"
 
 
 @pytest.mark.asyncio
@@ -145,13 +145,13 @@ async def test_chat_does_not_open_xlsx_before_first_model(tmp_path: Path) -> Non
 
     async def _loop(*_a, **_k):
         assert sales.resolve() not in {Path(p).resolve() for p in opened}
-        return ChatResult(reply="先 inspect_spreadsheet")
+        return ChatResult(reply="先 observe_spreadsheet")
 
     with patch("openpyxl.load_workbook", side_effect=_track), patch(
         "excelmanus.agent.loop.run_tool_loop", new=_loop
     ):
         result = await engine.followup("看一下 sales.xlsx")
-    assert "先 inspect" in result.reply
+    assert "先 observe_spreadsheet" in result.reply
     assert not any(Path(p).name == "sales.xlsx" for p in opened)
 
 
@@ -230,7 +230,7 @@ def test_code_mode_disclaimer_and_parent_call_field() -> None:
     event = ToolCallEvent(
         event_type=EventType.TOOL_CALL_START,
         tool_call_id="child",
-        tool_name="edit_spreadsheet",
+        tool_name="apply_spreadsheet_changes",
         parent_call_id="parent-run-code",
     )
     assert event.parent_call_id == "parent-run-code"
@@ -248,7 +248,7 @@ def test_cancelled_parent_blocks_new_sub_write(tmp_path: Path) -> None:
         bridge_dir=tmp_path / "bridge",
     )
     result = session._call_dispatcher(
-        tool_name="edit_spreadsheet",
+        tool_name="apply_spreadsheet_changes",
         arguments={"file_path": "a.xlsx", "operations": []},
         root_call_id="parent-run-code",
     )

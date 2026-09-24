@@ -96,6 +96,9 @@ async def run_engine_followup(
     mention_contexts: list[ResolvedMention] | None = None,
     context_input: dict[str, Any] | None = None,
     jev_budget: Any = None,
+    prompt_kind: str | None = None,
+    dispatch_mode: str | None = None,
+    client_message_id: str | None = None,
 ) -> ChatTurnOutcome:
     """按网页直聊参数调用 ``engine.followup``。
 
@@ -106,6 +109,12 @@ async def run_engine_followup(
     context_kwargs = {"context_input": context_input} if context_input else {}
     if jev_budget is not None:
         context_kwargs["jev_budget"] = jev_budget
+    if prompt_kind:
+        context_kwargs["prompt_kind"] = prompt_kind
+    if dispatch_mode:
+        context_kwargs["dispatch_mode"] = dispatch_mode
+    if client_message_id:
+        context_kwargs["client_message_id"] = client_message_id
     result = await engine.followup(
         display_text,
         on_event=on_event,

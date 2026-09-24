@@ -1,22 +1,20 @@
 "use client";
 
-import { useUIStore } from "@/stores/ui-store";
-import { useCallback } from "react";
 import { ArrowRight, KeyRound } from "lucide-react";
 import { requestModelSubTab } from "./model-subtab";
 import { useAdminModel } from "./admin-model-context";
 import { CodexOAuthCard } from "./CodexOAuthCard";
 import { WorkBuddyOAuthCard } from "./WorkBuddyOAuthCard";
 import { AntigravityOAuthCard } from "./AntigravityOAuthCard";
+import { SettingsCardGrid } from "../SettingsPageLayout";
 
 export function SubscriptionOAuthPanel() {
   const { config } = useAdminModel();
-  const profileNames = (config?.profiles || []).map((p) => p.name);
-  const notify = useCallback(() => useUIStore.getState().bumpModelProfiles(), []);
+  const profiles = config?.profiles || [];
 
   return (
-    <div className="space-y-4 pt-2">
-      <div className="space-y-2">
+    <div className="em-subscription-page space-y-4 pt-2">
+      <div className="em-subscription-hero space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <h3 className="text-base font-semibold tracking-tight">连接你的订阅账号</h3>
           <span className="rounded-md bg-primary/8 px-2 py-0.5 text-[11px] font-medium text-primary">无需 API Key</span>
@@ -29,26 +27,22 @@ export function SubscriptionOAuthPanel() {
           {step}{index < 2 && <ArrowRight className="ml-1 size-3 text-muted-foreground/50" />}
         </li>)}
       </ol>
-      <div className="space-y-2">
+      <SettingsCardGrid label="订阅服务" minCardWidth={340}>
       <CodexOAuthCard
-        onProfileCreated={notify}
-        existingProfileNames={profileNames}
+        profiles={profiles}
       />
       <WorkBuddyOAuthCard
         realm="cn"
-        onProfileCreated={notify}
-        existingProfileNames={profileNames}
+        profiles={profiles}
       />
       <WorkBuddyOAuthCard
         realm="global"
-        onProfileCreated={notify}
-        existingProfileNames={profileNames}
+        profiles={profiles}
       />
       <AntigravityOAuthCard
-        onProfileCreated={notify}
-        existingProfileNames={profileNames}
+        profiles={profiles}
       />
-      </div>
+      </SettingsCardGrid>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3 text-xs text-muted-foreground">
         <span>有 API Key？也可以通过供应商配置连接。</span>
         <button type="button" className="inline-flex min-h-8 items-center gap-1.5 font-medium text-primary hover:underline" onClick={() => requestModelSubTab("providers")}>

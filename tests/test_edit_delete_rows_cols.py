@@ -1,4 +1,4 @@
-"""edit_spreadsheet：delete_rows / delete_columns（1-based at，与 insert 同风格）。"""
+"""apply_spreadsheet_changes：delete_rows / delete_columns（1-based at，与 insert 同风格）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from openpyxl import Workbook, load_workbook
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import edit_spreadsheet, get_tools, init_guard
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, get_tools, init_guard
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
@@ -49,7 +49,7 @@ def _grid_book(path: Path) -> Path:
 def test_delete_rows_shifts_below_up(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _grid_book(tmp_path / "rows.xlsx")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -62,7 +62,7 @@ def test_delete_rows_shifts_below_up(tmp_path: Path) -> None:
     assert result.success, _err(result)
     payload = result.value
     assert isinstance(payload, dict)
-    applied = payload.get("applied") or []
+    applied = payload["observation"].get("operations") or []
     assert any("delete_rows@2" in str(item) for item in applied)
     wb = load_workbook(path)
     try:
@@ -77,7 +77,7 @@ def test_delete_rows_shifts_below_up(tmp_path: Path) -> None:
 def test_delete_columns_shifts_right_left(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _grid_book(tmp_path / "cols.xlsx")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -100,7 +100,7 @@ def test_delete_columns_shifts_right_left(tmp_path: Path) -> None:
 def test_delete_rows_count_deletes_multiple(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _grid_book(tmp_path / "multi.xlsx")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -129,7 +129,7 @@ def test_delete_rows_rewrites_formulas(tmp_path: Path) -> None:
     ws["B1"] = "=A1"
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -146,7 +146,7 @@ def test_delete_rows_rewrites_formulas(tmp_path: Path) -> None:
 
 
 def _sheet_delete(path: Path, sheet: str) -> ToolResult:
-    return edit_spreadsheet(
+    return apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{"kind": "sheet", "action": "delete", "sheet": sheet}],
@@ -245,10 +245,9 @@ def test_sheet_delete_refuses_chart_series_reference(tmp_path: Path) -> None:
 
 def test_delete_kind_in_schema_with_additional_properties_false() -> None:
     tools = {tool.name: tool for tool in get_tools()}
-    schema = tools["edit_spreadsheet"].input_schema
+    schema = tools["apply_spreadsheet_changes"].input_schema
     items = schema["properties"]["operations"]["items"]
-    assert items.get("additionalProperties") is False
-    assert {
-        "write", "insert", "sheet", "copy", "delete_rows", "delete_columns",
-        "pivot", "transform",
-    } <= set(items["properties"]["kind"]["enum"])
+    branches=items["oneOf"]
+    assert all(branch["additionalProperties"] is False for branch in branches)
+    kinds={branch["properties"]["kind"].get("const") or branch["properties"]["kind"]["enum"][0] for branch in branches}
+    assert {"write","insert","sheet","copy","delete_rows","delete_columns","pivot","transform"} <= kinds

@@ -29,16 +29,174 @@ from excelmanus.api_app_state import (
     resolve_workspace_root as _resolve_workspace_root_impl,
 )
 from excelmanus.logger import get_logger
-from excelmanus.workbook.read_cache import ReadCache
 from excelmanus.workspace.identity import IdentityError, resolve_canonical
-
-# Immutable, serialized view responses; live bytes are still version-checked on
-# every request, so external edits cannot be hidden by a time-based cache.
-_view_responses: ReadCache[JSONResponse] = ReadCache(max_bytes=16 * 1024 * 1024)
 
 logger = get_logger("api.files")
 
 router = APIRouter()
+
+
+@router.get("/api/v1/workbooks/observe")
+async def get_workbook_observation(request: Request) -> JSONResponse:
+    """The V2 observation endpoint; workspace authorization precedes projection."""
+    from excelmanus.workbook.service import WorkbookService
+    from excelmanus.workbook.snapshot import SnapshotError
+    from excelmanus.workbook_commit import CommitError
+    from zipfile import BadZipFile
+    from xml.etree.ElementTree import ParseError
+    try:
+        from lxml.etree import XMLSyntaxError
+    except ImportError:
+        XMLSyntaxError = ParseError
+    params = request.query_params
+    protocol = request.headers.get("x-workbook-protocol", "workbook/2")
+    if protocol != "workbook/2":
+        return _error_json_response(409, "工作簿协议版本不匹配，请刷新客户端", code="WORKBOOK_PROTOCOL_MISMATCH")
+    path, sheet = params.get("path", ""), params.get("sheet")
+    root, scope_error = _file_workspace_root(request, params.get("session_id"), params.get("workspace_id"))
+    if scope_error is not None:
+        return scope_error
+    resolved = _resolve_excel_path(path, params.get("session_id"), workspace_root=root)
+    if resolved is None:
+        return _error_json_response(404, "文件不存在或路径非法")
+    def read():
+        snap = _open_route_snapshot(resolved, path, root, params.get("workspace_id"))
+        expected = params.get("expected_version")
+        if expected and expected != snap.content_version:
+            return UnicodeJSONResponse(status_code=409, content={"error": "观察版本已变化", "code": "STALE_VIEW", "content_version": snap.content_version})
+        selected = sheet
+        mode = params.get("mode", "range")
+        if not selected and mode == "range":
+            if snap.is_csv():
+                selected = "Sheet1"
+            else:
+                wb = snap.open_workbook(data_only=False, read_only=True)
+                try:
+                    selected = (wb.active or wb.worksheets[0]).title
+                finally:
+                    wb.close()
+        facets = params.get("facets", "data,presentation,geometry,objects").split(",")
+        payload = WorkbookService().observe_snapshot(snap, sheet=selected, range=params.get("range", "A1:Z80" if mode == "range" else None), mode=mode, facets=facets, query=params.get("query", ""), offset=int(params.get("offset", 0)), limit=int(params.get("limit", 50)))
+        return JSONResponse(content=payload)
+    try:
+        return await run_in_threadpool(read)
+    except (SnapshotError, CommitError, BadZipFile, XMLSyntaxError, ParseError, ValueError, KeyError) as exc:
+        return _error_json_response(400, str(exc), code=getattr(exc, "code", "INVALID_ARGS"))
+
+
+class WorkbookChangesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str | None = None
+    workspace_id: str | None = None
+    path: str
+    operations: list[dict[str, Any]] = Field(min_length=1, max_length=20000)
+    expected_version: str | None = None
+    operation_id: str | None = None
+
+
+@router.post("/api/v1/workbooks/changes")
+async def apply_workbook_changes(request: WorkbookChangesRequest, raw_request: Request) -> JSONResponse:
+    from excelmanus.tools.context import use_workspace, ToolCallContext, bind_call, reset_call
+    from excelmanus.workbook.service import WorkbookService
+    from excelmanus.workbook_commit import CommitError
+    from excelmanus.tools._helpers import MutationAborted
+    from excelmanus.workbook.user_edits import summarize_operations
+    root, scope_error = _file_workspace_root(raw_request, request.session_id, request.workspace_id)
+    if scope_error is not None:
+        return scope_error
+    def apply():
+        with use_workspace(root, workspace_id=request.workspace_id) as ctx:
+            token = bind_call(ToolCallContext(binding=ctx.binding, call_id=request.operation_id or uuid.uuid4().hex,
+                                             tool_name="apply_spreadsheet_changes"))
+            try:
+                return WorkbookService().apply(request.path, operations=request.operations, expected_version=request.expected_version,
+                    event_context={"source": "user", "session_id": request.session_id, "summary": summarize_operations(request.operations)})
+            finally:
+                reset_call(token)
+    try:
+        payload = await run_in_threadpool(apply)
+        payload["cells_written"] = sum(len(op.get("cells", [])) for op in request.operations if op["kind"] == "cells.patch")
+        manager = get_session_manager()
+        if manager is not None:
+            try:
+                manager.drain_workspace_events()
+            except Exception:
+                logger.warning("Workbook committed; event delivery pending", exc_info=True)
+        return JSONResponse(content=payload, status_code=200 if payload.get("committed") else 409)
+    except CommitError as exc:
+        return UnicodeJSONResponse(status_code=409 if exc.code in {"VERSION_CONFLICT", "VERSION_REQUIRED"} else 400,
+            content={"error": str(exc), "code": exc.code, **exc.fields})
+    except MutationAborted as exc:
+        return JSONResponse(status_code=400, content=exc.result.value)
+    except (ValueError, KeyError) as exc:
+        return _error_json_response(400, str(exc), code="INVALID_ARGS")
+
+
+@router.get("/api/v1/workbooks/compare")
+async def get_workbook_comparison(request: Request) -> JSONResponse:
+    """Return V2 observations plus the canonical comparison/relationship facts."""
+    from excelmanus.workbook.service import WorkbookService
+    from excelmanus.workbook.service import WorkbookService
+    from excelmanus.tools.context import use_workspace
+    params = request.query_params
+    root, scope_error = _file_workspace_root(request, params.get("session_id"), params.get("workspace_id"))
+    if scope_error is not None:
+        return scope_error
+    file_a, file_b = params.get("file_a", ""), params.get("file_b", "")
+    if not file_a or not file_b:
+        return _error_json_response(400, "需要 file_a 和 file_b", code="INVALID_ARGS")
+    snapshots = {}
+    for key, path in (("file_a", file_a), ("file_b", file_b)):
+        resolved = _resolve_excel_path(path, params.get("session_id"), workspace_root=root)
+        if resolved is None:
+            return _error_json_response(404, f"文件不存在或路径非法: {path}")
+        snapshots[key] = await run_in_threadpool(_open_route_snapshot, resolved, path, root, params.get("workspace_id"))
+
+    def compare():
+        with use_workspace(root, workspace_id=params.get("workspace_id")):
+            compare_result = WorkbookService().query("compare_spreadsheets", {
+                "file_a": file_a,
+                "file_b": file_b,
+                "alignment": "position",
+                "ignore_style": True,
+                "max_diffs": int(params.get("max_diffs", "500")),
+            })
+            relationship_result = WorkbookService().query("analyze_spreadsheet", {
+                "mode": "relationships", "file_paths": [file_a, file_b], "max_files": 2,
+                "sample_rows": int(params.get("max_rows", "200")),
+            })
+        return compare_result, relationship_result
+
+    try:
+        compare_result, relationship_result = await run_in_threadpool(compare)
+        if compare_result.success:
+            for side in ("a","b"):
+                if compare_result.value.get(f"content_version_{side}") != snapshots[f"file_{side}"].content_version:
+                    return _error_json_response(409, "文件在比较期间发生变化，请重试", code="STALE_VIEW")
+        if relationship_result.success:
+            observed = relationship_result.value.get("source_versions") or {}
+            if any(observed.get(snap.file.relative, snap.content_version) != snap.content_version for snap in snapshots.values()):
+                return _error_json_response(409, "文件在关联分析期间发生变化，请重试", code="STALE_VIEW")
+    except (ValueError, TypeError) as exc:
+        return _error_json_response(400, str(exc), code="INVALID_ARGS")
+    body = {
+        key: await run_in_threadpool(WorkbookService().observe_snapshot, snapshots[key], facets=[], mode="overview")
+        for key in ("file_a", "file_b")
+    }
+    relationships: dict[str, Any] = {"shared_columns": []}
+    if getattr(relationship_result, "success", False):
+        value = relationship_result.value if isinstance(relationship_result.value, dict) else {}
+        pairs = value.get("file_pairs") or []
+        if pairs:
+            relationships["shared_columns"] = pairs[0].get("shared_columns", [])
+        hints = value.get("merge_hints") or []
+        if hints:
+            relationships["merge_hint"] = hints[0]
+    body["relationships"] = relationships
+    body["comparison"] = compare_result.value if getattr(compare_result, "success", False) else {
+        "status": "error", "message": getattr(compare_result, "model_text", "comparison failed"),
+    }
+    return JSONResponse(content=body)
 
 _TEXT_PREVIEW_SUFFIXES = frozenset({
     ".txt", ".md", ".markdown", ".json", ".js", ".jsx", ".ts", ".tsx",
@@ -278,439 +436,12 @@ async def get_excel_file(request: Request) -> StreamingResponse:
         },
     )
 
-@router.get("/api/v1/files/excel/snapshot")
-async def get_excel_snapshot(request: Request) -> JSONResponse:
-    """返回 Excel 文件的轻量 JSON 快照（供聊天内嵌预览）。
-
-    参数:
-      - path: 文件路径
-      - sheet: 指定工作表名（可选）
-      - max_rows: 最大行数（默认 50）
-      - session_id: 会话 ID（可选）
-      - all_sheets: 设为 1 时一次返回所有工作表快照（减少 HTTP 往返）
-    """
-    assert get_config() is not None, "服务未初始化"
-
-    path = request.query_params.get("path", "")
-    sheet = request.query_params.get("sheet")
-    max_rows = int(request.query_params.get("max_rows", "50"))
-    session_id = request.query_params.get("session_id")
-    workspace_id = request.query_params.get("workspace_id")
-    all_sheets = request.query_params.get("all_sheets", "").strip() in ("1", "true")
-    with_styles = request.query_params.get("with_styles", "1").strip() in ("1", "true")
-
-    if not path:
-        return _error_json_response(400, "缺少 path 参数")
-
-    from excelmanus.workspace.identity import display_name_for
-
-    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
-    if scope_error is not None:
-        return scope_error
-    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
-    if resolved is None:
-        return _error_json_response(404, f"文件不存在或路径非法: {path}")
-
-    # ── CSV 快捷路径 ──────────────────────────────────────
-    if os.path.splitext(resolved)[1].lower() == ".csv":
-        try:
-            snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
-            bound_version = snap.content_version
-
-            # Build/reuse the immutable CSV index, then parse only the header
-            # and requested preview window.  The old path materialized every
-            # logical row into a Python list even when max_rows was 50, which
-            # made large CSV previews consume tens of MB and scale with the
-            # entire file on every request.
-            from excelmanus.workbook.csv_index import csv_index
-
-            index = csv_index(snap)
-            total_rows = index.rows
-            total_cols = index.columns
-            sampled_rows = list(index.window(1, min(total_rows, max_rows + 1)))
-            headers = sampled_rows[0] if sampled_rows else []
-            col_letters = [chr(65 + i) if i < 26 else f"A{chr(65 + i - 26)}" for i in range(min(total_cols, 100))]
-            data_rows = sampled_rows[1:]
-            # 将纯数字字符串转换为数字
-            converted_rows: list[list[Any]] = []
-            for dr in data_rows:
-                conv: list[Any] = []
-                for v in dr:
-                    if v == "":
-                        conv.append(None)
-                    else:
-                        try:
-                            conv.append(int(v))
-                        except ValueError:
-                            try:
-                                conv.append(float(v))
-                            except ValueError:
-                                conv.append(v)
-                converted_rows.append(conv)
-
-            snap_csv: dict[str, Any] = {
-                "file": display_name_for(snap.file.relative),
-                "deprecated_for_editor": True,
-                "sheet": "Sheet1",
-                "sheets": ["Sheet1"],
-                "shape": {"rows": total_rows, "columns": total_cols},
-                "column_letters": col_letters,
-                "headers": headers,
-                "rows": converted_rows,
-                "total_rows": total_rows,
-                "truncated": total_rows > max_rows + 1,
-            }
-            if all_sheets:
-                return JSONResponse(content=_with_bound_version({
-                    "file": display_name_for(snap.file.relative),
-                    "sheets": ["Sheet1"],
-                    "all_snapshots": [snap_csv],
-                }, bound_version))
-            return JSONResponse(content=_with_bound_version(snap_csv, bound_version))
-        except Exception as exc:
-            logger.error("CSV snapshot 生成失败: %s", exc, exc_info=True)
-            return _error_json_response(500, f"读取文件失败: {exc}")
-
-    try:
-        from openpyxl import load_workbook
-        from openpyxl.utils import get_column_letter
-
-        from excelmanus.tools._style_extract import extract_cell_style as _extract_cell_style
-
-        from io import BytesIO
-
-        snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
-        file_display = display_name_for(snap.file.relative)
-        file_bytes, bound_version = snap.read_bytes(), snap.content_version
-        wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=not with_styles)
-        sheet_names = wb.sheetnames
-
-        def _read_sheet(ws_obj: Any) -> dict:
-            """读取单个工作表并返回快照 dict。"""
-            s_total_rows = ws_obj.max_row or 0
-            s_total_cols = ws_obj.max_column or 0
-            s_headers: list[str] = []
-            s_col_letters: list[str] = []
-            for c in range(1, min(s_total_cols + 1, 101)):
-                s_col_letters.append(get_column_letter(c))
-                cell_val = ws_obj.cell(row=1, column=c).value
-                s_headers.append(str(cell_val) if cell_val is not None else "")
-            s_rows: list[list[Any]] = []
-            s_row_limit = min(max_rows, s_total_rows, 200)
-            for r in range(2, s_row_limit + 2):
-                if r > s_total_rows:
-                    break
-                row_data: list[Any] = []
-                for c in range(1, min(s_total_cols + 1, 101)):
-                    val = ws_obj.cell(row=r, column=c).value
-                    if val is None:
-                        row_data.append(None)
-                    elif isinstance(val, (int, float, bool)):
-                        row_data.append(val)
-                    else:
-                        row_data.append(str(val))
-                s_rows.append(row_data)
-
-            result: dict[str, Any] = {
-                "sheet": ws_obj.title,
-                "shape": {"rows": s_total_rows, "columns": s_total_cols},
-                "column_letters": s_col_letters,
-                "headers": s_headers,
-                "rows": s_rows,
-                "total_rows": s_total_rows,
-                "truncated": s_total_rows > s_row_limit,
-            }
-
-            # 提取样式（仅 with_styles=True 时）
-            if with_styles:
-                cell_styles: dict[str, dict] = {}
-                merged: list[dict] = []
-                for r in range(1, s_row_limit + 2):
-                    if r > s_total_rows:
-                        break
-                    for c in range(1, min(s_total_cols + 1, 101)):
-                        cell_obj = ws_obj.cell(row=r, column=c)
-                        style = _extract_cell_style(cell_obj)
-                        if style:
-                            cell_styles[f"{r-1},{c-1}"] = style
-                # 合并单元格
-                try:
-                    for merge_range in ws_obj.merged_cells.ranges:
-                        merged.append({
-                            "startRow": merge_range.min_row - 1,
-                            "startColumn": merge_range.min_col - 1,
-                            "endRow": merge_range.max_row - 1,
-                            "endColumn": merge_range.max_col - 1,
-                        })
-                except Exception:
-                    pass
-                # 列宽
-                col_widths: dict[str, float] = {}
-                try:
-                    for col_letter, dim in ws_obj.column_dimensions.items():
-                        if dim.width and dim.width != 8.43:  # 默认宽度
-                            col_idx = 0
-                            for i, ch in enumerate(reversed(col_letter.upper())):
-                                col_idx += (ord(ch) - 64) * (26 ** i)
-                            col_widths[str(col_idx - 1)] = dim.width
-                except Exception:
-                    pass
-                # 行高
-                row_heights: dict[str, float] = {}
-                try:
-                    for row_idx, dim in ws_obj.row_dimensions.items():
-                        if dim.height and dim.height != 15:  # 默认行高
-                            row_heights[str(row_idx - 1)] = dim.height
-                except Exception:
-                    pass
-
-                if cell_styles:
-                    result["cell_styles"] = cell_styles
-                if merged:
-                    result["merged_cells"] = merged
-                if col_widths:
-                    result["column_widths"] = col_widths
-                if row_heights:
-                    result["row_heights"] = row_heights
-
-            return result
-
-        if all_sheets:
-            # 一次返回所有工作表快照
-            snapshots = []
-            for sn in sheet_names:
-                ws_obj = wb[sn]
-                snapshots.append(_read_sheet(ws_obj))
-            wb.close()
-            return JSONResponse(content=_with_bound_version({
-                "file": file_display,
-                "deprecated_for_editor": True,
-                "sheets": sheet_names,
-                "all_snapshots": snapshots,
-            }, bound_version))
-
-        # 单 sheet 模式（向后兼容）
-        ws = wb[sheet] if sheet and sheet in sheet_names else wb.active
-        if ws is None:
-            wb.close()
-            return _error_json_response(404, "工作表不存在")
-
-        snap = _read_sheet(ws)
-        snap["file"] = file_display
-        snap["sheets"] = sheet_names
-        wb.close()
-        payload = _with_bound_version(snap, bound_version)
-        payload["deprecated_for_editor"] = True
-        return JSONResponse(content=payload)
-    except Exception as exc:
-        logger.error("Excel snapshot 生成失败: %s", exc, exc_info=True)
-        return _error_json_response(500, f"读取文件失败: {exc}")
 
 
-@router.get("/api/v1/files/excel/view")
-async def get_excel_view(request: Request) -> JSONResponse:
-    """可编辑工作簿的范围投影。第 1 行是 R1，不是分析 headers。"""
-    assert get_config() is not None, "服务未初始化"
-
-    from excelmanus.workbook.refs import InvalidRefError, parse_rect
-    from excelmanus.workbook.snapshot import SnapshotError, SnapshotStale, project_view
-
-    path = request.query_params.get("path", "")
-    sheet = request.query_params.get("sheet") or None
-    session_id = request.query_params.get("session_id")
-    workspace_id = request.query_params.get("workspace_id")
-    rect_text = (request.query_params.get("rect") or "A1:AX200").strip()
-    with_styles = request.query_params.get("with_styles", "1").strip() in ("1", "true")
-    expected_version = (request.query_params.get("expected_version") or "").strip() or None
-    if not path:
-        return _error_json_response(400, "缺少 path 参数")
-
-    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
-    if scope_error is not None:
-        return scope_error
-    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
-    if resolved is None:
-        return _error_json_response(404, f"文件不存在或路径非法: {path}")
-
-    try:
-        base = parse_rect(rect_text, default_sheet=sheet)
-        if (base.max_row - base.min_row + 1) * (base.max_col - base.min_col + 1) > 20_000:
-            return _error_json_response(400, "单次视图最多读取 20000 个单元格", code="VIEW_TOO_LARGE")
-    except InvalidRefError as exc:
-        return _error_json_response(400, str(exc), code="INVALID_REF")
-
-    try:
-        def read_view() -> JSONResponse:
-            snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
-            if expected_version and expected_version != snap.content_version:
-                return UnicodeJSONResponse(status_code=409, content={
-                    "error": "视图版本已变化，请重新加载", "code": "STALE_VIEW",
-                    "content_version": snap.content_version, "expected_version": expected_version,
-                })
-            def build_view() -> tuple[JSONResponse, int]:
-                view = project_view(snap, [base], with_styles=with_styles, active_sheet_default=True)
-                view["deprecated_for_editor"] = False
-                response = JSONResponse(content=view)
-                return response, len(response.body)
-
-            return _view_responses.get_or_create(
-                (snap.id.key(), snap.suffix, base, with_styles), build_view,
-            )
-
-        return await run_in_threadpool(read_view)
-    except SnapshotStale as exc:
-        return UnicodeJSONResponse(
-            status_code=409,
-            content={"error": str(exc), "code": exc.code, **exc.fields},
-        )
-    except SnapshotError as exc:
-        status = 404 if exc.code in {"PATH_INVALID", "SHEET_NOT_FOUND"} else 400
-        return _error_json_response(status, str(exc), code=exc.code)
-    except Exception as exc:
-        logger.error("Excel view 生成失败: %s", exc, exc_info=True)
-        return _error_json_response(500, f"读取文件失败: {exc}")
 
 
-class ExcelWriteRequest(BaseModel):
-    """Excel 单元格写入请求。"""
-
-    model_config = ConfigDict(extra="forbid")
-    session_id: str | None = None
-    workspace_id: str | None = None
-    path: str
-    sheet: str | None = None
-    changes: list[dict[str, Any]] = Field(default_factory=list)
-    operations: list[dict[str, Any]] | None = None
-    expected_version: str | None = None
-    operation_id: str | None = None
 
 
-@router.post("/api/v1/files/excel/write")
-async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) -> JSONResponse:
-    """工作台编辑回写：一组 operations 一次 CAS。"""
-    assert get_config() is not None, "服务未初始化"
-
-    ws_root, scope_error = _file_workspace_root(
-        raw_request, request.session_id, request.workspace_id,
-    )
-    if scope_error is not None:
-        return scope_error
-    resolved = _resolve_excel_path(request.path, request.session_id, workspace_root=ws_root)
-    if resolved is None:
-        return _error_json_response(404, f"文件不存在或路径非法: {request.path}")
-
-    from io import BytesIO
-    from pathlib import Path as _Path
-
-    from openpyxl import load_workbook
-
-    from excelmanus.workbook.view_mutate import apply_workbook_operations, changes_to_operations
-    from excelmanus.workbook.user_edits import summarize_operations
-    from excelmanus.workbook_commit import CommitError
-    from excelmanus.workspace.file_service import WorkspaceFileService
-
-    try:
-        from excelmanus.xls_converter import needs_conversion as _nc3
-        if _nc3(resolved):
-            return _error_json_response(
-                400, "旧版工作簿可预览；请先显式转换为 .xlsx 后编辑", code="CONVERSION_REQUIRED",
-            )
-
-        dest = _Path(resolved).resolve()
-        try:
-            rel = str(dest.relative_to(_Path(ws_root).resolve())).replace("\\", "/")
-        except ValueError:
-            return _error_json_response(400, f"写入路径不在工作区内: {resolved}")
-
-        ops = list(request.operations or [])
-        if request.changes:
-            ops.extend(changes_to_operations(request.changes, request.sheet))
-        if not ops:
-            return _error_json_response(400, "缺少 changes 或 operations")
-
-        if request.expected_version is None:
-            error_id = str(uuid.uuid4())
-            return UnicodeJSONResponse(
-                status_code=409,
-                content={
-                    "error": "更新必须提供 expected_version（来自快照 content_version）",
-                    "error_id": error_id,
-                    "code": "VERSION_CONFLICT",
-                },
-            )
-
-        captured: dict[str, Any] = {"cells_written": sum(len(op.get("cells") or []) for op in ops if op.get("op") in {"set_values", "set_styles"})}
-
-        def builder(prev: bytes | None) -> bytes:
-            wb = load_workbook(BytesIO(prev or b""), keep_vba=dest.suffix.lower() == ".xlsm")
-            try:
-                captured["cells_written"] = apply_workbook_operations(wb, ops)
-                out = BytesIO()
-                wb.save(out)
-                return out.getvalue()
-            finally:
-                wb.close()
-
-        svc = WorkspaceFileService(ws_root)
-        receipt = await run_in_threadpool(
-            svc.update_with_builder,
-            rel,
-            builder,
-            expected_version=request.expected_version,
-            operation_id=request.operation_id,
-            intent={"operations": ops},
-            event_context={"source": "user", "session_id": request.session_id,
-                           "summary": summarize_operations(ops)},
-        )
-        if receipt.state == "conflict" or receipt.error_code == "VERSION_CONFLICT":
-            return UnicodeJSONResponse(
-                status_code=409,
-                content={
-                    "error": receipt.message or "版本冲突",
-                    "code": receipt.error_code or "VERSION_CONFLICT",
-                    **receipt.to_dict(),
-                },
-            )
-        if receipt.state != "committed":
-            status = 409 if receipt.state == "conflict" else 400
-            return UnicodeJSONResponse(
-                status_code=status,
-                content={
-                    "error": receipt.message or receipt.state,
-                    "code": receipt.error_code or receipt.state,
-                    **receipt.to_dict(),
-                },
-            )
-        body = receipt.to_dict()
-        body.update({
-            "status": "success",
-            "cells_written": captured.get("cells_written", 0),
-            "content_version": receipt.primary_version(),
-        })
-        manager = get_session_manager()
-        if manager is not None:
-            # Deliver on the event loop, after releasing the file transaction lock.
-            # The durable outbox remains retryable if notification fails.
-            try:
-                manager.drain_workspace_events()
-            except Exception:
-                logger.warning("用户编辑已保存，改动通知等待重试", exc_info=True)
-        return JSONResponse(content=body)
-    except CommitError as exc:
-        status = 409 if exc.code == "VERSION_CONFLICT" else 400 if exc.code == "PATH_INVALID" else 500
-        error_id = str(uuid.uuid4())
-        fields = exc.fields if isinstance(getattr(exc, "fields", None), dict) else {}
-        return UnicodeJSONResponse(
-            status_code=status,
-            content={"error": exc.message, "error_id": error_id, "code": exc.code, **fields},
-        )
-    except KeyError as exc:
-        return _error_json_response(404, "工作表不存在")
-    except ValueError as exc:
-        return _error_json_response(400, str(exc), code="INVALID_ARGS")
-    except Exception as exc:
-        logger.error("Excel write 失败: %s", exc, exc_info=True)
-        return _error_json_response(500, f"写入失败: {exc}")
 
 
 class WorkbookDraftBatch(BaseModel):
@@ -731,12 +462,12 @@ class WorkbookMergeRequest(BaseModel):
     operation_id: str | None = None
 
 
-@router.post("/api/v1/files/excel/merge")
+@router.post("/api/v1/workbooks/merge-review")
 async def merge_workbook_draft(request: WorkbookMergeRequest, raw_request: Request) -> JSONResponse:
-    """Preview is read-only; confirmation rechecks versions and merges in one transaction."""
+    """Review a draft, then publish the chosen V2 ChangeSet through WorkbookService."""
     import json
     from excelmanus.workbook.merge import review_merge
-    from excelmanus.workbook_commit import CommitError, content_version_of
+    from excelmanus.workbook_commit import CommitError
     from excelmanus.workspace.file_service import WorkspaceFileService
 
     ws_root, scope_error = _file_workspace_root(raw_request, request.session_id, request.workspace_id)
@@ -752,17 +483,17 @@ async def merge_workbook_draft(request: WorkbookMergeRequest, raw_request: Reque
     def run_merge():
         dest = Path(resolved).resolve()
         rel = dest.relative_to(Path(ws_root).resolve()).as_posix()
+        history = WorkspaceFileService(ws_root)
         if dest.suffix.lower() not in {".xlsx", ".xlsm"}:
             return {"status": "replan", "reason": "此文件格式需要由 Agent 核对并重新制定方案。"}, 200
         versions = {batch.expected_version for batch in request.batches}
         if len(versions) != 1:
             return {"status": "replan", "reason": "草稿跨越多个版本，需要由 Agent 分批核对修改。"}, 200
         version = next(iter(versions))
-        svc = WorkspaceFileService(ws_root)
         snap = _open_route_snapshot(resolved, request.path, ws_root, request.workspace_id)
         current = snap.read_bytes()
         current_version = snap.content_version
-        base = current if version == current_version else svc.store.read_blob(rel, version.removeprefix("sha256:"))
+        base = current if version == current_version else history.store.read_blob(rel, version.removeprefix("sha256:"))
         if base is None:
             return {"status": "replan", "reason": "原始版本已不在历史中，无法可靠地自动合并。草稿已保留，可交给 Agent 核对。", "content_version": current_version}, 200
         if request.apply and request.expected_version != current_version:
@@ -773,25 +504,32 @@ async def merge_workbook_draft(request: WorkbookMergeRequest, raw_request: Reque
         if not request.apply or preview["status"] != "review":
             return preview, 200
 
-        def builder(latest):
-            # This runs under the existing file lock after the expected-version check.
-            if content_version_of(latest or b"") != request.expected_version:
-                raise CommitError("VERSION_CONFLICT", "文件再次变化，请重新核对冲突")
-            result, merged = review_merge(base, latest, operations, choices=request.choices, apply=True, **options)
-            if merged is None:
-                raise ValueError(result.get("reason", "无法自动合并"))
-            return merged
-
-        retained = [{"sheet": row["sheet"], "cell": row["cell"], "field": row["field"],
-                     "retained": "current" if row["conflict"] and request.choices.get(row["id"]) == "remote" else "local"}
-                    for row in preview["cells"][:40]]
-        receipt = svc.update_with_builder(rel, builder, expected_version=request.expected_version,
-            operation_id=request.operation_id, intent={"merge_base": version, "operations": operations, "choices": request.choices},
-            event_context={"source": "user", "session_id": request.session_id,
-                           "summary": "用户已核对并合并并发草稿；请重新读取文件，保留双方修改。以下只列出前 40 项保留决策：" + json.dumps(retained, ensure_ascii=False)})
-        if receipt.state != "committed":
-            return {"error": receipt.message or "合并失败", "code": receipt.error_code or receipt.state}, 409 if receipt.error_code == "VERSION_CONFLICT" else 400
-        return {"status": "merged", "content_version": receipt.primary_version(), "operation_id": receipt.operation_id}, 200
+        # The reviewer returns a filtered canonical ChangeSet.  The service
+        # rechecks the same current version and performs the actual write.
+        review, _ = review_merge(base, current, operations, choices=request.choices, apply=True, **options)
+        merged_operations = review.get("operations") or []
+        if not merged_operations:
+            return {"status": "merged", "content_version": current_version,
+                    "operation_id": request.operation_id, "observation": {"status": "no_op"}}, 200
+        from excelmanus.tools.context import ToolCallContext, bind_call, reset_call, use_workspace
+        from excelmanus.workbook.user_edits import summarize_operations
+        from excelmanus.workbook.service import WorkbookService
+        with use_workspace(ws_root, workspace_id=request.workspace_id) as ctx:
+            token = bind_call(ToolCallContext(binding=ctx.binding, call_id=request.operation_id or uuid.uuid4().hex,
+                                              tool_name="apply_spreadsheet_changes"))
+            try:
+                applied = WorkbookService().apply(request.path, operations=merged_operations,
+                    expected_version=current_version,
+                    event_context={"source": "user", "session_id": request.session_id,
+                                   "summary": "用户已核对并合并并发草稿；" + summarize_operations(merged_operations),
+                                   "merge_base": version, "choices": request.choices})
+            finally:
+                reset_call(token)
+        if not applied.get("committed"):
+            return {"error": "合并未提交", "code": applied.get("code", "COMMIT_FAILED")}, 409
+        return {"status": "merged", "content_version": applied.get("content_version"),
+                "operation_id": applied.get("receipt", {}).get("operation_id", request.operation_id),
+                "observation": applied.get("observation", {})}, 200
 
     try:
         body, status = await run_in_threadpool(run_merge)
@@ -1230,197 +968,6 @@ async def download_file(request: Request) -> StreamingResponse:
         },
     )
 
-@router.get("/api/v1/files/excel/compare")
-async def get_excel_compare(request: Request) -> JSONResponse:
-    """返回两个 Excel 文件的快照 + 跨文件列关系，供前端对比视图使用。
-
-    参数:
-      - path_a: 左侧文件路径
-      - path_b: 右侧文件路径
-      - session_id: 会话 ID（可选）
-      - max_rows: 最大行数（默认 50）
-    """
-    assert get_config() is not None, "服务未初始化"
-
-    path_a = request.query_params.get("path_a", "")
-    path_b = request.query_params.get("path_b", "")
-    session_id = request.query_params.get("session_id")
-    max_rows = int(request.query_params.get("max_rows", "50"))
-
-    if not path_a or not path_b:
-        return _error_json_response(400, "缺少 path_a 或 path_b 参数")
-
-    ws_root = _resolve_workspace_root(request)
-
-    resolved_a = _resolve_excel_path(path_a, session_id, workspace_root=ws_root)
-    resolved_b = _resolve_excel_path(path_b, session_id, workspace_root=ws_root)
-
-    if resolved_a is None:
-        return _error_json_response(404, f"文件不存在: {path_a}")
-    if resolved_b is None:
-        return _error_json_response(404, f"文件不存在: {path_b}")
-
-    import asyncio
-
-    from excelmanus.workspace.identity import display_name_for
-
-    def _load_snapshot(resolved: str) -> dict[str, Any]:
-        """自包含的 snapshot 加载（支持 xlsx/xls/xlsb/csv）。"""
-        basename = os.path.basename(resolved)
-        file_display = display_name_for(
-            os.path.relpath(resolved, ws_root).replace("\\", "/")
-        )
-        ext = os.path.splitext(resolved)[1].lower()
-
-        # ── CSV 快捷路径 ──
-        if ext == ".csv":
-            try:
-                import csv as _csv
-                import io as _io
-
-                snap = _open_route_snapshot(resolved, basename, ws_root)
-                csv_bytes, bound_version = snap.read_bytes(), snap.content_version
-                decoded = ""
-                for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
-                    try:
-                        decoded = csv_bytes.decode(_try_enc)
-                        break
-                    except (UnicodeDecodeError, LookupError):
-                        continue
-                if not decoded and csv_bytes:
-                    decoded = csv_bytes.decode("latin-1")
-                reader = _csv.reader(_io.StringIO(decoded))
-                all_rows_raw: list[list[str]] = []
-                for row in reader:
-                    all_rows_raw.append(row)
-                    if len(all_rows_raw) > max_rows + 1:
-                        break
-                total = len(all_rows_raw)
-                total_cols = max((len(r) for r in all_rows_raw), default=0)
-                headers = all_rows_raw[0] if all_rows_raw else []
-                col_letters = [chr(65 + i) if i < 26 else f"A{chr(65 + i - 26)}" for i in range(min(total_cols, 100))]
-                data_rows = all_rows_raw[1: min(max_rows + 1, total)]
-                converted: list[list[Any]] = []
-                for dr in data_rows:
-                    conv: list[Any] = []
-                    for v in dr:
-                        if v == "":
-                            conv.append(None)
-                        else:
-                            try:
-                                conv.append(int(v))
-                            except ValueError:
-                                try:
-                                    conv.append(float(v))
-                                except ValueError:
-                                    conv.append(v)
-                    converted.append(conv)
-                snap_csv = {
-                    "file": file_display, "sheet": "Sheet1", "sheets": ["Sheet1"],
-                    "shape": {"rows": total, "columns": total_cols},
-                    "column_letters": col_letters, "headers": headers,
-                    "rows": converted, "total_rows": total,
-                    "truncated": total > max_rows + 1,
-                }
-                return _with_bound_version(
-                    {"file": file_display, "sheets": ["Sheet1"], "all_snapshots": [snap_csv]},
-                    bound_version,
-                )
-            except Exception as exc:
-                logger.error("Compare CSV snapshot 失败: %s — %s", resolved, exc)
-                return {"file": file_display, "sheets": [], "all_snapshots": [], "error": str(exc)}
-
-        # ── xlsx/xlsm 主路径（xls 转换由 open_snapshot_at 完成）──
-        from openpyxl import load_workbook as _lwb
-
-        def _read_ws(ws_obj: Any, _max_rows: int = max_rows) -> dict[str, Any]:
-            from openpyxl.utils import get_column_letter as _gcl
-            s_total_rows = ws_obj.max_row or 0
-            s_total_cols = ws_obj.max_column or 0
-            s_headers: list[str] = []
-            s_col_letters: list[str] = []
-            for c in range(1, min(s_total_cols + 1, 101)):
-                s_col_letters.append(_gcl(c))
-                cell_val = ws_obj.cell(row=1, column=c).value
-                s_headers.append(str(cell_val) if cell_val is not None else "")
-            s_rows: list[list[Any]] = []
-            s_row_limit = min(_max_rows, s_total_rows, 200)
-            for r in range(2, s_row_limit + 2):
-                if r > s_total_rows:
-                    break
-                row_data: list[Any] = []
-                for c in range(1, min(s_total_cols + 1, 101)):
-                    val = ws_obj.cell(row=r, column=c).value
-                    if val is None:
-                        row_data.append(None)
-                    elif isinstance(val, (int, float, bool)):
-                        row_data.append(val)
-                    else:
-                        row_data.append(str(val))
-                s_rows.append(row_data)
-            return {
-                "sheet": ws_obj.title,
-                "shape": {"rows": s_total_rows, "columns": s_total_cols},
-                "column_letters": s_col_letters,
-                "headers": s_headers,
-                "rows": s_rows,
-                "total_rows": s_total_rows,
-                "truncated": s_total_rows > s_row_limit,
-            }
-
-        try:
-            from io import BytesIO
-
-            snap = _open_route_snapshot(resolved, basename, ws_root)
-            file_bytes, bound_version = snap.read_bytes(), snap.content_version
-            wb = _lwb(BytesIO(file_bytes), data_only=True, read_only=True)
-            sheet_names = wb.sheetnames
-            snapshots = []
-            for sn in sheet_names:
-                ws_obj = wb[sn]
-                snap = _read_ws(ws_obj)
-                snap["file"] = file_display
-                snap["sheets"] = sheet_names
-                snapshots.append(snap)
-            wb.close()
-            return _with_bound_version(
-                {"file": file_display, "sheets": sheet_names, "all_snapshots": snapshots},
-                bound_version,
-            )
-        except Exception as exc:
-            logger.error("Compare snapshot 失败: %s — %s", resolved, exc)
-            return {"file": file_display, "sheets": [], "all_snapshots": [], "error": str(exc)}
-
-    snap_a, snap_b = await asyncio.gather(
-        asyncio.to_thread(_load_snapshot, resolved_a),
-        asyncio.to_thread(_load_snapshot, resolved_b),
-    )
-
-    # ── 跨文件关系检测 ──
-    relationships: dict[str, Any] = {"shared_columns": []}
-    try:
-        from excelmanus.tools.context import use_workspace
-        from excelmanus.workbook.data import discover_file_relationships as _dfr
-
-        with use_workspace(ws_root):
-            rel_result = await asyncio.to_thread(
-                _dfr, file_paths=[resolved_a, resolved_b], max_files=2
-            )
-        rel_data = rel_result.value if isinstance(getattr(rel_result, "value", None), dict) else {}
-        pairs = rel_data.get("file_pairs", [])
-        if pairs:
-            relationships["shared_columns"] = pairs[0].get("shared_columns", [])
-        hints = rel_data.get("merge_hints", [])
-        if hints:
-            relationships["merge_hint"] = hints[0]
-    except Exception as exc:
-        logger.debug("Compare 关系检测失败: %s", exc)
-
-    return JSONResponse(content={
-        "file_a": snap_a,
-        "file_b": snap_b,
-        "relationships": relationships,
-    })
 
 @router.get("/api/v1/files/relationships")
 async def get_file_relationships(request: Request) -> JSONResponse:

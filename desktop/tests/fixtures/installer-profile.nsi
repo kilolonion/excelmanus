@@ -13,6 +13,7 @@ OutFile "${BENCH_EXE}"
 !ifdef BENCH_FAST
   !include "${PROJECT_DIR}\installer\extract-files.nsh"
   LangString appCannotBeClosed 1033 "Cannot install fixture files"
+  !include "${PROJECT_DIR}\installer\move-files.nsh"
   !macro ExcelManusRecordExtractStage
     !insertmacro RecordStage "extract-files"
   !macroend
@@ -56,9 +57,11 @@ Section
   IfErrors failed
   !insertmacro RecordStage "copy-files"
   !endif
-  ClearErrors
-  CopyFiles /SILENT "$EXEPATH" "${BENCH_ROOT}\cached-installer.exe"
-  IfErrors failed
+  !ifndef BENCH_FAST
+    ClearErrors
+    CopyFiles /SILENT "$EXEPATH" "${BENCH_ROOT}\cached-installer.exe"
+    IfErrors failed
+  !endif
   !insertmacro RecordStage "cache-installer"
   ; These are only the fixture's own staging and destination directories.
   RMDir /r "$PLUGINSDIR\7z-out"
@@ -76,8 +79,10 @@ Section
   FileClose $BenchLog
   SetErrorLevel 0
   Quit
-  failed:
-    FileClose $BenchLog
-    SetErrorLevel 2
-    Quit
+  !ifndef BENCH_FAST
+    failed:
+      FileClose $BenchLog
+      SetErrorLevel 2
+      Quit
+  !endif
 SectionEnd

@@ -1,107 +1,50 @@
-"""Post-Write Inline Checkpoint 测试。
-
-覆盖当前写入意图：
-- edit_spreadsheet / format_spreadsheet / manage_spreadsheet_objects / write_word
-- 文件不存在、路径为空时静默返回空串
-"""
-
-from __future__ import annotations
-
+"""V2 evidence belongs to the atomic receipt, never to a second live-file read."""
 from pathlib import Path
 
 import openpyxl
+import pytest
+
+from excelmanus.tools.context import use_workspace
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes
+from excelmanus.workbook_commit import content_version_of_file
 
 
-def _create_test_xlsx(tmp_path: Path, *, sheets: dict[str, list[list]] | None = None) -> Path:
-    fp = tmp_path / "test.xlsx"
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "Sheet1"
-    if sheets:
-        for name, data in sheets.items():
-            if name == "Sheet1":
-                target = ws
-            else:
-                target = wb.create_sheet(name)
-            for row_idx, row_data in enumerate(data, 1):
-                for col_idx, val in enumerate(row_data, 1):
-                    target.cell(row=row_idx, column=col_idx, value=val)
-    wb.save(str(fp))
-    wb.close()
-    return fp
+@pytest.fixture
+def workbook(tmp_path):
+    path=tmp_path/'test.xlsx'
+    wb=openpyxl.Workbook(); wb.active.title='Data'; wb.active['A1']='old'; wb.save(path); wb.close()
+    with use_workspace(tmp_path):
+        yield path
 
 
-class TestPostWriteCheckpointEditSpreadsheet:
-    def test_reports_sheet_dimensions(self, tmp_path):
-        fp = _create_test_xlsx(tmp_path, sheets={"Sheet1": [["hello"]]})
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-        result = ToolDispatcher._post_write_checkpoint(
-            "edit_spreadsheet",
-            {"file_path": str(fp), "sheet": "Sheet1"},
-            str(tmp_path),
-        )
-        assert "回读确认" in result
-        assert "Sheet1" in result
-
-    def test_with_operations_sheet(self, tmp_path):
-        fp = _create_test_xlsx(tmp_path, sheets={"数据": [["a", "b"]]})
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-        result = ToolDispatcher._post_write_checkpoint(
-            "edit_spreadsheet",
-            {
-                "file_path": str(fp),
-                "operations": [{"sheet": "数据", "kind": "values"}],
-            },
-            str(tmp_path),
-        )
-        assert "数据" in result
+def test_receipt_binds_serialized_cells_to_committed_version(workbook):
+    result=apply_spreadsheet_changes(file_path=workbook.name,expected_version=content_version_of_file(workbook),operations=[{'kind':'write','sheet':'Data','start_cell':'A1','values':[['new']]}])
+    assert result.success, result.model_text
+    observation=result.value['observation']
+    assert observation['content_version']==content_version_of_file(workbook)
+    assert observation['cell_checks']==[{'sheet':'Data','cell':'A1','value':'new','formula':None,'verified':True}]
+    assert observation['visual_observed'] is False
 
 
-class TestPostWriteCheckpointFormat:
-    def test_format_spreadsheet_reports_style_readback(self, tmp_path):
-        # format_spreadsheet 现在做样式回读，不再走「未核验」的跳过分支
-        fp = _create_test_xlsx(tmp_path, sheets={"Sheet1": [[1], [2], [3]]})
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-        result = ToolDispatcher._post_write_checkpoint(
-            "format_spreadsheet",
-            {"file_path": str(fp), "sheet": "Sheet1"},
-            str(tmp_path),
-        )
-        assert "样式回读" in result
-        assert "Sheet1" in result
+def test_receipt_verifies_style_without_claiming_visual_check(workbook):
+    result=apply_spreadsheet_changes(file_path=workbook.name,expected_version=content_version_of_file(workbook),operations=[{'kind':'format','sheet':'Data','range':'A1','font':{'bold':True}}])
+    assert result.success
+    assert result.value['observation']['cell_checks'][0]['verified']
+    assert result.value['observation']['coverage']['kind']=='sampled'
+    wb=openpyxl.load_workbook(workbook)
+    try:
+        assert wb['Data']['A1'].font.bold
+    finally:
+        wb.close()
 
 
-class TestPostWriteCheckpointEdgeCases:
-    def test_empty_file_path(self, tmp_path):
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-        result = ToolDispatcher._post_write_checkpoint(
-            "edit_spreadsheet", {"file_path": ""}, str(tmp_path),
-        )
-        assert result == ""
+@pytest.mark.parametrize('file_path',['test.xlsx','', 'nonexistent.xlsx'])
+def test_dispatcher_does_not_create_a_second_workbook_checkpoint(workbook, file_path, monkeypatch):
+    from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
+    monkeypatch.setattr(openpyxl,'load_workbook',lambda *a,**kw:pytest.fail('V2 must use the receipt, not reopen a live file'))
+    assert ToolDispatcher._post_write_checkpoint('apply_spreadsheet_changes',{'file_path':file_path},str(workbook.parent))==''
 
-    def test_nonexistent_file(self, tmp_path):
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-        result = ToolDispatcher._post_write_checkpoint(
-            "edit_spreadsheet",
-            {"file_path": str(tmp_path / "nonexistent.xlsx")},
-            str(tmp_path),
-        )
-        assert result == ""
 
-    def test_unknown_tool(self, tmp_path):
-        fp = _create_test_xlsx(tmp_path)
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-        result = ToolDispatcher._post_write_checkpoint(
-            "some_other_tool", {"file_path": str(fp)}, str(tmp_path),
-        )
-        assert result == ""
-
-    def test_relative_path_resolved(self, tmp_path):
-        _create_test_xlsx(tmp_path, sheets={"Sheet1": [["val"]]})
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-        result = ToolDispatcher._post_write_checkpoint(
-            "edit_spreadsheet",
-            {"file_path": "test.xlsx", "sheet": "Sheet1"},
-            str(tmp_path),
-        )
-        assert "回读确认" in result
+def test_unknown_tool_does_not_create_checkpoint(workbook):
+    from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
+    assert ToolDispatcher._post_write_checkpoint('some_other_tool',{'file_path':str(workbook)},str(workbook.parent))==''

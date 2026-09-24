@@ -96,7 +96,7 @@ def request_image_handle_text(
     ref: ImageAttachmentRef,
     version: RequestImageAttachment,
 ) -> str:
-    preview = f"Image {_image_identity(ref)}; request preview {version.width}x{version.height}px."
+    preview = f"Image {_image_identity(ref)}; request preview {version.width}x{version.height}px; attachment-to-request scale=({version.width / ref.width:.8g},{version.height / ref.height:.8g}), origin=(0,0)."
     return preview + _attachment_descriptor(ref)
 
 
@@ -199,7 +199,7 @@ def _materialize_images(
                 out.append({"type": "text", "text": handle})
                 out.append({
                     "type": "image_url",
-                    "image_url": {"url": data_uri, "detail": "auto"},
+                    "image_url": {"url": data_uri, "detail": block.get("detail", "auto")},
                     "_variant_id": version.variant_id,
                     "_attachment_id": ref.attachment_id,
                 })

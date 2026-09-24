@@ -58,9 +58,9 @@ def _domain_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register_tools(
         [
-            _tool("inspect_spreadsheet", effect="none", description="只读探查 Excel"),
+            _tool("observe_spreadsheet", effect="none", description="只读探查 Excel"),
             _tool("analyze_spreadsheet", effect="none"),
-            _tool("edit_spreadsheet", effect="workspace_write", description="原子编辑写值"),
+            _tool("apply_spreadsheet_changes", effect="workspace_write", description="原子编辑写值"),
             _tool("write_text_file", effect="workspace_write"),
             _tool("run_code", effect="dynamic"),
             _tool("run_shell", effect="dynamic"),
@@ -86,10 +86,10 @@ class TestVisibleEqualsExecutable:
             mode="read",
         )
         names = set(catalog.names())
-        assert "inspect_spreadsheet" in names
+        assert "observe_spreadsheet" in names
         assert "analyze_spreadsheet" in names
         assert "write_plan" not in names
-        assert "edit_spreadsheet" not in names
+        assert "apply_spreadsheet_changes" not in names
         assert "write_text_file" not in names
         assert "run_code" not in names
         assert "run_shell" not in names
@@ -102,9 +102,9 @@ class TestVisibleEqualsExecutable:
             mode="plan",
         )
         names = set(catalog.names())
-        assert "inspect_spreadsheet" in names
+        assert "observe_spreadsheet" in names
         assert "write_plan" in names
-        assert "edit_spreadsheet" not in names
+        assert "apply_spreadsheet_changes" not in names
         assert "write_text_file" not in names
         assert "run_code" not in names
         for tool in catalog.tools:
@@ -116,9 +116,9 @@ class TestVisibleEqualsExecutable:
             mode="write",
         )
         names = set(catalog.names())
-        assert "edit_spreadsheet" in names
+        assert "apply_spreadsheet_changes" in names
         assert "run_code" in names
-        assert "inspect_spreadsheet" in names
+        assert "observe_spreadsheet" in names
         assert "write_plan" not in names
 
     def test_write_xlsx_family_hides_word_mcp_plan(self) -> None:
@@ -139,7 +139,7 @@ class TestVisibleEqualsExecutable:
             families=frozenset({"xlsx"}),
         )
         names = set(catalog.names())
-        assert "inspect_spreadsheet" in names
+        assert "observe_spreadsheet" in names
         assert "read_word" not in names
         assert "write_word" not in names
         assert "mcp_exa_search" not in names
@@ -151,19 +151,18 @@ class TestVisibleEqualsExecutable:
         registry.register_tools(
             [
                 _tool("trace_spreadsheet_formulas"),
-                _tool("manage_spreadsheet_objects"),
             ]
         )
         catalog = derive_effective_catalog(
             tools=registry.get_all_tools(),
             mode="write",
             families=frozenset({"csv"}),
-            disallowed=("trace_spreadsheet_formulas", "manage_spreadsheet_objects"),
+            disallowed=("trace_spreadsheet_formulas", "apply_spreadsheet_changes"),
         )
         names = set(catalog.names())
-        assert "inspect_spreadsheet" in names
+        assert "observe_spreadsheet" in names
         assert "trace_spreadsheet_formulas" not in names
-        assert "manage_spreadsheet_objects" not in names
+        assert "apply_spreadsheet_changes" not in names
 
     @pytest.mark.parametrize("mode", ["code", "both", "unknown", "", None])
     def test_invalid_catalog_mode_does_not_expand_permissions(self, mode) -> None:
@@ -176,7 +175,7 @@ class TestVisibleEqualsExecutable:
         ):
             with pytest.raises(ValueError, match="unknown catalog mode"):
                 operation()
-        assert "edit_spreadsheet" not in registry.effective_catalog().name_set()
+        assert "apply_spreadsheet_changes" not in registry.effective_catalog().name_set()
 
     def test_readonly_subagent_keeps_run_code(self) -> None:
         catalog = derive_effective_catalog(
@@ -186,7 +185,7 @@ class TestVisibleEqualsExecutable:
         )
         names = set(catalog.names())
         assert "run_code" in names
-        assert "edit_spreadsheet" not in names
+        assert "apply_spreadsheet_changes" not in names
 
 
 class TestIndexSubsetOfSchemas:
@@ -207,8 +206,8 @@ class TestIndexSubsetOfSchemas:
             mode="read",
         )
         text = catalog.tool_index_text()
-        assert "inspect_spreadsheet" in text
-        assert "edit_spreadsheet" not in text
+        assert "observe_spreadsheet" in text
+        assert "apply_spreadsheet_changes" not in text
         assert "write_text_file" not in text
 
 
@@ -218,15 +217,15 @@ class TestIntrospectionBoundToCatalog:
         register_introspection_tools(registry)
         catalog = derive_effective_catalog(tools=registry.get_all_tools(), mode="read")
         bind_introspection_catalog(catalog)
-        result = introspect_capability("tool_detail", "edit_spreadsheet")
+        result = introspect_capability("tool_detail", "apply_spreadsheet_changes")
         assert "不可用" in result
-        assert "edit_spreadsheet" in result
+        assert "apply_spreadsheet_changes" in result
 
     def test_can_i_do_does_not_recommend_hidden_or_missing_tools(self) -> None:
         registry = ToolRegistry()
         registry.register_tools(
             [
-                _tool("inspect_spreadsheet", effect="none", description="只读探查 Excel 数据"),
+                _tool("observe_spreadsheet", effect="none", description="只读探查 Excel 数据"),
                 _tool("list_directory", effect="none", description="列出目录"),
             ]
         )
@@ -234,19 +233,19 @@ class TestIntrospectionBoundToCatalog:
         catalog = derive_effective_catalog(tools=registry.get_all_tools(), mode="read")
         bind_introspection_catalog(catalog)
         hidden = introspect_capability("can_i_do", "原子编辑写值公式")
-        assert "edit_spreadsheet" not in hidden
+        assert "apply_spreadsheet_changes" not in hidden
         assert "write_text_file" not in hidden
         visible = introspect_capability("can_i_do", "读取 Excel 数据")
-        assert "inspect_spreadsheet" in visible
+        assert "observe_spreadsheet" in visible
 
     def test_can_i_do_does_not_recommend_unregistered_global_table_tools(self) -> None:
         registry = ToolRegistry()
         registry.register_tool(
-            _tool("inspect_spreadsheet", effect="none", description="只读探查 Excel 数据")
+            _tool("observe_spreadsheet", effect="none", description="只读探查 Excel 数据")
         )
         register_introspection_tools(registry)
         result = introspect_capability("can_i_do", "原子编辑写值公式")
-        assert "edit_spreadsheet" not in result
+        assert "apply_spreadsheet_changes" not in result
 
 
 class TestDigestStability:
@@ -303,7 +302,7 @@ class TestSchemaSortStable:
     def test_mixed_mcp_and_domain_sorted_by_name(self) -> None:
         tools = [
             _tool("mcp_zzz_write", effect="none"),
-            _tool("inspect_spreadsheet", effect="none"),
+            _tool("observe_spreadsheet", effect="none"),
             _tool("mcp_aaa_search", effect="none"),
             _tool("analyze_spreadsheet", effect="none"),
         ]
@@ -316,13 +315,13 @@ class TestSchemaSortStable:
         assert names == sorted(names)
         assert names == [
             "analyze_spreadsheet",
-            "inspect_spreadsheet",
             "mcp_aaa_search",
             "mcp_zzz_write",
+            "observe_spreadsheet",
         ]
 
     def test_extra_tools_order_does_not_affect_schemas_or_digest(self) -> None:
-        domain = [_tool("inspect_spreadsheet", effect="none")]
+        domain = [_tool("observe_spreadsheet", effect="none")]
         mcp_a = _tool("mcp_alpha", effect="none")
         mcp_b = _tool("mcp_beta", effect="none")
         left = derive_effective_catalog(
@@ -350,8 +349,8 @@ class TestRegistryDigestDelegates:
         read_digest = registry.catalog_digest()
         assert read_digest != write_digest
         names = _schema_names(registry.get_tiered_schemas(mode="chat_completions"))
-        assert "edit_spreadsheet" not in names
-        assert "inspect_spreadsheet" in names
+        assert "apply_spreadsheet_changes" not in names
+        assert "observe_spreadsheet" in names
 
 
 class TestMetaToolBuilderProjection:
@@ -373,8 +372,8 @@ class TestMetaToolBuilderProjection:
         builder = MetaToolBuilder(engine)
         builder.build_meta_tools = MagicMock(return_value=[])
         names = set(_schema_names(builder.build_v5_tools_impl()))
-        assert "inspect_spreadsheet" in names
-        assert "edit_spreadsheet" not in names
+        assert "observe_spreadsheet" in names
+        assert "apply_spreadsheet_changes" not in names
         assert "run_code" not in names
 
 
@@ -386,13 +385,13 @@ def test_versions_tool_visible_in_read_plan_but_write_action_still_blocked() -> 
     registry.register_tools(
         [
             _tool("manage_spreadsheet_versions", effect="workspace_write"),
-            _tool("edit_spreadsheet", effect="workspace_write"),
+            _tool("apply_spreadsheet_changes", effect="workspace_write"),
         ]
     )
     for mode in ("read", "plan"):
         catalog = derive_effective_catalog(tools=registry.get_all_tools(), mode=mode)
         assert "manage_spreadsheet_versions" in catalog.names()
-        assert "edit_spreadsheet" not in catalog.names()
+        assert "apply_spreadsheet_changes" not in catalog.names()
     assert (
         write_effect_for_call(
             "manage_spreadsheet_versions", {"action": "restore"}, declared="workspace_write"
@@ -435,25 +434,25 @@ def test_wire_projection_prunes_nested_schema(tmp_path) -> None:
     registry = ToolRegistry()
     registry.register_builtin_tools(str(tmp_path))
     catalog = derive_effective_catalog(tools=registry.get_all_tools(), mode="write")
-    tool = registry.get_tool("edit_spreadsheet")
+    tool = registry.get_tool("apply_spreadsheet_changes")
     assert tool is not None
     original = tool.input_schema
     schemas = catalog.tool_schemas()
     wire = next(
         s for s in schemas
-        if (s.get("function") or s).get("name") == "edit_spreadsheet"
+        if (s.get("function") or s).get("name") == "apply_spreadsheet_changes"
     )
     params = (wire.get("function") or wire)["parameters"]
     # 字段树按需披露，但外层 object|string 合同不能缩窄成 object。
     spec = params["properties"]["workbook_spec"]
-    assert set(spec["type"]) == {"object", "string"}
+    assert spec["type"] == "object"
     assert "tool_detail" in spec["description"]
     # 无剩余 $ref 时 $defs 整体移除
     assert "$defs" not in params
     # operations 深层字段描述剥离，但字段名/枚举保留
-    item_props = params["properties"]["operations"]["items"]["properties"]
-    assert item_props["kind"]["enum"]
-    assert all("description" not in p for p in item_props.values())
+    branches = params["properties"]["operations"]["items"]["oneOf"]
+    assert all(b["properties"]["kind"].get("enum") or b["properties"]["kind"].get("const") for b in branches)
+    assert all("description" not in p for b in branches for p in b["properties"].values())
     assert "tool_detail" in params["properties"]["operations"]["description"]
     # 运行时合同不受影响：input_schema 原样
     assert tool.input_schema is original
@@ -462,9 +461,9 @@ def test_wire_projection_prunes_nested_schema(tmp_path) -> None:
 
 def test_error_next_step_only_on_capability_gaps(tmp_path) -> None:
     """next_step 只出现在命名算子真表达不了的错误上。"""
-    from excelmanus.tools.intent_tools import (
+    from excelmanus.tools.workbook_tools import (
         compare_spreadsheets,
-        manage_spreadsheet_objects,
+        apply_spreadsheet_changes,
     )
     from excelmanus.workbook_commit import content_version_of_file
 
@@ -482,13 +481,11 @@ def test_error_next_step_only_on_capability_gaps(tmp_path) -> None:
     )
     assert styled.error is not None
     assert styled.error.fields.get("next_step") == "run_code"
-    bad_obj = manage_spreadsheet_objects(
-        file_path=str(book),
-        operations=[{"kind": "image", "sheet": "Sheet1"}],
-        expected_version=content_version_of_file(book),
-    )
+    from excelmanus.tools.context import use_workspace
+    with use_workspace(tmp_path):
+        bad_obj = apply_spreadsheet_changes(file_path=str(book), operations=[{"kind":"image", "sheet":"Sheet"}], expected_version=content_version_of_file(book))
     assert bad_obj.error is not None
-    assert "chart" in (bad_obj.error.message or "")
+    assert "image_path" in (bad_obj.error.message or "")
     assert "next_step" not in (bad_obj.error.fields or {})
 
 
@@ -521,7 +518,7 @@ def test_exposure_does_not_change_catalog_digest(tmp_path) -> None:
     assert after.mode == "write"
     assert after.digest() == before_digest
     assert registry.catalog_digest() == before_digest
-    assert "inspect_spreadsheet" in after.name_set()
+    assert "observe_spreadsheet" in after.name_set()
     assert "run_code" in after.name_set()
     after_schemas = after.tool_schemas()
     after_names = {

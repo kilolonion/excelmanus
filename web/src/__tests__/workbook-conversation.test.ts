@@ -7,7 +7,7 @@ import { fileRefFromSession } from "@/lib/workspace-file-ref";
 import { openWorkbookForConversation } from "@/lib/open-workbook";
 import { formatWorkbookMessage, prepareWorkbookMessage } from "@/lib/workbook-conversation";
 import type { Session } from "@/lib/types";
-import type { WorkbookViewSnapshot } from "@/lib/workbook-view";
+import type { WorkbookObservation } from "@/lib/workbook-observation";
 
 const edits = vi.hoisted(() => ({ flush: vi.fn(), pending: vi.fn(), paused: vi.fn() }));
 vi.mock("@/lib/excel-view-prefetch", () => ({ prefetchExcelView: vi.fn() }));
@@ -19,9 +19,9 @@ vi.mock("@/lib/excel-cell-edit", () => ({
 const session: Session = { id: "s1", title: "Sales", workspaceId: "w1", messageCount: 0, inFlight: false };
 const other: Session = { ...session, id: "s2", workspaceId: "w2" };
 const file = fileRefFromSession("uploads/sales.xlsx", session);
-const view: WorkbookViewSnapshot = {
+const view: WorkbookObservation = {
   file, content_version: "sha256:aaaa", active_sheet: "销售明细", sheets: [{ name: "销售明细", sheet_id: "s", used: { rows: 3, cols: 2 } }],
-  windows: [{ sheet: "销售明细", rect: { r0: 1, c0: 1, r1: 3, c1: 2 }, cells: {} }], coverage: { loaded: [], unloaded: [] },
+  regions: [{ sheet: "销售明细", rect: { r0: 1, c0: 1, r1: 3, c1: 2 }, cells: {} }], coverage: { loaded: [], unloaded: [] },
 };
 
 function ready() {
@@ -53,7 +53,7 @@ describe("open an existing workbook without an agent turn", () => {
   });
 
   it("does not open a late response after the user switches workspace", async () => {
-    let resolve!: (value: WorkbookViewSnapshot) => void;
+    let resolve!: (value: WorkbookObservation) => void;
     vi.spyOn(api, "fetchWorkbookView").mockImplementation(() => new Promise((r) => { resolve = r; }));
     const pending = openWorkbookForConversation(file.relative, session);
     useSessionStore.getState().setActiveSession(other.id);
@@ -64,7 +64,7 @@ describe("open an existing workbook without an agent turn", () => {
   });
 
   it("does not open a cancelled file after its read finishes", async () => {
-    let resolve!: (value: WorkbookViewSnapshot) => void;
+    let resolve!: (value: WorkbookObservation) => void;
     vi.spyOn(api, "fetchWorkbookView").mockImplementation(() => new Promise((r) => { resolve = r; }));
     const controller = new AbortController();
     const pending = openWorkbookForConversation(file.relative, session, { signal: controller.signal });

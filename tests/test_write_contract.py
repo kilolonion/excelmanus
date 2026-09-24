@@ -26,6 +26,13 @@ def _sha(path: Path) -> str:
     return content_version_of_file(path) or ""
 
 
+def _patches(*cells: dict) -> list[dict]:
+    by_sheet: dict[str, list[dict]] = {}
+    for cell in cells:
+        by_sheet.setdefault(str(cell.get("sheet") or "Sheet"), []).append({k: v for k, v in cell.items() if k != "sheet"})
+    return [{"kind": "cells.patch", "sheet": sheet, "cells": values} for sheet, values in by_sheet.items()]
+
+
 def _run_sandbox(
     workspace: Path,
     script: str,
@@ -80,27 +87,29 @@ async def test_snapshot_bound_bytes_not_later_disk(
     cfg = type("C", (), {"workspace_root": str(tmp_path)})()
     api_app_state.set_config(cfg)
     api_app_state.set_session_manager(None)
-    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
+    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None, **kwargs: str(tmp_path))
     monkeypatch.setattr(files_mod, "_resolve_excel_path", lambda *a, **k: str(tmp_path / "book.xlsx"))
 
     req = MagicMock()
-    req.query_params = {"path": "book.xlsx", "all_sheets": "1", "max_rows": "20", "with_styles": "0"}
+    req.query_params = {"path":"book.xlsx", "range":"A1:Z20", "facets":"data,geometry"}
+    req.headers = {}
     req.app.state.auth_enabled = False
-    snap = await api_module.get_excel_snapshot(req)
+    from excelmanus.api_routes_files import get_workbook_observation
+    snap = await get_workbook_observation(req)
     assert snap.status_code == 200
     body = json.loads(snap.body)
     assert body["content_version"] == seen_ver
     assert "external" not in json.dumps(body, ensure_ascii=False)
 
-    write_req = api_module.ExcelWriteRequest(
+    write_req = api_module.WorkbookChangesRequest(
         path="book.xlsx",
-        changes=[{"cell": "A1", "value": "from-ui"}],
+        operations=_patches({"cell": "A1", "value": "from-ui"}),
         expected_version=body["content_version"],
     )
     raw = MagicMock()
     raw.app.state.auth_enabled = False
     monkeypatch.setattr(files_mod, "_resolve_excel_path", lambda *a, **k: str(tmp_path / "book.xlsx"))
-    resp = await api_module.write_excel_cells(write_req, raw)
+    resp = await api_module.apply_workbook_changes(write_req, raw)
     assert resp.status_code == 409
     wb = load_workbook(tmp_path / "book.xlsx")
     assert wb.active["A1"].value == "external"
@@ -228,7 +237,7 @@ def test_paged_read_expected_version_detects_mid_pagination_drift(tmp_path: Path
     from excelmanus.security import FileAccessGuard
     from excelmanus.tools._guard_ctx import set_guard
     from excelmanus.tools.context import bind_workspace
-    from excelmanus.tools.intent_tools import init_guard, inspect_spreadsheet
+    from excelmanus.tools.workbook_tools import init_guard, observe_spreadsheet
 
     workspace = str(tmp_path)
     set_guard(FileAccessGuard(workspace))
@@ -244,7 +253,7 @@ def test_paged_read_expected_version_detects_mid_pagination_drift(tmp_path: Path
         wb.save(tmp_path / "book.xlsx")
         wb.close()
 
-        page1 = inspect_spreadsheet(
+        page1 = observe_spreadsheet(
             file_path="book.xlsx", mode="range", range="A1:B5",
         )
         assert page1.success, page1.model_text
@@ -256,7 +265,7 @@ def test_paged_read_expected_version_detects_mid_pagination_drift(tmp_path: Path
         outsider.save(tmp_path / "book.xlsx")
         outsider.close()
 
-        page2 = inspect_spreadsheet(
+        page2 = observe_spreadsheet(
             file_path="book.xlsx", mode="range", range="A6:B10",
             expected_version=v1,
         )
@@ -266,7 +275,7 @@ def test_paged_read_expected_version_detects_mid_pagination_drift(tmp_path: Path
         assert fields.get("content_version") and fields["content_version"] != v1
 
         # 重新核对后用新版本继续读 → 成功且数据是新页
-        page2b = inspect_spreadsheet(
+        page2b = observe_spreadsheet(
             file_path="book.xlsx", mode="range", range="A6:B10",
             expected_version=fields["content_version"],
         )

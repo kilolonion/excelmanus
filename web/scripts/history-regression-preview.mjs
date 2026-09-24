@@ -6,7 +6,7 @@ let restored = false;
 const saved = { revision_id:'saved', content_version:'restored-version', sequence:1, reason:'checkpoint', label:'完整收据', transaction_id:'tx-saved', parent_revision_id:null, created_at:new Date().toISOString() };
 function view(q, historic) {
   const isRestored = historic || restored;
-  const styled = historic || q.get('with_styles') === '1';
+  const styled = historic || (q.get('facets') || '').split(',').includes('presentation');
   const sheet = q.get('sheet') || (isRestored ? '收据' : '临时表');
   if (isRestored && sheet !== '收据') return { error: { code:'SHEET_NOT_FOUND', error:'工作表不存在' } };
   const cells = {};
@@ -25,14 +25,14 @@ function view(q, historic) {
   const merges = [{min_row:1,min_col:1,max_row:1,max_col:6},{min_row:2,min_col:1,max_row:2,max_col:6},{min_row:12,min_col:1,max_row:12,max_col:5}];
   const names = isRestored ? ['收据'] : ['临时表','收据'];
   return {file:{workspaceKey:'id:browser-ws',relative:'history-demo.xlsx'},content_version:isRestored?'restored-version':'before-version',active_sheet:sheet,with_styles:styled,
-    sheets:names.map(name=>({name,sheet_id:name,used:{rows:16,cols:6}})),windows:[{sheet,rect:{r0:1,c0:1,r1:200,c1:50},cells,merges:styled&&sheet==='收据'?merges:[],col_widths:styled?{A:8,B:24,C:18,D:10,E:14,F:16}:{},row_heights:styled?{1:40,2:24}:{}}],coverage:{loaded:[{sheet,r0:1,c0:1,r1:200,c1:50}],unloaded:[]}};
+    sheets:names.map(name=>({name,sheet_id:name,used:{rows:16,cols:6}})),regions:[{sheet,rect:{r0:1,c0:1,r1:200,c1:50},cells,merges:styled&&sheet==='收据'?merges:[],col_widths:styled?{A:8,B:24,C:18,D:10,E:14,F:16}:{},row_heights:styled?{1:40,2:24}:{}}],coverage:{loaded:[{sheet,r0:1,c0:1,r1:200,c1:50}],unloaded:[]}};
 }
 const server = await createServer({root,configFile:false,resolve:{alias:[{find:'@/lib/univer-modules',replacement:path.join(root,'src/__tests__/fixtures/univer-modules-browser.ts')},{find:'@',replacement:path.join(root,'src')}]},esbuild:{jsx:'automatic'},define:{'process.env.NODE_ENV':JSON.stringify('development')},server:{host:'127.0.0.1',port:5182,strictPort:true},plugins:[{name:'history-fixture',configureServer(server){
   server.middlewares.use(async(req,res,next)=>{
     if(!req.url?.startsWith('/api/v1/')) return next();
     const url=new URL(req.url,'http://localhost'); const q=url.searchParams;
     let payload;
-    if(url.pathname==='/api/v1/files/excel/view') { payload=view(q,false); if(payload.error){res.statusCode=404;payload=payload.error;} }
+    if(url.pathname==='/api/v1/workbooks/observe') { payload=view(q,false); if(payload.error){res.statusCode=404;payload=payload.error;} }
     else if(url.pathname==='/api/v1/revisions') payload={path:'history-demo.xlsx',content_version:restored?'restored-version':'before-version',revisions:[saved],total:1};
     else if(url.pathname==='/api/v1/revisions/preview') payload={...view(q,true),revision_id:saved.revision_id,revision_reason:saved.reason,revision_label:saved.label};
     else if(url.pathname==='/api/v1/revisions/restore') {

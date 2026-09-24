@@ -11,7 +11,8 @@ from openpyxl import Workbook
 from excelmanus.workbook.csv_index import csv_index
 from excelmanus.workbook.read_cache import ReadCache
 from excelmanus.workbook.refs import parse_rect
-from excelmanus.workbook.snapshot import open_snapshot_at, project_view
+from excelmanus.workbook.snapshot import open_snapshot_at
+from excelmanus.workbook.observation import observe_snapshot
 from excelmanus.workspace.listing import scan_workspace
 from excelmanus.workspace.refs import WorkspaceRef
 
@@ -61,9 +62,9 @@ class TestCsvIndex:
         text = "h1,h2\n" + "".join(f"{i},v{i}\n" for i in range(1, 500))
         snap = _snapshot(tmp_path, "rows.csv", text.encode("utf-8"))
         rect = parse_rect("A400:B402")
-        view = project_view(snap, [rect])
-        cells = view["windows"][0]["cells"]
-        assert cells["400,1"]["v"] == 399
+        view = observe_snapshot(snap, range=rect.to_a1(include_sheet=False))
+        cells = view["regions"][0]["cells"]
+        assert cells["400,1"]["v"] == "399"
         assert cells["402,2"]["v"] == "v401"
         assert view["sheets"][0]["used"]["rows"] == 500
 
@@ -104,7 +105,7 @@ class TestReadCache:
 
 
 class TestWorkbookPairCache:
-    def test_project_view_reuses_parsed_workbooks_per_version(
+    def test_observation_reuses_parsed_workbooks_per_version(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _xlsx(tmp_path / "book.xlsx")
@@ -123,9 +124,9 @@ class TestWorkbookPairCache:
             return real_load(*args, **kwargs)
 
         monkeypatch.setattr(openpyxl, "load_workbook", counted)
-        project_view(snap, [parse_rect("A1:B5")], with_styles=False)
+        observe_snapshot(snap, range="A1:B5", facets=["data"])
         assert loads == 2
-        project_view(snap, [parse_rect("C1:D5")], with_styles=False)
+        observe_snapshot(snap, range="C1:D5", facets=["data"])
         assert loads == 2
 
 

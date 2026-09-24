@@ -31,6 +31,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useUIStore } from "@/stores/ui-store";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { checkModelPlaceholder } from "@/lib/api";
+import { SettingsPageHeader } from "./SettingsPageLayout";
 
 const TAB_META = [
   { value: "model", label: "模型", coachId: "coach-settings-tab-model", icon: <Server className="size-4" /> },
@@ -94,148 +95,96 @@ export function SettingsDialog() {
         onInteractOutside={(event) => { if (isGuideLocked) event.preventDefault(); }}
         onOpenAutoFocus={(event) => { if (isGuideLocked) event.preventDefault(); }}
         onCloseAutoFocus={(event) => { if (isGuideLocked) event.preventDefault(); }}
-        className="em-settings-dialog !grid-none !flex !flex-col max-w-none max-h-none sm:max-w-3xl h-[100dvh] sm:h-[76vh] sm:max-h-[88vh] p-0 gap-0 overflow-hidden rounded-none sm:rounded-lg top-0 left-0 right-0 bottom-0 sm:top-[50%] sm:left-[50%] sm:right-auto sm:bottom-auto translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
+        className="em-settings-dialog !grid-none !flex !flex-col max-w-none max-h-none h-auto sm:max-w-5xl sm:h-auto min-h-0 p-0 gap-0 overflow-hidden rounded-none sm:rounded-2xl top-0 left-0 right-0 bottom-0 sm:top-[50%] sm:left-[50%] sm:right-auto sm:bottom-auto translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
+        <DialogTitle className="sr-only">设置</DialogTitle>
+        <DialogClose asChild>
+          <Button variant="ghost" size="icon" className="em-settings-close h-8 w-8 rounded-full opacity-70 hover:opacity-100">
+            <X className="h-4 w-4" />
+            <span className="sr-only">Close</span>
+          </Button>
+        </DialogClose>
         <Tabs
           value={primaryTab}
           onValueChange={(v) => openSettings(v)}
           className="flex flex-col overflow-hidden min-h-0 flex-1"
         >
-          <div className="em-settings-chrome flex-shrink-0">
-            <DialogHeader className="px-4 pt-2 pb-0 sm:px-6 sm:pt-3 flex-shrink-0 flex-row items-center">
-              <DialogTitle className="flex items-center gap-2 flex-1">
-                <Settings className="h-5 w-5" />
-                设置
-              </DialogTitle>
-              <DialogClose asChild>
-                <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 rounded-full opacity-70 hover:opacity-100">
-                  <X className="h-4 w-4" />
-                  <span className="sr-only">Close</span>
-                </Button>
-              </DialogClose>
-            </DialogHeader>
-
-            {/* ── Tab navigation (mobile: scrollable capsules, desktop: horizontal strip) ── */}
-            <nav className="em-settings-tabs relative flex-shrink-0" role="tablist" data-coach-id="coach-settings-tabs">
-              {/* Desktop: horizontal strip */}
-              <div className="hidden sm:flex px-4">
+          <div className="em-settings-body min-h-0 flex-1">
+            <aside className="em-settings-sidebar hidden sm:flex" aria-label="设置分类" data-coach-id="coach-settings-tabs">
+              <DialogHeader className="em-settings-sidebar-header flex-shrink-0 flex-row items-start">
+                <h2 className="flex items-center gap-2 flex-1 min-w-0">
+                  <span className="em-settings-title-icon"><Settings className="h-4 w-4" /></span>
+                  <span className="min-w-0">
+                    <span className="block text-sm font-semibold tracking-tight">设置</span>
+                    <span className="mt-0.5 block text-[10px] font-normal leading-snug text-muted-foreground">模型、扩展与系统偏好</span>
+                  </span>
+                </h2>
+              </DialogHeader>
+              <p className="em-settings-sidebar-label">工作区</p>
+              {TAB_META.map((tab) => {
+                const isActive = primaryTab === tab.value;
+                return (
+                  <button
+                    key={tab.value}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    data-coach-id={tab.coachId}
+                    onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)}
+                    className={`em-settings-sidebar-item ${isActive ? "is-active" : ""}`}
+                  >
+                    <span className="em-settings-sidebar-item-icon">{tab.icon}</span>
+                    <span className="flex-1 text-left">{tab.label}</span>
+                    {isActive && <span className="em-settings-sidebar-dot" />}
+                  </button>
+                );
+              })}
+              <div className="em-settings-sidebar-foot">
+                <span className="em-settings-sidebar-foot-dot" />
+                <span>本地配置已自动保存</span>
+              </div>
+            </aside>
+            <div className="em-settings-mobile-head sm:hidden">
+              <nav className="em-settings-mobile-tabs" role="tablist" data-coach-id="coach-settings-tabs">
                 {TAB_META.map((tab) => {
                   const isActive = primaryTab === tab.value;
-                  return (
-                    <button
-                      key={tab.value}
-                      type="button"
-                      role="tab"
-                      aria-selected={isActive}
-                      data-coach-id={tab.coachId}
-                      onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)}
-                      className={`
-                        relative flex-1 min-w-[44px] flex items-center justify-center
-                        gap-2 py-3
-                        outline-none select-none whitespace-nowrap
-                        transition-colors duration-200
-                        ${isActive
-                          ? "text-foreground"
-                          : "text-muted-foreground hover:text-foreground/70"}
-                      `}
-                    >
-                      <span
-                        className="transition-colors duration-200"
-                        style={{ color: isActive ? "var(--em-primary)" : undefined }}
-                      >
-                        {tab.icon}
-                      </span>
-                      <span className="text-[13px] font-medium leading-tight">
-                        {tab.label}
-                      </span>
-                      {isActive && (
-                        <motion.div
-                          layoutId="settings-tab-underline"
-                          className="absolute bottom-0 inset-x-2 h-[2px] rounded-full"
-                          style={{ backgroundColor: "var(--em-primary)" }}
-                          transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                        />
-                      )}
-                    </button>
-                  );
+                  return <button key={tab.value} type="button" role="tab" aria-selected={isActive} data-coach-id={tab.coachId} onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)} className={`em-settings-mobile-tab ${isActive ? "is-active" : ""}`}>{tab.icon}{tab.label}</button>;
                 })}
-              </div>
-
-              {/* Mobile: scrollable frosted-glass capsules with fade masks */}
-              <div className="relative sm:hidden">
-                <div className="em-settings-tab-fade pointer-events-none absolute left-0 top-0 bottom-0 w-5 z-10" />
-                <div className="em-settings-tab-fade pointer-events-none absolute right-0 top-0 bottom-0 w-5 z-10 rotate-180" />
-                <div className="flex gap-2 px-4 py-1.5 overflow-x-auto scrollbar-none">
-                  {TAB_META.map((tab) => {
-                    const isActive = primaryTab === tab.value;
-                    return (
-                      <button
-                        key={tab.value}
-                        type="button"
-                        role="tab"
-                        aria-selected={isActive}
-                        data-coach-id={tab.coachId}
-                        onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)}
-                        className={`
-                          flex items-center justify-center gap-1.5 px-3 py-1.5
-                          rounded-full shrink-0
-                          outline-none select-none whitespace-nowrap
-                          text-[12px] font-medium
-                          transition-all duration-200
-                          backdrop-blur-md
-                          ${isActive
-                            ? "bg-primary/15 text-foreground shadow-sm ring-1 ring-primary/20"
-                            : "bg-background/45 text-muted-foreground hover:bg-background/70 hover:text-foreground/80"}
-                        `}
-                      >
-                        <span
-                          className="transition-colors duration-200"
-                          style={{ color: isActive ? "var(--em-primary)" : undefined }}
-                        >
-                          {tab.icon}
-                        </span>
-                        {tab.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </nav>
+              </nav>
+            </div>
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={primaryTab}
+                initial={{ opacity: 0, x: 8 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -8 }}
+                transition={{ duration: 0.15 }}
+                className="em-settings-scroll overflow-y-auto min-h-0 h-full px-4 sm:px-7 flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-7"
+              >
+                <Suspense fallback={<TabSpinner />}>
+                  <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined} data-coach-id="coach-settings-content-model">
+                    {settingsTab === "model" && <ModelTab />}
+                  </TabsContent>
+                  <TabsContent value="plugins" className="mt-0 grow shrink-0 flex flex-col" forceMount={primaryTab === "plugins" ? true : undefined} data-coach-id={`coach-settings-content-${pluginTab}`}>
+                    {primaryTab === "plugins" && (
+                      <PluginsTab
+                        activeTab={pluginTab}
+                        onTabChange={(tab) => openSettings(tab)}
+                      />
+                    )}
+                  </TabsContent>
+                  <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
+                    {settingsTab === "runtime" && <><SettingsPageHeader icon={<SlidersHorizontal className="h-5 w-5" />} eyebrow="系统设置" title="工作区与运行时" description="调整表格、对话、上下文和 Agent 运行行为。" /><RuntimeTab /></>}
+                  </TabsContent>
+                  <TabsContent value="access" className="mt-0 grow shrink-0 flex flex-col">
+                    {settingsTab === "access" && <><SettingsPageHeader icon={<ShieldCheck className="h-5 w-5" />} eyebrow="安全设置" title="访问与安全" description="管理登录保护、管理员凭据和工具执行校验。" /><AccessTab /></>}
+                  </TabsContent>
+                  <TabsContent value="version" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "version" ? true : undefined} data-coach-id="coach-settings-content-version">
+                    {settingsTab === "version" && <><SettingsPageHeader icon={<ArrowUpCircle className="h-5 w-5" />} eyebrow="应用信息" title="版本与更新" description="检查版本、管理更新备份，并查看项目资源。" /><VersionTab /></>}
+                  </TabsContent>
+                </Suspense>
+              </motion.div>
+            </AnimatePresence>
           </div>
-          <div className="h-2 sm:h-3 flex-shrink-0" />
-
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={primaryTab}
-              initial={{ opacity: 0, x: 8 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -8 }}
-              transition={{ duration: 0.15 }}
-              className="em-settings-scroll overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-6"
-            >
-              <Suspense fallback={<TabSpinner />}>
-                <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined} data-coach-id="coach-settings-content-model">
-                  {settingsTab === "model" && <ModelTab />}
-                </TabsContent>
-                <TabsContent value="plugins" className="mt-0 grow shrink-0 flex flex-col" forceMount={primaryTab === "plugins" ? true : undefined} data-coach-id={`coach-settings-content-${pluginTab}`}>
-                  {primaryTab === "plugins" && (
-                    <PluginsTab
-                      activeTab={pluginTab}
-                      onTabChange={(tab) => openSettings(tab)}
-                    />
-                  )}
-                </TabsContent>
-                <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
-                  {settingsTab === "runtime" && <RuntimeTab />}
-                </TabsContent>
-                <TabsContent value="access" className="mt-0 grow shrink-0 flex flex-col">
-                  {settingsTab === "access" && <AccessTab />}
-                </TabsContent>
-                <TabsContent value="version" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "version" ? true : undefined} data-coach-id="coach-settings-content-version">
-                  {settingsTab === "version" && <VersionTab />}
-                </TabsContent>
-              </Suspense>
-            </motion.div>
-          </AnimatePresence>
         </Tabs>
       </DialogContent>
     </Dialog>

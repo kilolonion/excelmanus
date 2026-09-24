@@ -1,12 +1,12 @@
 ---
-name: spreadsheet:workbook_spec
-version: "11.0.0"
+name: spreadsheet:document
+version: "2.0.0"
 priority: 110
 order: 110
 layer: strategy
-max_tokens: 100
+max_tokens: 210
 conditions:
   catalog_mode: write
-  tool: edit_spreadsheet
+  tool: apply_spreadsheet_changes
 ---
-WorkbookSpec 经 edit_spreadsheet 的 workbook_spec 一次编译出新工作簿；已有文件用 operations。已有工作区也可再新建另一本，不要覆盖已有文件。必填 sheets 与 uncertainties（无可疑项时为 []）。看不清的写入 uncertainties，不要编造。Excel 做不了圆角、阴影、胶囊条。xlsm 可保留宏字节，但不执行宏。
+WorkbookSpec V2 只用于新建，字段使用规范对象。purpose=data 提取数据可用默认布局；purpose=visual_replica 需完整列宽行高或 layout_reference（已观察图片、表格 bbox、相对行列边界、目标总宽）。尺寸由同一 ChangeSet 编译；像素不能直接当字符列宽或 pt。保留看不清的 uncertainties，必要时 read_image crop 看局部。复刻后用 preview_spreadsheet 对照源图，按需要修正；成功生成文件只证明提交，不证明视觉一致。

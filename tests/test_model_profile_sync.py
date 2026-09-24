@@ -60,6 +60,25 @@ async def engine_for(s):
 
 
 @pytest.mark.asyncio
+async def test_fast_mode_profile_round_trip(setup):
+    s = setup
+    payload = {**profile(), "service_tier": "fast"}
+    response = await s.client.post("/api/v1/config/models/profiles", json=payload)
+    assert response.status_code == 201
+    assert s.store.get_profile("first")["service_tier"] == "fast"
+    config = (await s.client.get("/api/v1/config/models")).json()
+    assert config["profiles"][0]["service_tier"] == "fast"
+    _, engine = await engine_for(s)
+    assert engine._active_profile.service_tier == "fast"
+    response = await s.client.put(
+        "/api/v1/config/models/profiles/first",
+        json={**payload, "service_tier": ""},
+    )
+    assert response.status_code == 200
+    assert s.store.get_profile("first")["service_tier"] == ""
+
+
+@pytest.mark.asyncio
 async def test_create_rename_switch_delete_updates_actual_sessions(setup):
     s = setup
     assert (await s.client.post("/api/v1/config/models/profiles", json=profile())).status_code == 201

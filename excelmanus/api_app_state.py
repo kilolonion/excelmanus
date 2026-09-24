@@ -439,6 +439,7 @@ def build_model_profiles_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
             description=row.get("description", ""),
             protocol=row.get("protocol", "auto"),
             thinking_mode=row.get("thinking_mode", "auto"),
+            service_tier=row.get("service_tier", ""),
             model_family=row.get("model_family", ""),
             custom_extra_body=row.get("custom_extra_body", ""),
             custom_extra_headers=row.get("custom_extra_headers", ""),
@@ -643,9 +644,15 @@ def resolve_workspace(
             try:
                 workspace_path, _ = manager.resolve_workspace_binding(wid, None)
             except WorkspacePathError as exc:
-                raise HTTPException(status_code=400, detail={
-                    "error": str(exc), "code": "FILE_SCOPE_REQUIRED",
-                }) from exc
+                # A removed workspace registration does not remove the
+                # folder bound to an existing conversation. Session-only file
+                # requests already use that folder, so allow the redundant
+                # workspace id only when it is the session's stored id.
+                if manager.workspace_id_for_session(sid) != wid:
+                    raise HTTPException(status_code=400, detail={
+                        "error": str(exc), "code": "FILE_SCOPE_REQUIRED",
+                    }) from exc
+                workspace_path = session_path
             if not paths_equal(session_path, workspace_path):
                 raise HTTPException(status_code=409, detail={
                     "error": "会话与文件工作区不一致，请重新打开文件",

@@ -1,4 +1,4 @@
-"""单元格写入走 edit_spreadsheet，不再经过 write_cells 第二扇门。"""
+"""单元格写入走 apply_spreadsheet_changes，不再经过 write_cells 第二扇门。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from openpyxl import Workbook, load_workbook
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import edit_spreadsheet, init_guard
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, init_guard
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
@@ -49,7 +49,7 @@ def _edit(path: Path, operations: list[dict]) -> ToolResult:
             if not str(item.get("start_cell") or "").count("!"):
                 item["sheet"] = "Sheet1"
         filled.append(item)
-    return edit_spreadsheet(
+    return apply_spreadsheet_changes(
         file_path=str(path),
         operations=filled,
         expected_version=content_version_of_file(path),

@@ -43,9 +43,11 @@ export interface RuntimeSettingGroup {
 export function RuntimeSettingsPanel({
   groups,
   className = "",
+  onSaved,
 }: {
   groups: RuntimeSettingGroup[];
   className?: string;
+  onSaved?: (settings: RuntimeSettings) => void;
 }) {
   const [config, setConfig] = useState<RuntimeSettings | null>(null);
   const [draft, setDraft] = useState<RuntimeSettings>({});
@@ -95,7 +97,7 @@ export function RuntimeSettingsPanel({
   };
 
   const handleSave = async () => {
-    if (!hasChanges || saving) return;
+    if (!hasChanges || saving || !config) return;
     setSaving(true);
     setError("");
     try {
@@ -107,6 +109,7 @@ export function RuntimeSettingsPanel({
         triggerRestart(response.restart_reason || "配置已更新");
         return;
       }
+      onSaved?.({ ...config, ...draft });
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
       await fetchConfig(true);
@@ -135,9 +138,10 @@ export function RuntimeSettingsPanel({
   }
 
   return (
-    <div className={`space-y-3 ${className}`}>
+    <section className={`em-settings-panel em-settings-runtime-panel ${className}`.trim()}>
       {groups.map((group) => (
         <SettingsFoldSection
+          embedded
           key={group.title}
           title={group.title}
           description={group.description ?? ""}
@@ -229,8 +233,8 @@ export function RuntimeSettingsPanel({
         </SettingsFoldSection>
       ))}
 
-      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
-      <div className="flex justify-end">
+      {error && <p role="alert" className="px-3 pt-3 text-xs text-destructive">{error}</p>}
+      <div className="em-settings-card-footer">
         <Button
           type="button"
           size="sm"
@@ -248,6 +252,6 @@ export function RuntimeSettingsPanel({
           {saved ? "已保存" : "保存配置"}
         </Button>
       </div>
-    </div>
+    </section>
   );
 }

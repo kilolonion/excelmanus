@@ -28,7 +28,7 @@ def _config(**overrides) -> ExcelManusConfig:
 def _memory() -> ConversationMemory:
     memory = ConversationMemory(_config())
     memory.add_user_message("核对收款表")
-    memory.add_tool_call("failed-1", "inspect_spreadsheet", "{}")
+    memory.add_tool_call("failed-1", "observe_spreadsheet", "{}")
     memory.add_tool_result("failed-1", "原始失败详情", projection_content="精简失败详情")
     return memory
 
@@ -88,7 +88,7 @@ def test_annotation_roundtrips_event_log_as_a_replace_not_an_extra_turn(tmp_path
     log = SessionEventLog("recovery")
     memory.attach_event_log(log)
     memory.add_user_message("核对收款表")
-    memory.add_tool_call("failed-1", "inspect_spreadsheet", "{}")
+    memory.add_tool_call("failed-1", "observe_spreadsheet", "{}")
     memory.add_tool_result("failed-1", "原始失败详情", projection_content="精简失败详情")
     assert _annotate(memory)
     assert len(log.events) == 4
@@ -160,7 +160,7 @@ async def test_annotation_recompiles_sent_request_with_an_explicit_rewrite_event
     from tests.test_prepared_request_integration import engine_for
 
     engine = engine_for(protocol)
-    engine.memory.add_tool_call("failed-1", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("failed-1", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("failed-1", "原始失败详情")
     first, error = await compile_request(engine)
     assert error is None
@@ -184,7 +184,7 @@ async def test_replacing_sent_result_declares_rewrite_and_keeps_untracked_edits_
     from tests.test_prepared_request_integration import engine_for
 
     engine = engine_for()
-    engine.memory.add_tool_call("failed-1", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("failed-1", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("failed-1", "待确认")
     first, error = await compile_request(engine)
     assert error is None
@@ -208,7 +208,7 @@ async def test_failed_compilation_preserves_dirty_annotation_for_retry() -> None
     from tests.test_prepared_request_integration import engine_for
 
     engine = engine_for()
-    engine.memory.add_tool_call("failed-1", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("failed-1", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("failed-1", "失败详情")
     first, error = await compile_request(engine)
     assert error is None
@@ -239,7 +239,7 @@ async def test_annotating_a_new_result_does_not_break_the_existing_request_prefi
     first, error = await compile_request(engine)
     assert error is None
     series_of(engine).accept(first.header)
-    engine.memory.add_tool_call("failed-1", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("failed-1", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("failed-1", "失败详情")
     assert _annotate(engine.memory)
     assert not engine.memory._projection_dirty
@@ -259,7 +259,7 @@ def _host(memory: ConversationMemory) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_name", ["inspect_spreadsheet", "edit_spreadsheet", "format_spreadsheet"])
+@pytest.mark.parametrize("tool_name", ["observe_spreadsheet", "apply_spreadsheet_changes", "apply_spreadsheet_changes"])
 async def test_successful_reads_and_writes_do_not_evaluate_or_inject_advice(tool_name: str) -> None:
     memory = _memory()
     engine = _host(memory)
@@ -287,7 +287,7 @@ async def test_recovery_advice_is_attached_only_to_the_supplied_failed_result(fa
         patch("excelmanus.system_one.host.record_host_effect", Mock()) as record,
     ):
         reply = await maybe_advise_after_tools(
-            engine, [ToolCallResult("inspect_spreadsheet", {}, "failed", False, error="failed")],
+            engine, [ToolCallResult("observe_spreadsheet", {}, "failed", False, error="failed")],
             failed_tool_call_id=failed_id,
         )
     assert reply == ""
@@ -307,7 +307,7 @@ async def test_breaker_advice_is_returned_without_mutating_tool_or_user_messages
         patch("excelmanus.system_one.host.maybe_suggest_recovery", AsyncMock(return_value="终止重试，报告原因")),
     ):
         reply = await maybe_advise_after_tools(
-            engine, [ToolCallResult("inspect_spreadsheet", {}, "failed", False, error="failed")],
+            engine, [ToolCallResult("observe_spreadsheet", {}, "failed", False, error="failed")],
             failed_tool_call_id="failed-1", breaker_triggered=True,
         )
     assert reply == "终止重试，报告原因"
@@ -328,13 +328,13 @@ async def test_real_loop_attaches_recovery_to_the_actual_failed_call_before_next
     ), ToolRegistry())
     engine.memory.add_user_message("核对收款表")
     calls = [SimpleNamespace(
-        id=call_id, function=SimpleNamespace(name="inspect_spreadsheet", arguments='{"file_path":"book.xlsx"}'),
+        id=call_id, function=SimpleNamespace(name="observe_spreadsheet", arguments='{"file_path":"book.xlsx"}'),
     ) for call_id in ("first-failure", "actual-last-failure")]
     first_response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=calls))])
     final_response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="已说明错误和下一步", tool_calls=None))])
     create = AsyncMock(side_effect=[first_response, final_response])
     engine._client.chat.completions.create = create
-    results = [ToolCallResult("inspect_spreadsheet", {}, f"原始错误 {index}", False, error="failed") for index in (1, 2)]
+    results = [ToolCallResult("observe_spreadsheet", {}, f"原始错误 {index}", False, error="failed") for index in (1, 2)]
     engine._execute_tool_call = AsyncMock(side_effect=results)
 
     async def parallel_results(tool_calls, *_args, **_kwargs):

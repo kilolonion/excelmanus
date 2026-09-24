@@ -107,15 +107,15 @@ class TestToolRegistry:
         assert module_paths == tuple(dict.fromkeys(module_paths))
         assert "excelmanus.tools.image_tools" in registry_module._BUILTIN_TOOL_MODULE_PATHS
         assert "excelmanus.tools.memory_tools" in registry_module._BUILTIN_TOOL_MODULE_PATHS
-        assert "excelmanus.tools.intent_tools" in registry_module._BUILTIN_TOOL_MODULE_PATHS
+        assert "excelmanus.tools.workbook_tools" in registry_module._BUILTIN_TOOL_MODULE_PATHS
         assert "excelmanus.workbook.data" in registry_module._WORKBOOK_IMPL_MODULE_PATHS
 
     def test_builtin_tools_declare_write_effect_contract(self, tmp_path) -> None:
         registry = ToolRegistry()
         registry.register_builtin_tools(str(tmp_path))
 
-        assert registry.get_tool("inspect_spreadsheet") is not None
-        assert registry.get_tool("inspect_spreadsheet").write_effect == "none"
+        assert registry.get_tool("observe_spreadsheet") is not None
+        assert registry.get_tool("observe_spreadsheet").write_effect == "none"
 
         assert registry.get_tool("write_text_file") is not None
         assert registry.get_tool("write_text_file").write_effect == "workspace_write"
@@ -126,8 +126,8 @@ class TestToolRegistry:
         assert registry.get_tool("run_shell") is not None
         assert registry.get_tool("run_shell").write_effect == "dynamic"
 
-        assert registry.get_tool("edit_spreadsheet") is not None
-        assert registry.get_tool("edit_spreadsheet").write_effect == "workspace_write"
+        assert registry.get_tool("apply_spreadsheet_changes") is not None
+        assert registry.get_tool("apply_spreadsheet_changes").write_effect == "workspace_write"
 
         assert registry.get_tool("memory_save") is not None
         assert registry.get_tool("memory_save").write_effect == "external_write"

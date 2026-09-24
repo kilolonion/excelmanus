@@ -70,9 +70,9 @@ describe("desktop progress", () => {
 
   it("does not claim a browser download for the new native bridge", async () => {
     bridge(Promise.resolve({ ...initial, phase: "idle" }));
-    window.excelManusDesktop!.checkUpdate = vi.fn().mockResolvedValue({ current: "1.8.0", latest: "1.9.0",
+    window.excelManusDesktop!.checkUpdate = vi.fn().mockResolvedValue({ current: "1.8.1", latest: "1.9.0",
       hasUpdate: true, downloadUrl: "https://github.com/kilolonion/excelmanus/releases/download/v1.9.0/setup.exe" });
-    render(<DesktopUpdateCard current="1.8.0" />);
+    render(<DesktopUpdateCard current="1.8.1" />);
     fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
     fireEvent.click(await screen.findByRole("button", { name: "下载 v1.9.0 安装包" }));
     await act(async () => {});

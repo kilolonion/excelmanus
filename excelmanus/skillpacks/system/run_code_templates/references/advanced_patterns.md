@@ -6,7 +6,7 @@
 ## 批量条件写入
 
 先 analyze_spreadsheet(mode="filter", conditions=[...], columns=[目标列])，
-再 edit_spreadsheet(operations=[{kind:"write", selection:读结果.selection, values:二维矩阵}])。
+再 apply_spreadsheet_changes(operations=[{kind:"write", selection:读结果.selection, values:二维矩阵}])。
 矩阵行顺序对应 selection.rows，列顺序对应 selection.cols；不能按排序后的第几行当 Excel 行号。
 完整可执行代码见 write_patterns.md。只有在确需 Python 计算时使用 run_code，简单条件和汇总直接调 native。
 
@@ -27,5 +27,5 @@ aggregate/pivot 的 join 是左连接，右表重复键取第一条；先 distin
 ## VBA 与对象边界
 
 能保留宏字节不等于执行宏。事件宏、ActiveX 和 UserForm 不属于当前能力。
-当前 pivot 产生静态矩阵；原生 PivotTable、Table、命名范围、自动筛选、打印设置和图片插入没有公开修改入口。
+pivot 生成矩阵；原生 PivotTable、Table、命名范围、图片使用对应对象 kind，打印设置使用 print_layout。具体支持范围查询当前操作合同。
 图表目前可创建，不能更新/删除已有图表。不能用不落盘的 ws.add_table()/wb.save 片段声称完成。

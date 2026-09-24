@@ -196,7 +196,7 @@ def _is_file_like(obj):
     return hasattr(obj, "write") and not isinstance(obj, (str, bytes, bytearray))
 
 _XLSX_BYPASS_MSG = (
-    "工作区表格禁止直接保存。请用 em.format_spreadsheet、em.edit_spreadsheet 或 em.split_spreadsheet [等级: %s]"
+    "工作区表格禁止直接保存。请用 em.apply_spreadsheet_changes 或 em.split_spreadsheet [等级: %s]"
 )
 
 def _deny_workbook_bypass(path, label="save"):

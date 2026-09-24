@@ -43,23 +43,23 @@ export function WorkbookContextChip() {
     () => "");
   if (!target || !sessionId) return null;
   const label = `${fileBaseName(target.file.relative)}${target.sheet ? ` · ${target.sheet}` : ""}`;
-  return <div className="flex items-center gap-1.5 px-3 pt-2 pb-1 text-xs text-[var(--em-primary)]" data-workbook-context={target.file.relative}>
-    <FileSpreadsheet className="h-3.5 w-3.5 shrink-0" />
-    <button type="button" className="truncate text-left min-w-0" title={`本次提问默认引用：${target.file.relative}`} onClick={() => {
+  return <div className="em-composer-tab em-composer-tab--workbook text-xs" data-workbook-context={target.file.relative}>
+    <span className="em-composer-tab-icon" aria-hidden="true"><FileSpreadsheet className="h-3.5 w-3.5" /></span>
+    <button type="button" className="em-composer-tab-label truncate text-left min-w-0" title={`本次提问默认引用：${target.file.relative}`} onClick={() => {
       recordWorkbookChatNavigation("sheet", target.file.relative);
       useExcelStore.getState().openFullView(target.file.relative, target.sheet, target.layout);
     }}>{label}</button>
     <button type="button" aria-label={isPreview ? "设为主对话文件" : "更换主对话文件"} title={isPreview ? "关闭预览后继续讨论此表格" : "更换主对话文件"}
-      className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] px-2 py-1 hover:bg-[var(--em-primary-alpha-12)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--em-primary)]"
+      className="em-composer-tab-action inline-flex shrink-0 items-center gap-1"
       onClick={() => {
         const store = useWorkbookConversationStore.getState();
         if (isPreview) { useExcelStore.getState().setPrimaryWorkbook(target.file.relative); }
         else store.openSwitchPicker(sessionId);
       }}>
-      <ArrowLeftRight className="h-3 w-3" />{isPreview ? "设为主对话" : "更换"}
+      <ArrowLeftRight className="h-3 w-3" /><span className="em-composer-tab-action-label">{isPreview ? "设为主对话" : "更换"}</span>
     </button>
-    <span className="text-muted-foreground shrink-0 ml-auto">{editState || (view?.status === "ready" ? isPreview ? "本次引用预览" : "已关联" : view?.status === "error" ? "打开失败" : "加载中…")}</span>
-    <button type="button" aria-label={isPreview ? "关闭当前预览" : "移除当前表格关联"} className="p-1 rounded hover:bg-muted shrink-0" onClick={() => {
+    <span className="em-composer-tab-status shrink-0">{editState || (view?.status === "ready" ? isPreview ? "本次引用预览" : "" : view?.status === "error" ? "打开失败" : "加载中…")}</span>
+    <button type="button" aria-label={isPreview ? "关闭当前预览" : "移除当前表格关联"} className="em-composer-tab-dismiss shrink-0" onClick={() => {
       useExcelStore.getState().closePanel();
       useExcelStore.getState().closeFullView();
       if (!isPreview) useWorkbookConversationStore.getState().detach(sessionId);

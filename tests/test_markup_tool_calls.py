@@ -33,10 +33,10 @@ def _call(name: str, arguments, tc_id: str = "call_1") -> SimpleNamespace:
 
 MIMO_MARKUP = (
     "现在把宽度恢复回去，高度保留。"
-    "<tool_call><function=format_spreadsheet>"
+    "<tool_call><function=apply_spreadsheet_changes>"
     "<parameter=expected_version>sha256:d586608f</parameter>"
     "<parameter=file_path>outputs/收款收据_布局还原版.xlsx</parameter>"
-    '<parameter=operations>[{"kind": "size", "columns": {"A": 7}}, '
+    '<parameter=operations>[{"kind": "size", "column_widths": {"A": 7}}, '
     '{"kind": "print_layout", "print_layout": {"fit_to_width": 1}}]</parameter>'
     "</function></tool_call>"
 )
@@ -47,11 +47,11 @@ class TestParseMarkupToolCalls:
         calls = parse_markup_tool_calls(MIMO_MARKUP)
         assert len(calls) == 1
         call = calls[0]
-        assert call["name"] == "format_spreadsheet"
+        assert call["name"] == "apply_spreadsheet_changes"
         assert call["arguments"]["expected_version"] == "sha256:d586608f"
         assert call["arguments"]["file_path"] == "outputs/收款收据_布局还原版.xlsx"
         assert call["arguments"]["operations"] == [
-            {"kind": "size", "columns": {"A": 7}},
+            {"kind": "size", 'column_widths': {"A": 7}},
             {"kind": "print_layout", "print_layout": {"fit_to_width": 1}},
         ]
 
@@ -97,7 +97,7 @@ class TestRecoverToolCallsFromMarkup:
         """复刻导出日志：网关把数组参数截断在 \"operations\": 处。"""
         message = _msg(MIMO_MARKUP)
         tc = _call(
-            "format_spreadsheet",
+            "apply_spreadsheet_changes",
             '{"expected_version": "sha256:d586608f", '
             '"file_path": "outputs/收款收据_布局还原版.xlsx", "operations": ',
         )
@@ -105,7 +105,7 @@ class TestRecoverToolCallsFromMarkup:
 
         assert len(calls) == 1
         args = json.loads(calls[0].function.arguments)
-        assert args["operations"][0] == {"kind": "size", "columns": {"A": 7}}
+        assert args["operations"][0] == {"kind": "size", 'column_widths': {"A": 7}}
         assert args["file_path"] == "outputs/收款收据_布局还原版.xlsx"
         assert calls[0].id == "call_1"  # 保留原 id，tool_result 才能关联
         assert "<tool_call>" not in message.content

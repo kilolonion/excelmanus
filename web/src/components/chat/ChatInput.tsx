@@ -1,9 +1,12 @@
 "use client";
 
+import { activateModelProfile } from "@/lib/model-config-api";
+
 import { useRef, useState, useCallback, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowUp,
+  Play,
   Square,
   Loader2,
   Check,
@@ -19,11 +22,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
-import { apiFetch, buildApiUrl, apiGet, apiPut, getAuthHeaders } from "@/lib/api";
+import { apiFetch, buildApiUrl, apiGet, getAuthHeaders } from "@/lib/api";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { applyVisionFromModel } from "@/lib/vision-capability";
 import { UndoPanel } from "@/components/modals/UndoPanel";
-import type { ModelInfo, AttachedFile } from "@/lib/types";
+import type { ModelInfo, AttachedFile, MessageDispatchMode } from "@/lib/types";
 import {
   SLASH_COMMANDS,
   DISPLAY_COMMANDS,
@@ -61,10 +64,11 @@ import { ComposerRecoveryBar } from "./ComposerRecoveryBar";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import { resolveWorkspaceSurface } from "@/lib/workspace-surface";
-import { findLastRetryableFailure } from "@/lib/failure-recovery";
+import { findLastRetryableFailure, needsContinuationOffer } from "@/lib/failure-recovery";
+import { DispatchQueue } from "./DispatchQueue";
 
 interface ChatInputProps {
-  onSend: (text: string, files?: AttachedFile[], sessionId?: string | null) => void | boolean | Promise<void | boolean>;
+  onSend: (text: string, files?: AttachedFile[], sessionId?: string | null, dispatchMode?: MessageDispatchMode) => void | boolean | Promise<void | boolean>;
   onCommandResult?: (command: string, result: string, format: "markdown" | "text") => void;
   disabled?: boolean;
   isStreaming?: boolean;
@@ -92,15 +96,26 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
   const [activeSlashCmd, setActiveSlashCmd] = useState<string | null>(null);
   const [modelList, setModelList] = useState<ModelInfo[]>([]);
   const currentModel = useUIStore((s) => s.currentModel);
-  const setCurrentModel = useUIStore((s) => s.setCurrentModel);
   const visionCapable = useUIStore((s) => s.visionCapable);
   const configReady = useUIStore((s) => s.configReady);
   const configError = useUIStore((s) => s.configError);
   const configPlaceholderItems = useUIStore((s) => s.configPlaceholderItems);
+  const messageDispatchDefault = useUIStore((s) => s.messageDispatchDefault);
   const openSettings = useUIStore((s) => s.openSettings);
   const setConfigError = useUIStore((s) => s.setConfigError);
   const [confirmedTokens, setConfirmedTokens] = useState<Set<string>>(new Set());
   const [undoPanelOpen, setUndoPanelOpen] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    const before = useUIStore.getState().messageDispatchDefault;
+    void apiGet<{ message_dispatch_default?: MessageDispatchMode }>("/config/runtime", { signal: controller.signal }).then((config) => {
+      if (!controller.signal.aborted && config.message_dispatch_default && useUIStore.getState().messageDispatchDefault === before) {
+        useUIStore.getState().setMessageDispatchDefault(config.message_dispatch_default);
+      }
+    }).catch(() => {});
+    return () => controller.abort();
+  }, []);
 
   const tokenMapRef = useRef<Map<string, string>>(new Map());
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -109,6 +124,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
   const inputHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
   const pendingQuestion = useChatStore((s) => s.pendingQuestion);
+  const answeringQuestion = Boolean(pendingQuestion);
+  const pendingApproval = useChatStore((s) => s.pendingApproval);
   const hasMessages = useChatStore((s) => s.messageOrder.length > 0);
   // Streaming deltas do not affect the retry control. Avoid rerendering the
   // entire composer (and its file/mention pickers) for each received token.
@@ -118,14 +135,12 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
     () => (isStreaming || !messages ? null : findLastRetryableFailure(messages)),
     [isStreaming, messages],
   );
-
-  const handleRetryLastFailed = useCallback(() => {
-    if (!lastFailure) return;
-    const sessionId = useSessionStore.getState().activeSessionId;
-    void import("@/lib/chat-actions").then(({ retryAssistantMessage }) => {
-      retryAssistantMessage(lastFailure.messageId, sessionId);
-    });
-  }, [lastFailure]);
+  // 异常退出/失败尾部（含未产生 failure_guidance 的静默中断）→ 三角形继续按钮。
+  const continuationOffered = useMemo(
+    () => !isStreaming && !pendingQuestion && !pendingApproval && !!messages
+      && needsContinuationOffer(messages),
+    [isStreaming, pendingQuestion, pendingApproval, messages],
+  );
 
   const handleRetryLastFailedWithModel = useCallback((modelName: string) => {
     if (!lastFailure) return;
@@ -541,9 +556,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
       return;
     }
     try {
-      await apiPut("/models/active", { name });
-      setCurrentModel(name);
-      useUIStore.getState().bumpModelProfiles();
+      await activateModelProfile(name);
       applyVisionFromModel(modelList.find((m) => m.name === name));
       closePopover();
       setText("");
@@ -705,7 +718,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
       }
     }
 
-    if (pendingQuestion) {
+    if (pendingQuestion && answeringQuestion) {
       const selectedLabels = Array.from(questionSelected);
       let answer: string;
       if (selectedLabels.length > 0 && trimmed) {
@@ -752,14 +765,16 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
     const draftText = text;
     const finalText = applyDisplayReplacements(trimmed, tokenMapRef.current);
     sendPendingRef.current = true;
+    setIsSending(true);
     try {
       if (files.some((file) => file.workspaceKey && file.workspaceKey !== workspaceKeyForSessionId(sessionId))) {
         throw new Error("附件属于另一个工作区，请移除后在当前工作区重新选择");
       }
       if (useSessionStore.getState().activeSessionId !== sessionId) throw new Error("已切换对话，草稿已保留，请确认后重新发送");
       const validFiles = files.filter((af) => af.status === "success");
-      const sent = await onSend(finalText, validFiles.length > 0 ? validFiles : undefined, sessionId);
+      const sent = await onSend(finalText, validFiles.length > 0 ? validFiles : undefined, sessionId, messageDispatchDefault);
       if (sent === false) return;
+      if (useSessionStore.getState().activeSessionId !== sessionId) return;
       setText((current) => current === draftText ? "" : current);
       setFiles((current) => current.filter((af) => !validFiles.some((sentFile) => sentFile.id === af.id)));
       if (latestTextRef.current === draftText) {
@@ -771,8 +786,28 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
       nudgeInput(err instanceof Error ? err.message : "暂时无法发送，请重试");
     } finally {
       sendPendingRef.current = false;
+      setIsSending(false);
     }
   };
+
+  // 三角形「继续」：后台发送隐藏的 continue 接续异常退出/失败的回合，
+  // 不产生前台用户消息气泡。
+  const handleContinue = useCallback(() => {
+    if (disabled) {
+      nudgeInput("正在切换对话，请稍候");
+      return;
+    }
+    if (configBlocked) {
+      nudgeInput(getConfigBlockedHint());
+      return;
+    }
+    const sessionId = useSessionStore.getState().activeSessionId;
+    void import("@/lib/chat-actions").then(({ sendContinuation }) =>
+      sendContinuation("continue", sessionId, { promptKind: "continue" }),
+    ).catch((err) =>
+      nudgeInput(`继续失败：${err instanceof Error ? err.message : "未知错误"}`)
+    );
+  }, [disabled, configBlocked, getConfigBlockedHint, nudgeInput]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (isComposingRef.current) return;
@@ -842,10 +877,6 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
         nudgeInput("正在切换对话，请稍候");
         return;
       }
-      if (isStreaming && !pendingQuestion) {
-        nudgeInput("助手正在回复，请稍候");
-        return;
-      }
       if (isAnswerSubmitting) {
         nudgeInput("正在提交回答，请稍候");
         return;
@@ -856,21 +887,24 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
 
   return (
     <>
+      <DispatchQueue />
       {lastFailure && !pendingQuestion && (
         <ComposerRecoveryBar
           hint={lastFailure.title}
-          onRetry={handleRetryLastFailed}
+          onContinue={handleContinue}
           onRetryWithModel={handleRetryLastFailedWithModel}
         />
       )}
+    <div className="em-composer-tabs">
+      {showWorkbookContext && <WorkbookContextChip />}
+      <ChatLiveSelectionChip />
+    </div>
     <ChatDropzone
       onNativeFiles={insertFileMentions}
       onExcelFiles={attachWorkspaceFiles}
       highlighted={draftHighlight}
     >
       <ChatSelectionChip insertMentionTokens={insertMentionTokens} />
-      {showWorkbookContext && <WorkbookContextChip />}
-      <ChatLiveSelectionChip />
       <ChatMentionList
         popover={popover}
         popoverItems={popoverItems}
@@ -975,10 +1009,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
                   {configError && (
                     <button
                       type="button"
-                      onClick={() => setConfigError(null)}
+                      onClick={() => { setConfigError(null); useUIStore.getState().bumpModelProfiles(); }}
                       className="text-xs text-red-500/70 hover:text-red-600 dark:text-red-400/60 dark:hover:text-red-400 transition-colors"
                     >
-                      忽略并重试
+                      重新检查
                     </button>
                   )}
                   <button
@@ -1096,7 +1130,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
             }}
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
-            placeholder={pendingQuestion ? "输入自定义回答，或选择上方选项后发送" : (hasMessages ? "继续分析，或告诉我下一步…" : "有问题，尽管问")}
+            placeholder={answeringQuestion ? "输入自定义回答，或选择上方选项后发送" : (hasMessages ? "继续分析，或告诉我下一步…" : "有问题，尽管问")}
             disabled={disabled || isAnswerSubmitting}
             className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
               focus-visible:ring-0 focus-visible:ring-offset-0
@@ -1116,7 +1150,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
         </div>
 
         <div className="flex-shrink-0">
-            {isStreaming && !pendingQuestion ? (
+            {isStreaming && !pendingQuestion && !text.trim() && files.length === 0 ? (
                 <Button
                   key="stop"
                   data-coach-id="coach-stop-btn"
@@ -1128,23 +1162,40 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
                 >
                   <Square className="h-3 w-3 fill-background text-background" />
                 </Button>
-            ) : (
+            ) : continuationOffered && !text.trim() && files.length === 0 ? (
                 <Button
-                  key="send"
-                  data-coach-id="coach-send-btn"
-                  aria-label={pendingQuestion ? "发送回答" : "发送消息"}
+                  key="continue"
+                  data-coach-id="coach-continue-btn"
+                  aria-label="继续执行"
+                  title="继续执行"
                   size="icon"
                   className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
-                  onClick={handleSend}
-                  disabled={disabled || isAnswerSubmitting || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || hasUploadingFiles || hasFailedFiles}
+                  onClick={handleContinue}
+                  disabled={disabled || isAnswerSubmitting || configBlocked}
                 >
                   {isAnswerSubmitting ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <ArrowUp className="h-3.5 w-3.5" />
+                    <Play className="h-3.5 w-3.5 fill-current" />
                   )}
                 </Button>
+            ) : (
+              <div className="flex items-center gap-1">
+                {isStreaming && <Button type="button" variant="ghost" size="icon-sm" aria-label="停止生成" title="停止生成" onClick={onStop}><Square className="size-3.5" /></Button>}
+                <Button
+                  key="send"
+                  data-coach-id="coach-send-btn"
+                  aria-label={answeringQuestion ? "发送回答" : "发送消息"}
+                  size="icon"
+                  className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
+                  style={{ backgroundColor: "var(--em-primary)" }}
+                  onClick={handleSend}
+                  disabled={disabled || isSending || isAnswerSubmitting || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || hasUploadingFiles || hasFailedFiles}
+                >
+                  {isAnswerSubmitting || isSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" />}
+                </Button>
+              </div>
             )}
         </div>
       </div>

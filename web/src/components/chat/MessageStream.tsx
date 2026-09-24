@@ -11,9 +11,10 @@ import { AssistantMessage } from "./AssistantMessage";
 import { RollbackConfirmDialog } from "./RollbackConfirmDialog";
 import { messageEnterVariants } from "@/lib/sidebar-motion";
 import { useChatStore } from "@/stores/chat-store";
+import { useDispatchStore } from "@/stores/dispatch-store";
 import type { Message, FileAttachment } from "@/lib/types";
 import { isHiddenAssistantChrome } from "@/lib/assistant-chrome";
-import { stripInjectedUserPromptBlocks } from "@/lib/injected-user-prompt";
+import { dedupeFileAttachments, prepareUserMessageDisplay } from "@/lib/upload-notice";
 
 interface MessageStreamProps {
   isStreaming: boolean;
@@ -458,7 +459,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
       >
         {(hasMoreMessages || isLoadingOlderMessages) && (
           <div
-            className="pointer-events-none sticky top-1 z-10 flex h-0 justify-center overflow-visible"
+            className="pointer-events-none sticky top-0 z-10 flex h-8 items-center justify-center"
             aria-live="polite"
           >
             <button type="button" disabled={isLoadingOlderMessages}
@@ -467,7 +468,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
                 if (container) prependAnchorRef.current = { top: container.scrollTop, height: container.scrollHeight };
                 void loadOlderMessages();
               }}
-              className="pointer-events-auto rounded-full border border-border/60 bg-background/90 px-3 py-1 text-[11px] text-muted-foreground shadow-sm">
+              className="pointer-events-auto rounded-full border border-border/60 bg-background px-3 py-1 text-[11px] text-muted-foreground shadow-sm transition-[color,border-color] hover:text-foreground hover:border-[var(--em-primary-alpha-20)] disabled:opacity-70">
               {isLoadingOlderMessages ? "正在加载更早消息…" : "加载更早消息"}
             </button>
           </div>
@@ -653,22 +654,27 @@ const MessageRowItem = memo(function MessageRowItem({
   onRetryWithModel?: (assistantMessageId: string, modelName: string) => void;
 }) {
   const message = useChatStore((s) => s.messagesById[messageId]);
+  const sessionId = useChatStore((s) => s.loadedSessionId);
+  const receipt = useDispatchStore((s) => sessionId ? s.sessions[sessionId]?.[messageId] : undefined);
   useChatStore((s) => {
     const msg = s.messagesById[messageId];
     return msg ? messageContentTick(msg) : 0;
   });
   if (!message) return null;
   if (message.role === "user") {
-    const visibleContent = stripInjectedUserPromptBlocks(message.content);
-    if (!visibleContent && (!message.files || message.files.length === 0)) {
+    const visible = prepareUserMessageDisplay(message.content);
+    const visibleFiles = dedupeFileAttachments([...(message.files ?? []), ...visible.files]);
+    if (!visible.content && visibleFiles.length === 0) {
       return null;
     }
     return (
       <UserMessage
-        content={visibleContent}
-        files={message.files}
+        content={visible.content}
+        files={visibleFiles}
         isStreaming={isStreaming}
         timestamp={message.timestamp}
+        dispatchMode={message.dispatchMode}
+        dispatchStatus={receipt?.status ?? message.dispatchStatus}
         onEditAndResend={
           onEditAndResend
             ? (newContent: string, files?: File[], retainedFiles?: FileAttachment[]) =>
@@ -694,11 +700,12 @@ const MessageRowItem = memo(function MessageRowItem({
 function estimateMessageSize(msg: Message | undefined): number {
   if (!msg) return 96;
   if (msg.role === "user") {
-    const visible = stripInjectedUserPromptBlocks(msg.content);
-    if (!visible && (!msg.files || msg.files.length === 0)) return 0;
-    const lineCount = (visible.match(/\n/g) || []).length + 1;
+    const visible = prepareUserMessageDisplay(msg.content);
+    const files = dedupeFileAttachments([...(msg.files ?? []), ...visible.files]);
+    if (!visible.content && files.length === 0) return 0;
+    const lineCount = (visible.content.match(/\n/g) || []).length + 1;
     // 改进：考虑文件附件的高度
-    const fileHeight = (msg.files?.length || 0) * 32;
+    const fileHeight = files.length * 32;
     return Math.max(72, Math.min(lineCount * 24 + 56 + fileHeight, 400));
   }
 

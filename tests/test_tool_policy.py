@@ -35,10 +35,10 @@ EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
     "rename_file",
     "copy_file",
     "write_word",
-    "edit_spreadsheet",
-    "format_spreadsheet",
+    "apply_spreadsheet_changes",
+    "apply_spreadsheet_changes",
     "split_spreadsheet",
-    "manage_spreadsheet_objects",
+    "apply_spreadsheet_changes",
     "manage_spreadsheet_versions",
     "calculate_spreadsheet",
     "render_spreadsheet",
@@ -98,7 +98,7 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
         if name in {
             "run_code",
             "run_shell",
-            "manage_spreadsheet_objects",
+            "apply_spreadsheet_changes",
             "manage_spreadsheet_versions",
             "split_spreadsheet",
             "calculate_spreadsheet",
@@ -171,10 +171,11 @@ def test_tool_categories_cover_all_registered_tools(tmp_path: Path) -> None:
     assert not uncategorized, f"未分类工具: {sorted(uncategorized)}"
 
 
-def test_tool_categories_no_duplicates() -> None:
+def test_tool_categories_have_unique_members_and_explicit_cross_category_aliases() -> None:
     from excelmanus.tools.policy import TOOL_CATEGORIES
-    seen: set[str] = set()
-    for cat, tools in TOOL_CATEGORIES.items():
-        for tool in tools:
-            assert tool not in seen, f"工具 '{tool}' 在多个分类中重复"
-            seen.add(tool)
+    membership={}
+    for category,names in TOOL_CATEGORIES.items():
+        assert len(names)==len(set(names)), category
+        for name in names:
+            membership.setdefault(name,set()).add(category)
+    assert {name:groups for name,groups in membership.items() if len(groups)>1} == {"apply_spreadsheet_changes":{"edit","format","objects"}}

@@ -1,6 +1,6 @@
 """格式化内部辅助：样式构建、样式读取、行列尺寸估算。
 
-写入走 `format_spreadsheet`；本模块不再提交工作簿。
+写入走 `apply_spreadsheet_changes`；本模块不再提交工作簿。
 """
 
 from __future__ import annotations
@@ -69,142 +69,6 @@ def init_guard(workspace_root: str) -> None:
 
 
 # ── 只读样式探查 ──────────────────────────────────────────
-
-def read_cell_styles(
-    file_path: str,
-    cell_range: str,
-    sheet_name: str | None = None,
-    summary_only: bool = False,
-) -> ToolResult:
-    """读取指定单元格范围的样式信息（字体、填充、边框、对齐等）。
-
-    Args:
-        file_path: Excel 文件路径。
-        cell_range: 单元格范围，如 "A1:C3" 或 "A1"。
-        sheet_name: 工作表名称，默认活动工作表。
-        summary_only: 仅返回样式统计汇总而非逐单元格明细。
-
-    Returns:
-        ToolResult（value 为样式信息）。
-    """
-    guard = _get_guard()
-    safe_path = guard.resolve_and_validate(file_path)
-
-    from excelmanus.tools._helpers import ensure_openpyxl_compatible
-    safe_path = ensure_openpyxl_compatible(safe_path)
-
-    wb = load_workbook(safe_path)
-    ws = get_worksheet(wb, sheet_name)
-
-    # 获取合并单元格范围集合
-    merged_ranges = ws.merged_cells.ranges
-    merged_set: set[str] = set()
-    for mr in merged_ranges:
-        for row in mr.rows:
-            for cell_coord in row:
-                merged_set.add(f"{get_column_letter(cell_coord[1])}{cell_coord[0]}")
-
-    cell_data = ws[cell_range]
-    # 归一化为 tuple of tuples
-    if isinstance(cell_data, (Cell, MergedCell)):
-        rows: tuple = ((cell_data,),)
-    elif isinstance(cell_data, tuple) and cell_data and not isinstance(cell_data[0], tuple):
-        # 单行范围如 "A1:C1" 返回 tuple of Cell
-        rows = (cell_data,)
-    else:
-        rows = cell_data
-
-    max_cells = 200
-    cell_styles: list[dict[str, Any]] = []
-    fill_colors: set[str] = set()
-    font_colors: set[str] = set()
-    font_names: set[str] = set()
-    border_styles_used: set[str] = set()
-    total_cells = 0
-
-    for row in rows:
-        row_cells = row if isinstance(row, tuple) else (row,)
-        for cell in row_cells:
-            total_cells += 1
-            coord = f"{get_column_letter(cell.column)}{cell.row}"
-            is_merged = coord in merged_set
-
-            # 提取样式信息
-            font_info = _extract_font(cell.font)
-            fill_info = _extract_fill(cell.fill)
-            border_info = _extract_border(cell.border)
-            align_info = _extract_alignment(cell.alignment)
-            num_fmt = cell.number_format if cell.number_format != "General" else None
-
-            # 收集统计信息
-            if fill_info and fill_info.get("color"):
-                fill_colors.add(fill_info["color"])
-            if font_info:
-                if font_info.get("color"):
-                    font_colors.add(font_info["color"])
-                if font_info.get("name"):
-                    font_names.add(font_info["name"])
-            if border_info:
-                for side_name in ("left", "right", "top", "bottom"):
-                    s = border_info.get(side_name)
-                    if s and s != "none":
-                        border_styles_used.add(s)
-
-            if not summary_only and len(cell_styles) < max_cells:
-                # 只输出有非默认样式的单元格
-                has_style = any([font_info, fill_info, border_info, align_info, num_fmt, is_merged])
-                if has_style:
-                    entry: dict[str, Any] = {"cell": coord}
-                    val = cell.value
-                    if val is not None:
-                        entry["value"] = str(val) if not isinstance(val, (int, float, bool)) else val
-                    if font_info:
-                        entry["font"] = font_info
-                    if fill_info:
-                        entry["fill"] = fill_info
-                    if border_info:
-                        entry["border"] = border_info
-                    if align_info:
-                        entry["alignment"] = align_info
-                    if num_fmt:
-                        entry["number_format"] = num_fmt
-                    if is_merged:
-                        entry["merged"] = True
-                    cell_styles.append(entry)
-
-    # 在 wb.close() 之前保存 shape 信息
-    sheet_max_row = ws.max_row or 0
-    sheet_max_col = ws.max_column or 0
-
-    wb.close()
-
-    # 构建合并范围列表
-    range_merged: list[str] = [str(mr) for mr in merged_ranges]
-
-    result: dict[str, Any] = {
-        "status": "success",
-        "file": safe_path.name,
-        "range": cell_range,
-        "total_cells": total_cells,
-        "rows": sheet_max_row,
-        "columns": sheet_max_col,
-        "summary": {
-            "fill_colors_used": sorted(fill_colors),
-            "font_colors_used": sorted(font_colors),
-            "font_names_used": sorted(font_names),
-            "border_styles_used": sorted(border_styles_used),
-            "merged_ranges": range_merged,
-            "has_merged_cells": len(range_merged) > 0,
-        },
-    }
-    if not summary_only:
-        result["styled_cells"] = cell_styles
-        if len(cell_styles) >= max_cells:
-            result["truncated"] = True
-            result["truncated_message"] = f"仅展示前 {max_cells} 个有样式的单元格"
-
-    logger.info("已读取 %s 范围 %s 的样式（%d 个单元格）", safe_path.name, cell_range, total_cells)
-    return from_payload(result)
 
 # ── 列宽 / 行高智能估算 ─────────────────────────────────
 
@@ -405,7 +269,11 @@ def apply_column_sizes(
     """在已打开的工作表上调整列宽，不提交文件。"""
     adjusted: dict[str, float] = {}
     if columns:
-        for col_letter, width in _size_entries(columns, axis="column").items():
+        from excelmanus.workbook.geometry import materialize_column_spans
+        from openpyxl.utils import column_index_from_string
+        normalized = _size_entries(columns, axis="column")
+        materialize_column_spans(ws, [column_index_from_string(k) for k in normalized])
+        for col_letter, width in normalized.items():
             ws.column_dimensions[str(col_letter).upper()].width = float(width)
             adjusted[str(col_letter).upper()] = float(width)
         return adjusted
@@ -650,7 +518,7 @@ def _patch_alignment(existing: Any, config: dict[str, Any]) -> Alignment:
 
 # ── 条件格式规则构建 ─────────────────────────────────────
 #
-# format_spreadsheet kind=conditional_format 与 workbook_spec
+# apply_spreadsheet_changes kind=conditional_format 与 workbook_spec
 # conditional_formats 共用的规则构建。输入是模型面 dict（允许
 # 常用别名/大小写混写），输出 openpyxl 规则对象；非法输入抛 ValueError。
 
@@ -1099,7 +967,7 @@ def build_data_validation(rule_spec: dict[str, Any]) -> Any:
     return DataValidation(**kwargs)
 
 
-# ── 样式提取辅助函数（用于 read_cell_styles）──────────────
+# ── 样式提取辅助函数──────────────
 
 
 def _color_to_hex(color: Any) -> str | None:

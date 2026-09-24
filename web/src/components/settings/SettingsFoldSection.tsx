@@ -13,6 +13,7 @@ export function SettingsFoldSection({
   defaultOpen = true,
   open: openProp,
   onOpenChange,
+  embedded = false,
   children,
 }: {
   title: string;
@@ -23,6 +24,7 @@ export function SettingsFoldSection({
   defaultOpen?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  embedded?: boolean;
   children: ReactNode;
 }) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen);
@@ -36,7 +38,7 @@ export function SettingsFoldSection({
   const toggle = () => setOpen(!open);
 
   return (
-    <section className="em-settings-section rounded-xl border border-border" data-coach-id={coachId}>
+    <section className={cn("em-settings-section rounded-xl border border-border", embedded && "em-settings-section-embedded")} data-coach-id={coachId}>
       <div
         role="button"
         tabIndex={0}

@@ -1477,6 +1477,23 @@ class TestIterationLimit:
         assert result.iterations <= 3
         assert result.reply != '完成'
 
+    @pytest.mark.asyncio
+    async def test_zero_allows_more_than_old_call_limit(self) -> None:
+        config = _make_config(max_iterations=0)
+        engine = AgentEngine(config, _make_registry_with_tools())
+        _activate_test_tools(engine)
+        tool_responses = [
+            _make_tool_call_response([(f'call_{i}', 'add_numbers', json.dumps({'a': i, 'b': i}))])
+            for i in range(125)
+        ]
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[*tool_responses, _make_text_response('完成')],
+        )
+        result = await engine.followup('持续调用工具直到完成')
+        assert result.reply == '完成'
+        assert result.truncated is False
+        assert len(result.tool_calls) == 125
+
 class TestAsyncToolExecution:
     """异步工具执行场景（Requirement 1.10）。"""
 
@@ -2089,3 +2106,52 @@ async def test_refresh_credential_updates_protocol_even_if_token_unchanged() -> 
     engine._credential_resolver = resolver
     await engine._refresh_credential_if_needed()
     assert engine._active_protocol == 'openai_responses'
+
+
+@pytest.mark.asyncio
+async def test_named_api_profile_does_not_switch_to_subscription_credential() -> None:
+    proxy = ModelProfile(
+        name='codex proxy', model='gpt-6-astra', api_key='proxy-key',
+        base_url='https://proxy.example.com/v1', protocol='openai_responses',
+    )
+    cfg = _make_config(models=(proxy,))
+    engine = AgentEngine(cfg, _make_registry_with_tools())
+    engine.switch_model(proxy.name)
+    resolver = AsyncMock()
+    resolver.resolve.return_value = ResolvedCredential(
+        api_key='revoked-oauth-token', base_url='https://chatgpt.com/backend-api/codex',
+        source='oauth', provider='openai-codex', protocol='openai_responses',
+    )
+    engine._credential_resolver = resolver
+
+    await engine._refresh_credential_if_needed()
+
+    resolver.resolve.assert_not_awaited()
+    assert engine._active_api_key == 'proxy-key'
+    assert engine.active_base_url == 'https://proxy.example.com/v1'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('name, model', [
+    ('openai-codex/gpt-6-astra', 'gpt-6-astra'),
+    ('my-subscription', 'openai-codex/gpt-6-astra'),
+])
+async def test_managed_subscription_profile_still_refreshes_credential(name: str, model: str) -> None:
+    subscription = ModelProfile(
+        name=name, model=model, api_key='old-token',
+        base_url='https://chatgpt.com/backend-api/codex', protocol='openai_responses',
+    )
+    cfg = _make_config(models=(subscription,))
+    engine = AgentEngine(cfg, _make_registry_with_tools())
+    engine.switch_model(subscription.name)
+    resolver = AsyncMock()
+    resolver.resolve.return_value = ResolvedCredential(
+        api_key='new-token', base_url='https://chatgpt.com/backend-api/codex',
+        source='oauth', provider='openai-codex', protocol='openai_responses',
+    )
+    engine._credential_resolver = resolver
+
+    await engine._refresh_credential_if_needed()
+
+    resolver.resolve.assert_awaited_once_with(name if name.startswith('openai-codex/') else model)
+    assert engine._active_api_key == 'new-token'

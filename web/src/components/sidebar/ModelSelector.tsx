@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,64 +11,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
-import { useUIStore } from "@/stores/ui-store";
-import { apiGet, apiPut } from "@/lib/api";
 import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
-import { applyVisionFromModel } from "@/lib/vision-capability";
+import { useModelSelection } from "@/hooks/use-model-selection";
 
 export function ModelSelector() {
-  const currentModel = useUIStore((s) => s.currentModel);
-  const setCurrentModel = useUIStore((s) => s.setCurrentModel);
-  const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [switching, setSwitching] = useState(false);
-  const [switchError, setSwitchError] = useState<string | null>(null);
-  const modelsRequestRef = useRef(0);
-
-  const fetchModels = () => {
-    const requestId = ++modelsRequestRef.current;
-    const profileVersion = useUIStore.getState().modelProfileVersion;
-    apiGet<{ models: ModelInfo[] }>("/models")
-      .then((data) => {
-        if (requestId !== modelsRequestRef.current || profileVersion !== useUIStore.getState().modelProfileVersion) return;
-        setModels(data.models);
-        const active = data.models.find((m) => m.active);
-        setCurrentModel(active?.name ?? "");
-        applyVisionFromModel(active);
-        if (!active) useUIStore.getState().setVisionCapable(null);
-      })
-      .catch(() => {});
-  };
-
-  useEffect(() => {
-    fetchModels();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // 当 Settings 页 profile 变更时自动刷新模型列表
-  useEffect(() => {
-    if (modelProfileVersion > 0) fetchModels();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelProfileVersion]);
-
-  const handleSwitch = async (name: string) => {
-    if (name === currentModel || switching) return;
-    setSwitching(true);
-    setSwitchError(null);
-    try {
-      await apiPut("/models/active", { name });
-      setCurrentModel(name);
-      useUIStore.getState().bumpModelProfiles();
-      applyVisionFromModel(models.find((m) => m.name === name));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "切换失败";
-      setSwitchError(msg);
-      setTimeout(() => setSwitchError(null), 3000);
-    } finally {
-      setSwitching(false);
-    }
-  };
+  const { currentModel, models, switching, error: switchError, reload, selectModel: handleSwitch } = useModelSelection();
 
   const activeModel = models.find((m) => m.name === currentModel);
   const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
@@ -78,7 +25,7 @@ export function ModelSelector() {
     : currentModel || "模型未加载";
 
   return (
-    <DropdownMenu>
+    <DropdownMenu onOpenChange={(open) => { if (open) void reload(); }}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"

@@ -8,7 +8,7 @@ import pytest
 from openpyxl import Workbook
 
 from excelmanus.engine_core.tool_result import ToolResult
-from excelmanus.workbook import sheets as sheet_tools
+from excelmanus.tools import workbook_tools as sheet_tools
 
 
 def _payload(result: ToolResult) -> dict:
@@ -34,54 +34,28 @@ def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
-class TestListSheets:
-    def test_basic(self, workspace: Path) -> None:
-        result = _payload(sheet_tools.list_sheets("multi.xlsx"))
-        assert result.get("status") == "success"
-        assert result["file"] == "multi.xlsx"
-        assert result["sheet_count"] == 7
-        assert result["returned"] == 7
-        assert len(result["sheets"]) == 7
+class TestObservationSheets:
+    def test_basic(self,workspace):
+        result=sheet_tools.observe_spreadsheet("multi.xlsx")
+        assert result.success and result.value["file_path"]=="multi.xlsx"
+        assert len(result.value["sheets"])==7
 
-    def test_pagination(self, workspace: Path) -> None:
-        full = _payload(sheet_tools.list_sheets("multi.xlsx"))
-        page = _payload(sheet_tools.list_sheets("multi.xlsx", offset=2, limit=2))
-        assert page["sheet_count"] == full["sheet_count"]
-        assert page["offset"] == 2
-        assert page["limit"] == 2
-        assert page["returned"] == 2
-        assert page["sheets"] == full["sheets"][2:4]
-        assert page["has_more"] is True
+    def test_pagination(self,workspace):
+        page=sheet_tools.observe_spreadsheet("multi.xlsx",offset=2,limit=2).value
+        assert len(page["sheets"])==7
+        assert [r["sheet"] for r in page["regions"]]==["S03","S04"]
+        assert page["coverage"]["next_offset"]==4
 
-    def test_invalid_paging(self, workspace: Path) -> None:
-        result = _payload(sheet_tools.list_sheets("multi.xlsx", offset=-1, limit=10))
-        assert result.get("status") == "error"
-        result = _payload(sheet_tools.list_sheets("multi.xlsx", offset=0, limit=0))
-        assert result.get("status") == "error"
+    @pytest.mark.parametrize("offset,limit",[(-1,10),(0,0)])
+    def test_invalid_paging(self,workspace,offset,limit):
+        assert not sheet_tools.observe_spreadsheet("multi.xlsx",offset=offset,limit=limit).success
 
-    def test_file_not_found_returns_structured_error_with_suggestions(self, workspace: Path) -> None:
-        """文件不存在时应返回结构化错误 JSON 并列出可用 Excel 文件。"""
-        listed = sheet_tools.list_sheets("nonexistent.xlsx")
-        assert listed.success is False
-        result = _payload(listed)
-        assert result.get("status") == "error"
-        assert "nonexistent.xlsx" in result["message"]
-        assert "hint" in result
-        assert "available_excel_files" in result
-        assert "multi.xlsx" in result["available_excel_files"]
-        assert "不要擅自替换" in result["hint"]
-        assert "请用户提供" in result["remediation"]
+    def test_file_not_found_preserves_candidates(self,workspace):
+        result=sheet_tools.observe_spreadsheet("nonexistent.xlsx")
+        assert not result.success
+        assert "multi.xlsx" in result.value["available_excel_files"]
+        assert "不要擅自替换" in result.value["hint"]
 
-    def test_file_not_found_in_subdir(self, workspace: Path) -> None:
-        """子目录下不存在的文件也应返回结构化错误。"""
-        (workspace / "outputs").mkdir(exist_ok=True)
-        result = _payload(sheet_tools.list_sheets("outputs/missing.xlsx"))
-        assert result.get("status") == "error"
-        assert "missing.xlsx" in result["message"]
-        assert "hint" in result
-
-    def test_tool_def_disables_global_truncation(self, workspace: Path) -> None:
-        from excelmanus.tools import intent_tools
-
-        tools = {tool.name: tool for tool in intent_tools.get_tools()}
-        assert tools["inspect_spreadsheet"].max_result_chars == 0
+    def test_tool_def_disables_global_truncation(self,workspace):
+        tool=next(t for t in sheet_tools.get_tools() if t.name=="observe_spreadsheet")
+        assert tool.max_result_chars==0

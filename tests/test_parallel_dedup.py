@@ -31,7 +31,7 @@ def _fail_result(text: str, *, tool: str = "analyze_spreadsheet", args: dict | N
 
 def _ok_result():
     return SimpleNamespace(
-        tool_name="inspect_spreadsheet",
+        tool_name="observe_spreadsheet",
         arguments={},
         result='{"status":"ok"}',
         success=True,

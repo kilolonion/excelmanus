@@ -13,10 +13,16 @@ import {
   Download,
   FileText,
   FileJson,
+  Folder,
+  FolderOpen,
   FolderPlus,
+  Inbox,
   LoaderCircle,
   ChevronDown,
   Plus,
+  CheckCheck,
+  ExternalLink,
+  Clipboard,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -31,6 +37,7 @@ import {
   abortChat,
   updateSessionTitle,
   exportSession,
+  apiPost,
   type ExportFormat,
   fetchWorkspaces,
   reorderWorkspaces,
@@ -41,6 +48,7 @@ import type { WorkspaceFolder } from "@/lib/types";
 import { stopGeneration } from "@/lib/chat-actions";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
+import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
@@ -84,6 +92,8 @@ export const SessionList = memo(function SessionList() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const sessions = useSessionStore((s) => s.sessions);
   const sidebarSessionOrder = useSessionStore((s) => s.sidebarSessionOrder);
+  const readAtByWorkspace = useSessionStore((s) => s.readAtByWorkspace);
+  const markWorkspaceRead = useSessionStore((s) => s.markWorkspaceRead);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const addSession = useSessionStore((s) => s.addSession);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
@@ -93,6 +103,8 @@ export const SessionList = memo(function SessionList() {
   const isStreaming = useChatStore((s) => s.isStreaming);
   const chatPendingApproval = useChatStore((s) => s.pendingApproval);
   const chatPendingQuestion = useChatStore((s) => s.pendingQuestion);
+  const deployMode = useAuthConfigStore((s) => s.deployMode);
+  const [fileManagerName, setFileManagerName] = useState("文件管理器");
 
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -119,6 +131,13 @@ export const SessionList = memo(function SessionList() {
   const dragRef = useRef<SidebarDrag | null>(null);
   const dragPointerY = useRef<number | null>(null);
   const dragScrollFrame = useRef<number | null>(null);
+
+  useEffect(() => {
+    const platform = typeof navigator === "undefined" ? "" : navigator.userAgent.toLowerCase();
+    if (platform.includes("mac os") || platform.includes("macintosh")) setFileManagerName("Finder");
+    else if (platform.includes("windows")) setFileManagerName("资源管理器");
+    else if (platform.includes("linux")) setFileManagerName("文件管理器");
+  }, []);
 
   useEffect(() => {
     if (editingSessionId && editInputRef.current) {
@@ -482,7 +501,7 @@ export const SessionList = memo(function SessionList() {
     });
   }, []);
 
-  const handleDelete = async (sessionId: string) => {
+  const handleDelete = useCallback(async (sessionId: string) => {
     if (busySessionId) return;
     setBusySessionId(sessionId);
 
@@ -539,7 +558,33 @@ export const SessionList = memo(function SessionList() {
       }
       setBusySessionId((cur) => (cur === sessionId ? null : cur));
     }
-  };
+  }, [addSession, busySessionId, removeSession, removeSessionCache, setActiveSession, switchSession]);
+
+  const handleRevealWorkspace = useCallback(async (workspacePath: string, workspaceId?: string | null) => {
+    if (deployMode !== "standalone") {
+      try {
+        await navigator.clipboard.writeText(workspacePath);
+        setCreateError("服务器模式无法打开本机文件管理器，工作区路径已复制。");
+      } catch {
+        setCreateError("服务器模式无法打开本机文件管理器，请手动复制工作区路径。");
+      }
+      return;
+    }
+    try {
+      await apiPost("/files/reveal", { path: ".", workspace_id: workspaceId || undefined });
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "无法打开工作区所在文件夹");
+    }
+  }, [deployMode]);
+
+  const handleDeleteWorkspaceSessions = useCallback(async (sessionIds: string[]) => {
+    if (sessionIds.length === 0 || busySessionId) return;
+    // Reuse the existing per-session deletion path so active streams are
+    // stopped and local message caches are cleaned up consistently.
+    for (const sessionId of sessionIds) {
+      await handleDelete(sessionId);
+    }
+  }, [busySessionId, handleDelete]);
 
   const searchRow = (
     <div className="em-session-tools flex flex-col px-1 pt-3 pb-2 flex-shrink-0">
@@ -635,6 +680,10 @@ export const SessionList = memo(function SessionList() {
                   {virtualizer.getVirtualItems().map((row) => {
                     const { group, session } = rows[row.index];
                     const collapsed = collapsedGroups.has(group.key);
+                    const readAt = readAtByWorkspace[group.key];
+                    const unreadCount = readAt
+                      ? group.sessions.filter((item) => item.updatedAt && item.updatedAt > readAt).length
+                      : 0;
                     const frozen = Boolean(drag && (drag.kind === "workspace" ? drag.groupKey === group.key : drag.id === session?.id));
                     const indicator = dropTarget?.rowKey === rows[row.index].key ? dropTarget.side : null;
                     return (
@@ -663,12 +712,10 @@ export const SessionList = memo(function SessionList() {
                         {!session ? (
                         <div
                           className={cn(
-                            "em-workspace-group group/ws flex select-none items-center gap-1 rounded-md px-2 py-1 text-[var(--em-primary-light)] transition-colors",
-                            "hover:bg-[var(--em-primary-alpha-06)] hover:text-[var(--em-primary)]",
-                            "focus-within:bg-[var(--em-primary-alpha-06)] focus-within:text-[var(--em-primary)]",
-                            workspaceMenuKey === group.key && "bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]",
+                            "em-workspace-group group/ws flex select-none items-center gap-1 px-2 py-1 transition-colors",
                             group.workspaceId && "cursor-grab active:cursor-grabbing",
                           )}
+                          data-menu-open={workspaceMenuKey === group.key || undefined}
                           draggable={Boolean(group.workspaceId) && !reorderingWorkspace}
                           onPointerDownCapture={(event) => {
                             const button = (event.target as Element).closest("button");
@@ -692,12 +739,24 @@ export const SessionList = memo(function SessionList() {
                                 collapsed && "-rotate-90",
                               )}
                             />
-                            <span className="min-w-0 truncate text-[12px] font-medium tracking-wide text-current" title={group.path || group.title}>
+                            <span className="em-workspace-icon" aria-hidden="true">
+                              {group.key === "__ungrouped__"
+                                ? <Inbox className="h-3.5 w-3.5" />
+                                : collapsed
+                                  ? <Folder className="h-3.5 w-3.5" />
+                                  : <FolderOpen className="h-3.5 w-3.5" />}
+                            </span>
+                            <span className="min-w-0 truncate text-current" title={group.path || group.title}>
                               {group.title}
                             </span>
                             <span className="em-workspace-count" aria-label={`${group.sessions.length} 个对话`}>
                               {group.sessions.length}
                             </span>
+                            {unreadCount > 0 ? (
+                              <span className="em-workspace-unread" aria-label={`${unreadCount} 个未读对话`}>
+                                {unreadCount > 99 ? "99+" : unreadCount}
+                              </span>
+                            ) : null}
                             {group.isDefault ? (
                               <span
                                 className="inline-flex shrink-0 items-center rounded-full bg-[var(--em-primary-alpha-12)] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[var(--em-primary)]"
@@ -707,7 +766,7 @@ export const SessionList = memo(function SessionList() {
                               </span>
                             ) : null}
                           </button>
-                          {group.canManage ? (
+                          {(group.canManage || group.sessions.length > 0) ? (
                             <DropdownMenu
                               open={workspaceMenuKey === group.key}
                               onOpenChange={(open) => setWorkspaceMenuKey(open ? group.key : null)}
@@ -730,24 +789,64 @@ export const SessionList = memo(function SessionList() {
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent side="bottom" align="end" sideOffset={6} className={glassMenuPanelClass}>
+                                {group.canManage ? (
+                                  <DropdownMenuItem
+                                    className={glassMenuItemClass}
+                                    onClick={() => {
+                                      const current = workspaces.find((ws) => ws.id === group.workspaceId);
+                                      setWorkspaceMenuKey(null);
+                                      setAddFolderOpen(false);
+                                      setEditingWorkspace(current ?? {
+                                        id: group.workspaceId || "",
+                                        path: group.path || "",
+                                        title: group.title,
+                                        is_default: group.isDefault,
+                                      });
+                                    }}
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                    编辑工作区
+                                  </DropdownMenuItem>
+                                ) : null}
+                                {group.path ? (
+                                  <DropdownMenuItem
+                                    className={glassMenuItemClass}
+                                    onClick={() => {
+                                      setWorkspaceMenuKey(null);
+                                      void handleRevealWorkspace(group.path || "", group.workspaceId);
+                                    }}
+                                  >
+                                    {deployMode === "standalone" ? <ExternalLink className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
+                                    {deployMode === "standalone"
+                                      ? fileManagerName === "Finder" ? "在 Finder 中显示" : `在${fileManagerName}中显示`
+                                      : "复制工作区路径"}
+                                  </DropdownMenuItem>
+                                ) : null}
+                                <DropdownMenuSeparator className="mx-1 my-1.5 bg-[var(--em-hairline)]" />
                                 <DropdownMenuItem
                                   className={glassMenuItemClass}
                                   onClick={() => {
-                                    const current = workspaces.find((ws) => ws.id === group.workspaceId);
+                                    markWorkspaceRead(group.key);
                                     setWorkspaceMenuKey(null);
-                                    setAddFolderOpen(false);
-                                    setEditingWorkspace(current ?? {
-                                      id: group.workspaceId || "",
-                                      path: group.path || "",
-                                      title: group.title,
-                                      is_default: group.isDefault,
-                                    });
                                   }}
                                 >
-                                  <Pencil className="h-4 w-4" />
-                                  编辑工作区
+                                  <CheckCheck className="h-4 w-4" />
+                                  全部标为已读
                                 </DropdownMenuItem>
-                                <DropdownMenuSeparator className="mx-1 my-1.5 bg-[var(--em-hairline)]" />
+                                {group.sessions.length > 0 ? (
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    className={glassMenuDangerItemClass}
+                                    onClick={() => {
+                                      setWorkspaceMenuKey(null);
+                                      void handleDeleteWorkspaceSessions(group.sessions.map((item) => item.id));
+                                    }}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                    删除所有对话
+                                  </DropdownMenuItem>
+                                ) : null}
+                                {group.canManage ? <DropdownMenuSeparator className="mx-1 my-1.5 bg-[var(--em-hairline)]" /> : null}
                                 <DropdownMenuItem
                                   variant="destructive"
                                   className={glassMenuDangerItemClass}

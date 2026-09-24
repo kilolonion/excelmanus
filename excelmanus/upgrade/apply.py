@@ -20,6 +20,7 @@ from excelmanus.updater import (
     _run_cmd,
     check_for_updates,
     get_current_version,
+    source_version_guard,
     verify_database_migration,
 )
 
@@ -75,11 +76,19 @@ def apply_on_stopped_tree(
         err = vi.error or "检查更新失败：无法获取远程版本"
         _p(err, 100)
         return _fail(result, UpgradeOutcome.CHECK_FAILED, err)
+    if vi.downgrade_blocked:
+        return _fail(result, UpgradeOutcome.DOWNGRADE_BLOCKED, vi.error or "已阻止源码版本降级")
     if not vi.has_update:
         result.outcome = UpgradeOutcome.ALREADY_LATEST
         result.new_version = vi.current
         _p("已是最新版本", 100)
         return result
+    # The checker normally enforces this. Repeat the guard before touching Git
+    # when the installation has an explicit local version on disk.
+    if _read_version_from_disk(project_root) != "unknown":
+        rejection = source_version_guard(result.old_version, vi.latest)
+        if rejection:
+            return _fail(result, UpgradeOutcome.DOWNGRADE_BLOCKED, rejection)
     _p(f"发现新版本: {vi.current} → {vi.latest} ({vi.commits_behind} 个新提交)", 10)
     result.steps_completed.append("version_check")
 

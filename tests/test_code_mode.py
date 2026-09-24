@@ -17,9 +17,9 @@ from excelmanus.security.sandbox_hook import generate_wrapper_script
 from excelmanus.tools.registry import ToolDef
 
 
-def _read_excel_def() -> ToolDef:
+def _lookup_rows_def() -> ToolDef:
     return ToolDef(
-        name="read_excel",
+        name="lookup_rows",
         description="读取 Excel 摘要。",
         input_schema={
             "type": "object",
@@ -42,17 +42,17 @@ def _exec_sdk(source: str) -> dict[str, object]:
 
 
 class TestRenderSdkSource:
-    def test_schema_emits_read_excel_without_eval(self) -> None:
+    def test_schema_emits_lookup_rows_without_eval(self) -> None:
         from excelmanus.code_mode import render_sdk_source
 
-        source = render_sdk_source([_read_excel_def()])
-        assert "def read_excel(" in source
+        source = render_sdk_source([_lookup_rows_def()])
+        assert "def lookup_rows(" in source
         assert "file_path" in source
         assert "sheet_name=None" in source
         assert "读取 Excel 摘要。" in source
         assert "eval(" not in source
         assert '"""读取 Excel 摘要。"""' not in source
-        assert "read_excel.__doc__ =" in source
+        assert "lookup_rows.__doc__ =" in source
 
     def test_sdk_docstring_with_regex_escape_does_not_warn(self) -> None:
         import warnings
@@ -80,8 +80,8 @@ class TestRenderSdkSource:
     def test_sdk_section_lists_typed_signatures_not_bridge(self) -> None:
         from excelmanus.code_mode import render_sdk_section
 
-        section = render_sdk_section([_read_excel_def()])
-        assert "read_excel(file_path: str, sheet_name: str = ..." in section
+        section = render_sdk_section([_lookup_rows_def()])
+        assert "lookup_rows(file_path: str" in section
         assert "max_rows: int = ..." in section
         assert "-> Any" in section  # 未登记返回合同，不编造 dict。
         assert "- run_code" not in section
@@ -90,24 +90,29 @@ class TestRenderSdkSource:
 
     def test_sdk_section_operations_typed_as_list(self) -> None:
         from excelmanus.code_mode import render_sdk_section
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools.workbook_tools import get_tools
 
-        edit = next(tool for tool in get_tools() if tool.name == "edit_spreadsheet")
+        edit = next(tool for tool in get_tools() if tool.name == "apply_spreadsheet_changes")
         section = render_sdk_section([edit])
         assert "operations: list" in section
         # 嵌套 WorkbookSpec/operations 结构不展开进 SDK（F1 冻结）。
-        assert "start_cell" not in section.split("edit_spreadsheet(", 1)[1].split(")", 1)[0]
+        assert "start_cell" not in section.split("apply_spreadsheet_changes(", 1)[1].split(")", 1)[0]
         assert "dict{status, file_path, content_version" in section or "applied" in section
 
-    def test_inspect_sdk_keeps_sheet_name_drops_sheet(self) -> None:
+    def test_observation_sdk_uses_v2_sheet_and_rejects_legacy_fields(self) -> None:
         from excelmanus.code_mode import render_sdk_source
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools.workbook_tools import get_tools
 
-        inspect = next(tool for tool in get_tools() if tool.name == "inspect_spreadsheet")
+        inspect = next(tool for tool in get_tools() if tool.name == "observe_spreadsheet")
         source = render_sdk_source([inspect])
-        assert "def inspect_spreadsheet(" in source
-        assert "sheet_name=" in source
-        assert "sheet=" not in source.split("def inspect_spreadsheet(", 1)[1].split(")", 1)[0]
+        assert "def observe_spreadsheet(" in source
+        signature = source.split("def observe_spreadsheet(", 1)[1].split(")", 1)[0]
+        assert "sheet=" in signature
+        assert "sheet_name=" not in signature
+        ns = _exec_sdk(source)
+        for kwargs in ({"sheet_name": "S1"}, {"max_rows": 20}):
+            with pytest.raises(TypeError, match="unexpected keyword argument"):
+                ns["observe_spreadsheet"]("book.xlsx", **kwargs)
 
 
 class TestCodeModeBridge:
@@ -129,7 +134,7 @@ class TestCodeModeBridge:
             bridge_dir=tmp_path / "bridge",
             call_timeout=8.0,
         )
-        source = render_sdk_source([_read_excel_def()])
+        source = render_sdk_source([_lookup_rows_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_1")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
@@ -137,7 +142,7 @@ class TestCodeModeBridge:
         try:
             ns = _exec_sdk(source)
             result = await asyncio.to_thread(
-                ns["read_excel"], "data.xlsx", sheet_name="Sheet1",
+                ns["lookup_rows"], "data.xlsx", sheet_name="Sheet1",
             )
         finally:
             session.stop()
@@ -145,7 +150,7 @@ class TestCodeModeBridge:
         assert result == {"rows": 3}
         dispatcher.call_registry_tool.assert_awaited_once()
         kwargs = dispatcher.call_registry_tool.await_args.kwargs
-        assert kwargs["tool_name"] == "read_excel"
+        assert kwargs["tool_name"] == "lookup_rows"
         assert kwargs["arguments"]["file_path"] == "data.xlsx"
         assert kwargs["arguments"]["sheet_name"] == "Sheet1"
         assert kwargs["root_call_id"] == "call_parent_1"
@@ -161,14 +166,14 @@ class TestCodeModeBridge:
         from excelmanus.code_mode import CodeModeSession, render_sdk_source
         from excelmanus.security import FileAccessGuard
         from excelmanus.tools._guard_ctx import set_guard
-        from excelmanus.tools import intent_tools, reference_tools
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools import workbook_tools, reference_tools
+        from excelmanus.tools.workbook_tools import get_tools
         from excelmanus.tools.registry import ToolRegistry
         from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
         workspace = str(tmp_path)
         set_guard(FileAccessGuard(workspace))
-        intent_tools.init_guard(workspace)
+        workbook_tools.init_guard(workspace)
         reference_tools.init_guard(workspace)
 
         wb = Workbook()
@@ -198,7 +203,7 @@ class TestCodeModeBridge:
             dispatcher=_SyncDispatcher(),
             root_call_id="call_s13",
             bridge_dir=tmp_path / ".tmp" / "code_mode" / "s13",
-            tool_defs=[tools["inspect_spreadsheet"], tools["edit_spreadsheet"]],
+            tool_defs=[tools["observe_spreadsheet"], tools["apply_spreadsheet_changes"]],
             call_timeout=30.0,
         )
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
@@ -210,7 +215,7 @@ class TestCodeModeBridge:
             def _run() -> dict[str, object]:
                 out: dict[str, object] = {}
                 # 1) 读到 v1
-                first = ns["inspect_spreadsheet"](
+                first = ns["observe_spreadsheet"](
                     file_path="book.xlsx", mode="range", range="A1:B2",
                 )
                 v1 = first["content_version"]
@@ -222,7 +227,7 @@ class TestCodeModeBridge:
                 other.close()
                 # 3) 用 v1 写 → VERSION_CONFLICT，且错误携带恢复字段
                 try:
-                    ns["edit_spreadsheet"](
+                    ns["apply_spreadsheet_changes"](
                         file_path="book.xlsx",
                         expected_version=v1,
                         operations=[{
@@ -235,14 +240,14 @@ class TestCodeModeBridge:
                     out["conflict_code"] = exc.code
                     out["details"] = getattr(exc, "details", None) or str(exc)
                 # 4) 重新核对受影响数据 → 拿当前版本
-                second = ns["inspect_spreadsheet"](
+                second = ns["observe_spreadsheet"](
                     file_path="book.xlsx", mode="range", range="A1:B2",
                 )
                 v2 = second["content_version"]
                 out["v2"] = v2
                 out["v1_ne_v2"] = v1 != v2
                 # 5) 用核对后的版本重试 → 成功
-                retry = ns["edit_spreadsheet"](
+                retry = ns["apply_spreadsheet_changes"](
                     file_path="book.xlsx",
                     expected_version=v2,
                     operations=[{
@@ -296,17 +301,17 @@ class TestCodeModeBridge:
             bridge_dir=tmp_path / "bridge",
             call_timeout=8.0,
         )
-        source = render_sdk_source([_read_excel_def()])
+        source = render_sdk_source([_lookup_rows_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_2")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
         session.start()
         try:
             ns = _exec_sdk(source)
-            first = await asyncio.to_thread(ns["read_excel"], "ok.xlsx")
+            first = await asyncio.to_thread(ns["lookup_rows"], "ok.xlsx")
             assert first == {"ok": True}
             with pytest.raises(ns["HostToolError"]) as exc_info:
-                await asyncio.to_thread(ns["read_excel"], "missing.xlsx")
+                await asyncio.to_thread(ns["lookup_rows"], "missing.xlsx")
         finally:
             session.stop()
 
@@ -316,7 +321,7 @@ class TestCodeModeBridge:
         assert summary["succeeded"] == 1
         assert summary["failed"] == 1
         assert summary["writes"] == [
-            {"tool": "read_excel", "content_version": "sha256:abc"},
+            {"tool": "lookup_rows", "content_version": "sha256:abc"},
         ]
 
     @pytest.mark.asyncio
@@ -345,14 +350,14 @@ class TestCodeModeBridge:
             bridge_dir=tmp_path / "bridge",
             call_timeout=8.0,
         )
-        source = render_sdk_source([_read_excel_def()])
+        source = render_sdk_source([_lookup_rows_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_3")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
         session.start()
         try:
             ns = _exec_sdk(source)
-            result = await asyncio.to_thread(ns["read_excel"], "data.xlsx")
+            result = await asyncio.to_thread(ns["lookup_rows"], "data.xlsx")
         finally:
             session.stop()
         assert result == {"via": "execute"}
@@ -387,21 +392,21 @@ class TestCodeModeBridge:
             call_timeout=8.0,
             on_event=on_event,
         )
-        source = render_sdk_source([_read_excel_def()])
+        source = render_sdk_source([_lookup_rows_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_4")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
         session.start()
         try:
             ns = _exec_sdk(source)
-            await asyncio.to_thread(ns["read_excel"], "a.xlsx")
-            await asyncio.to_thread(ns["read_excel"], "b.xlsx")
+            await asyncio.to_thread(ns["lookup_rows"], "a.xlsx")
+            await asyncio.to_thread(ns["lookup_rows"], "b.xlsx")
         finally:
             session.stop()
         assert len(seen) == 2
         assert seen[0]["call_id"] != seen[1]["call_id"]
-        assert seen[0]["call_id"].startswith("call_parent_4:read_excel:")
-        assert seen[1]["call_id"].startswith("call_parent_4:read_excel:")
+        assert seen[0]["call_id"].startswith("call_parent_4:lookup_rows:")
+        assert seen[1]["call_id"].startswith("call_parent_4:lookup_rows:")
         assert seen[0]["on_event"] is on_event
         assert seen[1]["on_event"] is on_event
 
@@ -419,7 +424,7 @@ class TestBridgeBinding:
             dispatcher=AsyncMock(),
             root_call_id="call_bind",
             bridge_dir=tmp_path / "bridge",
-            bound_names=frozenset({"inspect_spreadsheet"}),
+            bound_names=frozenset({"observe_spreadsheet"}),
         )
         resp = tmp_path / "bridge" / "00000001.resp.json"
         session._handle_request(
@@ -437,11 +442,11 @@ class TestBridgeBinding:
             dispatcher=AsyncMock(),
             root_call_id="call_bind",
             bridge_dir=tmp_path / "bridge",
-            bound_names=frozenset({"inspect_spreadsheet"}),
+            bound_names=frozenset({"observe_spreadsheet"}),
         )
         resp = tmp_path / "bridge" / "00000002.resp.json"
         session._handle_request(
-            {"tool": "inspect_spreadsheet", "arguments": "book.xlsx"},
+            {"tool": "observe_spreadsheet", "arguments": "book.xlsx"},
             resp,
         )
         payload = self._resp_payload(resp)
@@ -454,7 +459,10 @@ class TestBridgeBinding:
 
         dispatcher = AsyncMock()
         dispatcher.call_registry_tool.return_value = ToolResult(
-            success=True, model_text="ok", value={"status": "ok"}
+            success=True, model_text="ok", value={
+                "status": "success", "schema_version": "workbook/2",
+                "file_path": "book.xlsx", "content_version": "sha256:abc",
+            },
         )
         session = CodeModeSession(
             dispatcher=dispatcher,
@@ -462,7 +470,7 @@ class TestBridgeBinding:
             bridge_dir=tmp_path / "bridge",
         )
         resp = tmp_path / "bridge" / "00000003.resp.json"
-        session._handle_request({"tool": "inspect_spreadsheet", "arguments": {}}, resp)
+        session._handle_request({"tool": "observe_spreadsheet", "arguments": {}}, resp)
         payload = self._resp_payload(resp)
         assert payload["ok"] is True
 
@@ -473,7 +481,10 @@ class TestBridgeBinding:
 
         async def _capture(*, tool_name, arguments, tool_scope=None, root_call_id=""):
             seen["root_call_id"] = root_call_id
-            return ToolResult(success=True, model_text="ok", value={"status": "ok"})
+            return ToolResult(success=True, model_text="ok", value={
+                "status": "success", "schema_version": "workbook/2",
+                "file_path": "book.xlsx", "content_version": "sha256:abc",
+            })
 
         dispatcher = AsyncMock()
         dispatcher.call_registry_tool.side_effect = _capture
@@ -481,12 +492,12 @@ class TestBridgeBinding:
             dispatcher=dispatcher,
             root_call_id="host_root",
             bridge_dir=tmp_path / "bridge",
-            bound_names=frozenset({"inspect_spreadsheet"}),
+            bound_names=frozenset({"observe_spreadsheet"}),
         )
         resp = tmp_path / "bridge" / "00000004.resp.json"
         session._handle_request(
             {
-                "tool": "inspect_spreadsheet",
+                "tool": "observe_spreadsheet",
                 "arguments": {},
                 "root_call_id": "spoofed_root",
             },
@@ -541,7 +552,7 @@ class TestBuildSession:
         a = build_session_for_run_code(dispatcher, root_call_id="call_same")
         b = build_session_for_run_code(dispatcher, root_call_id="call_same")
         assert a.bridge_dir != b.bridge_dir
-        assert "inspect_spreadsheet" in a.bound_names
+        assert "observe_spreadsheet" in a.bound_names
         assert a.call_timeout == 900.0
 
     def test_timeout_seconds_sets_call_timeout_and_deadline(self, tmp_path: Path) -> None:
@@ -583,10 +594,10 @@ class TestBuildSession:
         from excelmanus.code_mode import script_uses_sdk
 
         assert script_uses_sdk({"code": "import em\nprint(em.x)"}) is True
-        assert script_uses_sdk({"code": "from em import read_excel"}) is True
-        assert script_uses_sdk({"code": "print(em.inspect_spreadsheet)"}) is True
+        assert script_uses_sdk({"code": "from em import lookup_rows"}) is True
+        assert script_uses_sdk({"code": "print(em.observe_spreadsheet)"}) is True
         assert script_uses_sdk({"code": "print('hello')"}) is False
-        assert script_uses_sdk({"code": "em . inspect_spreadsheet()"}) is True
+        assert script_uses_sdk({"code": "em . observe_spreadsheet()"}) is True
         script = tmp_path / "job.py"
         script.write_text("print(1)\n", encoding="utf-8")
         assert script_uses_sdk({"script_path": "job.py"}, workspace_root=tmp_path) is False
@@ -607,7 +618,7 @@ class TestSessionStopSettlement:
         )
         session.bridge_dir.mkdir(parents=True, exist_ok=True)
         (session.bridge_dir / "00000001.req.json").write_text(
-            json.dumps({"tool": "inspect_spreadsheet", "arguments": {}}),
+            json.dumps({"tool": "observe_spreadsheet", "arguments": {}}),
             encoding="utf-8",
         )
         session.stop()
@@ -622,7 +633,7 @@ class TestDockerOffWording:
     def test_sdk_docstring_omits_strong_isolation_when_docker_off(self) -> None:
         from excelmanus.code_mode import render_sdk_source
 
-        source = render_sdk_source([_read_excel_def()])
+        source = render_sdk_source([_lookup_rows_def()])
         assert "强隔离" not in source
         assert "本机受限子进程" in source or "SDK" in source
 
@@ -665,7 +676,7 @@ class TestDockerOffWording:
             session,
         ))
         source = render_sdk_source(
-            [_read_excel_def()],
+            [_lookup_rows_def()],
             disclaimer=FULL_ACCESS_SANDBOX_DISCLAIMER,
         )
         assert payload["sandbox_note"] == FULL_ACCESS_SANDBOX_DISCLAIMER
@@ -679,12 +690,12 @@ class TestWrapperSdkInject:
 
         sdk_path = tmp_path / "em.py"
         sdk_path.write_text(
-            render_sdk_source([_read_excel_def()]),
+            render_sdk_source([_lookup_rows_def()]),
             encoding="utf-8",
         )
         script = tmp_path / "user.py"
         script.write_text(
-            "from em import read_excel\nprint(read_excel.__name__)\n",
+            "from em import lookup_rows\nprint(lookup_rows.__name__)\n",
             encoding="utf-8",
         )
         wrapper_src = generate_wrapper_script("GREEN", str(tmp_path))
@@ -700,7 +711,7 @@ class TestWrapperSdkInject:
             env=env,
         )
         assert completed.returncode == 0, completed.stderr
-        assert "read_excel" in completed.stdout
+        assert "lookup_rows" in completed.stdout
         assert "强隔离" not in wrapper_src
 
 
@@ -728,7 +739,7 @@ class TestBridgeTypedArgs:
             bridge_dir=tmp_path / "bridge",
             call_timeout=8.0,
         )
-        source = render_sdk_source([_read_excel_def()])
+        source = render_sdk_source([_lookup_rows_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
         session.start()
@@ -739,7 +750,7 @@ class TestBridgeTypedArgs:
                 "when": dt.datetime(2024, 8, 15, 10, 30),
                 "rows": [[dt.date(2024, 1, 2), dt.time(9, 5), {"k": dt.datetime(2024, 3, 4)}]],
             }
-            await asyncio.to_thread(ns["_call_host"], "read_excel", payload_args)
+            await asyncio.to_thread(ns["_call_host"], "lookup_rows", payload_args)
         finally:
             session.stop()
 
@@ -781,7 +792,7 @@ class TestBridgeCallTimeout:
             call_timeout=120.0,
             deadline_mono=time.monotonic() + 3600.0,
         )
-        for tool in ("ask_user", "run_shell", "delete_file", "inspect_spreadsheet"):
+        for tool in ("ask_user", "run_shell", "delete_file", "observe_spreadsheet"):
             assert session._timeout_for(tool) == interaction_wait_window()
             assert session._timeout_for(tool) >= DEFAULT_INTERACTION_TIMEOUT
 
@@ -799,7 +810,7 @@ class TestBridgeCallTimeout:
         from excelmanus.code_mode import render_sdk_source
         from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
 
-        source = render_sdk_source([_read_excel_def()])
+        source = render_sdk_source([_lookup_rows_def()])
         assert "_EM_INTERACTIVE_WINDOW" in source
         assert "_EM_TOOL_TIMEOUTS" in source
         ns = _exec_sdk(source)
@@ -1104,7 +1115,7 @@ class TestRuntimeHookAsk:
         engine = _make_approval_engine(tmp_path)
         engine._approval_resolver = AsyncMock(return_value="accept")
         runtime = self._runtime(engine)
-        token = runtime.allocate_token("edit_spreadsheet", {"file_path": "a.xlsx"})
+        token = runtime.allocate_token("apply_spreadsheet_changes", {"file_path": "a.xlsx"})
         assert await runtime._one_shot_ask(token) is True
         engine._approval_resolver.assert_awaited_once()
         assert engine.approval.pending is None
@@ -1113,7 +1124,7 @@ class TestRuntimeHookAsk:
     async def test_hook_ask_registry_accept_allows(self, tmp_path: Path) -> None:
         engine = _make_approval_engine(tmp_path)
         runtime = self._runtime(engine)
-        token = runtime.allocate_token("edit_spreadsheet", {"file_path": "a.xlsx"})
+        token = runtime.allocate_token("apply_spreadsheet_changes", {"file_path": "a.xlsx"})
 
         async def _approve() -> None:
             await asyncio.sleep(0.05)
@@ -1181,12 +1192,15 @@ class TestOutputContracts:
         )
         resp = tmp_path / "bridge" / "00000001.resp.json"
         session._handle_request(
-            {"tool": "edit_spreadsheet", "arguments": {}}, resp,
+            {"tool": "apply_spreadsheet_changes", "arguments": {}}, resp,
         )
         payload = json.loads(resp.read_text(encoding="utf-8"))
         assert payload["ok"] is False
         assert payload["error"]["code"] == "SDK_CONTRACT_VIOLATION"
-        assert "content_version" in json.dumps(payload["error"]["details"])
+        details = payload["error"]["details"]
+        assert details["execution_completed"] is True
+        for key in ("schema_version", "files", "receipt", "committed", "applied"):
+            assert any(key in violation for violation in details["violations"])
 
     def test_unregistered_tool_passes_through(self, tmp_path: Path) -> None:
         from excelmanus.code_mode import _payload_from_tool_result
@@ -1201,7 +1215,7 @@ class TestOutputContracts:
         from openpyxl import Workbook
 
         from excelmanus.security import FileAccessGuard
-        from excelmanus.tools import intent_tools
+        from excelmanus.tools import workbook_tools
         from excelmanus.tools._guard_ctx import set_guard
         from excelmanus.tools.context import use_workspace
         from excelmanus.tools.output_contracts import validate_output
@@ -1215,20 +1229,20 @@ class TestOutputContracts:
         wb.save(tmp_path / "book.xlsx")
         wb.close()
         set_guard(FileAccessGuard(str(tmp_path)))
-        intent_tools.init_guard(str(tmp_path))
+        workbook_tools.init_guard(str(tmp_path))
 
         calls = [
-            ("inspect_spreadsheet", {"file_path": "book.xlsx", "mode": "overview"}),
-            ("inspect_spreadsheet", {
+            ("observe_spreadsheet", {"file_path": "book.xlsx", "mode": "overview"}),
+            ("observe_spreadsheet", {
                 "file_path": "book.xlsx", "mode": "range", "range": "A1:B2",
             }),
             ("analyze_spreadsheet", {"file_path": "book.xlsx", "mode": "files"}),
             ("analyze_spreadsheet", {
                 "file_path": "book.xlsx", "mode": "filter",
-                "sheet_name": "S1", "column": "金额",
+                "sheet": "S1", "column": "金额",
                 "operator": ">", "value": 500,
             }),
-            ("edit_spreadsheet", {
+            ("apply_spreadsheet_changes", {
                 "file_path": "book.xlsx",
                 "operations": [{
                     "kind": "write", "sheet": "S1",
@@ -1236,7 +1250,7 @@ class TestOutputContracts:
                 }],
             }),
             ("split_spreadsheet", {
-                "file_path": "book.xlsx", "sheet_name": "S1",
+                "file_path": "book.xlsx", "sheet": "S1",
                 "by_column": "项目", "output_dir": "outputs",
             }),
             ("manage_spreadsheet_versions", {
@@ -1245,36 +1259,37 @@ class TestOutputContracts:
         ]
         with use_workspace(tmp_path):
             for name, args in calls:
-                result = getattr(intent_tools, name)(**args)
+                if name == "apply_spreadsheet_changes":
+                    observation = workbook_tools.observe_spreadsheet(file_path=args["file_path"])
+                    assert observation.success
+                    args["expected_version"] = observation.value["content_version"]
+                result = getattr(workbook_tools, name)(**args)
                 assert result.success, f"{name} 执行失败: {result.model_text}"
                 violations = validate_output(name, result.value, arguments=args)
                 assert violations == [], f"{name} 合同违约: {violations}"
 
-    def test_edit_spreadsheet_arg_branch(self) -> None:
-        """workbook_spec 创建分支不带 applied 不违约；operations 路径必须带。"""
+    @pytest.mark.parametrize("arguments", [
+        {"workbook_spec": {"sheets": []}},
+        {"operations": [{"kind": "write"}]},
+        {"workbooks": [{"file_path": "out.xlsx", "operations": []}]},
+        {"operations": [{"kind": "size"}], "dry_run": True},
+        None,
+    ])
+    def test_changes_share_one_output_contract(self, arguments) -> None:
+        """Create, edit, batch and dry-run expose the same transaction facts."""
         from excelmanus.tools.output_contracts import validate_output
 
-        spec_value = {
-            "status": "success", "file_path": "out.xlsx",
-            "content_version": "v1", "build_summary": {"sheets": 1},
+        value = {
+            "status": "success", "schema_version": "workbook/2",
+            "files": [], "receipt": {}, "committed": False, "applied": [],
         }
         assert validate_output(
-            "edit_spreadsheet", spec_value,
-            arguments={"workbook_spec": {"sheets": []}},
+            "apply_spreadsheet_changes", value, arguments=arguments,
         ) == []
-        # 无 spec 的 operations 编辑必须带 applied。
-        ops_args = {"operations": [{"kind": "write"}]}
-        missing = [v for v in validate_output(
-            "edit_spreadsheet", spec_value, arguments=ops_args,
-        ) if "applied" in v]
-        assert missing
-        assert validate_output(
-            "edit_spreadsheet",
-            {**spec_value, "applied": []},
-            arguments=ops_args,
-        ) == []
-        # 不传 arguments 时参数分支跳过，只看共有必有键。
-        assert validate_output("edit_spreadsheet", spec_value) == []
+        for key in ("applied", "files", "receipt", "committed", "schema_version"):
+            incomplete = {name: item for name, item in value.items() if name != key}
+            violations = validate_output("apply_spreadsheet_changes", incomplete, arguments=arguments)
+            assert any(key in violation for violation in violations)
 
     def test_spill_retrieve_skips_contract(self) -> None:
         """spill 句柄读取是宿主投影：字符串 value 不触发对象合同误报。"""
@@ -1294,8 +1309,9 @@ class TestOutputContracts:
 
         hint = contract_for("read_text_file").render_return_hint()
         assert "status" in hint and "truncated?" in hint
-        edit = contract_for("edit_spreadsheet").render_return_hint()
-        assert "applied?" in edit
+        edit = contract_for("apply_spreadsheet_changes").render_return_hint()
+        assert "applied" in edit and "applied?" not in edit
+        assert "observation?" in edit
 
     def test_sdk_nested_array_field_hint(self) -> None:
         """对象数组使用合法 Python 类型；嵌套字段通过详情查询。"""
@@ -1329,11 +1345,17 @@ class TestCodeModeWrapUp:
         dispatcher._call_budget_reason = "parent"
         dispatcher._readonly_replay_cache = {}
         snapshot = dispatcher.begin_nested_call_budget()
+        assert dispatcher._call_budget == 7
         dispatcher._call_count = 5
         dispatcher.restore_parent_call_budget(snapshot)
         assert dispatcher._call_count == 8
         assert dispatcher._call_budget == 10
         assert dispatcher._call_budget_reason == "parent"
+
+        dispatcher.begin_call_budget(None)
+        snapshot = dispatcher.begin_nested_call_budget()
+        assert dispatcher._call_budget is None
+        dispatcher.restore_parent_call_budget(snapshot)
 
     def test_sdk_calls_attached_after_stop(self, tmp_path: Path) -> None:
         from excelmanus.code_mode import (
@@ -1347,7 +1369,7 @@ class TestCodeModeWrapUp:
             root_call_id="call_sdk",
             bridge_dir=tmp_path / "bridge",
         )
-        session._record(SdkCallRecord(tool="inspect_spreadsheet", success=True, content_version="v1"))
+        session._record(SdkCallRecord(tool="observe_spreadsheet", success=True, content_version="v1"))
         session.stop()
         result = ToolResult(success=True, model_text="{}", value={"status": "ok"})
         attached = attach_sdk_calls(result, session)
@@ -1403,7 +1425,7 @@ class TestCodeModeWrapUp:
             bridge_dir=tmp_path / "bridge",
             call_timeout=450.0,
             deadline_wall=1_700_000_000.0,
-            tool_defs=[_read_excel_def()],
+            tool_defs=[_lookup_rows_def()],
         )
         token = set_code_mode_session(session)
         try:
@@ -1419,10 +1441,10 @@ class TestCodeModeWrapUp:
 
         assert "create_spreadsheet" not in OUTPUT_CONTRACTS
         required = {
-            "inspect_spreadsheet", "analyze_spreadsheet", "edit_spreadsheet",
-            "format_spreadsheet", "split_spreadsheet",
+            "observe_spreadsheet", "analyze_spreadsheet", "apply_spreadsheet_changes",
+            "apply_spreadsheet_changes", "split_spreadsheet",
             "compare_spreadsheets", "trace_spreadsheet_formulas",
-            "manage_spreadsheet_objects", "manage_spreadsheet_versions",
+            "apply_spreadsheet_changes", "manage_spreadsheet_versions",
             "list_directory", "read_text_file", "write_text_file", "edit_text_file",
             "copy_file", "rename_file", "delete_file", "offer_download",
             "run_shell", "skill", "ask_user", "delegate", "list_subagents",
@@ -1473,7 +1495,7 @@ class TestCodeModeWrapUp:
         store = ToolCallStore(db)
         store.log(
             session_id="s1",
-            tool_name="inspect_spreadsheet",
+            tool_name="observe_spreadsheet",
             success=True,
             call_id="child-1",
             parent_call_id="run-1",
@@ -1525,7 +1547,7 @@ class TestSseSubcallEvents:
         event = ToolCallEvent(
             event_type=EventType.TOOL_CALL_END,
             tool_call_id="child-1",
-            tool_name="inspect_spreadsheet",
+            tool_name="observe_spreadsheet",
             arguments={"file_path": "book.xlsx", "grid": huge},
             result=huge,
             parent_call_id="run-1",
@@ -1544,14 +1566,14 @@ class TestSseSubcallEvents:
         start = sse_event_to_sse(ToolCallEvent(
             event_type=EventType.TOOL_CALL_START,
             tool_call_id="child-1",
-            tool_name="inspect_spreadsheet",
+            tool_name="observe_spreadsheet",
             arguments={"file_path": "book.xlsx"},
             parent_call_id="run-1",
         ))
         end = sse_event_to_sse(ToolCallEvent(
             event_type=EventType.TOOL_CALL_END,
             tool_call_id="child-1",
-            tool_name="inspect_spreadsheet",
+            tool_name="observe_spreadsheet",
             success=True,
             result="ok",
             parent_call_id="run-1",
@@ -1590,14 +1612,14 @@ class TestSseSubcallEvents:
         ))
         append_tool_call_event(log, ToolCallEvent(
             event_type=EventType.TOOL_CALL_START,
-            tool_call_id="run-1:inspect_spreadsheet:1",
-            tool_name="inspect_spreadsheet",
+            tool_call_id="run-1:observe_spreadsheet:1",
+            tool_name="observe_spreadsheet",
             parent_call_id="run-1",
         ))
         append_tool_call_event(log, ToolCallEvent(
             event_type=EventType.TOOL_CALL_END,
-            tool_call_id="run-1:inspect_spreadsheet:1",
-            tool_name="inspect_spreadsheet",
+            tool_call_id="run-1:observe_spreadsheet:1",
+            tool_name="observe_spreadsheet",
             parent_call_id="run-1",
             success=True,
         ))
@@ -1613,7 +1635,7 @@ class TestSseSubcallEvents:
         )
         surface_roles = [m["role"] for m in log.surface_messages()]
         assert surface_roles == ["assistant", "tool"]
-        assert all(m.get("tool_call_id") != "run-1:inspect_spreadsheet:1" for m in log.surface_messages())
+        assert all(m.get("tool_call_id") != "run-1:observe_spreadsheet:1" for m in log.surface_messages())
 
         store = ChatHistoryStore(Database(str(tmp_path / "sse.db")))
         store.create_session("s-sse")
@@ -1648,12 +1670,12 @@ class TestSseSubcallEvents:
             SessionEventLog,
             reconstruct_tool_call_timeline,
         )
-        from excelmanus.tools import code_tools, intent_tools
+        from excelmanus.tools import code_tools, workbook_tools
         from excelmanus.tools.registry import ToolRegistry
         from excelmanus.workbook import data as data_tools
         from excelmanus.workbook_commit import seed_seen_versions
 
-        intent_tools.init_guard(str(tmp_path))
+        workbook_tools.init_guard(str(tmp_path))
         data_tools.init_guard(str(tmp_path))
         code_tools.init_guard(str(tmp_path))
         (tmp_path / "scripts" / "temp").mkdir(parents=True, exist_ok=True)
@@ -1670,7 +1692,7 @@ class TestSseSubcallEvents:
         wb.close()
 
         registry = ToolRegistry()
-        registry.register_tools(intent_tools.get_tools())
+        registry.register_tools(workbook_tools.get_tools())
         registry.register_tools(code_tools.get_tools())
         engine = AgentEngine(
             ExcelManusConfig(
@@ -1708,8 +1730,8 @@ class TestSseSubcallEvents:
         })
         script = (
             "import em\n"
-            "r = em.inspect_spreadsheet("
-            "file_path='book.xlsx', mode='range', sheet_name='Sheet1', max_rows=20)\n"
+            "r = em.observe_spreadsheet("
+            "file_path='book.xlsx', mode='range', sheet='Sheet1', range='A1:A20')\n"
             "print(r.get('content_version') or 'ok')\n"
         )
         tc = _SyntheticToolCall(
@@ -1732,11 +1754,11 @@ class TestSseSubcallEvents:
         parent_ends = [e for e in ends if e.tool_call_id == parent_id]
         child_starts = [
             e for e in starts
-            if e.parent_call_id == parent_id and e.tool_name == "inspect_spreadsheet"
+            if e.parent_call_id == parent_id and e.tool_name == "observe_spreadsheet"
         ]
         child_ends = [
             e for e in ends
-            if e.parent_call_id == parent_id and e.tool_name == "inspect_spreadsheet"
+            if e.parent_call_id == parent_id and e.tool_name == "observe_spreadsheet"
         ]
         assert parent_starts and parent_ends
         assert child_starts and child_ends
@@ -1758,7 +1780,7 @@ class TestSseSubcallEvents:
         roots = [n for n in timeline if n["tool_call_id"] == parent_id]
         assert len(roots) == 1
         nested = roots[0]["children"]
-        assert any(c["tool_name"] == "inspect_spreadsheet" for c in nested)
+        assert any(c["tool_name"] == "observe_spreadsheet" for c in nested)
         assert all(c["parent_call_id"] == parent_id for c in nested)
         assert all(c["started"] and c["ended"] for c in nested)
         assert all(
@@ -1769,7 +1791,7 @@ class TestSseSubcallEvents:
         )
         # UI 投影：子调用挂在父下，不是独立根卡片。
         root_names = [n["tool_name"] for n in timeline]
-        assert "inspect_spreadsheet" not in root_names
+        assert "observe_spreadsheet" not in root_names
 
         msgs = engine.memory.get_messages(["sys"])
         tool_msgs = [m for m in msgs if m.get("role") == "tool"]
@@ -1785,7 +1807,7 @@ class TestSseSubcallEvents:
         wire = engine.memory.project_for_request(["sys"])
         blob = json.dumps(wire, ensure_ascii=False)
         assert "row-15-secret-matrix" not in blob
-        assert "inspect_spreadsheet" not in [
+        assert "observe_spreadsheet" not in [
             (tc.get("function") or {}).get("name")
             for m in wire if m.get("role") == "assistant"
             for tc in (m.get("tool_calls") or [])

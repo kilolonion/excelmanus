@@ -2,12 +2,10 @@ import { describe, expect, it } from "vitest";
 import { toolIcon, toolStatusIconClass } from "@/lib/tool-icons";
 
 const KNOWN_TOOLS = [
-  "inspect_spreadsheet",
+  "observe_spreadsheet",
   "analyze_spreadsheet",
   "compare_spreadsheets",
-  "edit_spreadsheet",
-  "format_spreadsheet",
-  "manage_spreadsheet_objects",
+  "apply_spreadsheet_changes",
   "trace_spreadsheet_formulas",
   "manage_spreadsheet_versions",
   "run_code",
@@ -50,7 +48,7 @@ describe("toolIcon", () => {
       "introspect_capability",
       "run_shell",
       "list_directory",
-      "inspect_spreadsheet",
+      "observe_spreadsheet",
     ];
     const labels = names.map((name) => toolIcon(name).displayName);
     expect(new Set(labels).size).toBe(names.length);

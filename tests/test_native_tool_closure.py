@@ -10,15 +10,16 @@ import pytest
 
 from openpyxl import Workbook, load_workbook
 
-from excelmanus.tools import intent_tools
+from excelmanus.tools import workbook_tools
 from excelmanus.tools.context import use_workspace
-from excelmanus.tools.intent_tools import (
+from excelmanus.tools.workbook_tools import (
     analyze_spreadsheet,
-    edit_spreadsheet,
-    inspect_spreadsheet,
+    apply_spreadsheet_changes,
+    observe_spreadsheet,
     split_spreadsheet,
 )
 from excelmanus.tools.registry import ToolRegistry
+from tests.workbook_support import region_matrix
 from excelmanus.workbook_commit import content_version_of_file
 
 
@@ -46,8 +47,9 @@ def test_filter_projection_selection_keeps_source_column(tmp_path: Path) -> None
         selection = result.value["selection"]
         assert selection["cols"] == [3]
         assert "可写回 selection" in result.model_text
-        written = edit_spreadsheet(
+        written = apply_spreadsheet_changes(
             file_path="book.xlsx",
+            expected_version=result.value["content_version"],
             operations=[
                 {"kind": "write", "selection": selection, "values": [[99], [88]]}
             ],
@@ -62,12 +64,13 @@ def test_filter_projection_selection_keeps_source_column(tmp_path: Path) -> None
 def test_range_selection_keeps_non_a_column(tmp_path: Path) -> None:
     _book(tmp_path / "book.xlsx", [["a", "b", "c"], [1, 2, 3]])
     with use_workspace(tmp_path):
-        result = inspect_spreadsheet(file_path="book.xlsx", mode="range", range="C2:C2")
+        result = observe_spreadsheet(file_path="book.xlsx", mode="range", range="C2:C2")
         assert result.success
-        assert result.value["selection"]["cols"] == [3]
-        written = edit_spreadsheet(
+        assert result.value["regions"][0]["selection"]["cols"] == [3]
+        written = apply_spreadsheet_changes(
             file_path="book.xlsx",
-            operations=[{"kind": "write", "selection": result.value["selection"], "values": [[9]]}],
+            expected_version=result.value["content_version"],
+            operations=[{"kind": "write", "selection": result.value["regions"][0]["selection"], "values": [[9]]}],
         )
         assert written.success, written.model_text
     wb = load_workbook(tmp_path / "book.xlsx")
@@ -79,7 +82,7 @@ def test_range_selection_keeps_non_a_column(tmp_path: Path) -> None:
 def test_analyze_schema_fields_bind_and_execute(tmp_path: Path) -> None:
     _book(tmp_path / "book.xlsx", [["group", "value"], ["A", 1]])
     registry = ToolRegistry()
-    registry.register_tools(intent_tools.get_tools())
+    registry.register_tools(workbook_tools.get_tools())
     with use_workspace(tmp_path):
         result = registry.call_tool(
             "analyze_spreadsheet",
@@ -101,25 +104,20 @@ def test_profile_quality_accept_sample_rows_as_scan_budget(tmp_path: Path) -> No
             sheet = sampled.value["sheets"][0]
             assert sheet["sampled"] is True
             assert sheet["sample_size"] == 5
-            limited = analyze_spreadsheet(file_path="sales.csv", mode=mode, limit=5)
+            limited = analyze_spreadsheet(file_path="sales.csv", mode=mode, max_rows=5)
             assert limited.success, limited.model_text
         rejected = analyze_spreadsheet(file_path="sales.csv", mode="files", sample_rows=5)
         assert not rejected.success
 
 
-def test_mode_union_schema_fields_are_mode_accepted() -> None:
-    """mode-union 工具平铺在 schema 的每个字段必须至少被一个 mode 接受（或被默认值豁免）。"""
-    tools = {t.name: t for t in intent_tools.get_tools()}
-    cases = {
-        "inspect_spreadsheet": (intent_tools._INSPECT_MODE_FIELDS, intent_tools._INSPECT_DEFAULTS),
-        "analyze_spreadsheet": (intent_tools._ANALYZE_MODE_FIELDS, intent_tools._ANALYZE_DEFAULTS),
-        "trace_spreadsheet_formulas": (intent_tools._TRACE_MODE_FIELDS, intent_tools._TRACE_DEFAULTS),
-    }
-    for name, (mode_fields, defaults) in cases.items():
-        props = set(tools[name].input_schema.get("properties") or {})
-        accepted = set().union(*mode_fields.values()) | set(defaults)
-        dead = sorted(props - accepted)
-        assert not dead, f"{name} schema 字段未被任何 mode 接受: {dead}"
+def test_canonical_schemas_have_declared_required_fields():
+    from jsonschema import Draft202012Validator
+    for tool in workbook_tools.get_tools():
+        Draft202012Validator.check_schema(tool.input_schema)
+        assert set(tool.input_schema.get("required",[])) <= set(tool.input_schema["properties"])
+    from excelmanus.workbook.protocol import ObservationRequest
+    observe=next(t for t in workbook_tools.get_tools() if t.name=="observe_spreadsheet")
+    assert set(observe.input_schema["properties"])-{"file_path","expected_version"} <= set(ObservationRequest.model_fields)
 
 
 def test_split_tsv_and_distinct_keys(tmp_path: Path) -> None:
@@ -154,7 +152,7 @@ def test_profile_explicit_sheet_beyond_cap_is_not_empty(tmp_path: Path) -> None:
 def test_transform_rejects_formula_rewrite(tmp_path: Path) -> None:
     _book(tmp_path / "formula.xlsx", [["id", "value"], [1, 2], [1, "=B2*2"]])
     with use_workspace(tmp_path):
-        result = edit_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path="formula.xlsx",
             expected_version=content_version_of_file(tmp_path / "formula.xlsx"),
             operations=[
@@ -174,7 +172,7 @@ def test_transform_rejects_formula_rewrite(tmp_path: Path) -> None:
 def test_pivot_same_source_requires_explicit_overwrite(tmp_path: Path) -> None:
     _book(tmp_path / "pivot.xlsx", [["group", "kind", "value"], ["A", "x", 1]])
     with use_workspace(tmp_path):
-        result = edit_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path="pivot.xlsx",
             expected_version=content_version_of_file(tmp_path / "pivot.xlsx"),
             operations=[
@@ -184,7 +182,7 @@ def test_pivot_same_source_requires_explicit_overwrite(tmp_path: Path) -> None:
                     "target_sheet": "Sheet1",
                     "index": "group",
                     "columns": "kind",
-                    "pivot_values": "value",
+                    "values": "value",
                 }
             ],
         )
@@ -194,7 +192,7 @@ def test_pivot_same_source_requires_explicit_overwrite(tmp_path: Path) -> None:
 
 
 def test_compare_coordinates_counts_versions_and_uncached_formula(tmp_path: Path) -> None:
-    from excelmanus.tools.intent_tools import compare_spreadsheets
+    from excelmanus.tools.workbook_tools import compare_spreadsheets
     _book(tmp_path / 'a.xlsx', [['id', 'v'], [1, '=1+1'], [2, 10], [3, 20]])
     _book(tmp_path / 'b.xlsx', [['v', 'id'], [1, '=1+2'], [2, 11], [3, 21]])
     with use_workspace(tmp_path):
@@ -212,12 +210,12 @@ def test_compare_coordinates_counts_versions_and_uncached_formula(tmp_path: Path
 def test_union_range_selections_are_independent(tmp_path: Path) -> None:
     _book(tmp_path / 'book.xlsx', [['A', 'B', 'C'], [1, 2, 3], [4, 5, 6]])
     with use_workspace(tmp_path):
-        read = inspect_spreadsheet(file_path='book.xlsx', mode='range', range='B2:B3,C2:C3')
+        read = observe_spreadsheet(file_path='book.xlsx', mode='range', range='B2:B3,C2:C3')
         assert read.success, read.model_text
         assert 'selection' not in read.value
-        sel = read.value['areas'][1]['selection']
+        sel = read.value['regions'][1]['selection']
         assert sel['cols'] == [3]
-        written = edit_spreadsheet(file_path='book.xlsx', operations=[{'kind': 'write', 'selection': sel, 'values': [[30], [60]]}])
+        written = apply_spreadsheet_changes(file_path='book.xlsx', expected_version=read.value['content_version'], operations=[{'kind': 'write', 'selection': sel, 'values': [[30], [60]]}])
         assert written.success, written.model_text
     wb = load_workbook(tmp_path / 'book.xlsx')
     assert wb.active['B2'].value == 2
@@ -270,17 +268,17 @@ def test_split_transaction_partial_is_truthful_and_recoverable(tmp_path: Path, m
 def test_schema_alias_reaches_sdk_and_registry(tmp_path: Path) -> None:
     from excelmanus.code_mode import render_sdk_source
     namespace = {}
-    exec(render_sdk_source(intent_tools.get_tools()), namespace)
+    exec(render_sdk_source(workbook_tools.get_tools()), namespace)
     calls = []
     namespace['_call_host'] = lambda name, args: calls.append((name, args)) or args
-    namespace['format_spreadsheet'](path='book.xlsx', operations=[{'kind': 'format', 'range': 'A1', 'font': {'bold': True}}])
+    namespace['apply_spreadsheet_changes'](file_path='book.xlsx', operations=[{'kind': 'format', 'range': 'A1', 'font': {'bold': True}}])
     assert calls[0][1]['file_path'] == 'book.xlsx'
     registry = ToolRegistry()
-    registry.register_tools(intent_tools.get_tools())
+    registry.register_tools(workbook_tools.get_tools())
     registry.configure_schema_validation(mode='enforce', canary_percent=100, strict_path=False)
     _book(tmp_path / 'book.xlsx', [['group'], ['A']])
     with use_workspace(tmp_path):
-        result = registry.call_tool('split_spreadsheet', {'path': 'book.xlsx', 'column': 'group'})
+        result = registry.call_tool('split_spreadsheet', {'file_path': 'book.xlsx', 'by_column': 'group'})
     assert result.success, result.model_text
 
 
@@ -305,10 +303,10 @@ async def test_native_dispatcher_read_filter_write_result_is_model_usable(tmp_pa
     assert len(filtered['values']) == 4  # actual native text, beyond the old three-row preview
     assert filtered['model_field_aliases']['data'] == 'values'
     assert filtered['selection']['cols'] == [2]
-    written = await call('edit_spreadsheet', {'file_path': 'book.xlsx', 'operations': [{'kind': 'write', 'selection': filtered['selection'], 'values': [[10], [20], [30], [40]]}]}, 'write')
+    written = await call('apply_spreadsheet_changes', {'file_path': 'book.xlsx', 'expected_version':filtered['content_version'], 'operations': [{'kind': 'write', 'selection': filtered['selection'], 'values': [[10], [20], [30], [40]]}]}, 'write')
     assert written['content_version']
-    read = await call('inspect_spreadsheet', {'file_path': 'book.xlsx', 'mode': 'range', 'range': 'B2:B5'}, 'read')
-    assert read['values'] == [[10], [20], [30], [40]]
+    read = await call('observe_spreadsheet', {'file_path': 'book.xlsx', 'mode': 'range', 'range': 'B2:B5'}, 'read')
+    assert region_matrix(read['regions'][0]) == [[10], [20], [30], [40]]
 
 
 def test_large_native_payload_spills_actual_data(tmp_path: Path) -> None:
@@ -333,15 +331,15 @@ def test_overview_target_header_object_metadata_and_version(tmp_path: Path) -> N
     wb.save(tmp_path / 'book.xlsx')
     wb.close()
     with use_workspace(tmp_path):
-        read = inspect_spreadsheet(file_path='book.xlsx', mode='overview', sheet_name='Sheet1', header_row=2,
-                                   include=['columns', 'data_validation', 'print_settings'])
+        read = observe_spreadsheet(file_path='book.xlsx', mode='range', range='A2:C3', sheet='Sheet1',
+                                   facets=['data', 'presentation'])
         assert read.success, read.model_text
-        assert len(read.value['sheets']) == 1
-        sheet = read.value['sheets'][0]
-        assert sheet['column_names'] == ['id', None, 'amount']
+        assert len(read.value['regions']) == 1
+        sheet = read.value['regions'][0]
+        assert region_matrix(sheet)[0] == ['id', None, 'amount']
         assert sheet['data_validation']
         assert 'print_settings' in sheet
-        stale = inspect_spreadsheet(file_path='book.xlsx', mode='overview', expected_version='outdated')
+        stale = observe_spreadsheet(file_path='book.xlsx', mode='overview', expected_version='outdated')
         assert not stale.success
         assert stale.error.code == 'STALE_SNAPSHOT'
 
@@ -351,7 +349,7 @@ def test_clean_value_column_keeps_formulas_elsewhere_and_dedupe_moves_styles(tmp
     p = tmp_path / 'book.xlsx'
     _book(p, [['Title'], ['id', 'phone', 'derived'], ['A', '138-0013-8000', '=1+1'], ['B', '13900001111', 3]])
     with use_workspace(tmp_path):
-        result = edit_spreadsheet(file_path='book.xlsx', expected_version=content_version_of_file(p),
+        result = apply_spreadsheet_changes(file_path='book.xlsx', expected_version=content_version_of_file(p),
             operations=[{'kind': 'transform', 'sheet': 'Sheet1', 'header_row': 2, 'action': 'normalize_phone', 'column': 'phone'}])
     assert result.success, result.model_text
     wb = load_workbook(p)
@@ -366,7 +364,7 @@ def test_clean_value_column_keeps_formulas_elsewhere_and_dedupe_moves_styles(tmp
     wb.save(p)
     wb.close()
     with use_workspace(tmp_path):
-        result = edit_spreadsheet(file_path='dedupe.xlsx', expected_version=content_version_of_file(p),
+        result = apply_spreadsheet_changes(file_path='dedupe.xlsx', expected_version=content_version_of_file(p),
                                  operations=[{'kind': 'transform', 'action': 'dedupe', 'key_columns': ['id']}])
     assert result.success, result.model_text
     wb = load_workbook(p)
@@ -376,7 +374,7 @@ def test_clean_value_column_keeps_formulas_elsewhere_and_dedupe_moves_styles(tmp
 
 
 def test_format_appearance_uses_address_sheet_and_preserves_font_details(tmp_path: Path) -> None:
-    from excelmanus.tools.intent_tools import format_spreadsheet
+    from excelmanus.tools.workbook_tools import apply_spreadsheet_changes
     from openpyxl.styles import Font
     p = tmp_path / 'book.xlsx'
     _book(p, [['a']])
@@ -387,10 +385,10 @@ def test_format_appearance_uses_address_sheet_and_preserves_font_details(tmp_pat
     wb.save(p)
     wb.close()
     with use_workspace(tmp_path):
-        result = format_spreadsheet(file_path='book.xlsx', expected_version=content_version_of_file(p),
+        result = apply_spreadsheet_changes(file_path='book.xlsx', expected_version=content_version_of_file(p),
             operations=[{'kind': 'format', 'range': 'Other!A1', 'font': {'bold': True}, 'alignment': {'indent': 1, 'text_rotation': 30}}])
     assert result.success, result.model_text
-    assert result.value['appearance']['sheets'][0]['name'] == 'Other'
+    assert any(s['name']=='Other' for s in result.value['observation']['sheets'])
     wb = load_workbook(p)
     assert wb['Other']['A1'].font.family == 2
     assert wb['Other']['A1'].font.scheme == 'minor'
@@ -400,7 +398,7 @@ def test_format_appearance_uses_address_sheet_and_preserves_font_details(tmp_pat
 
 
 def test_trace_absolute_cell_and_checkpoint_preserve_version(tmp_path: Path) -> None:
-    from excelmanus.tools.intent_tools import trace_spreadsheet_formulas, manage_spreadsheet_versions
+    from excelmanus.tools.workbook_tools import trace_spreadsheet_formulas, manage_spreadsheet_versions
     _book(tmp_path / 'book.xlsx', [['id', 'v'], [1, '=A2+1']])
     with use_workspace(tmp_path):
         result = trace_spreadsheet_formulas(file_path='book.xlsx', mode='trace', target='Sheet1!$B$2')
@@ -423,13 +421,13 @@ def test_irrelevant_edit_field_and_conflicting_request_are_rejected(tmp_path: Pa
     p = tmp_path / 'book.xlsx'
     _book(p, [['id'], [1]])
     registry = ToolRegistry()
-    registry.register_tools(intent_tools.get_tools())
+    registry.register_tools(workbook_tools.get_tools())
     with use_workspace(tmp_path):
-        result = edit_spreadsheet(file_path='book.xlsx', expected_version=content_version_of_file(p),
+        result = apply_spreadsheet_changes(file_path='book.xlsx', expected_version=content_version_of_file(p),
                                  operations=[{'kind': 'write', 'start_cell': 'A2', 'values': [[2]], 'font': {'bold': True}}])
         assert not result.success
         assert result.value['invalid_fields'] == ['font']
-        result = registry.call_tool('inspect_spreadsheet', {'file_path': 'book.xlsx', 'request': {'path': 'different.xlsx'}})
+        result = registry.call_tool('observe_spreadsheet', {'file_path': 'book.xlsx', 'request': {'path': 'different.xlsx'}})
         assert not result.success
         assert result.error.code == 'TOOL_ARGUMENT_VALIDATION_ERROR'
 
@@ -438,7 +436,7 @@ def test_copy_literal_whitespace_and_split_case_collisions(tmp_path: Path) -> No
     p = tmp_path / 'book.xlsx'
     _book(p, [['group', 'v'], ['A/B', '  =literal'], ['a/b', 'text']])
     with use_workspace(tmp_path):
-        written = edit_spreadsheet(file_path='book.xlsx', expected_version=content_version_of_file(p),
+        written = apply_spreadsheet_changes(file_path='book.xlsx', expected_version=content_version_of_file(p),
             operations=[{'kind': 'copy', 'source_sheet': 'Sheet1', 'source_range': 'B2', 'target_sheet': 'Sheet1', 'target_start': 'C2'}])
         assert written.success, written.model_text
         split = split_spreadsheet(file_path='book.xlsx', by_column='group', header_row=1)

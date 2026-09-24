@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { writeExcelCells } from "@/lib/api";
+import { applyWorkbookChanges } from "@/lib/api";
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -10,7 +10,7 @@ function jsonResponse(status: number, body: unknown): Response {
   } as Response;
 }
 
-describe("writeExcelCells", () => {
+describe("applyWorkbookChanges", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     global.fetch = vi.fn();
@@ -26,10 +26,9 @@ describe("writeExcelCells", () => {
       }),
     );
 
-    const result = await writeExcelCells({
+    const result = await applyWorkbookChanges({
       path: "uploads/a.xlsx",
-      sheet: "Sheet1",
-      changes: [{ cell: "B2", value: 42 }],
+      operations: [{kind: "cells.patch", sheet: "Sheet1", cells: [{ cell: "B2", value: 42 }]}],
       sessionId: "sess-1",
       expectedVersion: "sha256:old",
     });
@@ -43,17 +42,16 @@ describe("writeExcelCells", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("/files/excel/write");
+    expect(String(url)).toContain("/workbooks/changes");
     expect(init?.method).toBe("POST");
     const body = JSON.parse(String(init?.body));
     expect(body).toMatchObject({
       path: "./uploads/a.xlsx",
-      sheet: "Sheet1",
-      changes: [{ cell: "B2", value: 42 }],
+      operations: [{kind: "cells.patch", sheet: "Sheet1", cells: [{ cell: "B2", value: 42 }]}],
       session_id: "sess-1",
       expected_version: "sha256:old",
     });
-    expect(body.operations).toBeNull();
+    expect(body.operations[0].kind).toBe("cells.patch");
   });
 
   it("sends expected_version null when omitted (API will reject)", async () => {
@@ -62,9 +60,9 @@ describe("writeExcelCells", () => {
       jsonResponse(200, { status: "success", cells_written: 1, content_version: "sha256:new" }),
     );
 
-    await writeExcelCells({
+    await applyWorkbookChanges({
       path: "./book.xlsx",
-      changes: [{ cell: "A1", value: "x" }],
+      operations: [{kind: "cells.patch", sheet: "Sheet1", cells: [{ cell: "A1", value: "x" }]}],
     });
 
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
@@ -80,9 +78,9 @@ describe("writeExcelCells", () => {
       }),
     );
 
-    const result = await writeExcelCells({
+    const result = await applyWorkbookChanges({
       path: "./book.xlsx",
-      changes: [{ cell: "A1", value: 1 }],
+      operations: [{kind: "cells.patch", sheet: "Sheet1", cells: [{ cell: "A1", value: 1 }]}],
       expectedVersion: "sha256:stale",
     });
 
@@ -93,9 +91,9 @@ describe("writeExcelCells", () => {
 
   it("defaults 409 code when body has no code", async () => {
     vi.mocked(global.fetch).mockResolvedValue(jsonResponse(409, { error: "conflict" }));
-    const result = await writeExcelCells({
+    const result = await applyWorkbookChanges({
       path: "./book.xlsx",
-      changes: [{ cell: "A1", value: 1 }],
+      operations: [{kind: "cells.patch", sheet: "Sheet1", cells: [{ cell: "A1", value: 1 }]}],
     });
     expect(result.code).toBe("VERSION_CONFLICT");
   });
@@ -103,7 +101,7 @@ describe("writeExcelCells", () => {
   it("throws on non-409 errors", async () => {
     vi.mocked(global.fetch).mockResolvedValue(jsonResponse(500, { error: "写入失败" }));
     await expect(
-      writeExcelCells({ path: "./book.xlsx", changes: [{ cell: "A1", value: 1 }] }),
+      applyWorkbookChanges({ path: "./book.xlsx", operations: [{kind: "cells.patch", sheet: "Sheet1", cells: [{ cell: "A1", value: 1 }]}] }),
     ).rejects.toThrow("写入失败");
   });
 });

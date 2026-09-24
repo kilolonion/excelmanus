@@ -2,7 +2,7 @@ from openpyxl import Workbook, load_workbook
 import pytest
 
 from excelmanus.tools.context import bind_workspace, reset_call
-from excelmanus.tools.intent_tools import edit_spreadsheet
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes
 from excelmanus.workbook.data import filter_data
 
 
@@ -27,7 +27,7 @@ def test_same_bytes_do_not_make_selection_portable(tmp_path, other_workspace):
         reset_call(token)
     token = bind_workspace(root_b)
     try:
-        result = edit_spreadsheet(target, operations=[{"kind": "write", "selection": selection, "values": [["Bob", 999]]}])
+        result = apply_spreadsheet_changes(target, expected_version=selection["content_version"], operations=[{"kind": "write", "selection": selection, "values": [["Bob", 999]]}])
         assert not result.success
         assert result.error.code == "SELECTION_STALE"
         assert load_workbook(root_b / target)["Data"]["B2"].value == 20

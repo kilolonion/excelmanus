@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Check, ChevronDown, Loader2, MessageSquare, Settings2 } from "lucide-react";
 import {
   DropdownMenu,
@@ -105,12 +105,13 @@ function ModelPicker({
 }
 
 export function RoleModelSection() {
-  const { config, handleActivateProfile, activatingProfile } = useAdminModel();
+  const { config, handleActivateProfile, activatingProfile, profileBusy, setSaveToast } = useAdminModel();
   const profiles = useMemo(() => config?.profiles || [], [config?.profiles]);
   const active = profiles.find((p) => p.name === config?.active) || profiles[0] || null;
 
   const [memoryModel, setMemoryModel] = useState("");
   const [memorySaving, setMemorySaving] = useState(false);
+  const memoryPending = useRef(false);
 
   const loadRuntime = useCallback(async () => {
     const cached = settingsCache.get<RuntimeSnippet>("/config/runtime");
@@ -132,6 +133,8 @@ export function RoleModelSection() {
   }, [loadRuntime]);
 
   const saveMemoryModel = async (modelId: string) => {
+    if (memoryPending.current) return;
+    memoryPending.current = true;
     setMemorySaving(true);
     const previous = memoryModel;
     setMemoryModel(modelId);
@@ -139,9 +142,12 @@ export function RoleModelSection() {
       await apiPut("/config/runtime", { memory_maintenance_model: modelId }, { direct: true });
       const cached = settingsCache.get<RuntimeSnippet>("/config/runtime");
       settingsCache.set("/config/runtime", { ...(cached || {}), memory_maintenance_model: modelId });
-    } catch {
+      setSaveToast({ msg: "记忆维护模型已保存", type: "success" });
+    } catch (error) {
       setMemoryModel(previous);
+      setSaveToast({ msg: error instanceof Error ? error.message : "记忆维护模型保存失败", type: "error" });
     } finally {
+      memoryPending.current = false;
       setMemorySaving(false);
     }
   };
@@ -152,7 +158,7 @@ export function RoleModelSection() {
   );
 
   const empty = profiles.length === 0;
-  const busy = Boolean(activatingProfile) || memorySaving;
+  const busy = profileBusy || memorySaving;
 
   return (
     <SettingsFoldSection
@@ -161,7 +167,7 @@ export function RoleModelSection() {
       icon={<Settings2 className="h-4 w-4" style={{ color: "var(--em-primary)" }} />}
       coachId="coach-settings-model-roles"
     >
-      <div className="px-3 pb-3">
+      <div className="px-3 pb-3 pt-3">
         <div className="rounded-lg border border-border/70 divide-y divide-border/70 overflow-hidden">
           <div className="em-model-role-row flex items-center gap-2 px-3 py-3">
             <div className="flex items-start gap-2 flex-1 min-w-0">

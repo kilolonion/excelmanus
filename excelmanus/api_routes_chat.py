@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import uuid
+from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, AsyncIterator, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -52,6 +55,7 @@ from excelmanus.session import (
 )
 from excelmanus.session_title import instant_session_title, title_from_messages
 from excelmanus.workspace.paths import workspace_title_from_path
+from excelmanus.agent.dispatch import DispatchConflict, DispatchMode
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -132,6 +136,13 @@ class ChatRequest(BaseModel):
     # the compatibility/default context for existing clients.
     sheet_contexts: list[SheetContext] = Field(default_factory=list, max_length=3)
     workbook_action: WorkbookAction | None = None
+    # 后台注入标记：非空时该用户消息以隐藏形式落库（_ui_hidden/_prompt_kind），
+    # 前端不渲染气泡。用于「异常退出/失败后继续」等恢复按钮发送的 continue。
+    prompt_kind: str | None = Field(default=None, max_length=64)
+    dispatch_mode: DispatchMode | None = None
+    client_message_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)] = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+    )
 
     @model_validator(mode="after")
     def workbook_action_requires_plan(self):
@@ -279,6 +290,12 @@ class ChatResponse(BaseModel):
     workspace_id: str | None = None
     workspace_title: str = ""
     workspace_routed: bool = False
+    dispatch: dict[str, Any] | None = None
+
+
+class DispatchRequest(ChatRequest):
+    mode: DispatchMode | None = None
+    client_message_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
 class ErrorResponse(BaseModel):
     """错误响应体（不暴露内部堆栈）。"""
@@ -289,6 +306,12 @@ class ErrorResponse(BaseModel):
 
 def _build_reply_sse(chat_result: Any, engine: Any) -> str:
     """构建 reply SSE 事件文本（chat_stream 与 chat_subscribe 共用）。"""
+    driver = getattr(engine, "_driver", None)
+    last = getattr(driver, "last_result", None)
+    if isinstance(last, ChatResult):
+        chat_result = last
+    elif isinstance(last, BaseException):
+        chat_result = ChatResult(reply="")
     normalized_reply = guard_public_reply((chat_result.reply or "").strip())
     route = engine.last_route_result
     return _sse_format("reply", {
@@ -301,7 +324,18 @@ def _build_reply_sse(chat_result: Any, engine: Any) -> str:
         "prompt_tokens": chat_result.prompt_tokens,
         "completion_tokens": chat_result.completion_tokens,
         "total_tokens": chat_result.total_tokens,
+        "turn_id": getattr(driver, "turn_id", ""),
+        "dispatch": getattr(driver, "last_reply", {}) or {},
     })
+
+
+def _dispatch_snapshot_sse(engine: Any) -> str:
+    driver = engine._driver
+    latest = next((m.get("_dispatch") for m in reversed(engine.raw_messages)
+                   if m.get("role") == "user" and m.get("_dispatch")), {})
+    active = driver.dispatch_receipt(str(latest.get("client_message_id") or "")) if latest else None
+    return _sse_format("dispatch_snapshot", {"dispatches": driver.dispatch_snapshot(),
+        "turn_id": driver.turn_id, "active_dispatch": active if driver.running else None})
 
 
 def _public_excel_path(path: str, workspace_root: str | None = None) -> str:
@@ -574,26 +608,40 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
 
     jev_budget = JevTurnBudget()
     route_decision = None
-    try:
-        from excelmanus.system_one.intent_context import route_session_workspace
+    routed_session_id = None
+    # prompt_kind 标记的是隐藏注入消息（如失败后的「继续」），始终绑定请求会话，
+    # 不参与工作区路由。
+    if not request.prompt_kind:
+        try:
+            from excelmanus.system_one.intent_context import route_session_workspace
 
-        routed_session_id, route_decision = await route_session_workspace(
-            get_session_manager(),
-            get_config(),
-            request.session_id,
-            request.message,
-            context_input,
-            budget=jev_budget,
-        )
-    except Exception:
-        routed_session_id = None
-        logger.debug("工作区路由判断失败", exc_info=True)
+            routed_session_id, route_decision = await route_session_workspace(
+                get_session_manager(),
+                get_config(),
+                request.session_id,
+                request.message,
+                context_input,
+                budget=jev_budget,
+            )
+        except Exception:
+            routed_session_id = None
+            logger.debug("工作区路由判断失败", exc_info=True)
 
     try:
         session_id, engine = await get_session_manager().acquire_for_chat(
             routed_session_id or request.session_id,
         )
     except SessionBusyError:
+        if request.dispatch_mode:
+            target = routed_session_id or request.session_id or ""
+            admission = await chat_dispatch(target, DispatchRequest(**{
+                **request.model_dump(), "session_id": target, "mode": request.dispatch_mode,
+            }), raw_request)
+            if admission.status_code != 202:
+                raise HTTPException(status_code=admission.status_code, detail=json.loads(admission.body))
+            receipt = json.loads(admission.body)
+            return ChatResponse(session_id=routed_session_id or request.session_id or "", reply="消息已接收。",
+                                skills_used=[], route_mode=request.dispatch_mode, dispatch=receipt)
         # The non-streaming compatibility endpoint has no live browser event
         # owner.  Keep its historical queue behavior; the resulting turn is
         # durable and the session revision lets clients pick it up on poll.
@@ -604,6 +652,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 "chat_mode": request.chat_mode,
                 "images": _serialize_images(request.images),
                 "context_input": context_input,
+                "prompt_kind": request.prompt_kind,
             },
         )
         if queued:
@@ -659,6 +708,9 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             mention_contexts=mention_contexts,
             context_input=context_input,
             jev_budget=jev_budget,
+            prompt_kind=request.prompt_kind,
+            dispatch_mode=request.dispatch_mode,
+            client_message_id=request.client_message_id,
         )
         chat_result = chat_turn.result
     except AttachmentError as _attachment_exc:
@@ -693,7 +745,10 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 logger.debug("非流式号池健康信号更新失败", exc_info=True)
         raise
     finally:
-        await get_session_manager().release_for_chat(session_id)
+        try:
+            await engine._driver.wait_until_idle()
+        finally:
+            await get_session_manager().release_for_chat(session_id)
 
     normalized_reply = guard_public_reply(chat_result.reply.strip())
 
@@ -722,9 +777,12 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             logger.debug("非流式号池台账写入失败", exc_info=True)
     # 记录已认证用户 token 使用量（非流式路径）
     # ── 自动标题（仅首轮）：截取用户消息 + 后台 AI 生成 ──
+    # 隐藏注入消息（prompt_kind）不直接用作文本，避免「continue」成为标题；
+    # 首轮失败在先、标题缺失时从历史可见消息补。
     generated_title: str | None = None
-    if engine.session_turn == 1:
-        generated_title = _truncate_user_message_as_title(display_text)
+    _title_seed = _resolve_title_seed(engine, session_id, request.prompt_kind, display_text)
+    if _title_seed:
+        generated_title = _truncate_user_message_as_title(_title_seed)
         if generated_title:
             _ch = get_session_manager().chat_history if get_session_manager() else None
             if _ch is not None:
@@ -734,7 +792,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                     logger.debug("截取标题写入失败", exc_info=True)
         _fire_and_forget(_generate_session_title_background(
             session_id=session_id,
-            user_message=display_text,
+            user_message=_title_seed,
             assistant_reply=normalized_reply,
         ), name="session_title")
     route = engine.last_route_result
@@ -813,20 +871,24 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             jev_budget = JevTurnBudget()
             route_decision = None
-            try:
-                from excelmanus.system_one.intent_context import route_session_workspace
+            routed_session_id = None
+            # prompt_kind 标记的是隐藏注入消息（如失败后的「继续」），始终绑定请求会话，
+            # 不参与工作区路由。
+            if not request.prompt_kind:
+                try:
+                    from excelmanus.system_one.intent_context import route_session_workspace
 
-                routed_session_id, route_decision = await route_session_workspace(
-                    get_session_manager(),
-                    get_config(),
-                    request.session_id,
-                    request.message,
-                    context_input,
-                    budget=jev_budget,
-                )
-            except Exception:
-                routed_session_id = None
-                logger.debug("工作区路由判断失败", exc_info=True)
+                    routed_session_id, route_decision = await route_session_workspace(
+                        get_session_manager(),
+                        get_config(),
+                        request.session_id,
+                        request.message,
+                        context_input,
+                        budget=jev_budget,
+                    )
+                except Exception:
+                    routed_session_id = None
+                    logger.debug("工作区路由判断失败", exc_info=True)
             try:
                 session_id, engine = await get_session_manager().acquire_for_chat(
                     routed_session_id or request.session_id,
@@ -913,6 +975,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             })
 
             _sse_event_count = 0
+            _turn_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            _turn_replies = 0
+
+            def _with_turn_usage(result: ChatResult) -> ChatResult:
+                return replace(result, **_turn_usage) if _turn_replies else result
 
             _flush_scheduled = False
 
@@ -947,6 +1014,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 消息持久化合并调度，在同一事件循环读取 memory。
                 """
                 nonlocal _sse_event_count
+                nonlocal _turn_replies
+                if event.event_type == EventType.TURN_REPLY:
+                    _turn_replies += 1
+                    for key in _turn_usage:
+                        _turn_usage[key] += int(getattr(event, key, 0) or 0)
                 _sse_event_count += 1
                 has_subscriber = stream_state.subscriber_queue is not None
                 logger.debug(
@@ -966,6 +1038,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             async def _run_chat_inner() -> ChatResult:
                 """后台执行与非流式相同的 followup，完成后释放会话锁。"""
+                starting_turn = engine._driver.turn_index
                 try:
                     outcome = await run_engine_followup(
                         engine,
@@ -977,12 +1050,25 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         mention_contexts=mention_contexts,
                         context_input=context_input,
                         jev_budget=jev_budget,
+                        prompt_kind=request.prompt_kind,
+                        dispatch_mode=request.dispatch_mode,
+                        client_message_id=request.client_message_id,
                     )
-                    return outcome.result
+                    await engine._driver.wait_until_idle()
+                    return _with_turn_usage(outcome.result)
+                except Exception:
+                    await engine._driver.wait_until_idle()
+                    if engine._driver.turn_index > starting_turn + 1:
+                        last = engine._driver.last_result
+                        return _with_turn_usage(last if isinstance(last, ChatResult) else ChatResult(reply=""))
+                    raise
                 finally:
-                    await get_session_manager().release_for_chat(session_id)
-                    nonlocal acquired
-                    acquired = False
+                    try:
+                        await engine._driver.wait_until_idle()
+                    finally:
+                        await get_session_manager().release_for_chat(session_id)
+                        nonlocal acquired
+                        acquired = False
 
             # ── 启动 chat 任务 ──
             if route_decision is not None:
@@ -1103,8 +1189,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 except Exception:
                     logger.debug("号池台账写入失败", exc_info=True)
             # ── 自动标题（仅首轮）：立即截取用户消息，后台异步 AI 生成 ──
-            if engine.session_turn == 1:
-                _instant_title = _truncate_user_message_as_title(display_text)
+            # 隐藏注入消息（prompt_kind）不直接用作文本，避免「continue」成为标题；
+            # 首轮失败在先、标题缺失时从历史可见消息补。
+            _title_seed = _resolve_title_seed(engine, session_id, request.prompt_kind, display_text)
+            if _title_seed:
+                _instant_title = _truncate_user_message_as_title(_title_seed)
                 if _instant_title:
                     yield _sse_format("session_title", {
                         "session_id": session_id,
@@ -1121,7 +1210,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 _fire_and_forget(
                     _generate_session_title_background(
                         session_id=session_id,
-                        user_message=display_text,
+                        user_message=_title_seed,
                         assistant_reply=normalized_reply,
                     ),
                     name="generate_session_title",
@@ -1210,7 +1299,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     _app_state.get_runtime().session_stream_states.pop(session_id, None)
             await _cancel_task(queue_get_task)
             # 安全网：确保 in_flight 锁被释放（正常路径已在 _run_chat_inner 中释放）
-            if acquired and session_id is not None:
+            if acquired and session_id is not None and (chat_task is None or chat_task.done()):
                 try:
                     await get_session_manager().release_for_chat(session_id)
                 except Exception:
@@ -1546,7 +1635,6 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 "stream_id": _sid,
                 "buffered_count": len(replay_items),
             })
-
             for seq, event in replay_items:
                 if event.event_type in _REPLAY_SKIP_TYPES:
                     continue
@@ -1555,6 +1643,10 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 sse = _sse_event_to_sse(event, session_id)
                 if sse is not None:
                     yield _inject_seq(sse, seq, _sid)
+
+            engine = get_session_manager().get_engine(session_id) if get_session_manager() else None
+            if engine is not None:
+                yield _dispatch_snapshot_sse(engine)
 
             while True:
                 assert queue_get_task is not None
@@ -1679,6 +1771,63 @@ async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONRespons
         status_code=200,
         content={"status": "cancelled"},
     )
+
+
+@router.post("/api/v1/chat/{session_id}/dispatch")
+async def chat_dispatch(session_id: str, request: DispatchRequest, raw_request: Request) -> JSONResponse:
+    """Admit an input into the active session actor and return its receipt."""
+    if get_session_manager() is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
+    if not await _has_session_access(session_id, raw_request):
+        return _error_json_response(404, "会话不存在")
+    if request.session_id and request.session_id != session_id:
+        raise HTTPException(status_code=422, detail="消息与会话不匹配")
+    if request.prompt_kind or request.message.startswith("/"):
+        raise HTTPException(status_code=422, detail="控制命令请使用对应的操作入口")
+    engine = await get_session_manager().get_or_restore_engine(session_id)
+    if request.images:
+        from excelmanus.attachments.store import get_attachment_store
+        if engine is None or not engine.is_vision_capable:
+            raise HTTPException(status_code=422, detail="当前模型不支持图片")
+        if any(get_attachment_store().get_ref(image.attachment_id) is None for image in request.images):
+            raise HTTPException(status_code=422, detail="图片附件不存在或已过期")
+    previous = engine._driver.dispatch_receipt(request.client_message_id) if engine is not None else None
+    mode = request.mode or request.dispatch_mode or (previous or {}).get("mode") or get_config().message_dispatch_default
+    try:
+        result = await get_session_manager().dispatch_message(
+            session_id, request.message, mode=mode,
+            client_message_id=request.client_message_id,
+            extra={"chat_mode": request.chat_mode, "images": _serialize_images(request.images),
+                   "context_input": _context_input(request), "raw_message": request.message},
+        )
+    except DispatchConflict as exc:
+        return JSONResponse(status_code=409, content={"code": "DISPATCH_CONFLICT", "error": str(exc)})
+    if result is None:
+        return JSONResponse(status_code=409, content={"code": "SESSION_IDLE", "error": "当前任务已经结束，请重新发送"})
+    return JSONResponse(status_code=202, content=result)
+
+
+@router.get("/api/v1/chat/{session_id}/dispatches")
+async def chat_dispatches(session_id: str, raw_request: Request) -> dict[str, Any]:
+    if not await _has_session_access(session_id, raw_request):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    engine = await get_session_manager().get_or_restore_engine(session_id)
+    return {"dispatches": engine._driver.dispatch_snapshot() if engine else []}
+
+
+@router.post("/api/v1/chat/{session_id}/dispatches/{dispatch_id}/cancel")
+async def chat_cancel_dispatch(session_id: str, dispatch_id: str, raw_request: Request) -> dict[str, Any]:
+    if not await _has_session_access(session_id, raw_request):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    engine = await get_session_manager().get_or_restore_engine(session_id)
+    if engine is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        return engine._driver.cancel_dispatch(dispatch_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="消息不存在") from None
+    except DispatchConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/api/v1/chat/{session_id}/guide", responses=_error_responses)
@@ -1823,6 +1972,29 @@ async def chat_approve(
 def _truncate_user_message_as_title(user_message: str) -> str | None:
     """从用户消息得到即时会话标题（去除上传前缀，取首行；显示层再做省略）。"""
     return instant_session_title(user_message)
+
+
+def _resolve_title_seed(
+    engine: Any,
+    session_id: str | None,
+    prompt_kind: str | None,
+    display_text: str,
+) -> str | None:
+    """返回本轮可用于生成标题的用户文本；None 表示本轮不生成标题。
+
+    - 普通首轮（``session_turn == 1``）：使用当前请求消息；
+    - 隐藏注入轮次（``prompt_kind``，如失败后的「继续」）：首轮可能失败在先、
+      标题尚未生成，此时从历史中第一条可见用户消息补一个；
+    - 其余情况不生成。
+    """
+    if prompt_kind:
+        ch = get_session_manager().chat_history if get_session_manager() else None
+        if ch is None or ch.get_title_source(session_id or "") not in (None, "fallback"):
+            return None
+        return title_from_messages(engine.raw_messages) or None
+    if engine.session_turn != 1:
+        return None
+    return display_text
 
 
 async def _generate_session_title_background(

@@ -372,13 +372,13 @@ class TestToolRegistration:
     """内部 compare_excel 不再上模型面；模型只见 compare_spreadsheets。"""
 
     def test_internal_compare_not_registered(self):
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools.workbook_tools import get_tools
         names = {tool.name for tool in get_tools()}
         assert "compare_excel" not in names
         assert "compare_spreadsheets" in names
 
     def test_intent_wrapper_schema(self):
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools.workbook_tools import get_tools
         tools = get_tools()
         tool = next(t for t in tools if t.name == "compare_spreadsheets")
         schema = tool.input_schema

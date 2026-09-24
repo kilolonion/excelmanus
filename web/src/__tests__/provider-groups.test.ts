@@ -21,6 +21,7 @@ function profile(partial: Partial<ProfileEntry> & Pick<ProfileEntry, "name" | "m
     description: "",
     protocol: "auto",
     thinking_mode: "auto",
+    service_tier: "",
     model_family: "",
     custom_extra_body: "",
     custom_extra_headers: "",

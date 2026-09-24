@@ -100,6 +100,19 @@ def test_inbox_reconstruct_roundtrip() -> None:
     assert [item.content for item in other.next_step] == ["hint"]
 
 
+def test_inbox_promotes_unconsumed_steer_to_next_turn() -> None:
+    inbox = Inbox()
+    item = inbox.push_steer(
+        "改看 B 表",
+        extra={"dispatch_id": "dsp-1", "client_message_id": "client-1", "dispatch_mode": "steer"},
+    )
+    promoted = inbox.promote_orphaned_steer()
+    assert promoted == [item]
+    assert inbox.next_step == ()
+    assert inbox.next_turn[0].kind == "followup"
+    assert inbox.next_turn[0].to_public_dict()["dispatch_id"] == "dsp-1"
+
+
 def test_chat_entrypoint_removed() -> None:
     assert "chat" not in AgentEngine.__dict__
 

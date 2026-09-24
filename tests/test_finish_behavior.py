@@ -344,7 +344,7 @@ class TestDelegateSubagentWritePropagation:
         from excelmanus.subagent.models import SubagentFileChange, SubagentResult
 
         structured = [
-            SubagentFileChange(path=p, tool_name="edit_spreadsheet")
+            SubagentFileChange(path=p, tool_name="apply_spreadsheet_changes")
             for p in file_changes
         ]
         return SubagentResult(

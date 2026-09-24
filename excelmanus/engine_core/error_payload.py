@@ -124,6 +124,8 @@ OUT_OF_RANGE = "OUT_OF_RANGE"
 NAMED_RANGE_NOT_FOUND = "NAMED_RANGE_NOT_FOUND"
 TABLE_NOT_FOUND = "TABLE_NOT_FOUND"
 USER_EDIT_PENDING = "USER_EDIT_PENDING"
+UNSUPPORTED_PRESERVATION = "UNSUPPORTED_PRESERVATION"
+SIGNED_WORKBOOK = "SIGNED_WORKBOOK"
 
 ERROR_CODES: frozenset[str] = frozenset({
     INVALID_ARGS,
@@ -185,6 +187,8 @@ ERROR_CODES: frozenset[str] = frozenset({
     NAMED_RANGE_NOT_FOUND,
     TABLE_NOT_FOUND,
     USER_EDIT_PENDING,
+    UNSUPPORTED_PRESERVATION,
+    SIGNED_WORKBOOK,
 })
 
 # error_code → failure_class。未列出的码（含未知）回落 internal。
@@ -225,6 +229,8 @@ ERROR_CODE_TO_FAILURE_CLASS: dict[str, str] = {
     SELECTION_STALE: FAILURE_CONFLICT,
     SHEET_REQUIRED: FAILURE_INVALID_ARGS,
     REF_UNSUPPORTED: FAILURE_UNSUPPORTED,
+    UNSUPPORTED_PRESERVATION: FAILURE_UNSUPPORTED,
+    SIGNED_WORKBOOK: FAILURE_BLOCKED,
     COORD_CONTRACT: FAILURE_INVALID_ARGS,
     FILE_EXISTS: FAILURE_CONFLICT,
     AMBIGUOUS_MATCH: FAILURE_CONFLICT,
@@ -262,13 +268,13 @@ _REMEDIATION_BY_CODE: dict[str, str] = {
         "不要擅自换成另一份表，也不要改用工作区外路径。"
     ),
     PATH_REQUIRED: "补上 file_path（工作区相对路径）后重试一次；仍不存在就按 PATH_INVALID 查找或请用户提供。",
-    DECODE_ERROR: "文本文件先换 encoding 参数重试（常见 gbk/gb18030/utf-16）；xlsx 等二进制文件换用匹配工具（inspect_spreadsheet），不要对二进制再调本工具。",
+    DECODE_ERROR: "文本文件先换 encoding 参数重试（常见 gbk/gb18030/utf-16）；xlsx 等二进制文件换用匹配工具（observe_spreadsheet），不要对二进制再调本工具。",
     SPEC_VALIDATION_FAILED: "按 errors 中的字段路径、原因与合法形状修正 workbook_spec 后重试，不要读产品源码。",
     SPEC_NOT_PATCH: "workbook_spec 只能用于创建新文件：换成尚不存在的输出路径，或对已有文件改用 operations 更新。",
     COMPILE_FAILED: "修正规格里的非法引用或操作后再编译，不要原样重试。",
     FORMULA_ERROR: "修正公式语法或引用（避免 #REF!）后重写该单元格，不要原样重试。",
-    OUT_OF_RANGE: "把行列缩小到工作表实际范围后重试；先 inspect_spreadsheet 看 max_row/max_col。",
-    PERMISSION_DENIED: "不要重试这次写入；改用 inspect_spreadsheet 等只读工具，或请用户切到编辑模式（也可切出只读/计划模式）。",
+    OUT_OF_RANGE: "把行列缩小到工作表实际范围后重试；先 observe_spreadsheet 看 max_row/max_col。",
+    PERMISSION_DENIED: "不要重试这次写入；改用 observe_spreadsheet 等只读工具，或请用户切到编辑模式（也可切出只读/计划模式）。",
     TOOL_NOT_ALLOWED: "不要再调这个工具名；改用当前授权目录里已有的工具。",
     PRE_EXECUTE_DENIED: "不要重试这次调用；当前守卫/只读子代理拒绝写入，改用只读工具或把限制写回主代理。",
     TOOL_CONTEXT_MISSING: "这次调用没有工作区上下文；不要猜测当前目录，请从会话入口重新发起。",
@@ -300,8 +306,10 @@ _REMEDIATION_BY_CODE: dict[str, str] = {
     PLAN_INACTIVE: "先 write_plan / 进入计划模式，或改用当前模式允许的工具。",
     CONVERSION_UNAVAILABLE: "该转换能力不可用；改用 xlsx 或请用户在 Excel 中另存。",
     NOOP: "这是空操作，不要原样重试；先 inspect 当前内容再决定是否修改。",
-    PROBE_FILE_FORBIDDEN: "不要探测该路径；改用用户工作区内的相对路径。",
-    PRODUCT_SOURCE_FORBIDDEN: "不要读取产品源码。改用 introspect_capability 查询工具字段，或 inspect_spreadsheet 读取工作区表格。不要改用 shell 或绝对路径绕过。",
+    PROBE_FILE_FORBIDDEN: "不要创建探测工作簿或靠改名重试。查询 introspect_capability 确认工具参数；要验证用户目标操作，可对实际目标文件使用 apply_spreadsheet_changes(dry_run=true)。格式与保留限制仍然有效。",
+    UNSUPPORTED_PRESERVATION: "当前适配器无法保证保留 capabilities 中的扩展或部件，本次未提交。保留原文件并说明不支持的功能；不要删除扩展、重打包或另建探测文件绕过保留检查。",
+    SIGNED_WORKBOOK: "编辑会使工作簿数字签名失效，本次未提交。请使用无签名的可编辑版本；不要删除签名后重试。",
+    PRODUCT_SOURCE_FORBIDDEN: "不要读取产品源码。改用 introspect_capability 查询工具字段，或 observe_spreadsheet 读取工作区表格。不要改用 shell 或绝对路径绕过。",
     CANCELLED: "任务已取消，不要重试同一调用。",
     PENDING_APPROVAL: "等待用户审批，不要用同一参数再提交一次。",
     BUDGET_EXCEEDED: "本轮工具调用预算已用尽，不要继续堆调用；汇总后结束。",

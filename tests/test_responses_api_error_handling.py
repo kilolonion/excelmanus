@@ -11,14 +11,130 @@
 from __future__ import annotations
 
 import pytest
+import httpx
 
-from excelmanus.providers.openai_responses import ResponsesAPIError
+from excelmanus.providers.openai_responses import (
+    OpenAIResponsesClient, ResponsesAPIError, _stream_failure_error,
+)
 from excelmanus.engine_core.llm_caller import (
     is_retryable_llm_error,
     is_nonretryable_auth_error,
     is_content_filter_error,
 )
 from excelmanus.error_guidance import classify_failure, _extract_status_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("override", [None, "default"])
+async def test_responses_forwards_priority_tier_and_preserves_explicit_override(stream, override):
+    import json
+
+    requests = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if body.get("service_tier") not in {"priority", "default"}:
+            return httpx.Response(422, json={"error": {"message": "Unsupported service_tier"}})
+        completed = {
+            "type": "response.completed",
+            "response": {"id": "resp-test", "model": "test-model", "output": []},
+        }
+        return httpx.Response(200, text="data: " + json.dumps(completed) + "\n\n")
+
+    client = OpenAIResponsesClient(api_key="test", base_url="https://provider.example/v1")
+    await client._http.aclose()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        client._http = http
+        result = await client.chat.completions.create(
+            model="test-model", messages=[{"role": "user", "content": "hello"}],
+            service_tier="priority", stream=stream,
+            extra_body={"service_tier": override} if override else {},
+        )
+        if stream:
+            async for _ in result:
+                pass
+    assert len(requests) == 1
+    assert requests[0]["service_tier"] == (override or "priority")
+
+
+def test_unsupported_service_tier_stream_failure_keeps_provider_detail():
+    exc = _stream_failure_error({
+        "type": "response.failed",
+        "response": {"error": {"message": "Unsupported service_tier: fast"}},
+    })
+    assert exc is not None
+    guidance = classify_failure(exc, stage="calling_llm", model="gpt-6-astra")
+    assert guidance.code == "invalid_request"
+    assert guidance.retryable is False
+    assert "Unsupported service_tier: fast" in guidance.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["collected", "stream", "background_start", "background_get", "background_cancel"])
+async def test_revoked_oauth_http_error_keeps_body_and_requests_login(mode):
+    payload = {"error": {"message": "Encountered invalidated oauth token for user, failing request", "code": "token_revoked"}}
+    client = OpenAIResponsesClient(api_key="test", base_url="https://provider.example/v1")
+    await client._http.aclose()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, json=payload),
+    )) as http:
+        client._http = http
+        with pytest.raises(ResponsesAPIError) as caught:
+            if mode == "background_start":
+                await client.start_background_response({})
+            elif mode == "background_get":
+                await client.get_background_response("resp-test")
+            elif mode == "background_cancel":
+                await client.cancel_background_response("resp-test")
+            else:
+                result = await client.chat.completions.create(
+                    model="test-model", messages=[{"role": "user", "content": "hello"}],
+                    stream=mode == "stream",
+                )
+                if mode == "stream":
+                    async for _ in result:
+                        pass
+    exc = caught.value
+    assert exc.body == payload
+    assert "b'" not in str(exc)
+    guidance = classify_failure(exc, provider="chatgpt", model="test-model")
+    assert guidance.code == "model_oauth_expired"
+    assert guidance.title == "订阅登录已失效"
+    assert "重新登录" in guidance.message
+    assert "API Key" not in guidance.message
+    assert "token_revoked" not in guidance.message
+    assert guidance.retryable is False
+    assert guidance.actions[0]["type"] == "open_settings"
+    assert is_retryable_llm_error(exc) is False
+
+
+@pytest.mark.asyncio
+async def test_plain_text_http_error_is_decoded():
+    from excelmanus.providers.openai_responses import _http_response_error
+    exc = await _http_response_error(httpx.Response(403, content="访问未授权".encode()))
+    assert exc.body == "访问未授权"
+    assert "访问未授权" in str(exc)
+    assert classify_failure(exc).code == "model_forbidden"
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "error", "code": "token_revoked", "message": "Login invalid"},
+    {"type": "response.failed", "response": {"error": {"code": "token_revoked", "message": "Login invalid"}}},
+])
+def test_revoked_oauth_stream_failure_is_auth_error(event):
+    exc = _stream_failure_error(event)
+    assert exc is not None
+    assert exc.status_code == 401
+    assert classify_failure(exc).code == "model_oauth_expired"
+
+
+def test_oauth_failure_survives_wrapping_and_legacy_byte_messages():
+    cause = ResponsesAPIError(401, "Responses API 错误: b'{\\n token_revoked }'")
+    wrapped = RuntimeError("Model call failed")
+    wrapped.__cause__ = cause
+    assert classify_failure(wrapped).code == "model_oauth_expired"
 
 
 # ── ResponsesAPIError 基础属性 ────────────────────────────────

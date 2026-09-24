@@ -12,6 +12,9 @@ import { useExcelStore, type ExcelCellDiff, type ExcelDiffEntry, type ExcelPrevi
 import { useWordStore } from "@/stores/word-store";
 import { useFilePreviewStore } from "@/stores/file-preview-store";
 import { useJevStore } from "@/stores/jev-store";
+import { useDispatchStore } from "@/stores/dispatch-store";
+import type { DispatchReceipt } from "@/lib/types";
+import { dedupeFileAttachments, prepareUserMessageDisplay } from "@/lib/upload-notice";
 import { classifyWorkspaceFile } from "@/lib/file-kind";
 import { displayFileName } from "@/lib/file-identity";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
@@ -20,6 +23,7 @@ import type { AssistantBlock, Session, TaskItem } from "@/lib/types";
 import { instantSessionTitle } from "@/lib/session-title";
 import { normalizeRelativePath, workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { parseWorkbookTarget, parseWorkbookPresentation, showWorkbookPresentation } from "@/lib/workbook-interaction";
+import { isFailureGuidanceBlock, isSameFailure } from "@/lib/failure-recovery";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,6 +55,8 @@ export interface SSEHandlerContext {
   hadStreamError: boolean;
   /** 本轮是否出现过会写入历史的工具副作用（diff / 改文件），用于结束后补同步。 */
   hadPersistedToolWork?: boolean;
+  turnId?: string;
+  completedTurnId?: string;
   /** 高置信 stay：抑制 done 内全部自动导航（含本轮自动 openCompare）。 */
   suppressAutoOpen?: boolean;
   /** 本轮 excel_diff 是否已自动打开对比视图（供 stay 撤回）。 */
@@ -66,6 +72,7 @@ export interface DeltaBatcher {
   flush(): void;
   dispose(): void;
   hasPendingContent(): boolean;
+  setTarget?(messageId: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +184,43 @@ export function getLastAssistantMessage(
 
 const S = () => useChatStore.getState();
 
+function receiveDispatch(raw: unknown, ctx: SSEHandlerContext): DispatchReceipt | null {
+  const receipt = raw as DispatchReceipt | null;
+  if (!receipt?.dispatch_id || !receipt.client_message_id || typeof receipt.revision !== "number") return null;
+  useDispatchStore.getState().upsert(ctx.effectiveSessionId, receipt);
+  return useDispatchStore.getState().sessions[ctx.effectiveSessionId]?.[receipt.client_message_id] ?? receipt;
+}
+
+function activateDispatch(receipt: DispatchReceipt, ctx: SSEHandlerContext) {
+  if (receipt.hidden) return;
+  const visible = prepareUserMessageDisplay(receipt.content);
+  const existing = S().messagesById[receipt.client_message_id];
+  if (!existing) {
+    S().addUserMessage(receipt.client_message_id, visible.content, visible.files);
+  } else if (existing.role === "user") {
+    // A queued message has no optimistic bubble. If a reconnect races the
+    // local send, merge the receipt's durable attachments without replacing
+    // the user's original visible text with transport metadata.
+    const files = dedupeFileAttachments([...(existing.files ?? []), ...visible.files]);
+    S().updateUserDispatch(receipt.client_message_id, {
+      ...(files.length > 0 ? { files } : {}),
+      dispatchId: receipt.dispatch_id,
+      dispatchMode: receipt.mode,
+      dispatchStatus: receipt.status,
+    });
+  }
+  if (!existing) {
+    S().updateUserDispatch(receipt.client_message_id, { dispatchId: receipt.dispatch_id, dispatchMode: receipt.mode, dispatchStatus: receipt.status });
+  }
+  // Keep the optimistic first reply; later turns and steers get their own owner.
+  if (!existing || ctx.turnId) {
+    ctx.batcher.flush();
+    ctx.assistantMsgId = `dispatch:${receipt.dispatch_id}`;
+    S().addAssistantMessage(ctx.assistantMsgId);
+    ctx.batcher.setTarget?.(ctx.assistantMsgId);
+  }
+}
+
 function updateResultBlock(messageId: string, callId: string | null, update: (block: AssistantBlock, previousMessage: boolean) => AssistantBlock, executionId?: string) {
   if (executionId) {
     const owner = [...S().messages].reverse().find((message) => message.role === "assistant"
@@ -270,6 +314,31 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
   }
 
   switch (event.event) {
+    case "dispatch_snapshot": {
+      for (const receipt of Array.isArray(data.dispatches) ? data.dispatches : []) receiveDispatch(receipt, ctx);
+      const active = receiveDispatch(data.active_dispatch, ctx);
+      if (active) activateDispatch(active, ctx);
+      ctx.turnId = String(data.turn_id || "");
+      break;
+    }
+    case "turn_start": {
+      const receipt = receiveDispatch(data.dispatch, ctx);
+      const turnId = typeof data.turn_id === "string" ? data.turn_id : "";
+      if (receipt && turnId !== ctx.turnId) activateDispatch(receipt, ctx);
+      ctx.turnId = turnId;
+      ctx.completedTurnId = undefined;
+      ctx.thinkingInProgress = false;
+      break;
+    }
+    case "dispatch_state": {
+      const receipt = receiveDispatch(data, ctx);
+      if (!receipt) break;
+      if (!ctx.turnId && receipt.turn_id) ctx.turnId = receipt.turn_id;
+      S().updateUserDispatchById(receipt.dispatch_id, receipt.status);
+      if (receipt.mode === "steer" && receipt.status === "completed" && receipt.turn_id === ctx.turnId
+          && !S().messagesById[receipt.client_message_id]) activateDispatch(receipt, ctx);
+      break;
+    }
     case "stream_init": {
       if (eventStreamId) {
         // Preserve the historical observable call for integrations that use
@@ -363,6 +432,17 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         message: "事件恢复失败，正在回源快照...",
         startedAt: Date.now(),
       });
+      break;
+    }
+
+    case "dispatch_accepted":
+    case "dispatch_queued":
+    case "dispatch_applying":
+    case "dispatch_applied":
+    case "dispatch_failed": {
+      const dispatchId = typeof data.dispatch_id === "string" ? data.dispatch_id : "";
+      const status = typeof data.status === "string" ? data.status : event.event.replace("dispatch_", "");
+      if (dispatchId) S().updateUserDispatchById(dispatchId, status);
       break;
     }
 
@@ -991,6 +1071,30 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
+    case "compaction": {
+      const operationId = typeof data.operation_id === "string" ? data.operation_id : "";
+      const status = typeof data.status === "string" ? data.status : "running";
+      const block: AssistantBlock = {
+        type: "compaction",
+        operationId,
+        status: status as "queued" | "running" | "completed" | "skipped" | "failed",
+        message: typeof data.message === "string" ? data.message : "正在压缩历史对话",
+        detail: typeof data.detail === "string" ? data.detail : undefined,
+        tokensBefore: typeof data.tokens_before === "number" ? data.tokens_before : undefined,
+        tokensAfter: typeof data.tokens_after === "number" ? data.tokens_after : undefined,
+        messagesBefore: typeof data.messages_before === "number" ? data.messages_before : undefined,
+        messagesAfter: typeof data.messages_after === "number" ? data.messages_after : undefined,
+        preservedQuotes: typeof data.preserved_quotes === "number" ? data.preserved_quotes : undefined,
+      };
+      const current = _getLastBlockOfType(ctx.assistantMsgId, "compaction") as Extract<AssistantBlock, { type: "compaction" }> | null;
+      if (current && operationId && current.operationId === operationId) {
+        S().updateBlockByType(ctx.assistantMsgId, "compaction", () => block);
+      } else {
+        S().appendBlock(ctx.assistantMsgId, block);
+      }
+      break;
+    }
+
     case "file_download": {
       ctx.hadPersistedToolWork = true;
       const dlFilePath = (data.file_path as string) || "";
@@ -1056,7 +1160,23 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     // ── 回复与完成 ───────────────────────────────────────────
+    case "turn_reply":
     case "reply": {
+      receiveDispatch(data.dispatch, ctx);
+      if (event.event === "reply" && data.turn_id && ctx.completedTurnId === data.turn_id) break;
+      if (event.event === "turn_reply") {
+        ctx.completedTurnId = String(data.turn_id || "");
+        const receipt = data.dispatch as DispatchReceipt | undefined;
+        if (receipt?.status === "interrupted") {
+          S().setPendingQuestion(null);
+          S().setPendingApproval(null);
+        }
+        if (Number(data.total_tokens) > 0) S().upsertBlockByType(msgId, "token_stats", {
+          type: "token_stats", promptTokens: Number(data.prompt_tokens) || 0,
+          completionTokens: Number(data.completion_tokens) || 0, totalTokens: Number(data.total_tokens) || 0,
+          iterations: Number(data.iterations) || 0,
+        });
+      }
       const content = (data.content as string) || "";
       const hasPendingInteraction =
         S().pendingApproval !== null || S().pendingQuestion !== null;
@@ -1075,6 +1195,8 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
               b.type === "text" ? { ...b, content } : b
             ));
           }
+        } else if (event.event === "turn_reply" && !textBlocks.map((b) => b.type === "text" ? b.content : "").join("").includes(content)) {
+          S().appendBlock(msgId, { type: "text", content });
         }
       }
       const uiReply = useUIStore.getState();
@@ -1274,65 +1396,35 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     case "failure_guidance": {
       ctx.hadStreamError = true;
       S().setPipelineStatus(null);
-      // 用 category 去重，避免同一 category 的多个 failure_guidance block
-      const fgCategory = (data.category as string) || "unknown";
-      const existingBlocks = (() => {
-        const msgs = S().messages;
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          if (msgs[i].id === msgId && msgs[i].role === "assistant") {
-            return (msgs[i] as { blocks: import("@/lib/types").AssistantBlock[] }).blocks;
+      const guidance: Extract<AssistantBlock, { type: "failure_guidance" }> = {
+        type: "failure_guidance",
+        category: (data.category as typeof guidance.category) || "unknown",
+        code: (data.code as string) || "",
+        title: (data.title as string) || "",
+        message: (data.message as string) || "",
+        stage: (data.stage as string) || "",
+        retryable: !!data.retryable,
+        diagnosticId: (data.diagnostic_id as string) || "",
+        actions: (data.actions as typeof guidance.actions) || [],
+        provider: (data.provider as string) || undefined,
+        model: (data.model as string) || undefined,
+      };
+      S().updateAssistantMessage(msgId, (m) => {
+        let inserted = false;
+        const blocks = m.blocks.flatMap((block): AssistantBlock[] => {
+          if (block.type === "llm_retry" && block.retryStatus === "exhausted") return [];
+          // 同一诊断的历史卡可能是 unknown；同时保留同分类只显示最新失败的行为。
+          if (isFailureGuidanceBlock(block)
+            && (isSameFailure(block, guidance) || block.category === guidance.category)) {
+            if (inserted) return [];
+            inserted = true;
+            return [guidance];
           }
-        }
-        return [];
-      })();
-      const hasSameCategory = existingBlocks.some(
-        (b) => b.type === "failure_guidance" && b.category === fgCategory,
-      );
-      if (hasSameCategory) {
-        // 替换已有同 category 的 block
-        S().updateAssistantMessage(msgId, (m) => ({
-          ...m,
-          blocks: m.blocks.map((b) => {
-            if (b.type === "failure_guidance" && b.category === fgCategory) {
-              return {
-                type: "failure_guidance" as const,
-                category: fgCategory as "model" | "transport" | "config" | "quota" | "unknown",
-                code: (data.code as string) || "",
-                title: (data.title as string) || "",
-                message: (data.message as string) || "",
-                stage: (data.stage as string) || "",
-                retryable: !!data.retryable,
-                diagnosticId: (data.diagnostic_id as string) || "",
-                actions: (data.actions as { type: "retry" | "open_settings" | "copy_diagnostic"; label: string }[]) || [],
-                provider: (data.provider as string) || undefined,
-                model: (data.model as string) || undefined,
-              };
-            }
-            return b;
-          }),
-        }));
-      } else {
-        S().appendBlock(msgId, {
-          type: "failure_guidance",
-          category: fgCategory as "model" | "transport" | "config" | "quota" | "unknown",
-          code: (data.code as string) || "",
-          title: (data.title as string) || "",
-          message: (data.message as string) || "",
-          stage: (data.stage as string) || "",
-          retryable: !!data.retryable,
-          diagnosticId: (data.diagnostic_id as string) || "",
-          actions: (data.actions as { type: "retry" | "open_settings" | "copy_diagnostic"; label: string }[]) || [],
-          provider: (data.provider as string) || undefined,
-          model: (data.model as string) || undefined,
+          return [block];
         });
-      }
-      // 收起同期的 llm_retry(exhausted) block
-      S().updateAssistantMessage(msgId, (m) => ({
-        ...m,
-        blocks: m.blocks.filter(
-          (b) => !(b.type === "llm_retry" && b.retryStatus === "exhausted"),
-        ),
-      }));
+        if (!inserted) blocks.push(guidance);
+        return { ...m, blocks };
+      });
       break;
     }
 

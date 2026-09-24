@@ -126,10 +126,10 @@ export function ExcelCompareView() {
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
-        setSheetsA(data.file_a.sheets || []);
-        setSheetsB(data.file_b.sheets || []);
-        if (data.file_a.sheets?.length) setActiveTabA((prev) => prev ?? data.file_a.sheets[0]);
-        if (data.file_b.sheets?.length) setActiveTabB((prev) => prev ?? data.file_b.sheets[0]);
+        setSheetsA(data.file_a.sheets.map((s) => s.name) || []);
+        setSheetsB(data.file_b.sheets.map((s) => s.name) || []);
+        if (data.file_a.sheets?.length) setActiveTabA((prev) => prev ?? data.file_a.sheets[0].name);
+        if (data.file_b.sheets?.length) setActiveTabB((prev) => prev ?? data.file_b.sheets[0].name);
         if (data.relationships?.shared_columns?.length) {
           setCompareRelationship({
             fileA: compareFileA,

@@ -1,4 +1,4 @@
-"""图片工具：read_image。规格编译走 replica_spec，创建写入走 edit_spreadsheet。"""
+"""图片工具：read_image。规格编译走 workbook.spec，创建写入走 apply_spreadsheet_changes。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 from excelmanus.attachments.admit import admit_image_bytes, admit_image_path
 from excelmanus.attachments.store import get_attachment_store
 from excelmanus.attachments.types import AttachmentError
+from excelmanus.engine_core.error_payload import PERMISSION_DENIED
 from excelmanus.engine_core.tool_result import ImageInjection, ToolResult, error_result
 from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.security import FileAccessGuard, SecurityViolationError
@@ -31,30 +32,6 @@ def _resolve_path(user_path: str) -> Path:
     return _get_guard().resolve_and_validate(user_path)
 
 
-def _apply_crop(data: bytes, crop: Any) -> bytes:
-    if not isinstance(crop, dict):
-        return data
-    try:
-        left = int(crop.get("x", 0))
-        top = int(crop.get("y", 0))
-        width = int(crop.get("width") or crop.get("w") or 0)
-        height = int(crop.get("height") or crop.get("h") or 0)
-    except (TypeError, ValueError) as exc:
-        raise AttachmentError(f"invalid crop box: {exc}", "INVALID_ARGS") from exc
-    if width <= 0 or height <= 0:
-        raise AttachmentError("crop width/height must be positive", "INVALID_ARGS")
-    from PIL import Image
-
-    with Image.open(BytesIO(data)) as image:
-        image.load()
-        box = (left, top, left + width, top + height)
-        cropped = image.crop(box)
-        out = BytesIO()
-        fmt = "PNG" if image.mode in {"RGBA", "LA", "P"} else "JPEG"
-        cropped.save(out, format=fmt)
-        return out.getvalue()
-
-
 def _inject(ref: Any, *, detail: str, extra: dict[str, Any] | None = None) -> ToolResult:
     extra = dict(extra or {})
     value = {
@@ -63,6 +40,9 @@ def _inject(ref: Any, *, detail: str, extra: dict[str, Any] | None = None) -> To
         "attachment_id": ref.attachment_id,
         "width": ref.width,
         "height": ref.height,
+        "source_digest": ref.source_digest,
+        "parent_attachment_id": ref.parent_attachment_id,
+        "crop_in_parent": ref.crop_in_parent,
         **extra,
     }
     summary = (
@@ -82,6 +62,27 @@ def _inject(ref: Any, *, detail: str, extra: dict[str, Any] | None = None) -> To
         ),
         value=value,
     )
+
+
+def _crop_reference(ref: Any, crop: dict[str, Any]) -> Any:
+    """Crop in attachment coordinates, preserving ancestry and original pixels."""
+    from dataclasses import replace
+    from PIL import Image, ImageOps
+    store = get_attachment_store()
+    source = store.get_source(ref) if ref.source_digest else store.get_bytes(ref)
+    x, y, width, height = (int(crop.get(key, 0)) for key in ("x", "y", "width", "height"))
+    if x < 0 or y < 0 or width <= 0 or height <= 0 or x + width > ref.width or y + height > ref.height:
+        raise AttachmentError("Crop exceeds attachment bounds", "INVALID_ARGS")
+    with Image.open(BytesIO(source)) as original:
+        image = ImageOps.exif_transpose(original)
+        sx, sy = image.width / ref.width, image.height / ref.height
+        region = image.crop((round(x * sx), round(y * sy), round((x + width) * sx), round((y + height) * sy)))
+        out = BytesIO()
+        region.convert("RGBA" if "A" in region.getbands() else "RGB").save(out, format="PNG")
+    child = admit_image_bytes(out.getvalue(), media_type="image/png")
+    child = replace(child, parent_attachment_id=ref.attachment_id,
+                    crop_in_parent={"x": x, "y": y, "width": width, "height": height})
+    return store.put(store.get_bytes(child), child)
 
 
 def read_image(
@@ -115,8 +116,7 @@ def read_image(
         try:
             ref = admit_image_path(path)
             if crop:
-                raw = get_attachment_store().get_bytes(ref)
-                ref = admit_image_bytes(_apply_crop(raw, crop), media_type=ref.media_type)
+                ref = _crop_reference(ref, crop)
         except AttachmentError as exc:
             return error_result(str(exc), code=exc.code)
         extra = {"file_path": str(path), "size_bytes": size}
@@ -132,13 +132,16 @@ def read_image(
     if ctx is None or attach not in ctx.durable_attachment_ids:
         return error_result(
             f"无权按 attachment_id 取回: {attach}",
-            code="permission_denied",
+            code=PERMISSION_DENIED,
+            remediation=(
+                "该附件未出现在当前会话的有效历史中。若用户已提供工作区原图，"
+                "可用 read_image(file_path=...) 读取；否则请用户在本会话重新上传。不要同参重试。"
+            ),
         )
     try:
         raw = store.get_bytes(ref)
         if crop:
-            raw = _apply_crop(raw, crop)
-            ref = admit_image_bytes(raw, media_type=ref.media_type)
+            ref = _crop_reference(ref, crop)
     except AttachmentError as exc:
         code = "corrupt" if "CORRUPT" in str(exc.code) else "missing"
         return error_result(str(exc), code=code)

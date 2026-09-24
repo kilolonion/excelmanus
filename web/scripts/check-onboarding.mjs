@@ -29,7 +29,7 @@ async function installApi(context, initial = originalState) {
     if (!p.startsWith('/api/v1/')) return route.continue();
     if (req.method() !== 'GET' && req.method() !== 'OPTIONS') writes.push({path:p, body:req.postDataJSON()});
     let data = {};
-    if (p.endsWith('/health')) data = {status:'ok',version:'1.8.0',configured,onboarding:state,deploy_mode:'standalone',tools:[],skillpacks:[],active_sessions:0};
+    if (p.endsWith('/health')) data = {status:'ok',version:'1.8.1',configured,onboarding:state,deploy_mode:'standalone',tools:[],skillpacks:[],active_sessions:0};
     else if (p === '/api/v1/config/models/profiles' && req.method() === 'POST') { configured = true; data = {status:'created'}; }
     else if (p === '/api/v1/onboarding') { state = req.postDataJSON(); data = state; }
     else if (p === '/api/v1/sessions' && req.method() === 'GET' || p === '/api/v1/skills') data = [];
@@ -41,7 +41,7 @@ async function installApi(context, initial = originalState) {
     else if (p === '/api/v1/mcp/servers') data = {servers:[]};
     else if (p.includes('/rules')) data = {rules:[]};
     else if (p.includes('/memory')) data = {entries:[],categories:[]};
-    else if (p.includes('version/check')) data = {current:'1.8.0',latest:'1.8.0',has_update:false,check_method:'desktop_installer'};
+    else if (p.includes('version/check')) data = {current:'1.8.1',latest:'1.8.1',has_update:false,check_method:'desktop_installer'};
     else if (p.includes('version/backups')) data = {backups:[]};
     else if (p.includes('version/installations')) data = {installations:[]};
     await route.fulfill({json:data});

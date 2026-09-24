@@ -2,8 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+export interface LoginLock { acquire(key: symbol): boolean; release(key: symbol): void; }
+
 type OAuthStart = { authorize_url: string; state: string; redirect_uri: string; mode: string };
 type OAuthOptions = {
+  lock?: LoginLock;
   name: string;
   messageType: string;
   start: () => Promise<OAuthStart>;
@@ -22,6 +25,7 @@ export function useOAuthLogin(options: OAuthOptions) {
   const [manual, setManual] = useState(false);
   const [notice, setNotice] = useState("");
   const [pasteUrl, setPasteUrl] = useState("");
+  const lease = useRef<{ lock: LoginLock; key: symbol } | null>(null);
   const attempt = useRef(0);
   const running = useRef(false);
   const session = useRef<{ state: string; redirect: URL; exchanging: boolean } | null>(null);
@@ -30,6 +34,8 @@ export function useOAuthLogin(options: OAuthOptions) {
   const timeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const dispose = useCallback(() => {
+    if (lease.current) lease.current.lock.release(lease.current.key);
+    lease.current = null;
     attempt.current += 1;
     running.current = false;
     session.current = null;
@@ -69,10 +75,11 @@ export function useOAuthLogin(options: OAuthOptions) {
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       const current = session.current;
-      if (!current || event.data?.type !== optionsRef.current.messageType) return;
+      if (!current || current.exchanging || event.data?.type !== optionsRef.current.messageType) return;
       if (event.origin !== current.redirect.origin && event.origin !== window.location.origin) return;
       // Errors must belong to this attempt too; a stale popup must not cancel a new login.
       if (event.data.state !== current.state) return;
+      if (popup.current && event.source && event.source !== popup.current) return;
       if (event.data.error) {
         reset();
         optionsRef.current.onError(`授权未完成：${event.data.error}。请重新登录。`);
@@ -87,6 +94,10 @@ export function useOAuthLogin(options: OAuthOptions) {
   const start = useCallback(async () => {
     if (running.current) return;
     dispose();
+    const key = Symbol("oauth");
+    const lock = optionsRef.current.lock;
+    if (lock && !lock.acquire(key)) return;
+    if (lock) lease.current = { lock, key };
     running.current = true;
     const id = attempt.current;
     setPhase("starting"); optionsRef.current.onError("");
@@ -99,6 +110,7 @@ export function useOAuthLogin(options: OAuthOptions) {
       const data = await optionsRef.current.start();
       if (attempt.current !== id) return;
       const url = optionsRef.current.validateUrl(data.authorize_url);
+      if (!data.state) throw new Error("授权会话无效，请重试");
       session.current = { state: data.state, redirect: new URL(data.redirect_uri), exchanging: false };
       setAuthorizeUrl(url); setPhase("waiting"); setManual(data.mode === "paste");
       // Native clients dispatch full URLs themselves and may intentionally return null.
@@ -127,6 +139,17 @@ export function useOAuthLogin(options: OAuthOptions) {
     }
   }, [dispose, reset]);
 
+  const reopen = useCallback(() => {
+    if (!session.current || session.current.exchanging || !authorizeUrl) return;
+    try {
+      popup.current = window.open(authorizeUrl, optionsRef.current.name, "width=600,height=700,toolbar=no,menubar=no");
+      setManual(true);
+      setNotice("请完成授权；若未自动返回，可粘贴完整回调地址继续。");
+    } catch {
+      optionsRef.current.onError("无法打开登录页，请检查浏览器弹窗设置。");
+    }
+  }, [authorizeUrl]);
+
   const submit = useCallback(async () => {
     const current = session.current;
     if (!current || current.exchanging || !pasteUrl.trim()) return;
@@ -134,7 +157,7 @@ export function useOAuthLogin(options: OAuthOptions) {
     let url: URL;
     try { url = new URL(pasteUrl.trim()); }
     catch { optionsRef.current.onError("地址格式无效，请复制授权完成后地址栏中的完整地址。"); return; }
-    if (url.origin !== current.redirect.origin || url.pathname !== current.redirect.pathname) {
+    if (url.username || url.password || url.origin !== current.redirect.origin || url.pathname !== current.redirect.pathname) {
       optionsRef.current.onError("这不是本次登录的回调地址，请复制授权完成后的完整地址。"); return;
     }
     if (url.searchParams.get("state") !== current.state) {
@@ -148,7 +171,7 @@ export function useOAuthLogin(options: OAuthOptions) {
     await exchange(code, current.state);
   }, [exchange, pasteUrl]);
 
-  return { busy: phase !== "idle", phase, authorizeUrl, manual, setManual, notice, pasteUrl, setPasteUrl, start, submit, cancel: reset };
+  return { busy: phase !== "idle", phase, authorizeUrl, manual, setManual, notice, pasteUrl, setPasteUrl, start, reopen, submit, cancel: reset };
 }
 
 export interface PollLoginSession {
@@ -161,6 +184,7 @@ export interface PollLoginSession {
 
 /** Serial polling prevents overlapping exchanges; attempt IDs ignore late responses. */
 export function usePollingLogin(options: {
+  lock?: LoginLock;
   start: () => Promise<PollLoginSession>;
   poll: (state: string) => Promise<{ status: string }>;
   onConnected: () => Promise<void>;
@@ -169,14 +193,17 @@ export function usePollingLogin(options: {
 }) {
   const optionsRef = useRef(options);
   useEffect(() => { optionsRef.current = options; });
-  const [busy, setBusy] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "starting" | "waiting" | "completing">("idle");
   const [session, setSession] = useState<PollLoginSession | null>(null);
+  const lease = useRef<{ lock: LoginLock; key: symbol } | null>(null);
   const attempt = useRef(0);
   const running = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const expiry = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popup = useRef<Window | null>(null);
   const dispose = useCallback(() => {
+    if (lease.current) lease.current.lock.release(lease.current.key);
+    lease.current = null;
     attempt.current += 1; running.current = false;
     if (timer.current) clearTimeout(timer.current);
     if (expiry.current) clearTimeout(expiry.current);
@@ -184,12 +211,17 @@ export function usePollingLogin(options: {
     timer.current = null; expiry.current = null; popup.current = null;
   }, []);
   useEffect(() => dispose, [dispose]);
-  const cancel = useCallback(() => { dispose(); setBusy(false); setSession(null); }, [dispose]);
+  const cancel = useCallback(() => { dispose(); setPhase("idle"); setSession(null); }, [dispose]);
   const start = useCallback(async () => {
     if (running.current) return;
-    dispose(); running.current = true;
+    dispose();
+    const key = Symbol("polling");
+    const lock = optionsRef.current.lock;
+    if (lock && !lock.acquire(key)) return;
+    if (lock) lease.current = { lock, key };
+    running.current = true;
     const id = attempt.current;
-    setBusy(true); setSession(null); optionsRef.current.onError("");
+    setPhase("starting"); setSession(null); optionsRef.current.onError("");
     try {
       const nativeClient = !!(window.excelManusDesktop || window.excelManusAndroid);
       if (optionsRef.current.openBrowser && !nativeClient) {
@@ -200,7 +232,9 @@ export function usePollingLogin(options: {
       if (attempt.current !== id) return;
       const url = new URL(data.url);
       if (url.protocol !== "https:" || url.username || url.password) throw new Error("授权地址无效");
+      if (!data.state) throw new Error("授权会话无效，请重试");
       setSession(data);
+      setPhase("waiting");
       if (optionsRef.current.openBrowser && nativeClient) window.open(data.url, "_blank", "noopener,noreferrer");
       if (popup.current && !popup.current.closed) popup.current.location.href = data.url;
       expiry.current = setTimeout(() => {
@@ -213,10 +247,14 @@ export function usePollingLogin(options: {
           const result = await optionsRef.current.poll(data.state);
           if (attempt.current !== id) return;
           if (result.status === "connected") {
+            setPhase("completing");
             if (expiry.current) clearTimeout(expiry.current);
             await optionsRef.current.onConnected();
             if (attempt.current === id) cancel();
             return;
+          }
+          if (result.status !== "pending") {
+            throw new Error(result.status === "expired" ? "登录已过期，请重新登录。" : "授权未完成，请重新登录。");
           }
         } catch (error) {
           if (attempt.current !== id) return;
@@ -231,5 +269,5 @@ export function usePollingLogin(options: {
       cancel(); optionsRef.current.onError(error instanceof Error ? error.message : "无法发起登录，请重试");
     }
   }, [cancel, dispose]);
-  return { busy, session, start, cancel };
+  return { busy: phase !== "idle", phase, session, start, cancel };
 }

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.logger import get_logger
+from excelmanus.providers.reasoning import extract_reasoning_text, split_content_parts
 from excelmanus.providers.stream_types import InlineThinkingStateMachine
 
 if TYPE_CHECKING:
@@ -453,6 +454,24 @@ class LLMCaller:
         _first_token_received = False
         _ttft_ms: float = 0.0
 
+        def emit_text(content: str = "", thinking: str = "") -> None:
+            nonlocal _thinking_streamed
+            if thinking:
+                thinking_parts.append(thinking)
+                _thinking_streamed = True
+                e._emit(on_event, ToolCallEvent(
+                    event_type=EventType.THINKING_DELTA,
+                    thinking_delta=thinking,
+                    iteration=iteration,
+                ))
+            if content:
+                content_parts.append(content)
+                e._emit(on_event, ToolCallEvent(
+                    event_type=EventType.TEXT_DELTA,
+                    text_delta=content,
+                    iteration=iteration,
+                ))
+
         _consecutive_chunk_errors = 0
         _max_chunk_errors = 3
         async for chunk in stream:
@@ -466,7 +485,7 @@ class LLMCaller:
                         _choices = getattr(chunk, "choices", None)
                         if _choices:
                             _d = getattr(_choices[0], "delta", None)
-                            if _d and (getattr(_d, "content", None) or getattr(_d, "thinking", None)):
+                            if _d and (getattr(_d, "content", None) or extract_reasoning_text(_d)):
                                 _has_content = True
                     if _has_content:
                         _first_token_received = True
@@ -477,20 +496,10 @@ class LLMCaller:
                     if getattr(chunk, "replay_state", None) is not None:
                         replay_state = chunk.replay_state
                     if chunk.content_delta:
-                        content_parts.append(chunk.content_delta)
-                        e._emit(on_event, ToolCallEvent(
-                            event_type=EventType.TEXT_DELTA,
-                            text_delta=chunk.content_delta,
-                            iteration=iteration,
-                        ))
+                        for part in _inline_sm.feed(chunk.content_delta):
+                            emit_text(part.content_delta, part.thinking_delta)
                     if chunk.thinking_delta:
-                        thinking_parts.append(chunk.thinking_delta)
-                        _thinking_streamed = True
-                        e._emit(on_event, ToolCallEvent(
-                            event_type=EventType.THINKING_DELTA,
-                            thinking_delta=chunk.thinking_delta,
-                            iteration=iteration,
-                        ))
+                        emit_text(thinking=chunk.thinking_delta)
                     if chunk.tool_calls_delta:
                         if not _tool_call_notified:
                             _tool_call_notified = True
@@ -523,37 +532,15 @@ class LLMCaller:
                     _consecutive_chunk_errors = 0
                     continue
 
-                delta_content = getattr(delta, "content", None)
+                _, delta_content = split_content_parts(getattr(delta, "content", None))
                 if delta_content:
                     # 通过状态机检测内联 <thinking> 标签
                     for _sd in _inline_sm.feed(delta_content):
-                        if _sd.thinking_delta:
-                            thinking_parts.append(_sd.thinking_delta)
-                            _thinking_streamed = True
-                            e._emit(on_event, ToolCallEvent(
-                                event_type=EventType.THINKING_DELTA,
-                                thinking_delta=_sd.thinking_delta,
-                                iteration=iteration,
-                            ))
-                        if _sd.content_delta:
-                            content_parts.append(_sd.content_delta)
-                            e._emit(on_event, ToolCallEvent(
-                                event_type=EventType.TEXT_DELTA,
-                                text_delta=_sd.content_delta,
-                                iteration=iteration,
-                            ))
+                        emit_text(_sd.content_delta, _sd.thinking_delta)
 
-                for thinking_key in ("thinking", "reasoning", "reasoning_content"):
-                    thinking_val = getattr(delta, thinking_key, None)
-                    if thinking_val:
-                        thinking_parts.append(str(thinking_val))
-                        _thinking_streamed = True
-                        e._emit(on_event, ToolCallEvent(
-                            event_type=EventType.THINKING_DELTA,
-                            thinking_delta=str(thinking_val),
-                            iteration=iteration,
-                        ))
-                        break
+                thinking_val = extract_reasoning_text(delta)
+                if thinking_val:
+                    emit_text(thinking=thinking_val)
 
                 delta_tool_calls = getattr(delta, "tool_calls", None)
                 if delta_tool_calls:
@@ -614,6 +601,10 @@ class LLMCaller:
                     break
                 logger.debug("流式 chunk 解析异常（已跳过）: %s", _chunk_exc)
                 continue
+
+        # 结束时释放标签前缀缓冲，保留以 "<" 等字符结尾的普通正文。
+        for part in _inline_sm.flush():
+            emit_text(part.content_delta, part.thinking_delta)
 
         # 组装为与非流式路径兼容的 message 对象
         content = "".join(content_parts)

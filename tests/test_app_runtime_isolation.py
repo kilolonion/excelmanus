@@ -37,7 +37,7 @@ async def test_two_asgi_apps_and_child_tasks_use_own_runtime():
     ("POST", "/api/v1/sessions", False),
     ("POST", "/api/v1/sessions/", False),
     ("POST", "/api/v1/upload", True),
-    ("POST", "/api/v1/files/excel/write", True),
+    ("POST", "/api/v1/workbooks/changes", True),
     ("POST", "/api/v1/revisions/restore", True),
     ("POST", "/api/v1/chat/stream", True),
     ("POST", "/api/v1/chat", True),

@@ -636,12 +636,12 @@ class TestGoldenCells:
 
 
 class TestMinMatchRate:
-    """min_match_rate 断言：要求成功的 edit_spreadsheet。"""
+    """min_match_rate 断言：要求成功的 apply_spreadsheet_changes。"""
 
     @staticmethod
     def _make_edit_call(*, success: bool = True) -> dict:
         return {
-            "tool_name": "edit_spreadsheet",
+            "tool_name": "apply_spreadsheet_changes",
             "result": '{"status":"success"}',
             "success": success,
         }
@@ -660,7 +660,7 @@ class TestMinMatchRate:
 
     def test_no_edit_call(self):
         r = _make_result_dict(tool_calls=[
-            {"tool_name": "inspect_spreadsheet", "success": True},
+            {"tool_name": "observe_spreadsheet", "success": True},
         ])
         v = validate_case(r, {"min_match_rate": 0.95})
         assert v.failed == 1
@@ -742,26 +742,26 @@ class TestForbiddenBypass:
     def test_run_code_bypass_detected(self):
         r = _make_result_dict(tool_calls=[
             {"tool_name": "run_code", "success": True,
-             "arguments": {"code": "em.edit_spreadsheet(operations=[...])"}},
+             "arguments": {"code": "em.apply_spreadsheet_changes(operations=[...])"}},
         ])
-        v = validate_case(r, {"forbidden_tools": ["edit_spreadsheet"]})
+        v = validate_case(r, {"forbidden_tools": ["apply_spreadsheet_changes"]})
         assert v.failed == 1
         assert "run_code" in v.results[0].message
 
     def test_em_shorthand_bypass_detected(self):
         r = _make_result_dict(tool_calls=[
             {"tool_name": "run_code", "success": True,
-             "arguments": {"code": "em.edit(workbook='x.xlsx', operations=[])"}},
+             "arguments": {"code": "em.apply_spreadsheet_changes(file_path='x.xlsx', operations=[])"}},
         ])
-        v = validate_case(r, {"forbidden_tools": ["edit_spreadsheet"]})
+        v = validate_case(r, {"forbidden_tools": ["apply_spreadsheet_changes"]})
         assert v.failed == 1
 
     def test_clean_run_code_passes(self):
         r = _make_result_dict(tool_calls=[
             {"tool_name": "run_code", "success": True,
-             "arguments": {"code": "em.inspect_spreadsheet(path='x.xlsx')"}},
+             "arguments": {"code": "em.observe_spreadsheet(path='x.xlsx')"}},
         ])
-        v = validate_case(r, {"forbidden_tools": ["edit_spreadsheet"]})
+        v = validate_case(r, {"forbidden_tools": ["apply_spreadsheet_changes"]})
         assert v.passed == 1
 
 

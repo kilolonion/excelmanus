@@ -12,7 +12,7 @@ from excelmanus.prompt.canonical import (
 )
 from excelmanus.prompt.registry import PromptRegistry, UnknownPromptVariable, interpolate
 from excelmanus.prompt.load import PromptComposer, PromptContext, parse_prompt_file
-from excelmanus.tools.intent_tools import get_tools as get_intent_tools
+from excelmanus.tools.workbook_tools import get_tools as get_workbook_tools
 from excelmanus.tools.plan_tools import exit_plan_mode
 from tests.prompt_support import (
     PLAN_SECTION_NAMES,
@@ -66,7 +66,7 @@ class TestCanonicalMarkdown:
         assert not (PROMPTS_DIR / "strategies" / "20_always_on.md").exists()
         identity = section_body("core/00_identity.md")
         assert "ExcelManus" in identity
-        assert "inspect_spreadsheet" not in section_body("strategies/16_inspect.md")
+        assert "observe_spreadsheet" in section_body("strategies/16_inspect.md")
         from importlib.resources import files
 
         packaged = files("excelmanus") / "prompts" / "core" / "00_identity.md"
@@ -123,7 +123,7 @@ class TestSystemAssembly:
         assert names == list(PLAN_SECTION_NAMES)
         assert "VERSION_CONFLICT" not in text
         assert "当前是计划模式" in text
-        assert "WorkbookSpec 经 edit_spreadsheet" not in text
+        assert "WorkbookSpec V2 只用于新建" not in text
 
     def test_read_prefix_matches_snapshot(self) -> None:
         text = system_text("read")
@@ -135,8 +135,8 @@ class TestSystemAssembly:
             PromptContext(chat_mode="write"),
             variables=_VARS,
         )
-        assert "def inspect_spreadsheet(" not in text
-        assert "def edit_spreadsheet(" not in text
+        assert "def observe_spreadsheet(" not in text
+        assert "def apply_spreadsheet_changes(" not in text
         assert "import em" in text
         assert "tool_detail" in text
 
@@ -156,16 +156,16 @@ class TestForbiddenTerms:
 
 class TestToolDescriptionSnapshots:
     def test_intent_descriptions_match_canonical(self) -> None:
-        tools = {tool.name: tool.description for tool in get_intent_tools()}
+        tools = {tool.name: tool.description for tool in get_workbook_tools()}
         for name in (
-            "inspect_spreadsheet",
+            "observe_spreadsheet",
             "analyze_spreadsheet",
             "compare_spreadsheets",
             "trace_spreadsheet_formulas",
-            "edit_spreadsheet",
-            "format_spreadsheet",
+            "apply_spreadsheet_changes",
+            "apply_spreadsheet_changes",
             "split_spreadsheet",
-            "manage_spreadsheet_objects",
+            "apply_spreadsheet_changes",
             "manage_spreadsheet_versions",
         ):
             assert tools[name] == TOOL_DESCRIPTIONS[name]
@@ -230,7 +230,7 @@ class TestAssembleKv:
         assert first[0] == second[0]
         assert "文件全景" not in first[0]
         assert "结论以实际读取的数据为依据" in first[0]
-        assert "WorkbookSpec 经 edit_spreadsheet" in first[0]
+        assert "WorkbookSpec V2 只用于新建" in first[0]
         assert len(first) == 1
         assert len(second) == 1
 
@@ -276,25 +276,25 @@ class TestRegistryToolsSnapshot:
         composer = _composer()
         composer.registry.tools(
             lambda: [
-                {"function": {"name": "edit_spreadsheet"}},
+                {"function": {"name": "apply_spreadsheet_changes"}},
                 {"function": {"name": "run_code"}},
             ]
         )
         assembly = composer.registry.assemble(AssembleContext())
         assert {s["function"]["name"] for s in assembly.tools} == {
-            "edit_spreadsheet",
+            "apply_spreadsheet_changes",
             "run_code",
         }
 
 def test_system_uses_capability_map_not_tool_index() -> None:
     from excelmanus.prompt.assemble import build_stable_system_prompt
     from excelmanus.tools.catalog import derive_effective_catalog
-    from excelmanus.tools.intent_tools import get_tools as get_intent_tools
+    from excelmanus.tools.workbook_tools import get_tools as get_workbook_tools
     from excelmanus.tools.word_tools import get_tools as get_word_tools
     from excelmanus.tools.registry import ToolRegistry
 
     registry = ToolRegistry()
-    registry.register_tools(get_intent_tools() + get_word_tools())
+    registry.register_tools(get_workbook_tools() + get_word_tools())
     catalog = derive_effective_catalog(
         tools=registry.get_all_tools(),
         mode="write",

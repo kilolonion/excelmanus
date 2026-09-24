@@ -119,10 +119,65 @@ describe("subscription OAuth recovery", () => {
     await act(() => result.current.start());
     expect(window.open).toHaveBeenCalledExactlyOnceWith(oauthData.authorize_url, "test-oauth", expect.any(String));
   });
+
+  it("reopens a blocked login with its opener intact and accepts callbacks only from that window", async () => {
+    const options = oauthOptions();
+    const { result } = renderHook(() => useOAuthLogin(options));
+    await act(() => result.current.start());
+    const popup = { closed: false, close: vi.fn() } as unknown as Window;
+    vi.mocked(window.open).mockReturnValue(popup);
+    act(() => result.current.reopen());
+    expect(window.open).toHaveBeenLastCalledWith(oauthData.authorize_url, "test-oauth", expect.not.stringContaining("noopener"));
+    const data = { type: options.messageType, state: "current", code: "valid" };
+    act(() => window.dispatchEvent(new MessageEvent("message", { origin: "http://localhost:1455", source: window, data })));
+    expect(options.exchange).not.toHaveBeenCalled();
+    await act(async () => { window.dispatchEvent(new MessageEvent("message", { origin: "http://localhost:1455", source: popup, data })); });
+    expect(options.exchange).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a late error callback cancel an exchange already in progress", async () => {
+    const pending = deferred<unknown>();
+    const options = oauthOptions(); options.exchange.mockReturnValueOnce(pending.promise);
+    const { result } = renderHook(() => useOAuthLogin(options));
+    await act(() => result.current.start());
+    act(() => result.current.setPasteUrl(callback));
+    let exchange!: Promise<void>;
+    act(() => { exchange = result.current.submit(); });
+    act(() => window.dispatchEvent(new MessageEvent("message", { origin: "http://localhost:1455", data: { type: options.messageType, state: "current", error: "access_denied" } })));
+    expect(result.current.phase).toBe("exchanging");
+    await act(async () => { pending.resolve({}); await exchange; });
+    expect(options.onConnected).toHaveBeenCalledOnce();
+  });
+
+  it("makes OAuth and device-code attempts mutually exclusive and releases the lock on cancel", async () => {
+    let owner: symbol | null = null;
+    const lock = { acquire: (key: symbol) => { if (owner) return false; owner = key; return true; }, release: (key: symbol) => { if (owner === key) owner = null; } };
+    const startDevice = vi.fn().mockResolvedValue({ state: "device", url: "https://auth.openai.com/device" });
+    const { result } = renderHook(() => ({
+      oauth: useOAuthLogin({ ...oauthOptions(), lock }),
+      device: usePollingLogin({ lock, start: startDevice, poll: vi.fn(), onConnected: vi.fn(), onError: vi.fn() }),
+    }));
+    await act(() => result.current.oauth.start());
+    await act(() => result.current.device.start());
+    expect(startDevice).not.toHaveBeenCalled();
+    act(() => result.current.oauth.cancel());
+    await act(() => result.current.device.start());
+    expect(startDevice).toHaveBeenCalledOnce();
+  });
 });
 
 describe("subscription polling", () => {
   const session = { state: "current", url: "https://workbuddy.ai/login", expires_in: 30, interval: 3 };
+  it("stops immediately on terminal authorization status", async () => {
+    vi.useFakeTimers();
+    const options = { start: async () => session, poll: vi.fn().mockResolvedValue({ status: "expired" }), onConnected: vi.fn(), onError: vi.fn() };
+    const { result } = renderHook(() => usePollingLogin(options));
+    await act(() => result.current.start());
+    await act(() => vi.advanceTimersByTimeAsync(3_000));
+    expect(result.current.busy).toBe(false);
+    expect(options.onError.mock.lastCall?.[0]).toContain("过期");
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("does not poll after cancellation while the start request is still pending", async () => {
     vi.useFakeTimers();
     const pending = deferred<typeof session>();

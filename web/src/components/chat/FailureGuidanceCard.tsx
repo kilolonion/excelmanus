@@ -6,14 +6,16 @@ import {
   Copy,
   CreditCard,
   HardDrive,
-  RotateCcw,
+  Play,
   Settings,
   ShieldAlert,
   Wifi,
   XCircle,
 } from "lucide-react";
 import { useUIStore } from "@/stores/ui-store";
+import { useSessionStore } from "@/stores/session-store";
 import { RetryModelPicker } from "@/components/chat/RetryModelPicker";
+import { requestModelSubTab } from "@/components/settings/model/model-subtab";
 import {
   canOfferRetry,
   displayFailureMessage,
@@ -41,7 +43,6 @@ interface FailureGuidanceCardProps {
   actions: { type: "retry" | "open_settings" | "copy_diagnostic"; label: string }[];
   provider?: string;
   model?: string;
-  onRetry?: () => void;
   onRetryWithModel?: (modelName: string) => void;
 }
 
@@ -61,7 +62,6 @@ export function FailureGuidanceCard({
   diagnosticId,
   provider,
   model,
-  onRetry,
   onRetryWithModel,
 }: FailureGuidanceCardProps) {
   const openSettings = useUIStore((s) => s.openSettings);
@@ -79,10 +79,17 @@ export function FailureGuidanceCard({
   const handleAction = useCallback(
     (actionType: string) => {
       switch (actionType) {
-        case "retry":
-          onRetry?.();
+        case "retry": {
+          // 「继续」：后台发送隐藏的 continue 接续失败回合，不产生用户气泡，
+          // 也不走回滚重发（continue 不回退任何文件变更）。
+          const sessionId = useSessionStore.getState().activeSessionId;
+          void import("@/lib/chat-actions").then(({ sendContinuation }) =>
+            sendContinuation("continue", sessionId, { promptKind: "continue" }),
+          );
           break;
+        }
         case "open_settings":
+          if (code === "model_oauth_expired") requestModelSubTab("subscription");
           openSettings("model");
           break;
         case "copy_diagnostic": {
@@ -106,7 +113,7 @@ export function FailureGuidanceCard({
         }
       }
     },
-    [onRetry, openSettings, diagnosticId, category, code, title, message, stage, retryable, provider, model],
+    [openSettings, diagnosticId, category, code, title, message, stage, retryable, provider, model],
   );
 
   return (
@@ -135,7 +142,7 @@ export function FailureGuidanceCard({
                     onClick={() => handleAction(action.type)}
                     className={isPrimary ? PRIMARY_BTN : GHOST_BTN}
                   >
-                    <RotateCcw className="h-3.5 w-3.5" />
+                    <Play className="h-3.5 w-3.5 fill-current" />
                     {action.label}
                   </button>
                 );

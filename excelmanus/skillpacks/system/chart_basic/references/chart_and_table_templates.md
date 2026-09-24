@@ -1,6 +1,6 @@
 # 图表与表格 run_code 模板
 
-工作区 xlsx 的改写必须走 SDK。原生图优先 `manage_spreadsheet_objects`。下面片段不要 `wb.save`。
+工作区 xlsx 的改写必须走 SDK。原生图优先 `apply_spreadsheet_changes`。下面片段不要 `wb.save`。
 
 ## 1. PNG 图表导出（matplotlib）
 
@@ -83,4 +83,4 @@ plt.rcParams["axes.unicode_minus"] = False
 
 ## Excel Table 对象
 
-当前 native 工具没有创建、更新或删除 Excel Table 对象的保存通路。不要在 run_code 中用 openpyxl `ws.add_table()` 后声称已经写回；这类内存修改不会自动提交。需要表格样式时使用 `format_spreadsheet` 的直接样式/条件格式；需要原生 Table 时明确告知暂不支持。
+原生 Table 使用 apply_spreadsheet_changes 的 kind=table 操作；对象读取用 observe_spreadsheet 的 objects 维度。

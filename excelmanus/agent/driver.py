@@ -18,6 +18,10 @@ from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.agent.budget import TurnBudget
 from excelmanus.agent.budget import TurnBudgetExceeded
+from excelmanus.agent.dispatch import (
+    DISPATCH_MODES, PENDING_DISPATCH, TERMINAL_DISPATCH,
+    DispatchConflict, fingerprint, public_receipt,
+)
 
 logger = get_logger("agent.driver")
 
@@ -57,6 +61,11 @@ class Driver:
         self._cancel_reason: str | None = None
         self._active_item: InboxItem | None = None
         self._turn_record: dict[str, Any] | None = None
+        self._dispatch_receipts: dict[str, dict[str, Any]] = {}
+        self._turn_task: asyncio.Task[Any] | None = None
+        self._interrupt_children_task: asyncio.Task[Any] | None = None
+        self.last_result: Any = None
+        self.last_reply: dict[str, Any] = {}
 
     @property
     def running(self) -> bool:
@@ -120,6 +129,139 @@ class Driver:
         self._persist_runtime_state()
         return item
 
+    def enqueue_dispatch(
+        self,
+        content: str,
+        *,
+        mode: str,
+        dispatch_id: str,
+        client_message_id: str,
+        extra: dict[str, Any] | None = None,
+    ) -> InboxItem:
+        if mode not in DISPATCH_MODES:
+            raise ValueError("未知发送策略")
+        if client_message_id in self._dispatch_receipts:
+            raise DispatchConflict("消息已接收，请查询原回执")
+        if any(message.get("message_id") == client_message_id for message in getattr(self.engine, "raw_messages", [])):
+            raise DispatchConflict("此消息 ID 已存在于历史中，请使用新的消息 ID")
+        if sum(r["status"] in PENDING_DISPATCH for r in self._dispatch_receipts.values()) >= 32:
+            raise DispatchConflict("排队消息已达 32 条，请等待或取消后再发送")
+        payload = dict(extra or {})
+        payload.update({
+            "dispatch_id": dispatch_id,
+            "client_message_id": client_message_id,
+            "dispatch_mode": mode,
+        })
+        effective = "steer" if mode == "steer" and self.running else "queue"
+        if effective == "steer":
+            item = self.inbox.push_steer(content, extra=payload)
+        else:
+            item = self.inbox.push_followup(content, extra=payload)
+        if mode == "interrupt":
+            self.inbox.prioritize_interrupt(item)
+        self._dispatch_receipts[client_message_id] = {
+            "dispatch_id": dispatch_id,
+            "client_message_id": client_message_id,
+            "mode": mode,
+            "effective_mode": effective if mode != "interrupt" else "interrupt",
+            "status": "interrupt_pending" if mode == "interrupt" and self.running else "queued",
+            "item_id": item.id,
+            "content": content,
+            "hidden": bool(payload.get("prompt_kind")),
+            "fingerprint": fingerprint(content, mode, payload),
+            "revision": 1,
+            "created_at": time.time(),
+            "turn_id": "", "step_id": "",
+        }
+        try:
+            self._persist_runtime_state(strict=True)
+        except Exception:
+            self.inbox.remove_pending(item.id)
+            self._dispatch_receipts.pop(client_message_id, None)
+            raise
+        self._publish_dispatch(self._dispatch_receipts[client_message_id])
+        if mode == "interrupt" and self.running:
+            self.request_interrupt()
+        return item
+
+    def dispatch_receipt(self, client_message_id: str) -> dict[str, Any] | None:
+        row = self._dispatch_receipts.get(client_message_id)
+        return public_receipt(row) if row is not None else None
+
+    def check_dispatch(self, client_message_id: str, content: str, mode: str, extra: dict[str, Any]) -> dict[str, Any] | None:
+        row = self._dispatch_receipts.get(client_message_id)
+        if row is not None and row.get("fingerprint") != fingerprint(content, mode, extra):
+            raise DispatchConflict("此消息 ID 已用于另一份内容，请使用新的消息 ID")
+        return self.dispatch_receipt(client_message_id)
+
+    def dispatch_snapshot(self) -> list[dict[str, Any]]:
+        return [public_receipt(row) for row in self._dispatch_receipts.values()]
+
+    def cancel_dispatch(self, dispatch_id: str) -> dict[str, Any]:
+        row = next((r for r in self._dispatch_receipts.values() if r["dispatch_id"] == dispatch_id), None)
+        if row is None:
+            raise KeyError(dispatch_id)
+        if row["status"] == "cancelled":
+            return public_receipt(row)
+        previous = self.inbox.find_item(row["item_id"])
+        queue = self.inbox.next_turn if previous is not None and previous.target == "next-turn" else self.inbox.next_step
+        position = queue.index(previous) if previous in queue else 0
+        item = self.inbox.remove_pending(row["item_id"])
+        if item is None:
+            raise DispatchConflict("消息已经开始处理，无法从队列撤回")
+        try:
+            self._set_dispatch(item, "cancelled", strict=True)
+        except Exception:
+            self.inbox.restore_pending(item, position)
+            raise
+        return public_receipt(row)
+
+    def _publish_dispatch(self, row: dict[str, Any]) -> None:
+        self._emit(ToolCallEvent(event_type=EventType.DISPATCH_STATE, dispatch=public_receipt(row)))
+
+    def _set_dispatch(self, item: InboxItem, status: str, error: str = "", *, strict: bool = False) -> None:
+        row = self._dispatch_receipts.get(str(item.extra.get("client_message_id") or ""))
+        if row is None or row["status"] in TERMINAL_DISPATCH:
+            return
+        before = dict(row)
+        row.update(status=status, revision=row["revision"] + 1, error=error,
+                   turn_id=self.turn_id, step_id=self.step_id,
+                   message_recorded=any(m.get("message_id") == row["client_message_id"] for m in getattr(self.engine, "raw_messages", [])))
+        try:
+            self._persist_runtime_state(strict=strict)
+        except Exception:
+            row.clear()
+            row.update(before)
+            raise
+        self._publish_dispatch(row)
+
+    def request_interrupt(self) -> None:
+        if self._cancel_reason in {"interrupt", "cancelled", "shutdown"}:
+            return
+        self._cancel_reason = "interrupt"
+        self._cancel_active_work()
+        children = getattr(self.engine, "_subagent_runtime", None)
+        if children is not None:
+            self._interrupt_children_task = asyncio.create_task(children.interrupt_turn(self.turn_id))
+        if self._turn_task is not None and not self._turn_task.done():
+            self._turn_task.cancel()
+
+    async def wait_until_idle(self) -> None:
+        while self.running:
+            await asyncio.shield(asyncio.gather(self._runner_task, return_exceptions=True))
+
+    async def _settle_interrupted_work(self) -> None:
+        if self._interrupt_children_task is not None:
+            await asyncio.shield(self._interrupt_children_task)
+            self._interrupt_children_task = None
+        runtime = getattr(self.engine, "_tool_runtime", None)
+        if runtime is not None:
+            await runtime.wait_settlement()
+        session = getattr(self.engine, "_active_code_mode_session", None)
+        if session is not None:
+            while session.has_unsettled_work():
+                await session.wait_settlement(timeout=0.5)
+
     def steer(self, content: str, *, extra: dict[str, Any] | None = None) -> InboxItem:
         item = self.inbox.push_steer(content, extra=extra)
         self._persist_runtime_state()
@@ -175,6 +317,7 @@ class Driver:
                 "active": self.status == "running",
                 "inbox": self.inbox.reconstruct(),
                 "turn": deepcopy(self._turn_record),
+                "dispatch_receipts": deepcopy(self._dispatch_receipts),
             },
             "approval": (
                 approval.snapshot_pending()
@@ -209,6 +352,11 @@ class Driver:
         if self._turn_record and self._turn_record.get("status") in {"preparing", "running"}:
             self._turn_record.update(status="interrupted", finished_at=time.time())
         self.inbox.load_reconstructed(driver_state.get("inbox"))
+        self._dispatch_receipts = deepcopy(driver_state.get("dispatch_receipts") or {})
+        for row in self._dispatch_receipts.values():
+            if row["status"] not in TERMINAL_DISPATCH and row["status"] not in PENDING_DISPATCH:
+                row.update(status="interrupted", error="服务重启，请核对已完成操作后继续", revision=row["revision"] + 1,
+                    message_recorded=any(m.get("message_id") == row["client_message_id"] for m in getattr(self.engine, "raw_messages", [])))
         approval = getattr(self.engine, "_approval", None)
         if approval is not None and callable(getattr(approval, "restore_pending", None)):
             approval.restore_pending(raw.get("approval"))
@@ -219,14 +367,16 @@ class Driver:
         if interaction is not None:
             interaction.restore(raw.get("interaction"))
 
-    def _persist_runtime_state(self) -> None:
+    def _persist_runtime_state(self, *, strict: bool = False) -> None:
         state = getattr(self.engine, "_state", None)
         if state is None:
             return
         state.runtime_state = self.runtime_state()
         saver = getattr(self.engine, "save_session_snapshot", None)
         if callable(saver):
-            saver()
+            saved = saver()
+            if strict and saved is False:
+                raise OSError("无法保存消息队列，请重试")
 
     def _ensure_runner(self) -> asyncio.Task[Any]:
         task = self._runner_task
@@ -239,6 +389,7 @@ class Driver:
         self.status = "running"
         self._idle_event.clear()
         try:
+            await self._settle_interrupted_work()
             while True:
                 timeout = float(
                     getattr(getattr(self.engine, "config", None), "turn_timeout_seconds", 0)
@@ -246,19 +397,28 @@ class Driver:
                 )
                 self._cancel_reason = "timeout" if timeout > 0 else None
                 try:
-                    has_next = (
-                        await asyncio.wait_for(self.turn(), timeout=timeout)
-                        if timeout > 0
-                        else await self.turn()
-                    )
+                    self._turn_task = asyncio.create_task(self.turn())
+                    has_next = await asyncio.wait_for(self._turn_task, timeout=timeout or None)
+                except asyncio.CancelledError:
+                    if self._cancel_reason != "interrupt" or asyncio.current_task().cancelling():
+                        raise
+                    await self._settle_interrupted_work()
+                    has_next = bool(self.inbox.next_turn)
                 except asyncio.TimeoutError:
                     self._cancel_active_work()
+                    await self._settle_interrupted_work()
                     has_next = bool(self.inbox.next_turn)
                 except Exception:
                     # turn 已把异常结算到所属输入；独立的后续输入仍可执行。
                     has_next = bool(self.inbox.next_turn)
                 finally:
+                    self._turn_task = None
                     self._cancel_reason = None
+                if self.inbox.next_step:
+                    promoted = self.inbox.promote_orphaned_steer()
+                    if promoted:
+                        logger.info("turn 结束后提升 %d 条未消费 steer 到下一轮", len(promoted))
+                        has_next = True
                 if not has_next:
                     return
         finally:
@@ -328,13 +488,26 @@ class Driver:
             extra = dict(saved_input.get("extra") or {})
             extra.pop("slash_command", None)
             extra.pop("raw_args", None)
+            for key in ("dispatch_id", "client_message_id", "dispatch_mode", "raw_message"):
+                extra.pop(key, None)
             extra.update(on_event=on_event, resumed_from=previous.get("turn_id"), resume_task=original_task)
             for staged in reversed(previous.get("staged_inputs") or []):
+                client_id = (staged.get("extra") or {}).get("client_message_id")
+                if client_id and any(m.get("message_id") == client_id for m in self.engine.raw_messages):
+                    continue
                 self.inbox.push(staged["kind"], staged["content"], extra=staged.get("extra"), first=True)
             previous["staged_inputs"] = []
+            handoff = getattr(self.engine, "_compaction_handoff", {}) or {}
+            continuation = (handoff.get("continuity") or {}) if isinstance(handoff, dict) else {}
+            resume_hint = str(
+                continuation.get("resume_instruction")
+                or (handoff.get("next_step") if isinstance(handoff, dict) else "")
+                or ""
+            ).strip()
             self.inbox.push(
                 "inject", f"中断任务的原始要求：{original_task}\n"
-                "结合已保存的对话继续；先核对中断步骤的实际结果，保留已经完成的工作。",
+                + (f"压缩交接的下一步：{resume_hint}\n" if resume_hint else "")
+                + "结合已保存的对话继续；先核对中断步骤的实际结果，保留已经完成的工作。",
                 extra={"prompt_kind": "task_resume"}, first=True,
             )
             item = self.inbox.push("followup", continuation, extra=extra, first=True)
@@ -358,7 +531,7 @@ class Driver:
         if callable(cancel):
             cancel()
         task = self._runner_task
-        if task is not None and not task.done() and task is not asyncio.current_task():
+        if task is not None and not task.done() and task is not asyncio.current_task() and not task.cancelling():
             task.cancel()
 
     async def stop(self, reason: str = "cancelled") -> None:
@@ -379,7 +552,8 @@ class Driver:
         queued = self.inbox.peek_turn()
         if queued is None:
             return False
-        self._on_event = queued.extra.get("on_event", self._on_event)
+        self._on_event = queued.extra.get("on_event") or self._on_event
+        queued.extra["on_event"] = self._on_event
         self.turn_index += 1
         self.step_index = 0
         self.turn_id = f"t{self.turn_index}"
@@ -416,6 +590,7 @@ class Driver:
                 event_type=EventType.TURN_START,
                 turn_id=self.turn_id,
                 iteration=self.turn_index,
+                dispatch=self.dispatch_receipt(str(queued.extra.get("client_message_id") or "")) or {},
             ),
         )
 
@@ -480,6 +655,7 @@ class Driver:
                     event_type=EventType.TURN_FAILED,
                     turn_id=self.turn_id,
                     iteration=self.turn_index,
+                    dispatch=self.dispatch_receipt(str(queued.extra.get("client_message_id") or "")) or {},
                     stop_reason=reason,
                     turn_error=str(exc),
                 ),
@@ -488,12 +664,15 @@ class Driver:
             from excelmanus.engine_types import ChatResult
 
             reason = self._cancel_reason or "cancelled"
-            if reason != "shutdown":
+            if reason == "interrupt":
+                self.engine._interaction_handler.clear_recovery()
+                self.engine._question_flow.clear()
+            elif reason != "shutdown":
                 self.engine._interaction_handler.pause_recovery()
-            message = "本轮执行超时。" if reason == "timeout" else "本轮执行已取消。"
+            message = "本轮执行超时。" if reason == "timeout" else "已由新消息中断，已完成的操作已保留。" if reason == "interrupt" else "本轮执行已取消。"
             last_result = ChatResult(reply=message, truncated=True)
             if self._turn_record is not None:
-                self._turn_record.update(status="timeout" if reason == "timeout" else "cancelled", stop_reason=reason)
+                self._turn_record.update(status="timeout" if reason == "timeout" else "interrupted" if reason == "interrupt" else "cancelled", stop_reason=reason)
             self._emit(
                 ToolCallEvent(
                     event_type=EventType.TURN_FAILED,
@@ -546,6 +725,23 @@ class Driver:
             item = self._active_item
             self._active_item = None
             if item is not None:
+                status = (self._turn_record or {}).get("status", "failed")
+                row = self._dispatch_receipts.get(str(item.extra.get("client_message_id") or ""))
+                if row is not None:
+                    row["reply"] = getattr(last_result, "reply", "")
+                for pending in self._dispatch_receipts.values():
+                    if pending["status"] == "applying":
+                        pending_item = self.inbox.find_item(pending["item_id"])
+                        if pending_item is not None:
+                            self._set_dispatch(pending_item, "failed", "消息未能纳入执行，请重试")
+                self._set_dispatch(item, "completed" if status == "completed" else "interrupted" if status in {"cancelled", "interrupted"} else "failed")
+                self.last_result = last_result
+                self.last_reply = self.dispatch_receipt(str(item.extra.get("client_message_id") or "")) or {}
+                if last_result is not None:
+                    self._emit(ToolCallEvent(event_type=EventType.TURN_REPLY,
+                        turn_id=self.turn_id, result=getattr(last_result, "reply", "本轮执行失败，请查看错误信息后重试。"), dispatch=self.last_reply,
+                        prompt_tokens=getattr(last_result, "prompt_tokens", 0), completion_tokens=getattr(last_result, "completion_tokens", 0),
+                        total_tokens=getattr(last_result, "total_tokens", 0), total_iterations=getattr(last_result, "iterations", 0)))
                 item.result = last_result
                 item.completed.set()
         return bool(self.inbox.next_turn)
@@ -572,6 +768,9 @@ class Driver:
                 ),
             }
             self._persist_runtime_state()
+
+        for item in claimed:
+            self._set_dispatch(item, "applying", strict=True)
 
         if target == "next-turn" and followup_item is None:
             return PreparedStep(kind="reject", messages=[], claimed=claimed)
@@ -625,7 +824,10 @@ class Driver:
                 logger.info("修复了 %d 个中断遗留的悬空 tool_call", repaired)
         self._record_claim(claimed, target)
         # pending next-step 先于本 turn 的 followup 进入 memory。
-        self._append_step_items(claimed)
+        await self._append_step_items(claimed)
+        for item in claimed:
+            if item is not followup_item:
+                self._set_dispatch(item, "completed")
         if self._turn_record is not None:
             self._turn_record["staged_inputs"] = []
 
@@ -636,6 +838,7 @@ class Driver:
             if on_event is not None:
                 self._on_event = on_event
             early_result = await self.engine._apply_claimed_followup(followup_item)
+            self._set_dispatch(followup_item, "applied")
             if early_result is not None:
                 return PreparedStep(
                     kind="reject",
@@ -692,8 +895,12 @@ class Driver:
         claimed = self.inbox.claim("next-step", turn=self.turn_index, step=iteration)
         if not claimed:
             return []
+        for item in claimed:
+            self._set_dispatch(item, "applying", strict=True)
         self._record_claim(claimed, "next-step")
-        self._append_step_items(claimed)
+        await self._append_step_items(claimed)
+        for item in claimed:
+            self._set_dispatch(item, "completed")
         return claimed
 
     async def turn_stopping(self) -> None:
@@ -707,9 +914,13 @@ class Driver:
             self._turn_record.update(status="running", step_index=iteration)
         self._persist_runtime_state()
 
-    def _append_step_items(self, claimed: list[InboxItem]) -> None:
+    async def _append_step_items(self, claimed: list[InboxItem]) -> None:
         for item in claimed:
             if item.kind in ("steer", "inject"):
+                if item.extra.get("dispatch_id"):
+                    from excelmanus.agent.session_api import append_steer_input
+                    await append_steer_input(self.engine, item)
+                    continue
                 text = str(item.content or "").strip()
                 if text:
                     kind = item.extra.get("prompt_kind") if item.kind == "inject" else None

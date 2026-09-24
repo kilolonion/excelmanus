@@ -24,7 +24,6 @@ def _make_dispatcher(*, vision: bool = True) -> tuple[ToolDispatcher, MagicMock]
     dispatcher = ToolDispatcher.__new__(ToolDispatcher)
     dispatcher._engine = engine
     dispatcher._deferred_image_injections = []
-    dispatcher._injected_image_hashes = set()
     dispatcher._tool_call_store = None
     dispatcher._handlers = []
     return dispatcher, engine
@@ -143,18 +142,16 @@ class TestReadExcelToolResult:
         wb.save(fp)
         return fp
 
-    def test_returns_tool_result_with_truncation_metadata(self, large_excel: Path) -> None:
-        tr = data_tools.read_excel(str(large_excel), max_rows=10)
+    def test_observe_returns_version_bound_tool_result(self, large_excel: Path) -> None:
+        from excelmanus.tools.workbook_tools import init_guard, observe_spreadsheet
+        from excelmanus.security import FileAccessGuard
+        init_guard(str(large_excel.parent))
+        tr = observe_spreadsheet(file_path=str(large_excel), mode="range", range="A1:B10", facets=["data"])
         assert isinstance(tr, ToolResult)
         assert tr.success
-        assert tr.coverage is not None
-        assert tr.coverage.get("kind") in {"truncated", "complete", "sampled"}
-        assert tr.value is not None
+        assert tr.value["schema_version"] == "workbook/2"
+        assert tr.value["regions"][0]["coverage"]["data"]["status"] == "complete"
         assert tr.ui_meta.files == ["large.xlsx"]
-        assert tr.ui_meta.preview is not None
-        # model_text 不应包含完整 50 行 dump
-        assert tr.model_text.count('"A"') < 20
-        assert "截断" in tr.model_text or tr.coverage.get("kind") != "truncated"
         assert tr.ui_meta.content_version
         assert str(tr.ui_meta.content_version).startswith("sha256:")
         assert tr.value.get("content_version") == tr.ui_meta.content_version

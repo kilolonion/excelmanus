@@ -34,13 +34,13 @@ const server = await createServer({ root, configFile: false, cacheDir: path.join
         return;
       }
       if (req.url?.startsWith("/chat/abort")) aborts++;
-      if (req.url?.startsWith("/files/excel/view?")) {
+      if (req.url?.startsWith("/workbooks/observe?")) {
         const query = new URL(req.url, "http://fixture").searchParams;
         const file = query.get("path"), sheet = query.get("sheet") || "明细";
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ file: { workspaceKey: "id:stream-ws", relative: file }, content_version: "v1", active_sheet: sheet,
-          with_styles: query.get("with_styles") === "1", sheets: [{ name: sheet, sheet_id: sheet, used: { rows: 30, cols: 8 } }],
-          windows: [{ sheet, rect: { r0: 1, c0: 1, r1: 200, c1: 50 }, cells: { "1,1": { t: "s", v: "销售额", cached: "yes" } } }],
+          request: { facets: (query.get("facets") || "").split(",") }, sheets: [{ name: sheet, sheet_id: sheet, used: { rows: 30, cols: 8 } }],
+          regions: [{ sheet, rect: { r0: 1, c0: 1, r1: 200, c1: 50 }, cells: { "1,1": { t: "s", v: "销售额", cached: "yes" } } }],
           coverage: { loaded: [{ sheet, r0: 1, c0: 1, r1: 200, c1: 50 }], unloaded: [] } }));
         return;
       }

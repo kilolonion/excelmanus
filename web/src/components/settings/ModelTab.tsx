@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Loader2, CheckCircle2, AlertTriangle, X, Database, Settings2, Crown, SlidersHorizontal } from "lucide-react";
 import { AdminModelContext } from "./model/admin-model-context";
 import { useAdminModelSettings } from "./model/useAdminModelSettings";
@@ -10,6 +10,7 @@ import { RoleModelSection } from "./model/RoleModelSection";
 import { JevRoleSection } from "./model/JevRoleSection";
 import { SubscriptionOAuthPanel } from "./model/SubscriptionOAuthPanel";
 import { AdvancedDiagnosticsPanel } from "./model/AdvancedDiagnosticsPanel";
+import { SettingsPageLayout, SettingsPageSubnav } from "./SettingsPageLayout";
 import {
   subscribeModelSubTab,
   takePendingModelSubTab,
@@ -23,13 +24,25 @@ const SUB_TABS: { key: ModelSubTab; label: string; icon: ReactNode; coachId: str
   { key: "diagnostics", label: "高级设置", icon: <SlidersHorizontal className="h-3 w-3" />, coachId: "coach-settings-subtab-diagnostics" },
 ];
 
+const SUB_TAB_DESCRIPTIONS: Record<ModelSubTab, string> = {
+  providers: "添加 API 或订阅连接，管理可用模型与默认模型。",
+  roles: "为聊天和记忆等任务分配最合适的模型。",
+  subscription: "连接已有订阅，免去重复填写 API Key。",
+  diagnostics: "调整能力、推理、预算与请求行为。",
+};
+
 export function ModelTab() {
   const ctx = useAdminModelSettings();
   const [subTab, setSubTab] = useState<ModelSubTab>(() => takePendingModelSubTab() ?? "providers");
+  const [subscriptionVisited, setSubscriptionVisited] = useState(subTab === "subscription");
+  const navigate = useCallback((tab: ModelSubTab) => {
+    setSubTab(tab);
+    if (tab === "subscription") setSubscriptionVisited(true);
+  }, []);
 
-  useEffect(() => subscribeModelSubTab(setSubTab), []);
+  useEffect(() => subscribeModelSubTab(navigate), [navigate]);
 
-  if (ctx.loading) {
+  if (ctx.loading && !ctx.config) {
     return (
       <div className="flex items-center justify-center py-12">
         <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -39,7 +52,18 @@ export function ModelTab() {
 
   return (
     <AdminModelContext.Provider value={ctx}>
-      <div className="flex flex-col gap-2">
+      <SettingsPageLayout className="em-model-page em-settings-page-stack">
+        <SettingsPageSubnav
+          label="模型工作区"
+          showHeader={false}
+          activeKey={subTab}
+          items={SUB_TABS.map((tab) => ({ ...tab, description: SUB_TAB_DESCRIPTIONS[tab.key] }))}
+          onChange={(key) => navigate(key as ModelSubTab)}
+        />
+        {ctx.loadError && <div role="alert" className="flex items-center gap-3 rounded-lg border border-destructive/20 p-3 text-xs text-destructive">
+          <span className="flex-1">{ctx.config ? "配置刷新失败，当前显示上次读取的内容。" : "无法读取模型配置。"}{ctx.loadError}</span>
+          <button type="button" className="shrink-0 underline" onClick={() => void ctx.fetchConfig(true)}>重新加载</button>
+        </div>}
         {ctx.saveToast && (
           <div
             className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity backdrop-blur-xl shadow-sm ${
@@ -56,45 +80,23 @@ export function ModelTab() {
           </div>
         )}
 
-        <div className="flex items-center gap-1 mb-1 overflow-x-auto scrollbar-none">
-          {SUB_TABS.map((tab) => {
-            const isActive = subTab === tab.key;
-            return (
-              <button
-                key={tab.key}
-                type="button"
-                aria-pressed={isActive}
-                data-coach-id={tab.coachId}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap border ${
-                  isActive
-                    ? "text-white border-transparent"
-                    : "border-border text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                }`}
-                style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
-                onClick={() => setSubTab(tab.key)}
-              >
-                {tab.icon}
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
-
-        {subTab === "providers" && (
-          <div className="flex flex-col gap-3">
-            <ProviderSection />
-            <JevProviderSection />
-          </div>
-        )}
-        {subTab === "roles" && (
-          <div className="flex flex-col gap-3">
-            <RoleModelSection />
-            <JevRoleSection />
-          </div>
-        )}
-        {subTab === "subscription" && <SubscriptionOAuthPanel />}
-        {subTab === "diagnostics" && <AdvancedDiagnosticsPanel />}
-      </div>
+        <main className="em-model-content" aria-live="polite">
+            {subTab === "providers" && (
+              <div className="flex flex-col gap-3">
+                <ProviderSection />
+                <JevProviderSection />
+              </div>
+            )}
+            {subTab === "roles" && (
+              <div className="flex flex-col gap-3">
+                <RoleModelSection />
+                <JevRoleSection />
+              </div>
+            )}
+            {subscriptionVisited && <div hidden={subTab !== "subscription"}><SubscriptionOAuthPanel /></div>}
+            {subTab === "diagnostics" && <AdvancedDiagnosticsPanel />}
+        </main>
+      </SettingsPageLayout>
     </AdminModelContext.Provider>
   );
 }

@@ -1,4 +1,4 @@
-"""Excel 原生图表实现：供 `manage_spreadsheet_objects` 内部调用。
+"""Excel 原生图表实现：供 `apply_spreadsheet_changes` 内部调用。
 
 模型面不注册本模块；PNG / matplotlib 出图走 `run_code`。
 """
@@ -8,20 +8,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from excelmanus.engine_core.tool_result import ToolResult, error_result, ok_result
+from excelmanus.engine_core.tool_result import ToolResult, error_result
 from excelmanus.logger import get_logger
-from excelmanus.security import FileAccessGuard
-from excelmanus.tools.context import bind_workspace, require_guard
+from excelmanus.tools.context import bind_workspace
 from excelmanus.tools._helpers import (
     MutationAborted,
-    commit_error_result,
-    commit_workbook_tool,
     get_worksheet,
-    prepare_excel_commit_path,
     resolve_sheet_name,
-    unwrap_mutation_abort,
 )
-from excelmanus.workbook_commit import CommitError
 from excelmanus.workbook.refs import InvalidRefError
 
 logger = get_logger("tools.chart")
@@ -39,10 +33,6 @@ _CHART_TYPE_ALIASES = {
     "scatterchart": "scatter",
     "xy": "scatter",
 }
-
-
-def _get_guard() -> FileAccessGuard:
-    return require_guard()
 
 
 def init_guard(workspace_root: str) -> None:
@@ -178,7 +168,8 @@ def add_chart_to_workbook(wb: Any, spec: ChartSpec) -> dict[str, Any]:
         return min_col, min_row, max_col, max_row
 
     try:
-        ws = get_worksheet(wb, spec.sheet_name)
+        from excelmanus.workbook.snapshot import require_default_sheet
+        ws = wb[require_default_sheet(wb.sheetnames, spec.sheet_name)]
     except ValueError as exc:
         raise MutationAborted(error_result(str(exc), code="INVALID_ARGS")) from exc
 
@@ -236,7 +227,7 @@ def add_chart_to_workbook(wb: Any, spec: ChartSpec) -> dict[str, Any]:
             target_ws = wb.create_sheet(title=spec.target_sheet)
     target_ws.add_chart(chart, spec.target_cell)
 
-    from excelmanus.workbook.data import _collect_charts
+    from excelmanus.workbook.presentation import _collect_charts
 
     chart_info = _collect_charts(target_ws)
     return {
@@ -306,7 +297,7 @@ def update_chart_in_workbook(wb: Any, op: dict[str, Any]) -> dict[str, Any]:
                     if hasattr(series, attr) and hasattr(old_series[pos], attr):
                         setattr(series, attr, deepcopy(getattr(old_series[pos], attr)))
         chart.series = new_chart.series
-    for field in ("title", "style", "width", "height"):
+    for field in ("title", "style"):
         if field in op:
             setattr(chart, field, op[field])
     for field, axis in (("x_title", "x_axis"), ("y_title", "y_axis")):
@@ -316,6 +307,8 @@ def update_chart_in_workbook(wb: Any, op: dict[str, Any]) -> dict[str, Any]:
             getattr(chart, axis).title = op[field]
     if "target_cell" in op:
         chart.anchor = op["target_cell"]
+    from excelmanus.workbook.geometry import resize_drawing
+    resize_drawing(chart, width=op.get("width"), height=op.get("height"), unit="cm")
     return {"target_sheet": ws.title, "index": index, "chart_type": new_type, "total_charts": len(ws._charts)}
 
 
@@ -330,91 +323,3 @@ def delete_chart_from_workbook(
     pos, chart = selected
     ws._charts.remove(chart)
     return {"deleted_index": pos, "target_sheet": ws.title, "remaining_charts": len(ws._charts)}
-
-
-def create_excel_chart(
-    file_path: str,
-    chart_type: str,
-    data_range: str,
-    categories_range: str | None = None,
-    sheet_name: str | None = None,
-    target_cell: str = "A1",
-    target_sheet: str | None = None,
-    title: str | None = None,
-    x_title: str | None = None,
-    y_title: str | None = None,
-    style: int | None = None,
-    width: float = 15.0,
-    height: float = 10.0,
-    from_rows: bool = False,
-    expected_version: str | None = None,
-) -> ToolResult:
-    """在 Excel 工作表中插入原生图表对象（嵌入式图表，非图片）。"""
-    from excelmanus.workbook.address import looks_like_coordinate_error
-
-    spec = normalize_chart_args(
-        chart_type=chart_type,
-        data_range=data_range,
-        categories_range=categories_range,
-        sheet_name=sheet_name,
-        target_cell=target_cell,
-        target_sheet=target_sheet,
-        title=title,
-        x_title=x_title,
-        y_title=y_title,
-        style=style,
-        width=width,
-        height=height,
-        from_rows=from_rows,
-    )
-    if isinstance(spec, ToolResult):
-        return spec
-
-    guard = _get_guard()
-    safe_path, rel = prepare_excel_commit_path(guard, file_path)
-    meta: dict[str, Any] = {}
-
-    def mutate(wb: Any) -> None:
-        meta.update(add_chart_to_workbook(wb, spec))
-
-    try:
-        cr = commit_workbook_tool(
-            guard=guard,
-            file_path=rel,
-            mutate_fn=mutate,
-            expected_version=expected_version,
-        )
-    except CommitError as exc:
-        aborted = unwrap_mutation_abort(exc)
-        if aborted is not None:
-            return aborted.result
-        if looks_like_coordinate_error(exc):
-            return error_result(
-                f"{getattr(exc, 'message', exc)}。"
-                "请用 A1:B12，表名放在 sheet，或写成 数据!A1:B12。",
-                code="INVALID_ARGS",
-            )
-        return commit_error_result(exc)
-
-    logger.info(
-        "create_excel_chart: %s[%s] %s at %s",
-        safe_path.name, meta.get("target_sheet"), spec.chart_type, spec.target_cell,
-    )
-    payload = {
-        "status": "success",
-        "file": safe_path.name,
-        "file_path": rel,
-        "chart_type": spec.chart_type,
-        "data_range": spec.data_range,
-        "target_sheet": meta.get("target_sheet"),
-        "target_cell": spec.target_cell,
-        "chart_info": meta.get("chart_info") or {},
-        "total_charts_on_sheet": meta.get("total_charts", 0),
-        "content_version": cr.content_version,
-    }
-    return ok_result(
-        payload,
-        model_text=(
-            f"已在 {payload['target_sheet']}!{spec.target_cell} 插入 {spec.chart_type} 图"
-        ),
-    )

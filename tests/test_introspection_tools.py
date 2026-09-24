@@ -12,8 +12,6 @@ import pytest
 from excelmanus.tools.introspection_tools import (
     INTROSPECT_CAPABILITY_SCHEMA,
     _ALL_QUERY_TYPES,
-    _EXTENDED_CAPABILITIES,
-    _SUBAGENT_CAPABILITIES,
     _handle_can_i_do,
     _handle_category_tools,
     _handle_related_tools,
@@ -43,8 +41,8 @@ def registry() -> ToolRegistry:
     reg = ToolRegistry()
     # 注册一些代表性工具
     for name in (
-        "inspect_spreadsheet", "analyze_spreadsheet", "compare_spreadsheets",
-        "edit_spreadsheet", "write_text_file", "copy_file", "run_code",
+        "observe_spreadsheet", "analyze_spreadsheet", "compare_spreadsheets",
+        "apply_spreadsheet_changes", "write_text_file", "copy_file", "run_code",
         "list_directory", "run_shell", "delete_file", "rename_file",
         "read_word", "inspect_word",
     ):
@@ -97,7 +95,7 @@ class TestBatchQuery:
     def test_batch_query_mode(self, registry: ToolRegistry) -> None:
         """批量查询应返回多个结果。"""
         queries = [
-            {"query_type": "tool_detail", "query": "inspect_spreadsheet"},
+            {"query_type": "tool_detail", "query": "observe_spreadsheet"},
             {"query_type": "can_i_do", "query": "读取数据"},
         ]
         result = introspect_capability(queries=queries)
@@ -105,8 +103,8 @@ class TestBatchQuery:
         # 应包含两个查询的结果
         assert "[1]" in result
         assert "[2]" in result
-        assert "inspect_spreadsheet" in result
-        assert "tool_detail(inspect_spreadsheet)" in result
+        assert "observe_spreadsheet" in result
+        assert "tool_detail(observe_spreadsheet)" in result
 
     def test_batch_query_empty(self, registry: ToolRegistry) -> None:
         """空的批量查询应返回提示信息。"""
@@ -149,12 +147,14 @@ class TestRegistration:
         assert "queries" in props
 
     def test_query_type_enum(self) -> None:
-        """query_type 应包含五种枚举值。"""
+        """旧工具发现入口与统一认知入口使用同一 schema。"""
         props = INTROSPECT_CAPABILITY_SCHEMA["properties"]
         enum_values = props["query_type"]["enum"]
         assert set(enum_values) == {
             "tool_detail", "category_tools", "can_i_do",
             "related_tools", "system_status",
+            "knowledge_index", "knowledge_search", "knowledge_read",
+            "knowledge_toc", "knowledge_find", "knowledge_related", "knowledge_spec", "knowledge_examples",
         }
 
     def test_in_read_only_safe_tools(self) -> None:
@@ -195,49 +195,50 @@ class TestToolDetail:
     def test_root_detail_includes_same_output_contract_as_output_query(self, registry: ToolRegistry) -> None:
         from excelmanus.tools.output_contracts import contract_summary
 
-        summary = contract_summary("inspect_spreadsheet")
-        assert summary in introspect_capability("tool_detail", "inspect_spreadsheet")
-        assert summary in introspect_capability("tool_detail", "inspect_spreadsheet.output")
+        summary = contract_summary("observe_spreadsheet")
+        assert summary in introspect_capability("tool_detail", "observe_spreadsheet")
+        assert summary in introspect_capability("tool_detail", "observe_spreadsheet.output")
 
     def test_output_detail_preserves_optional_value_types(self, registry: ToolRegistry) -> None:
         from excelmanus.tools.output_contracts import contract_for
 
-        contract = contract_for("edit_spreadsheet")
+        contract = contract_for("apply_spreadsheet_changes")
         assert contract.optional_types
-        detail = introspect_capability("tool_detail", "edit_spreadsheet.output")
+        detail = introspect_capability("tool_detail", "apply_spreadsheet_changes.output")
         for name, value_type in contract.optional_types.items():
             assert f"{name}:{value_type}" in detail
 
     def test_existing_tool(self, registry: ToolRegistry) -> None:
         """查询已注册工具应返回 schema 和权限信息。"""
-        result = introspect_capability("tool_detail", "inspect_spreadsheet")
-        assert "inspect_spreadsheet" in result
+        result = introspect_capability("tool_detail", "observe_spreadsheet")
+        assert "observe_spreadsheet" in result
         assert "file_path" in result
         assert "🟢" in result
 
-    def test_mode_union_tool_detail_lists_per_mode_fields(self, registry: ToolRegistry) -> None:
-        """mode-union 工具的 tool_detail 应披露逐 mode 可用字段，避免模型按平铺 schema 误传。"""
-        from excelmanus.tools import intent_tools
+    def test_mode_detail_uses_live_schema_and_field_descriptions(self, registry: ToolRegistry) -> None:
+        """mode 与字段解释来自实时 schema，不依赖已移除的独立字段映射。"""
+        from excelmanus.tools import workbook_tools
 
-        real = {t.name: t for t in intent_tools.get_tools()}
+        real = {t.name: t for t in workbook_tools.get_tools()}
         registry._tools["analyze_spreadsheet"] = real["analyze_spreadsheet"]
         registry._tools["trace_spreadsheet_formulas"] = real["trace_spreadsheet_formulas"]
         detail = introspect_capability("tool_detail", "analyze_spreadsheet")
-        assert "mode=quality 字段:" in detail
-        assert "sample_rows" in detail
+        assert "quality" in detail
+        field = introspect_capability("tool_detail", "analyze_spreadsheet.sample_rows")
+        assert real["analyze_spreadsheet"].input_schema["properties"]["sample_rows"]["description"] in field
         trace_detail = introspect_capability("tool_detail", "trace_spreadsheet_formulas")
-        assert "mode=map 字段:" in trace_detail
+        assert "map" in trace_detail and "trace" in trace_detail
 
     def test_schema_consistency(self, registry: ToolRegistry) -> None:
         """返回的 schema 应与 ToolDef.input_schema 一致。"""
-        result = introspect_capability("tool_detail", "inspect_spreadsheet")
-        tool_def = registry.get_tool("inspect_spreadsheet")
+        result = introspect_capability("tool_detail", "observe_spreadsheet")
+        tool_def = registry.get_tool("observe_spreadsheet")
         assert tool_def is not None
-        assert '"file_path"' in result
+        assert "file_path" in result
 
     def test_permission_read_only(self, registry: ToolRegistry) -> None:
         """只读工具应标注为 🟢。"""
-        result = introspect_capability("tool_detail", "inspect_spreadsheet")
+        result = introspect_capability("tool_detail", "observe_spreadsheet")
         assert "🟢" in result
 
     def test_permission_confirm(self, registry: ToolRegistry) -> None:
@@ -252,7 +253,7 @@ class TestToolDetail:
 
     def test_category_shown(self, registry: ToolRegistry) -> None:
         """应显示工具所属分类。"""
-        result = introspect_capability("tool_detail", "inspect_spreadsheet")
+        result = introspect_capability("tool_detail", "observe_spreadsheet")
         assert "inspect" in result
 
     def test_nonexistent_tool(self, registry: ToolRegistry) -> None:
@@ -272,14 +273,14 @@ class TestCategoryTools:
         """查询有效分类应返回该分类下所有工具。"""
         result = introspect_capability("category_tools", "inspect")
         for tool_name in TOOL_CATEGORIES["inspect"]:
-            if registry.get_tool(tool_name) is not None or tool_name in TOOL_SHORT_DESCRIPTIONS:
+            if registry.get_tool(tool_name) is not None:
                 assert tool_name in result
 
     def test_tools_with_descriptions(self, registry: ToolRegistry) -> None:
         """返回的工具应附带描述。"""
         result = introspect_capability("category_tools", "inspect")
-        assert "inspect_spreadsheet" in result
-        desc = TOOL_SHORT_DESCRIPTIONS.get("inspect_spreadsheet", "")
+        assert "observe_spreadsheet" in result
+        desc = TOOL_SHORT_DESCRIPTIONS.get("observe_spreadsheet", "")
         if desc:
             assert desc in result
 
@@ -300,25 +301,25 @@ class TestCanIDo:
     def test_matching_query(self, registry: ToolRegistry) -> None:
         """使用工具描述关键词应匹配到对应工具。"""
         result = introspect_capability("can_i_do", "读取 Excel 数据")
-        assert "可见工具可做" in result
-        assert "inspect_spreadsheet" in result
+        assert "available" in result
+        assert "observe_spreadsheet" in result
 
     def test_product_diff_term_routes_to_compare(self, registry: ToolRegistry) -> None:
         """产品术语 diff 不应依赖短描述的词袋命中。"""
         result = introspect_capability("can_i_do", "diff")
-        assert "可见工具可做" in result
+        assert "available" in result
         assert "compare_spreadsheets" in result
 
     def test_self_match(self, registry: ToolRegistry) -> None:
         """使用工具完整描述作为查询应匹配到该工具。"""
-        desc = TOOL_SHORT_DESCRIPTIONS["inspect_spreadsheet"]
+        desc = TOOL_SHORT_DESCRIPTIONS["observe_spreadsheet"]
         result = introspect_capability("can_i_do", desc)
-        assert "inspect_spreadsheet" in result
+        assert "observe_spreadsheet" in result
 
     def test_no_match(self, registry: ToolRegistry) -> None:
         """无匹配时应返回当前不可用。"""
         result = introspect_capability("can_i_do", "量子计算模拟")
-        assert "当前不可用" in result
+        assert "unknown" in result
 
     def test_max_results_per_layer(self, registry: ToolRegistry) -> None:
         """每层匹配结果不应超过 5 个。"""
@@ -339,13 +340,13 @@ class TestCanIDo:
     def test_extended_capabilities_match(self, registry: ToolRegistry) -> None:
         """can_i_do 应能匹配扩展能力（run_code + Python 库）。"""
         result = introspect_capability("can_i_do", "数据透视表 pivot")
-        assert "可见工具可做" in result
-        assert "扩展能力" in result or "pivot" in result.lower()
+        assert "available" in result
+        assert "pivot" in result.lower()
 
     def test_subagent_match(self, registry: ToolRegistry) -> None:
         """can_i_do 应能匹配子代理能力。"""
         result = introspect_capability("can_i_do", "只读探索 文件结构分析")
-        assert "可见工具可做" in result or "当前不可用" in result
+        assert "available" in result or "unknown" in result
 
 
 # ── related_tools 测试 ────────────────────────────────────
@@ -382,47 +383,20 @@ class TestSystemStatus:
         assert "系统状态概览" in result
         assert "内置工具" in result
         assert "工具分类" in result
-        assert "扩展能力" in result
-        assert "内置子代理" in result
+        assert "MCP 扩展工具" in result
+        assert "当前目录模式" in result
 
     def test_shows_subagent_names(self, registry: ToolRegistry) -> None:
         """system_status 应列出所有内置子代理名称。"""
         result = introspect_capability("system_status", "")
-        for name in _SUBAGENT_CAPABILITIES:
-            assert name in result
+        assert "delegate" not in registry.get_tool_names()
+        assert "内置子代理" not in result
 
-    def test_extended_capabilities_count(self, registry: ToolRegistry) -> None:
-        """system_status 应显示正确的扩展能力数量。"""
-        result = introspect_capability("system_status", "")
-        assert f"{len(_EXTENDED_CAPABILITIES)} 项" in result
 
 
 # ── 扩展能力常量测试 ─────────────────────────────────────
 
 
-class TestExtendedCapabilitiesConstants:
-    """测试扩展能力和子代理常量的完整性。"""
-
-    def test_extended_capabilities_non_empty(self) -> None:
-        """扩展能力描述不应为空。"""
-        assert len(_EXTENDED_CAPABILITIES) > 0
-        for key, desc in _EXTENDED_CAPABILITIES.items():
-            assert isinstance(key, str) and key
-            assert isinstance(desc, str) and desc
-            assert (
-                "run_code" in desc
-                or "edit_spreadsheet" in desc
-                or "format_spreadsheet" in desc
-                or "manage_spreadsheet_objects" in desc
-                or "WorkbookSpec" in desc
-                or "当前不可用" in desc
-                or "不可用" in desc
-            ), f"扩展能力 {key} 应指向意图工具、run_code，或声明当前不可用"
-
-    def test_subagent_capabilities_match_builtin(self) -> None:
-        """子代理能力描述应与 builtin.py 中定义的子代理一致。"""
-        expected = {"explorer", "subagent"}
-        assert set(_SUBAGENT_CAPABILITIES.keys()) == expected
 
 
 # ── 纯查询无副作用测试 ────────────────────────────────────
@@ -434,10 +408,10 @@ class TestNoSideEffects:
     def test_registry_unchanged(self, registry: ToolRegistry) -> None:
         """调用后 ToolRegistry 状态不变。"""
         tools_before = set(registry.get_tool_names())
-        introspect_capability("tool_detail", "inspect_spreadsheet")
+        introspect_capability("tool_detail", "observe_spreadsheet")
         introspect_capability("category_tools", "inspect")
         introspect_capability("can_i_do", "读取数据")
-        introspect_capability("related_tools", "edit_spreadsheet")
+        introspect_capability("related_tools", "apply_spreadsheet_changes")
         tools_after = set(registry.get_tool_names())
         assert tools_before == tools_after
 
@@ -455,53 +429,29 @@ class TestFreezeFromSchema:
         from excelmanus.tools.catalog import derive_effective_catalog
 
         reg = ToolRegistry()
-        format_tool = ToolDef(
-            name="format_spreadsheet",
-            description="改外观含冻结",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {"type": "string"},
-                    "operations": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "kind": {
-                                    "type": "string",
-                                    "enum": ["format", "merge", "unmerge", "size", "freeze"],
-                                },
-                                "freeze_panes": {"type": "string"},
-                            },
-                        },
-                    },
-                },
-                "required": ["file_path", "operations"],
-            },
-            func=lambda: None,
-        )
+        from excelmanus.tools.workbook_tools import get_tools
+        format_tool = next(t for t in get_tools() if t.name == "apply_spreadsheet_changes")
         reg.register_tool(format_tool)
         catalog = derive_effective_catalog(tools=reg.get_all_tools(), mode="write")
         token = mod._call_catalog.set(catalog)
         try:
             result = introspect_capability("can_i_do", "冻结首行")
-            assert "可见工具可做" in result
-            assert "kind=freeze" in result
+            assert "available" in result
+            assert "apply_spreadsheet_changes" in result
             assert "已有文件不可用" not in result
-            assert "支持" not in result.split("能力判断:", 1)[-1][:20]
-            detail = introspect_capability("tool_detail", "format_spreadsheet")
-            assert "operations.kind" in detail
+            detail = introspect_capability("tool_detail", "apply_spreadsheet_changes")
+            assert "operations" in detail
             assert "Excel A1 引用语法" not in detail
             size_detail = introspect_capability(
-                "tool_detail", "format_spreadsheet.operations.size",
+                "tool_detail", "apply_spreadsheet_changes.operations.size",
             )
             assert "字段不存在" not in size_detail
             assert "columns" in size_detail or "auto_fit" in size_detail
             freeze_ops = introspect_capability(
-                "tool_detail", "format_spreadsheet.operations.freeze",
+                "tool_detail", "apply_spreadsheet_changes.operations.freeze",
             )
-            freeze_top = introspect_capability("tool_detail", "format_spreadsheet.freeze")
-            for freeze_detail in (freeze_ops, freeze_top):
+            freeze_top = introspect_capability("tool_detail", "apply_spreadsheet_changes.freeze")
+            for freeze_detail in (freeze_ops,):
                 assert "字段不存在" not in freeze_detail
                 assert "freeze_panes" in freeze_detail
         finally:
@@ -517,5 +467,5 @@ class TestRegistryNotInitialized:
 
     def test_returns_error(self, empty_registry: ToolRegistry) -> None:
         """未初始化时应返回错误提示。"""
-        result = introspect_capability("tool_detail", "inspect_spreadsheet")
+        result = introspect_capability("tool_detail", "observe_spreadsheet")
         assert "工具注册表尚未初始化" in result

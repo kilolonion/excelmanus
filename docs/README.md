@@ -1,8 +1,8 @@
 # ExcelManus 文档导航 · Documentation
 
-本文档集对应 **1.8.0 源码**，最近同步于 **2026-09-21**。安装包是否已发布、支持的系统架构及签名状态，以对应发布资产为准。
+本文档集对应 **1.8.1 源码**，最近同步于 **2026-09-21**。安装包是否已发布、支持的系统架构及签名状态，以对应发布资产为准。
 
-These guides describe the **1.8.0 source tree**, updated on **2026-09-21**. Installer availability, architecture, and signing status depend on the published assets.
+These guides describe the **1.8.1 source tree**, updated on **2026-09-21**. Installer availability, architecture, and signing status depend on the published assets.
 
 ## 使用与部署 · Using and deploying
 
@@ -28,6 +28,7 @@ The running service exposes its request and response schemas at [the local API r
 | [Web README](../web/README.md) | 前端开发、地址配置、构建与检查 / Frontend development, origin settings, builds, checks |
 | [Desktop README](../desktop/README.md) | App 界面、桌面打包、运行时、签名与数据目录 / App UI, packaging, runtimes, signing, profiles |
 | [提示词分层与维护](prompt-layering.md) | 提示词、工具参数与执行约束的维护边界 / Prompt, schema, and runtime responsibilities |
+| [Agent 统一认知门户](knowledge-portal.md) | 按需查询产品设计、流程、配置、能力及恢复说明 / On-demand product knowledge and live capabilities |
 | [技能装载与工作区](skill-isolation-design.md) | 技能发现与工作区范围 / Skill discovery and workspace scope |
 | [Bench](../bench/README.md) | 真实模型评测、隔离配置与结果解释 / Live-model evaluation and result interpretation |
 | [套件字段](../bench/cases/README.md) | 评测输入、断言与权限 / Evaluation inputs, assertions, permissions |

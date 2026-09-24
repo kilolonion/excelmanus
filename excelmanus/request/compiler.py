@@ -115,6 +115,10 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
             body["enable_thinking"] = True
             body["thinking_budget"] = budget
             extra["extra_body"] = body
+        elif effective == "chat_template":
+            body = dict(extra.get("extra_body") or {})
+            body["chat_template_kwargs"] = {"enable_thinking": True}
+            extra["extra_body"] = body
         elif effective == "glm_thinking":
             body = dict(extra.get("extra_body") or {})
             body["thinking"] = {"type": "enabled"}
@@ -128,6 +132,14 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
             }
             extra["extra_body"] = body
     if profile is not None:
+        if (
+            getattr(profile, "service_tier", "") == "fast"
+            and protocol_hint in {"openai", "openai_responses"}
+            and not str(getattr(profile, "model", "")).startswith("openai-codex/")
+        ):
+            # Both aliases enable Fast mode on OpenAI; compatible gateways may
+            # still reject the newer "fast" spelling. Keep the config/UI value.
+            extra["service_tier"] = "priority"
         import json as _json
 
         raw_body = getattr(profile, "custom_extra_body", None)

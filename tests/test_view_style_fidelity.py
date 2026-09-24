@@ -8,7 +8,7 @@ from openpyxl.styles import Border, Color, Font, PatternFill, Side
 from openpyxl.writer.theme import theme_xml
 
 from excelmanus.tools._style_extract import extract_cell_style, resolve_color
-from excelmanus.workbook.view_mutate import apply_univer_style
+from excelmanus.workbook.mutation import execute_operation
 from excelmanus.workspace.file_service import WorkspaceFileService
 
 
@@ -23,7 +23,7 @@ def test_border_matches_univer_and_survives_writeback(name, expected):
     ws["A1"].border = Border(bottom=Side(style=name, color="000000"))
     style = extract_cell_style(ws["A1"])
     assert style["bd"]["b"] == {"s": expected, "cl": {"rgb": "#000000"}}
-    apply_univer_style(ws["B1"], style)
+    execute_operation(ws.parent, {"kind":"format","sheet":ws.title,"range":"B1","border":{"bottom":{"style":name,"color":"000000"}}})
     assert ws["B1"].border.bottom.style == name
 
 

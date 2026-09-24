@@ -316,6 +316,7 @@ def test_jev_config_defaults() -> None:
         base_url="https://example.com/v1",
         model="m",
     )
+    assert cfg.jev_experimental_enabled is False
     assert cfg.jev_enabled == "enforce"
     assert cfg.jev_exposure == "enforce"
     assert cfg.jev_mode_hint is True
@@ -688,8 +689,8 @@ def test_profile_intersects_authorized_catalog_and_preserves_core() -> None:
     from excelmanus.tools.registry import ToolDef
 
     registered = {
-        "inspect_spreadsheet",
-        "edit_spreadsheet",
+        "observe_spreadsheet",
+        "apply_spreadsheet_changes",
         "write_plan",
         "exit_plan_mode",
         "ask_user",
@@ -700,9 +701,9 @@ def test_profile_intersects_authorized_catalog_and_preserves_core() -> None:
     inspect_tools = resolve_profile_tools("inspect", registered)
     assert "write_plan" in inspect_tools
     assert "exit_plan_mode" in inspect_tools
-    assert "inspect_spreadsheet" in inspect_tools
+    assert "observe_spreadsheet" in inspect_tools
     assert "ask_user" in inspect_tools
-    assert "edit_spreadsheet" in inspect_tools
+    assert "apply_spreadsheet_changes" in inspect_tools
     web_tools = resolve_profile_tools("web", registered)
     assert "mcp_demo_search" in web_tools
     full = resolve_profile_tools("full", registered)
@@ -729,7 +730,7 @@ def test_profile_reconciles_with_builtin_registry(tmp_path) -> None:
         assert resolved <= names
         if profile == "inspect":
             assert "write_plan" in resolved
-            assert "edit_spreadsheet" in resolved
+            assert "apply_spreadsheet_changes" in resolved
 
 
 @pytest.mark.asyncio

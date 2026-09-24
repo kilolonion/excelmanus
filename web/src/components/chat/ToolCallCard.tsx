@@ -67,14 +67,12 @@ function parseMergeResult(toolName: string, resultStr: string | undefined): {
 }
 
 const EXCEL_READ_TOOLS = new Set([
-  "inspect_spreadsheet",
+  "observe_spreadsheet",
   "analyze_spreadsheet",
   "compare_spreadsheets",
 ]);
 const EXCEL_WRITE_TOOLS = new Set([
-  "edit_spreadsheet",
-  "format_spreadsheet",
-  "manage_spreadsheet_objects",
+  "apply_spreadsheet_changes",
 ]);
 const EXCEL_DIFF_TOOLS = new Set([
   ...EXCEL_WRITE_TOOLS,

@@ -13,7 +13,7 @@ import type { SubagentRun } from "@/lib/types";
 const run: SubagentRun = {
   run_id: "run-1", agent_name: "explorer", task: "汇总销售额", file_paths: [],
   background: true, status: "running", created_at: 1, started_at: 2, finished_at: null,
-  iteration: 2, tool_calls: 3, last_tool: "inspect_spreadsheet", result: null, resumed_from: null,
+  iteration: 2, tool_calls: 3, last_tool: "observe_spreadsheet", result: null, resumed_from: null,
 };
 
 function renderCard(patch: Partial<SubagentRun> = {}) {
@@ -56,7 +56,7 @@ describe("background task display", () => {
   it("exposes result text and every committed file after an interrupted execution", () => {
     const html = renderCard({ status: "paused", changed_files: ["./sales.xlsx"], result: {
       stop_reason: "aborted", output: "已完成区域汇总", diagnostic: null, iterations: 2, tool_calls_count: 3,
-      structured_changes: [{ path: "./sales.xlsx", tool_name: "edit_spreadsheet", change_type: "write", sheets_affected: [] }],
+      structured_changes: [{ path: "./sales.xlsx", tool_name: "apply_spreadsheet_changes", change_type: "write", sheets_affected: [] }],
       observed_files: [],
     } });
     expect(html).toContain("已完成区域汇总");

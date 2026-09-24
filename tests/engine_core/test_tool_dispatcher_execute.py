@@ -134,7 +134,7 @@ class TestToolDispatcherExecute:
         tc = SimpleNamespace(
             id="call_edit",
             function=SimpleNamespace(
-                name="edit_spreadsheet",
+                name="apply_spreadsheet_changes",
                 arguments=json.dumps({"file_path": "a.xlsx"}),
             ),
         )
@@ -236,7 +236,7 @@ class TestToolDispatcherExecute:
             permission_mode="default",
             conversation_id="sub_1",
             structured_changes=[
-                SubagentFileChange(path="outputs/test.xlsx", tool_name="edit_spreadsheet")
+                SubagentFileChange(path="outputs/test.xlsx", tool_name="apply_spreadsheet_changes")
             ],
         )
         engine._delegate_to_subagent = AsyncMock(return_value=sub_result)
@@ -320,7 +320,7 @@ class TestToolDispatcherExecute:
 
         engine._registry.register_tool(
             ToolDef(
-                name="edit_spreadsheet",
+                name="apply_spreadsheet_changes",
                 description="edit",
                 input_schema={"type": "object", "properties": {}},
                 func=boom,
@@ -330,7 +330,7 @@ class TestToolDispatcherExecute:
         engine._current_chat_mode = "read"
         tc = SimpleNamespace(
             id="call_edit",
-            function=SimpleNamespace(name="edit_spreadsheet", arguments="{}"),
+            function=SimpleNamespace(name="apply_spreadsheet_changes", arguments="{}"),
         )
         result = await engine._tool_dispatcher.execute(
             tc=tc,
@@ -355,7 +355,7 @@ class TestToolDispatcherExecute:
 
         engine._registry.register_tool(
             ToolDef(
-                name="edit_spreadsheet",
+                name="apply_spreadsheet_changes",
                 description="edit",
                 input_schema={"type": "object", "properties": {}},
                 func=boom,
@@ -365,7 +365,7 @@ class TestToolDispatcherExecute:
         engine._current_chat_mode = "plan"
         tc = SimpleNamespace(
             id="call_edit",
-            function=SimpleNamespace(name="edit_spreadsheet", arguments="{}"),
+            function=SimpleNamespace(name="apply_spreadsheet_changes", arguments="{}"),
         )
         result = await engine._tool_dispatcher.execute(
             tc=tc,

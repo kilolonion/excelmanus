@@ -1,23 +1,18 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState } from "react";
 import {
   Loader2, ExternalLink, ChevronRight, ChevronDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { apiPost, apiDelete } from "@/lib/api";
 import {
   subscriptionOAuthStart,
   subscriptionOAuthExchange,
-  connectSubscriptionProvider,
-  disconnectSubscriptionProvider,
-  refreshSubscriptionToken,
-  fetchSubscriptionModels,
-  type SubscriptionModelEntry,
 } from "@/lib/auth-api";
 import { SubscriptionAccountCard } from "./SubscriptionAccountCard";
-import { useSubscriptionAccount } from "./useSubscriptionAccount";
+import { useSubscriptionProvider } from "./useSubscriptionProvider";
+import type { ProfileEntry } from "./types";
 import { useOAuthLogin } from "./useSubscriptionLogin";
 import { OAuthLoginProgress } from "./OAuthLoginProgress";
 import { ANTIGRAVITY_OAUTH_PRESET } from "./constants";
@@ -39,51 +34,21 @@ function assertGoogleAuthUrl(value: string): string {
 }
 
 export function AntigravityOAuthCard({
-  onProfileCreated,
-  existingProfileNames,
+  profiles,
 }: {
-  onProfileCreated: () => void;
-  existingProfileNames: string[];
+  profiles: ProfileEntry[];
 }) {
-  const [error, setError] = useState("");
-
-  // Manual paste
-  const [tokenInput, setTokenInput] = useState("");
-  const [connecting, setConnecting] = useState(false);
-  const [showManual, setShowManual] = useState(false);
-
-  // Disconnect / Refresh
-  const [disconnecting, setDisconnecting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-
-  // Model catalog
-  const [catalog, setCatalog] = useState<SubscriptionModelEntry[]>([]);
-  const [catalogLoading, setCatalogLoading] = useState(false);
   const [modelsExpanded, setModelsExpanded] = useState(false);
-  const [addingModel, setAddingModel] = useState<string | null>(null);
-  const [removingModel, setRemovingModel] = useState<string | null>(null);
-
-  const existingProfiles = new Set(
-    existingProfileNames.filter((n) => n.startsWith(`${PROVIDER}/`)),
-  );
-
-
-  const loadCatalog = useCallback(async () => {
-    setCatalogLoading(true);
-    try {
-      const res = await fetchSubscriptionModels(PROVIDER);
-      setCatalog(res.models || []);
-    } catch {
-      setCatalog([]);
-    } finally {
-      setCatalogLoading(false);
-    }
-  }, []);
-
-  const { status, setStatus, loading, statusError, reloadStatus, completeLogin } = useSubscriptionAccount(PROVIDER, onProfileCreated, loadCatalog);
-  const isConnected = status?.status === "connected";
-  const isExpired = status?.status === "expired";
+  const controller = useSubscriptionProvider(PROVIDER, profiles, ANTIGRAVITY_OAUTH_PRESET);
+  const {
+    status, loading, statusError, reloadStatus, completeLogin, error, setError,
+    tokenInput, setTokenInput, connecting, showManual, setShowManual, disconnecting, refreshing,
+    addingModel, removingModel, providerProfiles, profileForModel,
+    handleManualConnect, handleDisconnect, handleRefresh, handleAddModel, handleRemoveModel,
+    catalog, catalogLoading, catalogError, loadCatalog,
+  } = controller;
   const oauth = useOAuthLogin({
+    lock: controller.lock,
     name: "antigravity-oauth", messageType: "antigravity-oauth-callback",
     start: () => subscriptionOAuthStart(PROVIDER), validateUrl: assertGoogleAuthUrl,
     exchange: (code, state) => subscriptionOAuthExchange(PROVIDER, code, state),
@@ -91,103 +56,18 @@ export function AntigravityOAuthCard({
   });
   const oauthBusy = oauth.busy;
   const handleOAuthLogin = oauth.start;
-  const busy = oauthBusy || connecting || disconnecting || refreshing || !!addingModel || !!removingModel;
-
-  const handleManualConnect = useCallback(async () => {
-    if (!tokenInput.trim() || connecting) return;
-    setConnecting(true);
-    setError("");
-    try {
-      const parsed = JSON.parse(tokenInput.trim());
-      await connectSubscriptionProvider(PROVIDER, parsed);
-      await completeLogin();
-      setTokenInput("");
-      setShowManual(false);
-    } catch (e) {
-      setError(e instanceof SyntaxError ? "JSON 格式无效" : (e instanceof Error ? e.message : "连接失败"));
-    } finally {
-      setConnecting(false);
-    }
-  }, [tokenInput, connecting, completeLogin]);
-
-  const handleDisconnect = useCallback(async () => {
-    if (disconnecting) return;
-    setDisconnecting(true);
-    setError("");
-    try {
-      await disconnectSubscriptionProvider(PROVIDER);
-      onProfileCreated();
-      setStatus({ status: "disconnected", provider: PROVIDER });
-      setCatalog([]);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "断开失败");
-    } finally {
-      setDisconnecting(false);
-    }
-  }, [disconnecting, onProfileCreated, setStatus]);
-
-  const handleRefresh = useCallback(async () => {
-    if (refreshing) return;
-    setRefreshing(true);
-    setError("");
-    try {
-      const result = await refreshSubscriptionToken(PROVIDER);
-      setStatus((prev) => prev ? { ...prev, status: "connected", expires_at: result.expires_at } : prev);
-      onProfileCreated();
-      void loadCatalog();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "刷新失败");
-    } finally {
-      setRefreshing(false);
-    }
-  }, [refreshing, onProfileCreated, loadCatalog, setStatus]);
-
-  const handleAddModel = useCallback(async (entry: SubscriptionModelEntry) => {
-    const profileName = entry.profile_name || `${PROVIDER}/${entry.model}`;
-    setAddingModel(profileName);
-    setError("");
-    try {
-      await apiPost("/config/models/profiles", {
-        name: profileName,
-        model: entry.public_model_id || profileName,
-        api_key: "",
-        base_url: ANTIGRAVITY_OAUTH_PRESET.base_url,
-        description: `${entry.display_name || entry.model} — Antigravity 订阅登录（无需 API Key）`,
-        protocol: ANTIGRAVITY_OAUTH_PRESET.protocol,
-        thinking_mode: ANTIGRAVITY_OAUTH_PRESET.thinking_mode,
-        model_family: ANTIGRAVITY_OAUTH_PRESET.model_family,
-        custom_extra_body: "",
-        custom_extra_headers: "",
-      }, { direct: true });
-      onProfileCreated();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "创建档案失败");
-    } finally {
-      setAddingModel(null);
-    }
-  }, [onProfileCreated]);
-
-  const handleRemoveModel = useCallback(async (profileName: string) => {
-    setRemovingModel(profileName);
-    setError("");
-    try {
-      await apiDelete(`/config/models/profiles/${encodeURIComponent(profileName)}`, { direct: true });
-      onProfileCreated();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "删除档案失败");
-    } finally {
-      setRemovingModel(null);
-    }
-  }, [onProfileCreated]);
+  const busy = oauthBusy || controller.busy;
+  const isConnected = status?.status === "connected";
+  const isExpired = status?.status === "expired";
 
   return (
     <SubscriptionAccountCard
       provider={PROVIDER} title="Google Antigravity" description="使用 Google Antigravity / Cloud Code Assist 订阅" account={status?.email}
-      status={status?.status} loading={loading} busy={busy} modelCount={existingProfiles.size}
+      status={status?.status} loading={loading} busy={busy} modelCount={providerProfiles.length}
       error={error} statusError={statusError} onRetry={reloadStatus}
     >
       {/* ── Connected / Expired ── */}
-      {!loading && (isConnected || isExpired) && (
+      {(isConnected || isExpired) && (
         <>
           <div className="flex items-center gap-2">
             <div className={`h-2 w-2 rounded-full ${isExpired ? "bg-amber-500" : "bg-green-500"}`} />
@@ -211,12 +91,13 @@ export function AntigravityOAuthCard({
                 : <ChevronRight className="h-3 w-3 text-muted-foreground" />}
               <span className="text-[11px] text-muted-foreground">管理可用模型</span>
               <Badge variant="secondary" className="text-[10px] ml-auto">
-                {existingProfiles.size}/{catalog.length || "…"}
+                {providerProfiles.length}/{catalog.length || "…"}
               </Badge>
             </button>
             {modelsExpanded && (
               <>
                 <p className="text-[11px] text-muted-foreground">添加后可在模型选择器中使用；移除仅删除该模型配置。</p>
+                {catalogError && <p role="alert" className="text-xs text-destructive">{catalogError} <button type="button" className="underline" onClick={loadCatalog}>重新获取</button></p>}
                 {catalogLoading ? (
                   <div className="flex items-center justify-center py-2">
                     <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
@@ -227,8 +108,9 @@ export function AntigravityOAuthCard({
                   <div className="space-y-1">
                     {catalog.map((m) => {
                       const profileName = m.profile_name || `${PROVIDER}/${m.model}`;
-                      const isAdded = existingProfiles.has(profileName);
-                      const isBusy = addingModel === profileName || removingModel === profileName;
+                      const existing = profileForModel(m);
+                      const isAdded = Boolean(existing);
+                      const isBusy = addingModel === profileName || removingModel === existing?.name;
                       return (
                         <div
                           key={profileName}
@@ -244,8 +126,8 @@ export function AntigravityOAuthCard({
                             <Button
                               size="sm" variant="ghost"
                               className="h-8 px-1.5 text-[11px] text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950 shrink-0"
-                              onClick={() => handleRemoveModel(profileName)}
-                              disabled={busy || isExpired}
+                              onClick={() => handleRemoveModel(existing!.name)}
+                              disabled={busy}
                             >
                               {isBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : "移除"}
                             </Button>
@@ -283,7 +165,7 @@ export function AntigravityOAuthCard({
       )}
 
       {/* ── Not connected ── */}
-      {!loading && !isConnected && (
+      {(!loading || status) && !isConnected && (
         <>
           <p className="text-xs text-muted-foreground leading-relaxed">
             使用 Google Antigravity / Cloud Code Assist 订阅（Claude、Gemini、GPT-OSS），无需 API Key。登录后自动创建模型档案。

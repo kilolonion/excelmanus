@@ -26,7 +26,7 @@ def published(tag="v1.9.0", **extra):
 def setup_release(tmp_path, monkeypatch):
     root = tmp_path / "source"
     root.mkdir()
-    (root / "pyproject.toml").write_text('[project]\nversion = "1.8.0"\n')
+    (root / "pyproject.toml").write_text('[project]\nversion = "1.8.1"\n')
     (root / ".git").mkdir()
     with releases._lock:
         releases._cache.clear()
@@ -65,7 +65,7 @@ def test_transport_failures_fall_back_to_public_release(setup_release, failure):
     assert opener.open.call_count == 2
 
 
-@pytest.mark.parametrize("tag", ["v1.7.1", "v1.8.0", "v1.10.0"])
+@pytest.mark.parametrize("tag", ["v1.7.1", "v1.8.1", "v1.10.0"])
 def test_numeric_release_comparison_without_downgrades(setup_release, tag):
     root, opener = setup_release
     opener.open.return_value = response(published(tag))

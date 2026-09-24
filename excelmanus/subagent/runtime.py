@@ -151,6 +151,7 @@ class SubagentRuntime:
         self._callbacks[run_id] = request.on_event
         self._records[run_id] = {
             "run_id": run_id, "agent_name": config.name, "task": task_text,
+            "parent_turn_id": getattr(getattr(parent, "_driver", None), "turn_id", ""),
             "file_paths": list(request.file_paths), "background": background,
             "status": "queued", "created_at": time.time(), "started_at": None, "finished_at": None,
             "iteration": 0, "tool_calls": 0, "last_tool": "", "result": None,
@@ -505,6 +506,15 @@ class SubagentRuntime:
         run = await self._launch(request, background=True,
                                  history=record.get("history"), resumed_from=run_id)
         return run.id
+
+    async def interrupt_turn(self, turn_id: str) -> None:
+        children = [(run_id, driver._child) for run_id, (_, driver, _) in list(self._live.items())
+                    if self._records.get(run_id, {}).get("parent_turn_id") == turn_id]
+        await asyncio.gather(*(self.interrupt(run_id) for run_id, _ in children))
+        for _, child in children:
+            if child is not None:
+                await child._subagent_runtime.interrupt_turn(child._driver.turn_id)
+                await child._driver._settle_interrupted_work()
 
     async def interrupt(self, run_id: str, *, pause: bool = False) -> None:
         self.get_run(run_id)

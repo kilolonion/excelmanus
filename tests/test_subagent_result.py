@@ -24,19 +24,19 @@ def test_structured_changes_and_observed_from_tool_batch() -> None:
         reply="已写入",
         tool_calls=[
             ToolCallResult(
-                tool_name="inspect_spreadsheet",
+                tool_name="observe_spreadsheet",
                 arguments={"file_path": "sales.xlsx"},
                 result="ok",
                 success=True,
             ),
             ToolCallResult(
-                tool_name="edit_spreadsheet",
-                arguments={"file_path": "outputs/out.xlsx", "sheet_name": "Sheet1"},
+                tool_name="apply_spreadsheet_changes",
+                    arguments={"file_path": "outputs/out.xlsx", "sheet": "Sheet1"},
                 result="ok",
                 success=True,
             ),
             ToolCallResult(
-                tool_name="edit_spreadsheet",
+                tool_name="apply_spreadsheet_changes",
                 arguments={"file_path": "outputs/fail.xlsx"},
                 result="denied",
                 success=False,
@@ -74,7 +74,7 @@ def test_format_parent_reply_keeps_partial_hint() -> None:
         reply="中途失败",
         tool_calls=[
             ToolCallResult(
-                tool_name="inspect_spreadsheet",
+                tool_name="observe_spreadsheet",
                 arguments={"file_path": "data.xlsx"},
                 result="ok",
                 success=True,

@@ -15,8 +15,10 @@
 - POST   /api/v1/mcp/reload                  热重载所有 MCP 连接
 - POST   /api/v1/mcp/servers/{name}/test     测试单个 MCP Server 连接
 - GET    /api/v1/files/excel                  返回 xlsx 文件二进制流（Univer 加载）
-- GET    /api/v1/files/excel/snapshot         返回 Excel 轻量 JSON 快照（聊天内嵌预览）
-- POST   /api/v1/files/excel/write            侧边面板编辑回写单元格
+- GET    /api/v1/workbooks/observe            返回版本绑定的 V2 Observation
+- POST   /api/v1/workbooks/changes            提交 V2 ChangeSet
+- POST   /api/v1/workbooks/merge-review       核对并提交并发冲突的 V2 ChangeSet
+- GET    /api/v1/workbooks/compare            返回两个 V2 Observation 与比较事实
 - DELETE /api/v1/sessions/{session_id}        删除会话
 - GET    /api/v1/sessions/{sid}/operations     操作历史时间线列表
 - GET    /api/v1/sessions/{sid}/operations/{id} 操作详情（含 diff）
@@ -1118,16 +1120,16 @@ from excelmanus.api_routes_chat import (  # noqa: F401
 )
 from excelmanus.api_routes_files import (  # noqa: F401
     AdmitAttachmentRequest,
-    ExcelWriteRequest,
+    WorkbookChangesRequest,
     WordWriteRequest,
     admit_attachment,
     create_file_group,
     delete_file_group,
     download_file,
-    get_excel_compare,
+    get_workbook_comparison,
     get_excel_file,
-    get_excel_snapshot,
-    get_excel_view,
+    get_workbook_observation,
+    get_workbook_observation,
     get_file_registry,
     get_file_relationships,
     get_image_file,
@@ -1145,7 +1147,7 @@ from excelmanus.api_routes_files import (  # noqa: F401
     workspace_delete_item,
     workspace_mkdir,
     workspace_rename_item,
-    write_excel_cells,
+    apply_workbook_changes,
     write_word_content,
 )
 from excelmanus.api_routes_sessions import (  # noqa: F401

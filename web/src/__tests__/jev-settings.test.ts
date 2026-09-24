@@ -116,15 +116,27 @@ describe("jev-settings", () => {
   it("chatEnabled requires gate on and a configured key", () => {
     expect(jevChatEnabledFromRuntime({ jev_enabled: "shadow" })).toBe(false);
     expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: true,
       jev_enabled: "shadow",
       ai_gateway: { configured: true },
     })).toBe(true);
     expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: true,
       jev_enabled: "enforce",
       jev_providers: [{ id: "custom-1", configured: true }],
     })).toBe(true);
+    expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: false,
+      jev_enabled: "enforce",
+      ai_gateway: { configured: true },
+    })).toBe(false);
+    expect(jevChatEnabledFromRuntime({
+      jev_enabled: "enforce",
+      ai_gateway: { configured: true },
+    })).toBe(false);
     // 总闸 off：密钥已配也完全断开
     expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: true,
       jev_enabled: "off",
       ai_gateway: { configured: true },
       jev_providers: [{ id: "vercel", configured: true }],
@@ -138,11 +150,13 @@ describe("jev-settings", () => {
     ];
     // 未指定激活提供商 → 第一个已配密钥
     expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: true,
       jev_enabled: "shadow",
       jev_providers: providers,
     })).toBe(true);
     // 显式选中无密钥提供商、只有 vercel 旧版密钥 → 未连接
     expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: true,
       jev_enabled: "shadow",
       jev_active_provider: "typesafe",
       jev_providers: providers,
@@ -151,6 +165,7 @@ describe("jev-settings", () => {
     })).toBe(false);
     // 显式选中无密钥提供商、直连旧版密钥仍在 → 已连接
     expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: true,
       jev_enabled: "shadow",
       jev_active_provider: "typesafe",
       jev_providers: [
@@ -162,6 +177,7 @@ describe("jev-settings", () => {
     })).toBe(true);
     // 显式 id 不存在 → 落到第一个已配密钥
     expect(jevChatEnabledFromRuntime({
+      jev_experimental_enabled: true,
       jev_enabled: "shadow",
       jev_active_provider: "missing",
       jev_providers: providers,

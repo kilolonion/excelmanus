@@ -29,20 +29,20 @@ try {
   page.on("console", (message) => { if (message.type() === "error") console.error(message.text()); });
   const versions = new Map();
   const values = new Map();
-  await page.route("**/api/v1/files/excel/compare?**", (route) => route.fulfill({ json: { file_a: { sheets: ["明细"] }, file_b: { sheets: ["明细"] }, relationships: { shared_columns: [] } } }));
+  await page.route("**/api/v1/workbooks/compare?**", (route) => route.fulfill({ json: { file_a: { sheets: [{ name: "明细", sheet_id: "明细", used: { rows: 60, cols: 12 } }] }, file_b: { sheets: [{ name: "明细", sheet_id: "明细", used: { rows: 60, cols: 12 } }] }, relationships: { shared_columns: [] } } }));
   const read = (file) => {
     if (!versions.has(file)) { versions.set(file, 1); values.set(file, { "1,1": { t: "s", v: file, cached: "yes" }, "2,1": { t: "n", v: 10, cached: "yes" } }); }
     return `v${versions.get(file)}`;
   };
-  await page.route("**/api/v1/files/excel/view?**", async (route) => {
+  await page.route("**/api/v1/workbooks/observe?**", async (route) => {
     const params = new URL(route.request().url()).searchParams;
     const file = params.get("path").replace(/^\.\//, ""), version = read(file), sheet = params.get("sheet") || "明细";
     await route.fulfill({ json: { file: { workspaceKey: "id:multi-ws", relative: file }, content_version: version, active_sheet: sheet,
-      with_styles: params.get("with_styles") === "1", sheets: ["明细", "汇总"].map((name) => ({ name, sheet_id: name, used: { rows: 60, cols: 12 } })),
-      windows: [{ sheet, rect: { r0: 1, c0: 1, r1: 200, c1: 50 }, cells: values.get(file) }],
+      request: { facets: (params.get("facets") || "").split(",") }, sheets: ["明细", "汇总"].map((name) => ({ name, sheet_id: name, used: { rows: 60, cols: 12 } })),
+      regions: [{ sheet, rect: { r0: 1, c0: 1, r1: 200, c1: 50 }, cells: values.get(file) }],
       coverage: { loaded: [{ sheet, r0: 1, c0: 1, r1: 200, c1: 50 }], unloaded: [] } } });
   });
-  await page.route("**/api/v1/files/excel/write", async (route) => {
+  await page.route("**/api/v1/workbooks/changes", async (route) => {
     const body = route.request().postDataJSON(), file = body.path.replace(/^\.\//, "");
     writes.push(body);
     assert.equal(body.expected_version, read(file));

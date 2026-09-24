@@ -34,7 +34,7 @@ def _result() -> ChatResult:
         reply="done",
         tool_calls=[
             ToolCallResult(
-                tool_name="edit_spreadsheet",
+                tool_name="apply_spreadsheet_changes",
                 arguments={"file_path": "a.xlsx"},
                 result="ok",
                 success=True,
@@ -53,7 +53,7 @@ async def test_legacy_mutation_verify_does_not_review_written_turns() -> None:
         _current_chat_mode="write",
         _state=SimpleNamespace(
             affected_files=["a.xlsx"],
-            write_operations_log=[{"tool": "edit_spreadsheet", "success": True}],
+            write_operations_log=[{"tool": "apply_spreadsheet_changes", "success": True}],
         ),
         memory=SimpleNamespace(get_messages=lambda: [{"role": "user", "content": "改 A1"}]),
         _jev_turn_budget=None,
@@ -193,7 +193,7 @@ def test_style_mismatch_marks_evidence_incomplete() -> None:
         reply="done",
         tool_calls=[
             ToolCallResult(
-                tool_name="format_spreadsheet",
+                tool_name="apply_spreadsheet_changes",
                 arguments={"file_path": "a.xlsx"},
                 result="ok",
                 success=True,

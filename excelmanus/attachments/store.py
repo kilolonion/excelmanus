@@ -40,6 +40,25 @@ class AttachmentStore:
         self.meta = self.root / "v1" / "meta"
         self.request_cache = self.root / "request-images"
         self.files_index = self.root / "files-index"
+        self.sources = self.root / "sources"
+
+    def put_source(self, data: bytes) -> str:
+        digest = hashlib.sha256(data).hexdigest()
+        path = self.sources / digest[:2] / digest
+        if not path.is_file():
+            _atomic_write(path, data)
+        return digest
+
+    def get_source(self, ref: ImageAttachmentRef) -> bytes:
+        import re
+        digest = ref.source_digest
+        if not digest or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise AttachmentError("Original image source is unavailable", "ATTACHMENT_MISSING")
+        path = self.sources / digest[:2] / digest
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
+            raise AttachmentError("Original image digest mismatch", "ATTACHMENT_CORRUPT")
+        return data
 
     def object_path(self, digest: str) -> Path:
         return self.objects / digest[:2] / digest

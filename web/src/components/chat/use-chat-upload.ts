@@ -7,7 +7,7 @@ import { identityKey, toPublicFileIdentity } from "@/lib/file-identity";
 import type { AttachedFile } from "@/lib/types";
 import { useSessionStore } from "@/stores/session-store";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
-import { isVisionImageFile } from "@/lib/file-kind";
+import { isVisionImageUpload } from "@/lib/file-kind";
 import { detectFileUrl, friendlyUploadError } from "./chat-input-constants";
 import {
   formatFileMention,
@@ -39,8 +39,61 @@ function attachmentIdentity(path: string | undefined, filename: string): string 
 }
 
 /** 本地选择/粘贴时上传尚未返回工作区路径，至少写入可解析的 `@file:` + basename。 */
+function pendingMentionPath(filename: string): string {
+  const basename = filename.replace(/\\/g, "/").split("/").pop() || "unnamed";
+  // @file tokens are whitespace-delimited and the backend parser rejects
+  // punctuation used as range/version delimiters.  The server applies the
+  // same kind of basename sanitisation when the upload completes; this
+  // placeholder only needs to remain parseable until backfill replaces it.
+  return basename.replace(/[\s,;!?\[\]@]+/g, "_").replace(/^_+|_+$/g, "") || "unnamed";
+}
+
 function mentionForPendingUpload(filename: string): string {
-  return formatFileMention({ path: filename });
+  return formatFileMention({ path: pendingMentionPath(filename) });
+}
+
+/**
+ * Chromium/Safari expose pasted files through either DataTransfer.files or
+ * DataTransfer.items.  The latter is required for some native clipboard
+ * producers (notably Finder and browser image copies).
+ */
+function clipboardFiles(data: DataTransfer): File[] {
+  const files = Array.from(data.files ?? []);
+  if (files.length > 0) return files;
+  return Array.from(data.items ?? [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+}
+
+function fileMetadataLine(line: string): string {
+  let value = line.trim().replace(/^['"]|['"]$/g, "");
+  if (value.startsWith("file://")) {
+    try {
+      value = decodeURIComponent(value.slice("file://".length));
+    } catch {
+      value = value.slice("file://".length);
+    }
+  }
+  return value.replace(/\\/g, "/");
+}
+
+/**
+ * Native file copies may also carry a path/URI as text.  That text is
+ * clipboard metadata, while spreadsheet/browser copies can legitimately
+ * carry useful TSV or HTML text alongside a file.  Only suppress text that
+ * is clearly a path/URI for one of the pasted files.
+ */
+function isClipboardFileMetadata(data: DataTransfer, files: File[], text: string): boolean {
+  if (!text.trim()) return true;
+  const uriList = data.getData("text/uri-list").trim();
+  const lines = (uriList || text).split(/\r?\n/).map(fileMetadataLine).filter(Boolean);
+  if (lines.length === 0) return true;
+  return lines.every((line) => {
+    const pathLike = line.startsWith("/") || line.startsWith("~/") || /^[A-Za-z]:\//.test(line);
+    if (!pathLike && !uriList) return false;
+    return files.some((file) => line === file.name || line.endsWith(`/${file.name}`));
+  });
 }
 
 function activeUploadScope(): { sessionId?: string; workspaceId?: string } {
@@ -62,7 +115,7 @@ export function backfillPendingUploadFull(
   originalName: string,
   resolvedPath: string,
 ): boolean {
-  const pendingFull = formatFileMention({ path: originalName });
+  const pendingFull = mentionForPendingUpload(originalName);
   const resolvedFull = formatFileMention({ path: resolvedPath });
   let hit = false;
   for (const [display, full] of tokenMap) {
@@ -215,7 +268,7 @@ export function useChatUpload({
     for (const af of attached) {
       void triggerUpload(af.id, af.file);
     }
-    insertDocMentions(newFiles.filter((f) => !isVisionImageFile(f.name)).map((f) => mentionForPendingUpload(f.name)));
+    insertDocMentions(newFiles.filter((f) => !isVisionImageUpload(f)).map((f) => mentionForPendingUpload(f.name)));
   }, [insertDocMentions, triggerUpload]);
 
   const attachWorkspaceFiles = useCallback((incoming: WorkspaceDroppedFile[]) => {
@@ -229,7 +282,7 @@ export function useChatUpload({
     if (unique.length === 0) return;
 
     const attached: AttachedFile[] = unique.map((file) => {
-      const image = isVisionImageFile(file.filename);
+      const image = isVisionImageUpload({ name: file.filename });
       return {
         id: newAttachmentId("ws-"),
         file: new File([], file.filename),
@@ -242,14 +295,14 @@ export function useChatUpload({
     setFiles((prev) => [...prev, ...attached]);
     for (const af of attached) {
       const result = af.uploadResult!;
-      if (isVisionImageFile(result.filename)) {
+      if (isVisionImageUpload({ name: result.filename })) {
         void hydrateWorkspaceImage(af.id, result.path, result.filename);
       } else {
         trackRecentExcelFile(result.path, result.filename);
       }
     }
     insertDocMentions(
-      unique.filter((file) => !isVisionImageFile(file.filename)).map((file) => workspaceFileMention(file)),
+      unique.filter((file) => !isVisionImageUpload({ name: file.filename })).map((file) => workspaceFileMention(file)),
     );
   }, [files, hydrateWorkspaceImage, insertDocMentions]);
 
@@ -265,7 +318,7 @@ export function useChatUpload({
     }
 
     tokenMapRef.current.clear();
-    const docFiles = newFiles.filter((f) => !isVisionImageFile(f.name));
+    const docFiles = newFiles.filter((f) => !isVisionImageUpload(f));
     let nextText = draftText.trim();
     if (docFiles.length > 0) {
       const displayTokens = toDisplayMentionTokens(
@@ -301,7 +354,7 @@ export function useChatUpload({
           f.id === id ? { ...f, status: "success" as const, uploadResult: result, workspaceKey } : f
         )
       );
-      if (!isVisionImageFile(result.filename)) {
+      if (!isVisionImageUpload({ name: result.filename })) {
         const mention = formatFileMention({ path: result.path });
         const displayTokens = toDisplayMentionTokens([mention], tokenMapRef.current);
         setConfirmedTokens((prev) => {
@@ -327,6 +380,22 @@ export function useChatUpload({
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
+      const picked = clipboardFiles(e.clipboardData);
+      if (picked.length > 0) {
+        // 剪贴板携带文件（截图、文件管理器复制的文件、网页复制的图片等），
+        // 复用「添加文件」上传管线：生成附件，非图片文件在文本中留下 @file 引用。
+        const pastedText = e.clipboardData.getData("text/plain");
+        if (!isClipboardFileMetadata(e.clipboardData, picked, pastedText)) {
+          // 文件与文本并存（如 Excel 复制单元格会同时带上截图和 TSV）：
+          // 不拦截默认粘贴，等文本落进输入框后再追加文件引用。
+          setTimeout(() => insertFileMentions(picked), 0);
+        } else {
+          // 纯文件粘贴要拦下默认行为，避免浏览器把文件名等占位文本写入输入框。
+          e.preventDefault();
+          insertFileMentions(picked);
+        }
+        return;
+      }
       const pasted = e.clipboardData.getData("text/plain");
       const fileUrl = detectFileUrl(pasted);
       if (fileUrl) {
@@ -339,7 +408,7 @@ export function useChatUpload({
         void triggerUrlUpload(fileUrl);
       }
     },
-    [text, triggerUrlUpload, textareaRef, setText]
+    [text, triggerUrlUpload, insertFileMentions, textareaRef, setText]
   );
 
   return {

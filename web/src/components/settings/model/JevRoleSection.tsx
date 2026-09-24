@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronDown, Gauge, Info, Loader2 } from "lucide-react";
+import { Check, ChevronDown, FlaskConical, Info, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -47,6 +47,8 @@ export function JevRoleSection() {
     reload,
     resetDraft,
   } = useJevSettings();
+
+  if (!runtime?.jev_experimental_enabled) return null;
 
   const status = jevEntryStatus({
     configured,
@@ -96,7 +98,7 @@ export function JevRoleSection() {
     <SettingsFoldSection
       title="Jev 任务辅助"
       description="理解任务上下文、整理工具结果，让每次介入都有据可查"
-      icon={<Gauge className="h-4 w-4" style={{ color: "var(--em-primary)" }} />}
+      icon={<FlaskConical className="h-4 w-4" style={{ color: "var(--em-gold)" }} />}
       coachId="coach-settings-jev-model"
     >
       <div className="px-3 pb-3">

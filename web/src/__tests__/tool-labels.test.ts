@@ -29,13 +29,13 @@ describe("extractToolContext", () => {
 
 describe("toolActionTitle", () => {
   it("uses inspect mode for a readable title", () => {
-    expect(toolActionTitle("inspect_spreadsheet", { mode: "overview" })).toBe("读取工作表结构");
-    expect(toolActionTitle("inspect_spreadsheet", { mode: "range" })).toBe("读取明细");
+    expect(toolActionTitle("observe_spreadsheet", { mode: "overview" })).toBe("读取工作表结构");
+    expect(toolActionTitle("observe_spreadsheet", { mode: "range" })).toBe("读取明细");
   });
 
   it("labels write operations as writing back the sheet", () => {
     expect(
-      toolActionTitle("edit_spreadsheet", {
+      toolActionTitle("apply_spreadsheet_changes", {
         operations: [{ kind: "write", values: [[1]] }],
       }),
     ).toBe("写回原工作表");
@@ -54,14 +54,14 @@ describe("toolActionTitle", () => {
 describe("activityGroupTitle", () => {
   it("uses waiting title for pending writes", () => {
     expect(
-      activityGroupTitle([{ name: "edit_spreadsheet", status: "pending" }]),
+      activityGroupTitle([{ name: "apply_spreadsheet_changes", status: "pending" }]),
     ).toBe("更新工作表");
   });
 
   it("groups read-only tools", () => {
     expect(
       activityGroupTitle([
-        { name: "inspect_spreadsheet", status: "success" },
+        { name: "observe_spreadsheet", status: "success" },
         { name: "analyze_spreadsheet", status: "success" },
       ]),
     ).toBe("读取数据");
@@ -70,7 +70,7 @@ describe("activityGroupTitle", () => {
 
 describe("approvalCopy", () => {
   it("asks to write the original file for spreadsheet edits", () => {
-    const copy = approvalCopy("edit_spreadsheet", { sheet: "区域汇总" });
+    const copy = approvalCopy("apply_spreadsheet_changes", { sheet: "区域汇总" });
     expect(copy.title).toBe("允许写入原文件？");
     expect(copy.description).toContain("区域汇总");
   });

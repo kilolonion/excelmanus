@@ -6,13 +6,13 @@ from openpyxl import Workbook, load_workbook
 
 from excelmanus import workbook_commit
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools import intent_tools
+from excelmanus.tools import workbook_tools
 from excelmanus.tools._guard_ctx import set_guard
 
 
 def test_recalculation_can_change_print_settings_without_invalidating_commit(tmp_path, monkeypatch):
     set_guard(FileAccessGuard(str(tmp_path)))
-    intent_tools.init_guard(str(tmp_path))
+    workbook_tools.init_guard(str(tmp_path))
     path = tmp_path / "receipt.xlsx"
     wb = Workbook()
     wb.active.title = "Receipt"
@@ -37,7 +37,7 @@ def test_recalculation_can_change_print_settings_without_invalidating_commit(tmp
 
     recalc = Mock(side_effect=recalculate)
     monkeypatch.setattr(workbook_commit, "recalculate_workbook_bytes", recalc)
-    result = intent_tools.format_spreadsheet(
+    result = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=workbook_commit.content_version_of_file(path),
         operations=[{
@@ -47,21 +47,19 @@ def test_recalculation_can_change_print_settings_without_invalidating_commit(tmp
     )
 
     assert result.success, result.model_text
-    recalc.assert_called_once()
+    recalc.assert_not_called()
     assert result.value["content_version"] == workbook_commit.content_version_of_file(path)
-    assert result.value["formula_recalculation"]["status"] == "recalculated"
-    preview = result.value["appearance"]
-    assert preview["source"] == "mutation_preview"
-    assert preview["phase"] == "before_serialization"
-    assert "不代表最终提交文件的快照" in preview["note"]
+    assert result.value["observation"]["formula_cache"].startswith("invalidated")
+    preview = result.value["observation"]
+    assert preview["content_version"] == workbook_commit.content_version_of_file(path)
+    assert preview["visual_observed"] is False
     settings = preview["sheets"][0]["print_settings"]
     assert settings["orientation"] == "landscape" and settings["scale"] == 125
-    assert "mutation_preview" in result.model_text
     committed = load_workbook(path)
     try:
         ws = committed["Receipt"]
-        assert ws.page_setup.orientation == "portrait"
-        assert ws.page_setup.scale == 100
+        assert ws.page_setup.orientation == "landscape"
+        assert ws.page_setup.scale == 125
         assert ws["A1"].value == "=1+1"
     finally:
         committed.close()

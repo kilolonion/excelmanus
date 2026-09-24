@@ -1,4 +1,5 @@
 "use client";
+import { hasPresentation, presentationNotice } from "@/lib/workbook-observation";
 
 import { isSingleCellSelection, readActiveRange } from "@/lib/excel-selection";
 
@@ -30,8 +31,8 @@ import {
 import { useWorkbookFocusStore } from "@/stores/workbook-focus-store";
 import { highlightWorkbookRanges, type WorkbookHighlightRegistry } from "@/lib/workbook-focus";
 import { saveBlob } from "@/lib/save-blob";
-import { letterToColIndex, windowCellPatch, demoWorkbookView, viewMatchesLease, viewSnapshotToUniver, type WorkbookViewSnapshot } from "@/lib/workbook-view";
-import { INITIAL_WORKBOOK_VIEW_RECT, pageForCell, pagesForViewport, rangeIsLoaded, mergeViewWindows, firstUnloadedCell } from "@/lib/workbook-window";
+import { letterToColIndex, windowCellPatch, demoWorkbookObservation, viewMatchesLease, observationToUniver, type WorkbookObservation } from "@/lib/workbook-observation";
+import { INITIAL_WORKBOOK_VIEW_RECT, pageForCell, pagesForViewport, rangeIsLoaded, mergeViewWindows, firstUnloadedCell, rangeHasPresentation } from "@/lib/workbook-window";
 import { normalizeRelativePath, versionStoreKey, type WorkspaceFileRef } from "@/lib/workspace-file-ref";
 import { activateWorkbookSheet } from "@/lib/excel-univer-lifecycle";
 import {
@@ -215,7 +216,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   const onCellEditRef = useRef(onCellEdit);
   const readOnlyRef = useRef(readOnly);
   const suppressEditsRef = useRef(false);
-  const viewRef = useRef<WorkbookViewSnapshot | null>(null);
+  const viewRef = useRef<WorkbookObservation | null>(null);
   const [viewContentVersion, setViewContentVersion] = useState<string | null>(null);
   const identityRef = useRef({ fileRef, sessionId, viewGeneration });
   identityRef.current = { fileRef, sessionId, viewGeneration };
@@ -479,22 +480,21 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   const prepareLoadingShellRef = useRef(prepareLoadingShell);
   prepareLoadingShellRef.current = prepareLoadingShell;
 
-  const applyWindow = (next: WorkbookViewSnapshot) => {
+  const applyWindow = (next: WorkbookObservation) => {
     const api = univerRef.current;
     if (!api) return;
     const wb = api?.getActiveWorkbook?.();
     if (!wb) return;
     beginSuppressEdits();
     try {
-      for (const win of next.windows) {
+      for (const win of next.regions) {
         const sheet = wb.getSheetByName(win.sheet);
         if (!sheet) continue;
         const identity = { unitId: workbookIdRef.current, subUnitId: sheet.getSheetId() };
         const command = (id: string, params: Record<string, unknown>) => {
-          // onlyLocal value mutations bypass Univer's formula dependency updates.
-          // The surrounding suppressEdits guard keeps hydration out of persistence;
-          // allow value patches to recalculate after refresh or version restore.
-          if (api.syncExecuteCommand(id, { ...identity, ...params }, { onlyLocal: id !== "sheet.mutation.set-range-values" }) === false) {
+          // Windows contain saved values, not the full formula dependency graph.
+          // Hydration must not recalculate offscreen references as empty inputs.
+          if (api.syncExecuteCommand(id, { ...identity, ...params }, { onlyLocal: true }) === false) {
             throw new Error("更新表格视图失败，请重试");
           }
         };
@@ -503,21 +503,34 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         if (sheet.getMaxRows() < Math.max(meta.used.rows, win.rect.r1)) command("sheet.mutation.set-worksheet-row-count", { rowCount: Math.max(meta.used.rows, win.rect.r1, 200) });
         if (sheet.getMaxColumns() < Math.max(meta.used.cols, win.rect.c1)) command("sheet.mutation.set-worksheet-column-count", { columnCount: Math.max(meta.used.cols, win.rect.c1, 50) });
         command("sheet.mutation.set-range-values", { cellValue: windowCellPatch(win, snapshot.cellData, wb.getWorkbook().getStyles().toJSON()) });
-        if (next.with_styles !== false) {
+        if (win.merges) {
           const intersects = (r: IRange) => r.endRow >= win.rect.r0 - 1 && r.startRow <= win.rect.r1 - 1 && r.endColumn >= win.rect.c0 - 1 && r.startColumn <= win.rect.c1 - 1;
           const oldMerges = (snapshot.mergeData || []).filter(intersects);
           if (oldMerges.length) command("sheet.mutation.remove-worksheet-merge", { ranges: oldMerges });
           const merges = (win.merges || []).map((m) => ({ startRow: m.min_row - 1, endRow: m.max_row - 1, startColumn: m.min_col - 1, endColumn: m.max_col - 1 }));
           if (merges.length) command("sheet.mutation.add-worksheet-merge", { ranges: merges });
+        }
+        if (win.geometry) {
           const colWidth: Record<number, number | null> = {};
           const rowHeight: Record<number, number | null> = {};
           for (const c of Object.keys(snapshot.columnData || {})) if (+c >= win.rect.c0 - 1 && +c < win.rect.c1) colWidth[+c] = null;
           for (const r of Object.keys(snapshot.rowData || {})) if (+r >= win.rect.r0 - 1 && +r < win.rect.r1) rowHeight[+r] = null;
-          for (const [c, width] of Object.entries(win.col_widths || {})) colWidth[letterToColIndex(c)] = width * 7.5;
-          for (const [r, height] of Object.entries(win.row_heights || {})) rowHeight[+r - 1] = height / 0.75;
+          for (const dim of win.geometry?.columns || []) colWidth[dim.index - 1] = dim.pixels;
+          for (const dim of win.geometry?.rows || []) rowHeight[dim.index - 1] = dim.pixels;
           const ranges = [{ startRow: win.rect.r0 - 1, endRow: win.rect.r1 - 1, startColumn: win.rect.c0 - 1, endColumn: win.rect.c1 - 1 }];
           if (Object.keys(colWidth).length) command("sheet.mutation.set-worksheet-col-width", { ranges, colWidth });
           if (Object.keys(rowHeight).length) command("sheet.mutation.set-worksheet-row-height", { ranges, rowHeight });
+          for (const [axis, dimensions] of [["col", win.geometry.columns], ["row", win.geometry.rows]] as const) {
+            for (const hidden of [false, true]) {
+              const axisRanges = dimensions.filter((d) => d.hidden === hidden).map((d) => ({
+                startRow: axis === "row" ? d.index - 1 : win.rect.r0 - 1,
+                endRow: axis === "row" ? d.index - 1 : win.rect.r1 - 1,
+                startColumn: axis === "col" ? d.index - 1 : win.rect.c0 - 1,
+                endColumn: axis === "col" ? d.index - 1 : win.rect.c1 - 1,
+              }));
+              if (axisRanges.length) command(`sheet.mutation.set-${axis}-${hidden ? "hidden" : "visible"}`, { ranges: axisRanges });
+            }
+          }
         }
       }
     } finally { endSuppressEdits(); }
@@ -584,7 +597,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         expected = next.content_version;
         rememberSnapshotVersion(file.relative, next.content_version, file.workspaceKey);
         onViewStateRef.current?.({ status: "ready", sheet: name, version: next.content_version });
-        if (styles && next.with_styles !== false) styledPagesRef.current.add(`${expected}|${name}|${page.address}`);
+        if (styles && hasPresentation(next)) styledPagesRef.current.add(`${expected}|${name}|${page.address}`);
         setError(null);
         externalRefreshRef.current = false;
         return true;
@@ -724,7 +737,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         if (!sameFile && univerRef.current) prepareLoadingShellRef.current(univerRef.current);
 
         const view = isDemoPath(filePath)
-          ? demoWorkbookView(filePath)
+          ? demoWorkbookObservation(filePath)
           : await fetchWorkbookView({
               path: filePath,
               workspaceKey: fileRef!.workspaceKey,
@@ -775,7 +788,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         if (shellMatches) {
           // Keep the native ribbon, formula bar, grid and footer mounted while
           // replacing only the explicitly empty loading worksheet.
-          const data = viewSnapshotToUniver(view, previousWorkbookId) as {
+          const data = observationToUniver(view, previousWorkbookId) as {
             sheetOrder: string[]; sheets: Record<string, Record<string, unknown>>;
           };
           for (const [index, id] of data.sheetOrder.entries()) {
@@ -783,7 +796,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
               unitId: previousWorkbookId, index, sheet: normalizeSheetRef.current!(data.sheets[id]),
             }, { onlyLocal: true })) throw new Error("载入工作表失败");
           }
-          activateWorkbookSheet(api, view.windows[0]?.sheet || view.sheets[0].name);
+          activateWorkbookSheet(api, view.regions[0]?.sheet || view.sheets[0].name);
           if (!api.syncExecuteCommand("sheet.mutation.remove-sheet", {
             unitId: previousWorkbookId, subUnitId: LOADING_SHEET_ID, subUnitName: "正在读取…",
           }, { onlyLocal: true })) throw new Error("载入工作表失败");
@@ -795,14 +808,14 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           }
           let workbookId = createPreviewWorkbookId();
           workbookIdRef.current = workbookId;
-          let workbookData = viewSnapshotToUniver(view, workbookId);
+          let workbookData = observationToUniver(view, workbookId);
           try {
             api.createWorkbook(workbookData);
           } catch (createErr) {
             if (!isDuplicateUnitIdError(createErr)) throw createErr;
             workbookId = createPreviewWorkbookId();
             workbookIdRef.current = workbookId;
-            workbookData = viewSnapshotToUniver(view, workbookId);
+            workbookData = observationToUniver(view, workbookId);
             api.createWorkbook(workbookData);
           }
         }
@@ -813,7 +826,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         sheetNamesRef.current.clear();
         for (const meta of view.sheets) sheetNamesRef.current.set(`sheet-${meta.name}`, meta.name);
         applyWorkbookEditable(api, readOnlyRef.current);
-        activateWorkbookSheet(api, (preferredSheet === null ? undefined : preferredSheet || initialSheetRef.current) || view.active_sheet || view.windows[0]?.sheet);
+        activateWorkbookSheet(api, (preferredSheet === null ? undefined : preferredSheet || initialSheetRef.current) || view.active_sheet || view.regions[0]?.sheet);
         const nextSheet = api.getActiveWorkbook()?.getActiveSheet?.();
         if (position) nextSheet?.scrollToCell?.(position.startRow, position.startColumn);
         if (selection) nextSheet?.setActiveRange?.(nextSheet.getRange(selection.startRow, selection.startColumn,
@@ -823,7 +836,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
         setLoading(false);
         setSyncing(false);
-        reportView?.({ status: "ready", sheet: nextSheet?.getSheetName?.() || view.active_sheet || view.windows[0]?.sheet, version: view.content_version });
+        reportView?.({ status: "ready", sheet: nextSheet?.getSheetName?.() || view.active_sheet || view.regions[0]?.sheet, version: view.content_version });
         if (fileRef && isWorkbookEditPaused(fileRef)) {
           setError("此文件仍有未保存的编辑草稿，可先导出草稿，再重新加载核对。");
         }
@@ -878,6 +891,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
             UniverSheetsCorePreset({
               container: containerRef.current,
               ribbonType: "classic",
+              formula: { initialFormulaComputing: 2 },
               footer: {
                 sheetBar: true,
                 statisticBar: false,
@@ -1028,7 +1042,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
                 void loadWindowRef.current(sheet, missing);
                 return;
               }
-              if (withStylesRef.current && view.with_styles === false && !isDemoPath(filePathRef.current)) {
+              if (withStylesRef.current && positions.some((r) => !rangeHasPresentation(view, name, r)) && !isDemoPath(filePathRef.current)) {
                 evt.cancel = true;
                 setWindowStatus("正在补齐格式和合并区域，请稍后编辑");
                 void loadWindowRef.current(sheet);
@@ -1397,6 +1411,11 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         style={{ position: "relative", visibility: (viewRef.current && (isDemoPath(filePath) || !fileRef || viewMatchesLease(viewRef.current, fileRef))) || loadingShellKey === loadingFileKey(fileRef, filePath) ? "visible" : "hidden" }}
         {...(isMobile && selectionMode ? touchGestureHandlers : {})}
       />
+      {!loading && !error && presentationNotice(viewRef.current) && (
+        <div role="status" className="absolute bottom-10 left-3 right-3 z-20 rounded border bg-background/95 px-3 py-1 text-xs text-muted-foreground">
+          {presentationNotice(viewRef.current)}
+        </div>
+      )}
       {/* 移动端提示：首次加载显示，4 秒后自动淡出 */}
       {isMobile && hintVisible && !selectionMode && !loading && !error && (
         <div

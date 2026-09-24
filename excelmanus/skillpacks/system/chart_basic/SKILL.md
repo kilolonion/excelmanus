@@ -7,12 +7,12 @@ resources:
   - references/chart_and_table_templates.md
 version: "2.1.0"
 ---
-原生 Excel 图表走 `manage_spreadsheet_objects` 的 `operations`（`kind=chart`）。`data_range` 需包含表头行。
+原生 Excel 图表走 `apply_spreadsheet_changes` 的 `operations`（`kind=chart`）。`data_range` 需包含表头行。
 
 独立 PNG 可用 `run_code` + matplotlib。当前只支持创建原生图表；没有 Table 对象或已有图表更新/删除入口。
 
 ```
-manage_spreadsheet_objects(
+apply_spreadsheet_changes(
   file_path="book.xlsx",
   expected_version=...,
   operations=[{

@@ -232,7 +232,7 @@ class CommandHandler:
             return result_msg
 
         if command == "/compact":
-            return await self._handle_compact_command(parts)
+            return await self._handle_compact_command(parts, on_event=on_event)
 
         if command == "/registry":
             return self._handle_registry_command(parts)
@@ -268,7 +268,7 @@ class CommandHandler:
 
         return self._handle_undo_command(parts)
 
-    async def _handle_compact_command(self, parts: list[str]) -> str:
+    async def _handle_compact_command(self, parts: list[str], *, on_event: "EventCallback | None" = None) -> str:
         """处理 /compact 会话控制命令。
 
         用法：
@@ -291,7 +291,7 @@ class CommandHandler:
         if action == "status":
             sys_msgs, _tools = compaction_wire_context(e)
             sys_msgs = sys_msgs or e.memory.build_system_messages()
-            status = compaction_mgr.get_status(e.memory, sys_msgs)
+            status = compaction_mgr.get_status(e.memory, sys_msgs, _tools)
             pct = status["usage_ratio"] * 100
             threshold_pct = status["threshold_ratio"] * 100
             lines = [
@@ -299,6 +299,7 @@ class CommandHandler:
                 f"- 自动压缩: {'启用' if status['enabled'] else '禁用'}",
                 f"- 当前 token 使用: {status['current_tokens']:,} / {status['max_tokens']:,} ({pct:.1f}%)",
                 f"- 自动压缩阈值: {threshold_pct:.0f}%",
+                f"- 本轮安全触发线: {status.get('trigger_tokens', 0):,} tokens",
                 f"- 对话消息数: {status['message_count']}",
                 f"- 累计压缩次数: {status['compaction_count']}",
             ]
@@ -332,6 +333,16 @@ class CommandHandler:
         sys_msgs = sys_msgs or e.memory.build_system_messages()
 
         from excelmanus.compaction import capture_progress, sync_compaction_boundary
+        from excelmanus.compaction_runtime import finish as finish_compaction_operation
+        from excelmanus.compaction_runtime import new_operation, publish as publish_compaction_operation
+
+        operation = new_operation("manual")
+        publish_compaction_operation(
+            e, operation, on_event=on_event,
+            status="running",
+            message="正在压缩历史对话",
+            detail="会保留最近要求、任务进度和已核对的关键原文；完成后继续当前任务。",
+        )
 
         result = await compaction_mgr.manual_compact(
             memory=e.memory,
@@ -345,6 +356,7 @@ class CommandHandler:
         )
 
         if not result.success:
+            finish_compaction_operation(e, operation, result, on_event=on_event)
             return f"压缩未执行: {result.error}"
 
         recorder = getattr(e, "record_compaction_handoff", None)
@@ -352,6 +364,7 @@ class CommandHandler:
             recorder(getattr(result, "handoff", None))
 
         sync_compaction_boundary(e)
+        finish_compaction_operation(e, operation, result, on_event=on_event)
 
         pct_before = (
             result.tokens_before / e.max_context_tokens * 100
@@ -364,10 +377,12 @@ class CommandHandler:
             else 0
         )
         return (
-            f"✅ 上下文压缩完成。\n"
+            f"✅ 上下文压缩完成，已压缩历史对话。\n"
             f"- 消息: {result.messages_before} → {result.messages_after}\n"
             f"- Token: {result.tokens_before:,} ({pct_before:.1f}%) → "
             f"{result.tokens_after:,} ({pct_after:.1f}%)\n"
+            f"- 已核对保留的关键原文: {len((result.handoff or {}).get('verbatim', []))} 段\n"
+            f"- 后续会按交接记录继续任务，不重放已完成写入。\n"
             f"- 累计压缩次数: {compaction_mgr.stats.compaction_count}"
         )
 

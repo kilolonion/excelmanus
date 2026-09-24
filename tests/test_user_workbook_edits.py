@@ -32,10 +32,17 @@ def manager_for(**engines):
     return manager
 
 
+def _patches(*cells: dict) -> list[dict]:
+    by_sheet: dict[str, list[dict]] = {}
+    for cell in cells:
+        by_sheet.setdefault(str(cell.get("sheet") or "Sales"), []).append({k: v for k, v in cell.items() if k != "sheet"})
+    return [{"kind": "cells.patch", "sheet": sheet, "cells": values} for sheet, values in by_sheet.items()]
+
+
 def edit_event(index=1):
     return {"event_id": f"edit-{index}", "path": "book.xlsx", "after_version": f"v{index}",
-        "context": {"source": "user", "summary": summarize_operations([
-            {"op": "set_values", "sheet": "Sales", "cells": [{"cell": "A1", "value": f"=B1+{index}"}]}])}}
+        "context": {"source": "user", "summary": summarize_operations(
+            _patches({"cell": "A1", "value": f"=B1+{index}", "sheet": "Sales"}))}}
 
 
 def response(text=None, tools=None):
@@ -71,9 +78,9 @@ async def test_saved_user_changes_reach_idle_agent_and_other_sessions_only_in_wo
     manager._sessions.update(s2=SimpleNamespace(engine=same), foreign=SimpleNamespace(engine=other))
     version = content_version_of_file(tmp_path / "book.xlsx")
     engine._state.file_content_versions.update({"./book.xlsx": version, "unrelated.xlsx": "keep"})
-    req = files.ExcelWriteRequest(path="book.xlsx", session_id="s1", expected_version=version,
-        changes=[{"sheet": "Sales", "cell": "A1", "value": "=B1+2"}], operation_id="user-edit")
-    result = await files.write_excel_cells(req, MagicMock())
+    req = files.WorkbookChangesRequest(path="book.xlsx", session_id="s1", expected_version=version,
+        operations=_patches({"sheet": "Sales", "cell": "A1", "value": "=B1+2"}), operation_id="user-edit")
+    result = await files.apply_workbook_changes(req, MagicMock())
     assert result.status_code == 200
     assert engine._driver.status == "idle"
     assert len(engine._driver.inbox.next_step) == 1
@@ -84,7 +91,7 @@ async def test_saved_user_changes_reach_idle_agent_and_other_sessions_only_in_wo
     assert len(same._driver.inbox.next_step) == 1
     assert not other._driver.inbox.next_step
     manager.drain_workspace_events()
-    replay = await files.write_excel_cells(req, MagicMock())
+    replay = await files.apply_workbook_changes(req, MagicMock())
     assert replay.status_code == 200
     assert brief.extra["workbook_event_count"] == 1
     # A session loaded later has an independent durable cursor.
@@ -107,8 +114,8 @@ async def test_conflicting_write_preserves_agent_change_and_emits_no_user_brief(
     wb.active["A1"] = "agent change"
     wb.save(path)
     wb.close()
-    result = await files.write_excel_cells(files.ExcelWriteRequest(path="book.xlsx", expected_version=old,
-        changes=[{"cell": "A1", "value": "stale user change"}]), MagicMock())
+    result = await files.apply_workbook_changes(files.WorkbookChangesRequest(path="book.xlsx", expected_version=old,
+        operations=_patches({"cell": "A1", "value": "stale user change", "sheet": "Sales"})), MagicMock())
     assert result.status_code == 409
     assert not engine._driver.inbox.next_step
     wb = load_workbook(path)
@@ -185,9 +192,9 @@ def test_context_survives_transaction_recovery(tmp_path, monkeypatch):
 
 
 def test_structural_and_large_paste_summaries_are_bounded():
-    summary = summarize_operations([{"op": "insert_axis", "sheet": "Sales", "axis": "row", "index": 2, "count": 4},
-        {"op": "set_values", "sheet": "Sales", "cells": [{"cell": f"A{i}", "value": "x" * 10000} for i in range(100)]}])
-    assert "insert_axis" in summary and '"cell_count": 100' in summary
+    summary = summarize_operations([{"kind": "insert", "sheet": "Sales", "axis": "row", "at": 2, "count": 4},
+        {"kind": "cells.patch", "sheet": "Sales", "cells": [{"cell": f"A{i}", "value": "x" * 10000} for i in range(100)]}])
+    assert "insert" in summary and '"cell_count": 100' in summary
     assert len(summary) <= 2420
 
 @pytest.mark.asyncio
@@ -210,9 +217,9 @@ async def test_real_save_during_model_request_defers_stale_tool(write_env, tmp_p
     task = asyncio.create_task(engine.followup("update workbook"))
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        saved = await files.write_excel_cells(files.ExcelWriteRequest(path="book.xlsx", session_id="s1",
+        saved = await files.apply_workbook_changes(files.WorkbookChangesRequest(path="book.xlsx", session_id="s1",
             expected_version=content_version_of_file(tmp_path / "book.xlsx"),
-            changes=[{"sheet":"Sales", "cell":"B2", "value":777}]), MagicMock())
+            operations=_patches({"sheet":"Sales", "cell":"B2", "value":777})), MagicMock())
         assert saved.status_code == 200
     finally:
         release.set()
@@ -227,8 +234,8 @@ async def test_restoring_workbook_history_notifies_agent(write_env, tmp_path, mo
     from excelmanus import api_routes_workspace as revisions
     files, engine, _ = write_env
     path = tmp_path / "book.xlsx"
-    saved = await files.write_excel_cells(files.ExcelWriteRequest(path="book.xlsx",
-        expected_version=content_version_of_file(path), changes=[{"cell":"A1", "value":"new"}]), MagicMock())
+    saved = await files.apply_workbook_changes(files.WorkbookChangesRequest(path="book.xlsx",
+        expected_version=content_version_of_file(path), operations=_patches({"sheet":"Sales", "cell":"A1", "value":"new"})), MagicMock())
     assert saved.status_code == 200
     before = next(r for r in WorkspaceFileService(tmp_path).list_history("book.xlsx") if r.reason == "beforeEdit")
     monkeypatch.setattr(revisions, "_workspace_root", lambda *args: tmp_path)

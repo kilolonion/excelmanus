@@ -32,6 +32,7 @@ class ModelProfile:
     description: str = ""  # 可选描述
     protocol: str = "auto"  # 协议类型：auto|openai|openai_responses|anthropic|gemini
     thinking_mode: str = "auto"  # thinking 参数格式覆盖
+    service_tier: str = ""  # OpenAI Fast mode: ""|fast
     model_family: str = ""  # 实际模型族：claude|gpt|gemini|deepseek|qwen|glm|grok
     custom_extra_body: str = ""  # 自定义 extra_body JSON
     custom_extra_headers: str = ""  # 自定义 extra_headers JSON
@@ -721,10 +722,12 @@ class ExcelManusConfig:
     protocol: str = "auto"  # 激活模型协议类型：auto|openai|openai_responses|anthropic|gemini
     responses_continuation_enabled: bool = False  # Responses 原生 previous_response_id 续接
     responses_background_enabled: bool = False  # Responses 后台响应并轮询终态
-    max_iterations: int = 120  # 本轮 LLM 回合与工具调用上限（并行工具各计 1 次）
+    max_iterations: int = 0  # 0 表示不限制本轮 LLM 回合与工具调用次数
     turn_timeout_seconds: int = 0  # 单个 turn 的 wall-clock 上限；0 表示不限制
     turn_token_budget: int = 0  # 单个 turn 的输入+输出 token 上限；0 表示不限制
     turn_cost_budget_usd: float = 0.0  # 单个 turn 的美元成本上限；0 表示不限制
+    # 执行中消息：steer 下一步吸收，interrupt 收尾后切换，queue 下一轮处理。
+    message_dispatch_default: str = "steer"
     input_cost_per_1k_usd: float = 0.0  # provider 未返回 cost 时的估算单价
     output_cost_per_1k_usd: float = 0.0
     max_consecutive_failures: int = 6
@@ -739,7 +742,7 @@ class ExcelManusConfig:
     skills_project_dir: str = ".excelmanus/skillpacks"
     skills_context_char_budget: int = 12000  # 技能正文字符预算，0 表示不限制
     skills_discovery_enabled: bool = True
-    agent_self_management_enabled: bool = False  # 用户显式启用自身能力查询与会话配置技能/工具
+    agent_self_management_enabled: bool = True  # 默认启用自身能力查询与会话配置技能/工具，用户可关闭
     skills_discovery_scan_workspace_ancestors: bool = True
     skills_discovery_include_agents: bool = True
     skills_discovery_scan_external_tool_dirs: bool = True
@@ -773,7 +776,7 @@ class ExcelManusConfig:
     cap_probe_thinking_strategy_timeout: float = 8.0  # thinking 单策略上限（秒）
     # subagent 执行配置
     subagent_enabled: bool = True
-    subagent_max_iterations: int = 120  # 子循环 LLM 回合与工具调用上限
+    subagent_max_iterations: int = 0  # 0 表示不限制子循环回合与工具调用次数
     subagent_max_consecutive_failures: int = 6
     subagent_timeout_seconds: int = 600  # 单个子代理执行超时（秒）
     parallel_subagent_max: int = 3  # 并行子代理最大并发数
@@ -855,6 +858,8 @@ class ExcelManusConfig:
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
     # Jev / TypeSafe System One（可选 extra；走运行时设置 / config_kv，不进 model_profiles）
+    # Jev 前端入口默认隐藏，需在实验性功能中显式开启。
+    jev_experimental_enabled: bool = False
     # JEV is binary: off disables a gate, enforce enables it fully.  The
     # loader migrates the removed legacy ``shadow`` value to ``enforce``.
     jev_enabled: str = "enforce"
@@ -1394,14 +1399,19 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         )
     _log_deprecated_model_warning("EXCELMANUS_MODEL", model)
 
-    max_iterations = _parse_int(
-        _s("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 120
+    max_iterations = _parse_int_allow_zero(
+        _s("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 0
     )
     turn_timeout_seconds = _parse_int_allow_zero(
         _s("EXCELMANUS_TURN_TIMEOUT_SECONDS"),
         "EXCELMANUS_TURN_TIMEOUT_SECONDS",
         0,
     )
+    message_dispatch_default = (_s("EXCELMANUS_MESSAGE_DISPATCH_DEFAULT", "steer") or "steer").strip().lower()
+    if message_dispatch_default not in {"steer", "interrupt", "queue"}:
+        raise ConfigError(
+            "EXCELMANUS_MESSAGE_DISPATCH_DEFAULT 必须是 steer、interrupt 或 queue。"
+        )
     responses_continuation_enabled = _parse_bool(
         _s("EXCELMANUS_RESPONSES_CONTINUATION_ENABLED"),
         "EXCELMANUS_RESPONSES_CONTINUATION_ENABLED",
@@ -1579,10 +1589,10 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
     parallel_tool_max = _parse_int(_s("EXCELMANUS_PARALLEL_TOOL_MAX"), "EXCELMANUS_PARALLEL_TOOL_MAX", 4)
     if parallel_tool_max > 32:
         raise ConfigError("EXCELMANUS_PARALLEL_TOOL_MAX 不能超过 32")
-    subagent_max_iterations = _parse_int(
+    subagent_max_iterations = _parse_int_allow_zero(
         _s("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
         "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
-        120,
+        0,
     )
     subagent_max_consecutive_failures = _parse_int(
         _s("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES"),
@@ -1807,6 +1817,11 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
     jev_enabled = _parse_jev_gate(
         _s("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "enforce"
     )
+    jev_experimental_enabled = _parse_bool(
+        _s("EXCELMANUS_JEV_EXPERIMENTAL_ENABLED"),
+        "EXCELMANUS_JEV_EXPERIMENTAL_ENABLED",
+        False,
+    )
     jev_exposure = _parse_jev_gate(
         _s("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "enforce"
     )
@@ -1903,7 +1918,7 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         subagent_enabled=subagent_enabled,
         agent_self_management_enabled=_parse_bool(
             _s("EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED"),
-            "EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED", False,
+            "EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED", True,
         ),
         parallel_readonly_tools=parallel_readonly_tools,
         parallel_tool_max=parallel_tool_max,
@@ -1958,6 +1973,8 @@ def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bo
         thinking_budget=thinking_budget,
         thinking_effort_options=thinking_effort_options,
         models=models,
+        message_dispatch_default=message_dispatch_default,
+        jev_experimental_enabled=jev_experimental_enabled,
         jev_enabled=jev_enabled,
         jev_exposure=jev_exposure,
         jev_mode_hint=jev_mode_hint,

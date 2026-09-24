@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, ChevronRight, Gauge, Loader2, Minus, Pencil, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronRight, FlaskConical, Gauge, Loader2, Minus, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import { JevFieldRow, JevSaveBar, JevStatusChip } from "./jev-widgets";
 import { JevPresetPicker, JevProviderForm } from "./JevProviderForm";
 import { useJevSettings } from "./useJevSettings";
+import { requestModelSubTab } from "./model-subtab";
 
 function ProviderMark({ id, name }: { id: string; name: string }) {
   const letter = id === "typesafe" ? "T" : id === "vercel" ? "V" : (name.trim().slice(0, 1) || "J").toUpperCase();
@@ -63,6 +64,7 @@ export function JevProviderSection() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [sectionOpen, setSectionOpen] = useState(true);
+  const [experimentalOpen, setExperimentalOpen] = useState(false);
 
   const beginAdd = () => {
     setSectionOpen(true);
@@ -146,27 +148,46 @@ export function JevProviderSection() {
 
   return (
     <SettingsFoldSection
-      title="决策提供商"
-      description="添加 TypeSafe、Vercel 或自定义决策服务，然后选择默认提供商"
-      icon={<Gauge className="h-4 w-4" style={{ color: "var(--em-primary)" }} />}
+      title="实验性功能"
+      description="Jev 决策提供商与任务辅助功能"
+      icon={<FlaskConical className="h-4 w-4" style={{ color: "var(--em-gold)" }} />}
       coachId="coach-settings-jev-provider"
-      open={sectionOpen}
-      onOpenChange={setSectionOpen}
-      actions={
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-7 text-[11px] gap-1 shrink-0"
-          style={{ color: "var(--em-primary)", borderColor: "color-mix(in srgb, var(--em-primary) 35%, transparent)" }}
-          onClick={beginAdd}
-          disabled={loading || saving || !runtime}
-        >
-          <Plus className="h-3 w-3" />
-          添加提供商
-        </Button>
-      }
+      open={experimentalOpen}
+      onOpenChange={setExperimentalOpen}
     >
-      <div className="px-3 pb-3 space-y-2">
+      <div className="border-t border-border/60 p-3">
+        {!runtime?.jev_experimental_enabled ? (
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-border/80 bg-muted/20 p-4">
+            <FlaskConical className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <p className="min-w-0 flex-1 text-xs leading-5 text-muted-foreground">
+              Jev 仍处于实验阶段。请先在模型设置的高级设置中开启，之后这里才会显示决策提供商和相关配置。
+            </p>
+            <Button size="sm" variant="outline" onClick={() => requestModelSubTab("diagnostics")}>
+              前往高级设置
+            </Button>
+          </div>
+        ) : (
+          <SettingsFoldSection
+          title="决策提供商"
+          description="添加 TypeSafe、Vercel 或自定义决策服务，然后选择默认提供商"
+          icon={<Gauge className="h-4 w-4" style={{ color: "var(--em-primary)" }} />}
+          open={sectionOpen}
+          onOpenChange={setSectionOpen}
+          actions={
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-[11px] gap-1 shrink-0"
+              style={{ color: "var(--em-primary)", borderColor: "color-mix(in srgb, var(--em-primary) 35%, transparent)" }}
+              onClick={beginAdd}
+              disabled={loading || saving}
+            >
+              <Plus className="h-3 w-3" />
+              添加提供商
+            </Button>
+          }
+          >
+          <div className="px-3 pb-3 space-y-2">
         {loading && !runtime ? (
           <div className="flex items-center justify-center gap-2 py-8 text-xs text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -356,6 +377,9 @@ export function JevProviderSection() {
               />
             </div>
           </fieldset>
+        )}
+          </div>
+        </SettingsFoldSection>
         )}
       </div>
     </SettingsFoldSection>

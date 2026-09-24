@@ -30,8 +30,8 @@
       "assertions": {
         "max_llm_calls": 6,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet",
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes",
           "write_text_file"
         ],
         "output_checks": [
@@ -77,8 +77,8 @@
       "assertions": {
         "max_llm_calls": 7,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet"
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes"
         ],
         "output_checks": [
           {
@@ -296,8 +296,8 @@
       "assertions": {
         "max_llm_calls": 6,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet"
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes"
         ],
         "output_checks": [
           {
@@ -573,7 +573,7 @@
       "expected": {
         "lens": "一次请求里的多项格式",
         "review_focus": [
-          "是否一次 format_spreadsheet 批量完成还是拆很多次",
+          "是否一次 apply_spreadsheet_changes 批量完成还是拆很多次",
           "整列 range 写法是否被工具接受",
           "是否误改了数据",
           "回复是否只讲做了什么"
@@ -794,8 +794,8 @@
       "assertions": {
         "max_llm_calls": 8,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet"
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes"
         ],
         "output_checks": [
           {
@@ -1045,8 +1045,8 @@
       "assertions": {
         "max_llm_calls": 4,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet",
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes",
           "run_code",
           "write_text_file"
         ],
@@ -1097,7 +1097,7 @@
         "review_focus": [
           "run_code 是否触发审批、审批文案是否让用户看懂要做什么",
           "拆出的文件是否保留表头",
-          "有没有为每个省调用一次 edit_spreadsheet（低效）"
+          "有没有为每个省调用一次 apply_spreadsheet_changes（低效）"
         ]
       }
     },
@@ -1114,7 +1114,7 @@
         "max_llm_calls": 3,
         "max_tool_calls": 2,
         "forbidden_tools": [
-          "edit_spreadsheet",
+          "apply_spreadsheet_changes",
           "run_code"
         ],
         "output_checks": [
@@ -1228,8 +1228,8 @@
       "assertions": {
         "max_llm_calls": 8,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet"
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes"
         ],
         "output_checks": [
           {
@@ -1263,8 +1263,8 @@
       "assertions": {
         "max_llm_calls": 8,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet"
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes"
         ],
         "output_checks": [
           {
@@ -1387,8 +1387,8 @@
       "assertions": {
         "max_llm_calls": 8,
         "forbidden_tools": [
-          "edit_spreadsheet",
-          "format_spreadsheet"
+          "apply_spreadsheet_changes",
+          "apply_spreadsheet_changes"
         ],
         "output_checks": [
           {

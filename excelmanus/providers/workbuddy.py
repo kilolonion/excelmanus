@@ -16,6 +16,8 @@ import logging
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
+from excelmanus.providers.reasoning import extract_reasoning_text, split_content_parts
+
 logger = logging.getLogger(__name__)
 
 _WORKBUDDY_HOSTS = ("copilot.tencent.com", "workbuddy.ai", "www.workbuddy.ai")
@@ -109,9 +111,10 @@ async def _fold_stream(stream: AsyncIterator[Any]) -> Any:
                 continue
             if getattr(delta, "role", None):
                 slot["role"] = delta.role
-            if getattr(delta, "content", None):
-                slot["content_parts"].append(delta.content)
-            reasoning = getattr(delta, "reasoning_content", None)
+            _, content = split_content_parts(getattr(delta, "content", None))
+            if content:
+                slot["content_parts"].append(content)
+            reasoning = extract_reasoning_text(delta)
             if reasoning:
                 slot["reasoning_parts"].append(reasoning)
             for tc in getattr(delta, "tool_calls", None) or []:

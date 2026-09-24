@@ -203,7 +203,7 @@ async def test_e_tier_b_spreadsheet_does_not_evaluate(monkeypatch: pytest.Monkey
     engine, _pending = _ask_engine(jev_enabled="enforce", jev_calibrated=True)
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
         assert await maybe_shadow_approval(
-            engine, tool_name="edit_spreadsheet", arguments={"file_path": "a.xlsx"},
+            engine, tool_name="apply_spreadsheet_changes", arguments={"file_path": "a.xlsx"},
         ) is None
         mocked.assert_not_called()
 

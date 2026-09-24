@@ -132,7 +132,7 @@ async def test_known_dangerous_skips_evaluate_and_denies() -> None:
 async def test_readonly_and_green_skip_jev() -> None:
     engine, _pending = _ask_engine(jev_enabled="shadow")
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
-        await maybe_shadow_approval(engine, tool_name="inspect_spreadsheet", arguments={})
+        await maybe_shadow_approval(engine, tool_name="observe_spreadsheet", arguments={})
         await maybe_shadow_approval(
             engine,
             tool_name="run_code",

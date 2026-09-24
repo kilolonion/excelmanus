@@ -45,29 +45,29 @@ beforeEach(() => {
 });
 
 describe("ChatLiveSelectionChip", () => {
-  it("keeps every disjoint area when referencing or asking the agent", () => {
+  it("keeps every disjoint area when referencing", () => {
     const { container } = showChip();
     act(() => useExcelStore.getState().setLiveSelection({ path: "sales.xlsx", sheet: "明细", range: "A1:B2,D4,F:F,8:9", contentVersion: "abcd" }));
     fireEvent.click(container.querySelector('[data-em-live-selection-action="reference"]')!);
     expect(useExcelStore.getState().pendingSelection?.range).toBe("A1:B2,D4,F:F,8:9");
-    fireEvent.click(container.querySelector('[data-em-live-selection-action="analyze"]')!);
-    expect(useExcelStore.getState().pendingTemplateMessage).toContain("@file:sales.xlsx[明细!A1:B2,D4,F:F,8:9]@sha256:abcd");
   });
 
-  it("renders the live selection and wires reference / analyze actions", () => {
+  it("renders the live selection with reference but no analyze action", () => {
     const { container } = showChip();
     const chip = container.querySelector("[data-em-live-selection]");
     expect(chip?.getAttribute("data-em-live-selection")).toBe("明细!C2:C9");
+    expect(container.querySelector('[data-em-live-selection-action="analyze"]')).toBeNull();
 
     fireEvent.click(container.querySelector('[data-em-live-selection-action="reference"]')!);
     expect(useExcelStore.getState().pendingSelection).toEqual({
       filePath: "sales.xlsx", sheet: "明细", range: "C2:C9", contentVersion: "v1",
     });
+  });
 
-    fireEvent.click(container.querySelector('[data-em-live-selection-action="analyze"]')!);
-    const message = useExcelStore.getState().pendingTemplateMessage;
-    expect(message).toContain("C2:C9");
-    expect(message?.startsWith("请分析")).toBe(true);
+  it("clears the current selection when cancelled", () => {
+    const { container } = showChip();
+    fireEvent.click(container.querySelector('[data-em-live-selection-action="cancel"]')!);
+    expect(useExcelStore.getState().liveSelection).toBeNull();
   });
 
   it("renders nothing in selection mode or for a different file", () => {

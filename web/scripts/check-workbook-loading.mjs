@@ -7,23 +7,29 @@ import assert from "node:assert/strict";
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 const { createServer } = await import("vite");
+const { default: tailwind } = await import("@tailwindcss/postcss");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const server = await createServer({
-  root, configFile: false, cacheDir: path.join(root, "node_modules/.vite-workbook-loading"),
+  root, configFile: false, css: { postcss: { plugins: [tailwind({ base: root })] } }, cacheDir: path.join(root, "node_modules/.vite-workbook-loading"),
   resolve: { alias: [
     { find: "@/lib/univer-modules", replacement: path.join(root, "src/__tests__/fixtures/univer-modules-browser.ts") },
     { find: "@", replacement: path.join(root, "src") },
   ] },
   esbuild: { jsx: "automatic" },
-  optimizeDeps: { include: ["react", "react-dom/client", "react-dom", "react/jsx-dev-runtime", "zustand", "zustand/middleware", "lucide-react", "clsx", "tailwind-merge", "@univerjs/core", "@univerjs/presets", "@univerjs/preset-sheets-core", "@univerjs/preset-sheets-core/locales/zh-CN", "@univerjs/sheets-ui"] },
+  optimizeDeps: { holdUntilCrawlEnd: false, noDiscovery: true, include: ["react", "react-dom/client", "react-dom", "react/jsx-dev-runtime", "zustand", "zustand/middleware", "lucide-react", "clsx", "tailwind-merge", "@univerjs/core", "@univerjs/presets", "@univerjs/preset-sheets-core", "@univerjs/preset-sheets-core/locales/zh-CN", "@univerjs/sheets-ui"] },
   define: { "process.env.NODE_ENV": JSON.stringify("development") },
-  server: { host: "127.0.0.1", port: 0 },
+  server: { host: "127.0.0.1", port: 0, watch: { ignored: ["**/.next/**", "**/.build/**"] } },
 });
 let browser;
 try {
   await server.listen();
   browser = await chromium.launch({ headless: true, ...(process.env.WORKBOOK_BROWSER_CHANNEL ? { channel: process.env.WORKBOOK_BROWSER_CHANNEL } : {}) });
   const page = await browser.newPage({ viewport: { width: Number(process.env.WORKBOOK_TEST_WIDTH || 1280), height: 800 } });
+  if (process.env.WORKBOOK_DEBUG) {
+    page.on("request", (r) => console.log("request", r.url()));
+    page.on("requestfinished", (r) => console.log("finished", r.url()));
+    page.on("requestfailed", (r) => console.log("failed", r.url(), r.failure()));
+  }
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") console.error(message.text()); });
@@ -37,23 +43,25 @@ try {
   let sheets = ["Main", "Second"];
   let cells = { "1,1": { t: "s", v: "original", cached: "yes" }, "1,2": { t: "n", v: 2, f: "=1+1", cached: "yes" }, "2,1": { t: "s", v: "merged", cached: "yes" }, "201,1": { t: "n", v: 201, cached: "yes" }, "401,1": { t: "n", v: 401, cached: "yes" } };
   const parseCell = (a1) => { const [, letters, row] = a1.match(/([A-Z]+)(\d+)/); return [Number(row), [...letters].reduce((v, c) => v * 26 + c.charCodeAt(0) - 64, 0)]; };
-  await page.route("**/api/v1/files/excel/view?**", async (route) => {
+  await page.route("**/api/v1/workbooks/observe?**", async (route) => {
     const params = new URL(route.request().url()).searchParams;
     requests.push(Object.fromEntries(params));
     const sheet = params.get("sheet") || "Main";
-    const styles = params.get("with_styles") === "1";
+    const styles = (params.get("facets") || "").split(",").includes("presentation");
     if (!sheets.includes(sheet)) return route.fulfill({ status: 404, json: { code: "SHEET_NOT_FOUND", error: "missing sheet" } });
     const expected = params.get("expected_version");
     if (expected && expected !== `v${version}`) return route.fulfill({ status: 409, json: { code: "STALE_VIEW", error: "stale", content_version: `v${version}` } });
-    const [first, last] = (params.get("rect") || "A1:AX200").split(":");
+    const [first, last] = (params.get("range") || "A1:AX200").split(":");
     const [r0, c0] = parseCell(first), [r1, c1] = parseCell(last);
     const within = Object.fromEntries(Object.entries(cells).filter(([key]) => { const [r,c] = key.split(",").map(Number); return r >= r0 && r <= r1 && c >= c0 && c <= c1; }).map(([key, cell]) => [key, { ...cell, ...(styles ? { s: { bl: 1 } } : {}) }]));
     const otherFile = params.get("path").endsWith("other.xlsx");
     if (otherFile && within["1,1"]) within["1,1"].v = "other file";
     const data = {
-      file: { workspaceKey: "id:browser-ws", relative: params.get("path").replace(/^\.\//, "") }, content_version: `v${version}`, active_sheet: "Main", with_styles: styles,
+      file: { workspaceKey: "id:browser-ws", relative: params.get("path").replace(/^\.\//, "") }, content_version: `v${version}`, schema_version: "workbook/2", active_sheet: "Main", request: { facets: (params.get("facets") || "").split(",") },
       sheets: sheets.map((name) => ({ name, sheet_id: name, used: { rows: 600, cols: 60 } })),
-      windows: [{ sheet, rect: { r0,c0,r1,c1 }, cells: within, ...(styles ? { merges: r0 <= 2 && r1 >= 2 && c0 === 1 ? [{ min_row: 2,min_col: 1,max_row: 2,max_col: 2 }] : [], col_widths: c0 === 1 ? { A: 24 } : {}, row_heights: r0 === 1 ? { "1": 30 } : {} } : {}) }],
+      regions: [{ sheet, rect: { r0,c0,r1,c1 }, cells: within, ...(styles ? { merges: r0 <= 2 && r1 >= 2 && c0 === 1 ? [{ min_row: 2,min_col: 1,max_row: 2,max_col: 2 }] : [], geometry: {
+        columns: Array.from({length:c1-c0+1},(_,i)=>({index:c0+i,native:c0+i===1?24:8.43,pixels:c0+i===1?173:64,hidden:false})),
+        rows: Array.from({length:r1-r0+1},(_,i)=>({index:r0+i,native:r0+i===1?30:15,pixels:r0+i===1?40:20,hidden:false})), width_px:0,height_px:0 } } : {}) }],
       coverage: { loaded: [{ sheet,r0,c0,r1,c1 }], unloaded: [] },
     };
     if (!styles && !firstReadHeld) {
@@ -64,7 +72,7 @@ try {
     if (otherFile && !styles) await new Promise((resolve) => setTimeout(resolve, 400));
     await route.fulfill({ json: data }).catch(() => {});
   });
-  await page.route("**/api/v1/files/excel/write", async (route) => {
+  await page.route("**/api/v1/workbooks/changes", async (route) => {
     const body = route.request().postDataJSON(); writes.push(body);
     if (body.expected_version !== `v${version}`) return route.fulfill({ status: 409, json: { code: "VERSION_CONFLICT", status: "conflict", cells_written: 0 } });
     for (const op of body.operations) for (const cell of op.cells || []) {
@@ -77,7 +85,7 @@ try {
     await route.fulfill({ json: { status: "success", cells_written: 1, content_version: `v${version}` } });
   });
   const url = `${server.resolvedUrls.local[0]}src/__tests__/fixtures/workbook-browser.html`;
-  await page.goto(url);
+  await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.workbookAPI?.getActiveWorkbook()?.getSheetBySheetId("__excelmanus_loading__"));
   await page.locator('[data-univer-container] [data-em-ribbon="history"]').waitFor({ state: "visible" });
   await page.locator('[data-univer-container] [role="tab"]').filter({ hasText: "公式" }).waitFor({ state: "visible" });
@@ -107,7 +115,7 @@ try {
   releaseFirstRead();
   const ready = () => page.waitForFunction(() => {
     const sheet = window.workbookAPI?.getActiveWorkbook()?.getActiveSheet();
-    return sheet?.getSheet().getSnapshot().columnData?.[0]?.w === 180 && !document.querySelector('[role="alert"]');
+    return sheet?.getSheet().getSnapshot().columnData?.[0]?.w === 173 && !document.querySelector('[role="alert"]');
   }, { timeout: 60000 });
   await ready().catch(async (error) => {
     console.error(JSON.stringify(await page.evaluate(() => ({ text: document.body.innerText.slice(-1200), counters: window.workbookCounters,
@@ -120,7 +128,7 @@ try {
   assert.equal(await page.evaluate(() => window.loadingHeader === document.querySelector('[data-univer-container] header')), true);
   assert.equal(await page.evaluate(() => Boolean(window.workbookAPI.getActiveWorkbook().getSheetBySheetId("__excelmanus_loading__"))), false);
   if (process.env.WORKBOOK_SCREENSHOT) await page.screenshot({ path: process.env.WORKBOOK_SCREENSHOT.replace(/\.png$/, ".ready.png") });
-  assert.equal(requests.filter((r) => !r.sheet && r.with_styles === "0").length, 1);
+  assert.equal(requests.filter((r) => !r.sheet && r.facets === "data,geometry").length, 1);
   assert.equal(await page.evaluate(() => window.workbookCounters.created), 1);
   if (!process.env.WORKBOOK_INTERACTIONS_ONLY) {
   const requestsBeforeRender = requests.length;
@@ -188,7 +196,10 @@ try {
   await page.waitForTimeout(400);
   version++;
   await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().getRange("F5").setValue("unsaved"));
-  await page.getByRole("alert").waitFor();
+  await page.getByRole("alert").waitFor().catch(async (error) => {
+    console.error(JSON.stringify({ phase:"conflict", version, writes:writes.slice(-4), requests:requests.slice(-6), state:await page.evaluate(() => ({text:document.body.innerText.slice(-900),sheet:window.workbookAPI.getActiveWorkbook().getActiveSheet().getSheetName(),value:window.workbookAPI.getActiveWorkbook().getActiveSheet().getRange("F5").getValue()})) }));
+    throw error;
+  });
   assert.equal(await page.evaluate(() => window.workbookAPI.getActiveWorkbook().getActiveSheet().getRange("F5").getValue()), "unsaved");
   assert.equal(cells["5,6"], undefined);
   const writesAtConflict = writes.length;
@@ -313,5 +324,5 @@ try {
   console.log(JSON.stringify({ status: "passed", mode: process.env.WORKBOOK_INTERACTIONS_ONLY ? "interactions" : "all", scenarios: [...(process.env.WORKBOOK_INTERACTIONS_ONLY ? [] : ["stable parent render", "local edit", "queued edits", "remote delete", "file scope", "sheet switch", "viewport boundary", "hidden refresh", "conflict retention", "conflict reload", "sheet deletion", "late file response"]), "native loading shell", "stable shell geometry", "no edits before data", "first paint", "breathing without mark recreation", "live reduced motion", "zoomed focus", "planned overlay without style writes", "selection confirmation HTTP", "selection read-only", "overlay cleanup"], requests: requests.length, writes: writes.length, loadingLayout }));
 } finally {
   await browser?.close();
-  await server.close();
+  await Promise.race([server.close(), new Promise((resolve) => setTimeout(resolve, 3000))]);
 }

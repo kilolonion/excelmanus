@@ -9,7 +9,7 @@ import {
   OverlayCardFooter,
 } from "@/components/ui/overlay-card";
 import { DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { createWorkspaceFolder, updateWorkspaceFolder } from "@/lib/api";
+import { createWorkspaceFolder, selectWorkspaceFolder, updateWorkspaceFolder } from "@/lib/api";
 import type { WorkspaceFolder } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -70,22 +70,17 @@ export function AddWorkspaceDialog({
     const picker = typeof window !== "undefined"
       ? window.excelManusDesktop?.selectFolder
       : undefined;
-    if (!picker) {
-      setPathOpen(true);
-      setError("当前运行环境不支持系统文件夹选择器，请输入本机文件夹的绝对路径");
-      window.requestAnimationFrame(() => pathRef.current?.focus());
-      return;
-    }
-
     setPicking(true);
     setError("");
     try {
-      const selectedPath = await picker();
+      const selectedPath = await (picker ? picker() : selectWorkspaceFolder());
       if (!selectedPath) return;
       setPath(selectedPath);
       setPathOpen(true);
     } catch (err) {
+      setPathOpen(true);
       setError(err instanceof Error ? err.message : "无法打开系统文件夹选择器");
+      window.requestAnimationFrame(() => pathRef.current?.focus());
     } finally {
       setPicking(false);
     }
@@ -244,7 +239,7 @@ export function AddWorkspaceDialog({
                 )}
               </div>
               <p className="text-[12px] leading-relaxed text-[var(--em-text-secondary)]">
-                使用本机已有目录。桌面版会打开系统文件夹选择器；不会新建文件夹，聊天记录也不会写入该目录。
+                使用运行 ExcelManus 的电脑上已有的目录。本机 Mac 网页和桌面版可打开系统文件夹选择器；也可直接输入绝对路径。不会新建文件夹，聊天记录也不会写入该目录。
               </p>
             </div>
           ) : (

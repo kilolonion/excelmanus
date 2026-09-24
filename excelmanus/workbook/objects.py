@@ -136,7 +136,7 @@ def _pivot(wb, ws, op, action):
     return {"kind":"pivot_table","name":name,"sheet":ws.title,"ref":footprint.coord,"cache_records":len(source_rows)-1,"native":True}
 
 
-def apply_object_operation(wb,op,*,guard=None):
+def apply_object_operation(wb,op,*,guard=None,image_bytes=None):
     kind=op["kind"]; action=op.get("action","create")
     if action not in {"create","update","resize","delete","refresh"}: raise ValueError("对象 action 无效")
     sheet=op.get("target_sheet") if kind=="pivot_table" else None
@@ -216,20 +216,21 @@ def apply_object_operation(wb,op,*,guard=None):
     elif kind=="image":
         from openpyxl.drawing.image import Image
         index=op.get("index")
-        if action in {"update","delete"}:
+        if action in {"update","resize","delete"}:
             if not isinstance(index,int) or index<0 or index>=len(ws._images): raise ValueError("image.index 不存在")
             image=ws._images[index]
             if action=="delete": ws._images.remove(image); return {"kind":kind,"index":index,"deleted":True}
         else: image=None
         if op.get("image_path"):
             if guard is None: raise ValueError("图片操作需要工作区 guard")
-            new=Image(str(guard.resolve_and_validate(op["image_path"])))
+            from io import BytesIO
+            new=Image(BytesIO(image_bytes) if image_bytes is not None else str(guard.resolve_and_validate(op["image_path"])))
             if image: new.anchor=image.anchor; ws._images[index]=new
             else: ws.add_image(new,op.get("target_cell","A1"))
             image=new
         if image is None: raise ValueError("image.create 需要 image_path")
         if "target_cell" in op: image.anchor=op["target_cell"]
-        for key in ("width","height"):
-            if key in op: setattr(image,key,op[key])
+        from excelmanus.workbook.geometry import resize_drawing
+        resize_drawing(image, width=op.get("width"), height=op.get("height"), unit="px")
     else: raise ValueError(f"不支持的对象类型 {kind}")
     return {"kind":kind,"action":action,"sheet":ws.title,"name":name,"cell":op.get("cell")}

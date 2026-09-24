@@ -119,20 +119,55 @@ def collect_image_refs(content: Any) -> list[ImageAttachmentRef]:
     return refs
 
 
-def attachment_ids_from_messages(messages: Sequence[Any]) -> frozenset[str]:
+def attachment_ids_from_messages(
+    messages: Sequence[Any], *, event_log: Any | None = None,
+) -> frozenset[str]:
+    """Session-owned refs, including the sources of live compaction summaries.
+
+    New summaries carry host-generated IDs for snapshot-only restores. Older
+    event logs retain the original refs behind replace edges. Follow only live
+    summaries' compaction ancestry: scanning the entire audit history would
+    also grant access to images removed by rollback or session clear. Textual
+    mentions of an attachment ID never grant access.
+    """
+    by_seq: dict[int, dict[str, Any]] = {}
+    durable_messages = getattr(event_log, "durable_messages", None)
+    if callable(durable_messages) and any(
+        isinstance(message, dict) and message.get("_prompt_kind") == "compaction"
+        for message in messages
+    ):
+        by_seq = {
+            message["_seq"]: message for message in durable_messages()
+            if isinstance(message, dict) and isinstance(message.get("_seq"), int)
+        }
     found: set[str] = set()
-    for message in messages:
+    pending = list(messages)
+    visited: set[int] = set()
+    while pending:
+        message = pending.pop()
         if not isinstance(message, dict):
             continue
+        seq = message.get("_seq")
+        if isinstance(seq, int):
+            if seq in visited:
+                continue
+            visited.add(seq)
         for ref in collect_image_refs(message.get("content")):
             found.add(ref.attachment_id)
+        compacted = message.get("_compacted_attachment_ids")
+        if isinstance(compacted, list):
+            found.update(item for item in compacted if isinstance(item, str) and item)
+        if message.get("_prompt_kind") == "compaction":
+            for source in by_seq.get(seq, {}).get("_shadows", []):
+                if source in by_seq and source not in visited:
+                    pending.append(by_seq[source])
     return frozenset(found)
 
 
 def attachment_ids_from_engine(engine: Any) -> frozenset[str]:
     memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
     messages = getattr(memory, "messages", None) or []
-    return attachment_ids_from_messages(messages)
+    return attachment_ids_from_messages(messages, event_log=getattr(memory, "event_log", None))
 
 
 def _walk_collect(content: Any, refs: list[ImageAttachmentRef]) -> None:

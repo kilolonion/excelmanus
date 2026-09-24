@@ -3,10 +3,16 @@ import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { pythonBaseFilter, prunePythonRuntime } from './runtime-files.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const project = resolve(root, '..');
+// run_code accepts user/third-party scripts that may open module.__file__.
+// A zipped stdlib is not fully transparent to those scripts, so preserve the
+// filesystem layout by default. Compaction is an explicit distribution choice.
+const compactStdlib = process.env.EXCELMANUS_COMPACT_PYTHON_STDLIB || '0';
+if (!['0', '1'].includes(compactStdlib)) throw new Error('EXCELMANUS_COMPACT_PYTHON_STDLIB must be 0 or 1');
 const homeDir = process.env.USERPROFILE || process.env.HOME || '';
 const extraPaths = [
   join(homeDir, '.local', 'bin'),
@@ -35,8 +41,15 @@ if (!existsSync(python)) throw new Error(`Managed Python layout not supported: $
 const site = run(python, ['-I', '-B', '-X', 'utf8', '-c', 'import sysconfig; print(sysconfig.get_path("purelib"))'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
 const siteRelative = relative(target, site);
 if (siteRelative === '..' || siteRelative.startsWith(`..${sep}`) || isAbsolute(siteRelative)) throw new Error('Python is not relocatable');
-const requirements = `${target}-requirements.txt`;
+// Requirements are build metadata; do not ship them under extraResources.
+const requirements = join(buildRoot, `python-requirements-${createHash('sha256').update(target).digest('hex').slice(0, 12)}.txt`);
+rmSync(`${target}-requirements.txt`, { force: true });
 run('uv', ['export', '--frozen', '--only-group', 'desktop-runtime', '-o', requirements], { stdio: ['ignore', 'ignore', 'inherit'] });
 run('uv', ['pip', 'install', '--python', python, '--target', site, '--requirements', requirements]);
 console.log('Removed Python test/cache files:', prunePythonRuntime(target));
+if (compactStdlib === '1') {
+  run(python, ['-I', '-B', '-X', 'utf8', join(root, 'scripts', 'compact-python-stdlib.py'), target]);
+} else {
+  console.log('Preserving filesystem standard-library sources for third-party script compatibility');
+}
 run(python, ['-I', '-B', '-X', 'utf8', join(root, 'scripts', 'check-python-runtime.py')]);

@@ -12,10 +12,13 @@ import {
   deriveSessionTitleFromMessages,
   isFallbackSessionTitle,
 } from "@/lib/session-title";
-import { extractFileAttachmentsFromContent, stripImageSentPlaceholder } from "@/lib/upload-notice";
+import {
+  dedupeFileAttachments,
+  prepareUserMessageDisplay,
+  stripImageSentPlaceholder,
+} from "@/lib/upload-notice";
 import {
   isHiddenBackendUserMessage,
-  stripInjectedUserPromptBlocks,
 } from "@/lib/injected-user-prompt";
 import {
   collectHistoryAffectedFiles,
@@ -26,8 +29,10 @@ import {
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import {
   blocksHaveProgress,
+  dedupeFailureGuidance,
   hydrateFailureGuidanceFromText,
   isFailureGuidanceBlock,
+  isSameFailure,
 } from "@/lib/failure-recovery";
 
 // 内存快速缓存（扩展 IndexedDB）
@@ -70,7 +75,25 @@ function _buildMessageEntities(messages: Message[]): MessageEntities {
   const messagesById: Record<string, Message> = {};
   const messageIndexById: Record<string, number> = {};
 
-  for (const msg of messages) {
+  for (const incoming of messages) {
+    // Every ingress (optimistic, SSE and history) passes through the same
+    // attachment projection. This prevents a replayed receipt from creating
+    // duplicate chips and keeps the durable path as the stable identity.
+    let msg = incoming.role === "user"
+      ? (() => {
+          const prepared = prepareUserMessageDisplay(incoming.content);
+          const files = dedupeFileAttachments([...(incoming.files ?? []), ...prepared.files]);
+          const content = prepared.content;
+          const sameFiles = files.length === (incoming.files?.length ?? 0)
+            && files.every((file, index) => file === incoming.files?.[index]);
+          if (content === incoming.content && sameFiles) return incoming;
+          return { ...incoming, content, ...(files.length > 0 ? { files } : { files: undefined }) };
+        })()
+      : incoming;
+    if (msg.role === "assistant") {
+      const blocks = dedupeFailureGuidance(msg.blocks);
+      if (blocks !== msg.blocks) msg = { ...msg, blocks };
+    }
     const msgId = String(msg.id || "").trim();
     if (!msgId) continue;
     if (messageIndexById[msgId] != null) {
@@ -130,9 +153,7 @@ interface LoadMessagesOptions {
  * 将连续的 assistant/tool 消息合并为带 blocks 的单个 assistant 消息。
  */
 const _EXCEL_WRITE_TOOL_NAMES = new Set([
-  "edit_spreadsheet",
-  "format_spreadsheet",
-  "manage_spreadsheet_objects",
+  "apply_spreadsheet_changes",
   "manage_spreadsheet_versions",
   "run_code",
 ]);
@@ -150,14 +171,10 @@ const _MAX_DIFFS_IN_STORE = 500;
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent", "task_list",
   // verification_report 仅出现在历史缓存中，保留以便刷新时不丢旧卡片
-  "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
+  "token_stats", "status", "verification_report", "staging_hint", "memory_extracted", "compaction",
   "llm_retry", "failure_guidance",
   "tool_notice", "reasoning_notice",
 ]);
-
-// failure_guidance 与其他 SSE-only 块不同：后端会将其后端渲染为 text block（failure_guidance_text）。
-// 合并时需要移除对应的后端 text block，避免重复。
-const _SSE_ONLY_HAS_BACKEND_COUNTERPART = new Set(["failure_guidance"]);
 
 /**
  * 将仅由 SSE 产生的块（thinking、iteration、approval_action、subagent）从 oldMessages 合并到 newMessages，
@@ -208,7 +225,11 @@ function _preserveSseOnlyBlocks(
     if (sseBlocks.length === 0 && oldToolCallMap.size === 0) return msg;
 
     // 浠ユ棫鍧楅『搴忎负妯℃澘锛氫繚鐣欎粎 SSE 鐨勫潡涓嶅姩锛岀敤鍒锋柊鍚庣殑鍧楁浛鎹㈠悗绔寔涔呭寲鐨勫潡銆?
-    const newBackendBlocks = msg.blocks.map((nb) => {
+    // 只移除身份匹配的持久化失败，不能按位置消费后端块（可能吞掉工具结果）。
+    const preservedFailures = sseBlocks.filter(isFailureGuidanceBlock);
+    const newBackendBlocks = msg.blocks.filter((nb) =>
+      !isFailureGuidanceBlock(nb) || !preservedFailures.some((old) => isSameFailure(old, nb)),
+    ).map((nb) => {
       // 寤剁画 SSE 浜х敓鐨?tool_call 鐘舵€侊紙閿欒鐘舵€併€佺粨鏋溿€侀敊璇俊鎭級锛屽悗绔浆鎹㈠彲鑳藉凡涓㈠け銆?
       if (
         nb.type === "tool_call"
@@ -242,10 +263,6 @@ function _preserveSseOnlyBlocks(
       if (_SSE_ONLY_BLOCK_TYPES.has(ob.type)) {
         if (recovered && isFailureGuidanceBlock(ob)) continue;
         merged.push(ob);
-        // failure_guidance 鏈夊悗绔寔涔呭寲瀵瑰簲鐨?text block锛屾秷璐瑰畠浠ラ伩鍏嶉噸澶?
-        if (_SSE_ONLY_HAS_BACKEND_COUNTERPART.has(ob.type) && ni < newBackendBlocks.length) {
-          ni++;
-        }
       } else {
         if (ni < newBackendBlocks.length) {
           merged.push(newBackendBlocks[ni++]);
@@ -396,12 +413,6 @@ function _isToolResultError(content: string): boolean {
   }
 }
 
-function _extractFileAttachmentsFromContent(
-  rawContent: string,
-): { content: string; files: FileAttachment[] } {
-  return extractFileAttachmentsFromContent(rawContent);
-}
-
 function _resolveBackendMessageId(msg: Record<string, unknown>): string {
   const messageId =
     typeof msg.message_id === "string"
@@ -479,9 +490,10 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
       } else {
         content = JSON.stringify(msg.content ?? "");
       }
-      // 从内容中嵌入的上传通知提取文件附件，并去掉后台注入的技能目录。
-      const extracted = _extractFileAttachmentsFromContent(content);
-      const visible = stripInjectedUserPromptBlocks(extracted.content);
+      // 从内容中嵌入的上传通知提取文件附件，并去掉后台注入的技能目录
+      // 及自动注入的工作簿上下文。这个投影同时用于历史恢复和 SSE 回源。
+      const extracted = prepareUserMessageDisplay(content);
+      const visible = extracted.content;
       if (!visible && extracted.files.length === 0) continue;
       const userMsg: Message = {
         id: backendMessageId,
@@ -489,6 +501,12 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
         content: visible,
         timestamp: _resolveBackendTimestamp(msg),
       };
+      const dispatch = msg._dispatch as Record<string, unknown> | undefined;
+      if (dispatch && typeof dispatch.dispatch_id === "string") {
+        userMsg.dispatchId = dispatch.dispatch_id;
+        userMsg.dispatchMode = dispatch.dispatch_mode as import("@/lib/types").MessageDispatchMode;
+        userMsg.dispatchStatus = "applied";
+      }
       const action = msg._workbook_action;
       if (action && typeof action === "object" && typeof (action as Record<string, unknown>).operation === "string") {
         userMsg.workbookAction = action as import("@/lib/workbook-handoff").WorkbookActionContext;
@@ -1097,6 +1115,8 @@ interface ChatState {
     updater: (message: Extract<Message, { role: "assistant" }>) => Extract<Message, { role: "assistant" }>,
   ) => void;
   addUserMessage: (id: string, content: string, files?: FileAttachment[], workbookAction?: import("@/lib/workbook-handoff").WorkbookActionContext, workbookContext?: import("@/lib/workbook-context").WorkbookMessageContext) => void;
+  updateUserDispatch: (messageId: string, patch: { content?: string; files?: FileAttachment[]; dispatchId?: string; dispatchMode?: import("@/lib/types").MessageDispatchMode; dispatchStatus?: string }) => void;
+  updateUserDispatchById: (dispatchId: string, status: string) => void;
   addAssistantMessage: (id: string) => void;
   appendBlock: (messageId: string, block: AssistantBlock) => void;
   updateLastBlock: (messageId: string, updater: (block: AssistantBlock) => AssistantBlock) => void;
@@ -1171,8 +1191,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
   addUserMessage: (id, content, files, workbookAction, workbookContext) =>
     set((state) => {
+      if (state.messagesById[id]) return state;
       _localTurnVersion++;
-      const message: Message = { id, role: "user", content, files, timestamp: Date.now(), ...(workbookAction ? { workbookAction } : {}), ...(workbookContext ? { workbookContext } : {}) };
+      const prepared = prepareUserMessageDisplay(content);
+      const normalizedFiles = dedupeFileAttachments([...(files ?? []), ...prepared.files]);
+      const message: Message = {
+        id,
+        role: "user",
+        content: prepared.content,
+        ...(normalizedFiles.length > 0 ? { files: normalizedFiles } : {}),
+        timestamp: Date.now(),
+        ...(workbookAction ? { workbookAction } : {}),
+        ...(workbookContext ? { workbookContext } : {}),
+      };
       const newOrder = [...state.messageOrder, id];
       const newById = { ...state.messagesById, [id]: message };
       return {
@@ -1183,8 +1214,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loadedMessageTotal: state.loadedMessageTotal == null ? null : state.loadedMessageTotal + 1,
       };
     }),
+  updateUserDispatch: (messageId, patch) =>
+    set((state) => {
+      const current = state.messagesById[messageId];
+      if (!current || current.role !== "user") return {};
+      const next = { ...current, ...patch };
+      return _setMessagesSnapshot(state.messages.map((message) => message.id === messageId ? next : message));
+    }),
+  updateUserDispatchById: (dispatchId, status) =>
+    set((state) => {
+      if (!dispatchId) return {};
+      const nextMessages = state.messages.map((message) => (
+        message.role === "user" && message.dispatchId === dispatchId
+          ? { ...message, dispatchStatus: status }
+          : message
+      ));
+      return _setMessagesSnapshot(nextMessages);
+    }),
   addAssistantMessage: (id) =>
     set((state) => {
+      if (state.messagesById[id]) return state;
       const message: Message = { id, role: "assistant", blocks: [], timestamp: Date.now() };
       const newOrder = [...state.messageOrder, id];
       const newById = { ...state.messagesById, [id]: message };

@@ -93,7 +93,7 @@ class GlobalConfigStore:
 
     _PROFILE_COLUMNS = (
         "name, model, api_key, base_url, description, protocol, "
-        "thinking_mode, model_family, custom_extra_body, custom_extra_headers, "
+        "thinking_mode, service_tier, model_family, custom_extra_body, custom_extra_headers, "
         "canonical_model"
     )
 
@@ -121,6 +121,7 @@ class GlobalConfigStore:
         description: str = "",
         protocol: str = "auto",
         thinking_mode: str = "auto",
+        service_tier: str = "",
         model_family: str = "",
         custom_extra_body: str = "",
         custom_extra_headers: str = "",
@@ -132,11 +133,11 @@ class GlobalConfigStore:
             self._conn.execute(
                 "INSERT INTO model_profiles "
                 "(name, model, api_key, base_url, description, protocol, "
-                "thinking_mode, model_family, custom_extra_body, custom_extra_headers, "
+                "thinking_mode, service_tier, model_family, custom_extra_body, custom_extra_headers, "
                 "canonical_model, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (name, model, enc_api_key, base_url, _profile_description(description), protocol,
-                 thinking_mode, model_family, custom_extra_body, custom_extra_headers,
+                 thinking_mode, service_tier, model_family, custom_extra_body, custom_extra_headers,
                  canonical_model, now, now),
             )
             self._conn.commit()
@@ -156,6 +157,7 @@ class GlobalConfigStore:
         description: str | None = None,
         protocol: str | None = None,
         thinking_mode: str | None = None,
+        service_tier: str | None = None,
         model_family: str | None = None,
         custom_extra_body: str | None = None,
         custom_extra_headers: str | None = None,
@@ -188,6 +190,9 @@ class GlobalConfigStore:
         if thinking_mode is not None:
             sets.append("thinking_mode = ?")
             params.append(thinking_mode)
+        if service_tier is not None:
+            sets.append("service_tier = ?")
+            params.append(service_tier)
         if model_family is not None:
             sets.append("model_family = ?")
             params.append(model_family)

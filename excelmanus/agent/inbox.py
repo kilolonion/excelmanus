@@ -23,6 +23,7 @@ _SNAPSHOT_EXTRA_KEYS = (
     "chat_mode", "slash_command", "raw_args", "images", "prompt_kind",
     "resumed_from", "resume_task", "resume_interaction",
     "workbook_events", "workbook_event_count", "workbook_paths",
+    "dispatch_id", "client_message_id", "dispatch_mode", "raw_message",
 )
 
 
@@ -47,7 +48,7 @@ class InboxItem:
         }}
 
     def to_public_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "kind": self.kind,
             "content": self.content,
@@ -56,6 +57,11 @@ class InboxItem:
             "claimed_turn": self.claimed_turn,
             "claimed_step": self.claimed_step,
         }
+        for key in ("dispatch_id", "client_message_id", "dispatch_mode"):
+            value = self.extra.get(key)
+            if value:
+                result[key] = value
+        return result
 
 
 class Inbox:
@@ -77,6 +83,30 @@ class Inbox:
 
     def peek_turn(self) -> InboxItem | None:
         return self._next_turn[0] if self._next_turn else None
+
+    def find_item(self, item_id: str) -> InboxItem | None:
+        for item in (*self._next_turn, *self._next_step, *self._claimed):
+            if item.id == item_id:
+                return item
+        return None
+
+    def remove_pending(self, item_id: str) -> InboxItem | None:
+        for queue in (self._next_turn, self._next_step):
+            for index, item in enumerate(queue):
+                if item.id == item_id:
+                    return queue.pop(index)
+        return None
+
+    def restore_pending(self, item: InboxItem, position: int) -> None:
+        queue = self._next_turn if item.target == "next-turn" else self._next_step
+        queue.insert(position, item)
+
+    def prioritize_interrupt(self, item: InboxItem) -> None:
+        self._next_turn.remove(item)
+        position = 0
+        while position < len(self._next_turn) and self._next_turn[position].extra.get("dispatch_mode") == "interrupt":
+            position += 1
+        self._next_turn.insert(position, item)
 
     def push(
         self,
@@ -152,6 +182,29 @@ class Inbox:
         else:
             items, self._next_step = self._next_step, []
         return [item.content for item in items if str(item.content or "").strip()]
+
+    def promote_orphaned_steer(self) -> list[InboxItem]:
+        """将当前 turn 结束时未消费的 steer 转为下一轮输入。
+
+        steer 只能在 step 边界生效；如果 turn 恰好在边界前自然结束，
+        不能让它停留在 next-step 里永久等待。
+        """
+        promoted: list[InboxItem] = []
+        remaining: list[InboxItem] = []
+        for item in self._next_step:
+            if item.kind == "steer":
+                item.kind = "followup"
+                item.target = "next-turn"
+                promoted.append(item)
+            else:
+                remaining.append(item)
+        self._next_step = remaining
+        # Interrupts retain priority; late steers precede ordinary queued tasks.
+        position = 0
+        while position < len(self._next_turn) and self._next_turn[position].extra.get("dispatch_mode") == "interrupt":
+            position += 1
+        self._next_turn[position:position] = promoted
+        return promoted
 
     def reconstruct(self) -> dict[str, Any]:
         """序列化未认领队列（不含 extra 回调）。"""

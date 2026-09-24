@@ -1,128 +1,20 @@
-# 格式化、图表与打印模板
+# V2 格式与布局
 
-工作区 xlsx 的改写必须走 SDK（`format_spreadsheet` / `edit_spreadsheet` / `split_spreadsheet` / `manage_spreadsheet_objects`）。不要 `wb.save`，也不要指望 `Font(color="red")` 在 openpyxl 里识别中文/英文颜色名。
-
-## 格式化样式
+读取目标版本后，把格式、尺寸和对象放在同一个 ChangeSet。
 
 ```python
-from em import format_spreadsheet, inspect_spreadsheet
-
-version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
-
-format_spreadsheet(
-    file_path="file.xlsx",
-    expected_version=version,
-    operations=[{
-        "kind": "format",
-        "sheet": "Sheet1",
-        "range": "A1",
-        "font": {"name": "微软雅黑", "bold": True, "color": "红色", "size": 12},
-        "fill": {"color": "黄色", "type": "solid"},
-        "alignment": {"horizontal": "center", "vertical": "center", "wrap_text": True},
-        "number_format": "#,##0.00",
-    }, {
-        "kind": "size",
-        "sheet": "Sheet1",
-        "columns": {"A": 20},
-        "rows": {"1": 30},
-    }],
-)
+from em import observe_spreadsheet, apply_spreadsheet_changes, preview_spreadsheet
+seen = observe_spreadsheet(file_path="outputs/book.xlsx", sheet="Sheet1", mode="range", range="A1:D20",
+                           facets=["data", "presentation", "geometry"])
+changed = apply_spreadsheet_changes(file_path="outputs/book.xlsx", expected_version=seen["content_version"], operations=[
+    {"kind": "format", "sheet": "Sheet1", "range": "A1:D1", "font": {"bold": True}, "fill": {"color": "4472C4"}},
+    {"kind": "geometry.scale", "sheet": "Sheet1", "range": "A1:D20", "x": 1.25, "y": 0.8},
+])
+print(changed["receipt"], changed["observation"])
+preview_spreadsheet(file_path="outputs/book.xlsx", sheet="Sheet1", range="A1:D20", expected_version=changed["content_version"])
 ```
 
-颜色名只走 format helper（见 format_basic/color_palette.md），不要写 `Font(color="red")`。
-
-## 批量格式化（区域）
-
-```python
-from em import format_spreadsheet, inspect_spreadsheet
-
-version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
-
-format_spreadsheet(
-    file_path="file.xlsx",
-    expected_version=version,
-    operations=[{
-        "kind": "format",
-        "sheet": "Sheet1",
-        "range": "A1:J1",
-        "font": {"bold": True},
-        "fill": {"color": "4472C4", "type": "solid"},
-    }],
-)
-```
-
-## 合并单元格
-
-默认保留所有值；非锚点有值时先整理内容。只有明确要舍弃非锚点值时才传 allow_data_loss=true。
-
-```python
-from em import format_spreadsheet, inspect_spreadsheet
-
-version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
-
-format_spreadsheet(
-    file_path="file.xlsx",
-    expected_version=version,
-    operations=[{"kind": "merge", "sheet": "Sheet1", "range": "A1:D1"}],
-)
-```
-
-## 条件格式 / 打印 / 数据验证
-
-条件格式和数据验证已经可用，使用 `format_spreadsheet` 的 `operations`，先查询
-`format_spreadsheet.operations.rule` 的字段合同。不要用 openpyxl 改完再期望 SDK
-提交能带上。打印设置是否可用以当前能力目录为准，不把它与条件格式混为一谈。
-
-## 图表
-
-```python
-from em import manage_spreadsheet_objects, inspect_spreadsheet
-
-version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
-
-manage_spreadsheet_objects(
-    file_path="file.xlsx",
-    expected_version=version,
-    operations=[{
-        "kind": "chart",
-        "sheet": "Sheet1",
-        "chart_type": "bar",
-        "data_range": "B1:B10",
-        "categories_range": "A2:A10",
-        "target_cell": "E2",
-        "title": "销售额",
-    }],
-)
-```
-
-## 专业对齐（按列数据类型）
-
-```python
-from em import format_spreadsheet, inspect_spreadsheet
-
-version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
-
-format_spreadsheet(
-    file_path="file.xlsx",
-    expected_version=version,
-    operations=[
-        {"kind": "format", "sheet": "Sheet1", "range": "A1:D1", "alignment": {"horizontal": "center"}},
-        {"kind": "format", "sheet": "Sheet1", "range": "A2:B100", "alignment": {"horizontal": "left"}},
-        {"kind": "format", "sheet": "Sheet1", "range": "C2:D100", "alignment": {"horizontal": "right"}},
-    ],
-)
-```
-
-## auto_fit 收尾
-
-```python
-from em import format_spreadsheet, inspect_spreadsheet
-
-version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
-
-format_spreadsheet(
-    file_path="file.xlsx",
-    expected_version=version,
-    operations=[{"kind": "size", "sheet": "Sheet1", "auto_fit": True}],
-)
-```
+比例只是示例，按用户目标选择。固定尺寸用 `kind=size` 的 column_widths 和 row_heights，单位分别为字符、pt。
+按内容适配须显式指定 axis 与 range；不得用 auto_fit 覆盖已指定的比例。
+条件格式规则查询 `apply_spreadsheet_changes.operations.conditional_format.rule`；验证规则查询 `.operations.data_validation.rule`。
+循环写入串行。工具成功是提交状态，视觉覆盖与未支持项以预览和回读的证据为准。

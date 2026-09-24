@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  dedupeFileAttachments,
   extractFileAttachmentsFromContent,
+  fileAttachmentMarker,
   formatUploadNotice,
+  prepareUserMessageDisplay,
   stripImageSentPlaceholder,
 } from "@/lib/upload-notice";
 
@@ -53,5 +56,26 @@ describe("stripImageSentPlaceholder", () => {
     expect(
       stripImageSentPlaceholder("分析这张图\n[图片 #1 已在之前的对话中发送]"),
     ).toBe("分析这张图");
+  });
+});
+
+describe("prepareUserMessageDisplay", () => {
+  it("removes transport notices and generated workbook context from the bubble", () => {
+    const result = prepareUserMessageDisplay(
+      "[已上传文件: ./uploads/abcd1234_收款收据.xlsx]\n\n@file:uploads/收款收据.xlsx\n当前工作表：\"收款收据\"\n\n帮我把表格拉宽一点",
+    );
+    expect(result.content).toBe("帮我把表格拉宽一点");
+    expect(result.files).toEqual([{ filename: "收款收据.xlsx", path: "./uploads/abcd1234_收款收据.xlsx", size: 0 }]);
+    expect(prepareUserMessageDisplay("收款收据.xlsx\n当前工作表：\"收款收据\"\n\n帮我把表格拉宽一点").content)
+      .toBe("帮我把表格拉宽一点");
+  });
+
+  it("dedupes attachment records by durable path instead of array position", () => {
+    const files = [
+      { filename: "sales.xlsx", path: "./uploads/abcd1234_sales.xlsx", size: 0 },
+      { filename: "sales.xlsx", path: "uploads/abcd1234_sales.xlsx", size: 42 },
+    ];
+    expect(dedupeFileAttachments(files)).toEqual([files[1]]);
+    expect(fileAttachmentMarker(files[0])).toBe(fileAttachmentMarker(files[1]));
   });
 });

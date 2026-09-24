@@ -41,7 +41,7 @@ async def test_run_full_probe_stage_callback_and_timeouts() -> None:
             source="manual_probe",
         )
 
-    m_health.assert_called_once_with(client, "test-model", timeout=1.0)
+    m_health.assert_called_once_with(client, "test-model", timeout=1.0, retries=1)
     m_tool.assert_called_once_with(client, "test-model", timeout=2.0)
     m_vision.assert_called_once_with(client, "test-model", timeout=3.0)
     m_thinking.assert_called_once_with(
@@ -51,6 +51,7 @@ async def test_run_full_probe_stage_callback_and_timeouts() -> None:
         timeout=4.0,
         strategy_timeout=0.5,
         thinking_mode="auto",
+        strategy_model="",
     )
 
     assert ("health", "running") in stage_events
@@ -267,7 +268,7 @@ async def test_thinking_budget_exhaustion() -> None:
             ("s4", {}, "d"),
         ],
     ), patch("excelmanus.model_probe._try_thinking_stream", new=AsyncMock(side_effect=_slow_try)):
-        ok, _err, _t = await _probe_openai_thinking(
+        ok, err, _t = await _probe_openai_thinking(
             client=MagicMock(),
             model="test",
             messages=[{"role": "user", "content": "hi"}],
@@ -276,7 +277,8 @@ async def test_thinking_budget_exhaustion() -> None:
             base_url="https://api.openai.com/v1",
         )
 
-    assert ok is False
+    assert ok is None
+    assert "budget exhausted" in err
     # Should stop before trying all 4 strategies due to budget exhaustion
     assert len(calls) <= 2
 

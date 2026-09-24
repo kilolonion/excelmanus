@@ -1,5 +1,5 @@
 import { consumeSSE, SSEError } from "./sse";
-import { apiPost, buildApiUrl } from "./api";
+import { apiPost, buildApiUrl, dispatchChatMessage } from "./api";
 import { mapWithConcurrency } from "./concurrency";
 import { uuid } from "@/lib/utils";
 import { isVisionImageFile, isVisionImageUpload } from "@/lib/file-kind";
@@ -9,7 +9,7 @@ import { useUIStore } from "@/stores/ui-store";
 import { useJevStore } from "@/stores/jev-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem, AttachedFile, FileAttachment } from "@/lib/types";
-import { formatUploadNotice } from "./upload-notice";
+import { dedupeFileAttachments, fileAttachmentMarker, formatUploadNotice } from "./upload-notice";
 import {
   dispatchSSEEvent,
   preDispatch,
@@ -28,6 +28,8 @@ import { handleWorkbookMessageSent } from "./workbook-chat-navigation";
 import { acknowledgedSelectionVersion } from "./excel-cell-edit";
 import { normalizeRelativePath } from "./workspace-file-ref";
 import { prepareWorkbookMergeSources } from "./workbook-group-actions";
+import type { MessageDispatchMode } from "./types";
+import { useDispatchStore } from "@/stores/dispatch-store";
 
 type ChatImagePayload = {
   media_type: string;
@@ -315,14 +317,15 @@ function applyThinkingDelta(messageId: string, thinkingDelta: string) {
 }
 
 function makeDeltaBatcher(messageId: string, controller: AbortController) {
+  let target = messageId;
   const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
     if (useChatStore.getState().abortController !== controller) return;
-    if (textDelta.length > 0) applyTextDelta(messageId, textDelta);
-    if (thinkingDelta.length > 0) applyThinkingDelta(messageId, thinkingDelta);
+    if (textDelta.length > 0) applyTextDelta(target, textDelta);
+    if (thinkingDelta.length > 0) applyThinkingDelta(target, thinkingDelta);
   });
   // Publish already received text before stopGeneration releases ownership.
   controller.signal.addEventListener("abort", () => batcher.dispose(), { once: true });
-  return batcher;
+  return Object.assign(batcher, { setTarget: (id: string) => { batcher.flush(); target = id; } });
 }
 
 function scheduleSessionResync(sessionId: string, delayMs: number) {
@@ -373,6 +376,44 @@ export function resumeAfterInteraction(sessionId: string, response: { resume_req
 }
 
 let preparingSubmission = false;
+const pendingDispatches = new Map<string, Parameters<typeof dispatchChatMessage>[1]>();
+const dispatchKey = (request: PreparedWorkbookRequest, files: AttachedFile[] | undefined, mode: MessageDispatchMode) =>
+  JSON.stringify([request.sessionId, request, mode, files?.map((file) => file.id)]);
+
+async function dispatchDuringStream(request: PreparedWorkbookRequest, files: AttachedFile[] | undefined, mode: MessageDispatchMode) {
+  const sid = request.sessionId;
+  if (!sid) throw new Error("请等待会话初始化完成");
+  const key = dispatchKey(request, files, mode);
+  let body = pendingDispatches.get(key);
+  if (!body) {
+    const images: ChatImagePayload[] = [];
+    const notices: string[] = [];
+    const noticeMarkers = new Set<string>();
+    for (const file of files ?? []) {
+      if (file.status !== "success") throw new Error("请先完成附件上传");
+      if (isVisionImageUpload(file.file)) {
+        images.push(await _admitChatImage(file.cachedBase64 ?? await _fileToBase64(file.file), file.file.type || "image/png", file.file.name));
+      }
+      if (file.uploadResult && !file.fromWorkspace) {
+        const marker = fileAttachmentMarker(file.uploadResult);
+        if (!noticeMarkers.has(marker)) {
+          noticeMarkers.add(marker);
+          notices.push(formatUploadNotice(isVisionImageUpload(file.file) ? "image" : "file", file.uploadResult.path));
+        }
+      }
+    }
+    body = { message: [...notices, request.text].join("\n\n"), mode, client_message_id: uuid(),
+      images, chat_mode: request.chatMode ?? useUIStore.getState().chatMode,
+      sheet_context: request.sheetContext, sheet_contexts: request.sheetContexts,
+      workbook_action: request.workbookAction };
+    pendingDispatches.set(key, body);
+  }
+  assertWorkbookRequestCurrent(request);
+  const result = await dispatchChatMessage(sid, body);
+  useDispatchStore.getState().upsert(sid, result);
+  pendingDispatches.delete(key);
+  return true;
+}
 
 function reportWorkbookSubmissionError(error: unknown, sessionId: string) {
   if (getActiveSessionId() !== sessionId) return;
@@ -437,15 +478,18 @@ function startMessageStream(...args: Parameters<typeof streamMessage>) {
 
 /** Resolves once accepted; callers keep their draft when preflight rejects. */
 export async function sendMessage(text: string, files?: AttachedFile[], sessionId?: string | null, displayText?: string,
-  prepared?: PreparedWorkbookRequest): Promise<boolean> {
-  if (useChatStore.getState().isStreaming || preparingSubmission || (!text.trim() && !files?.length)) return false;
+  prepared?: PreparedWorkbookRequest, dispatchMode?: MessageDispatchMode): Promise<boolean> {
+  if (preparingSubmission || (!text.trim() && !files?.length)) return false;
   const sid = sessionId || getActiveSessionId();
   if (sid !== getActiveSessionId()) throw new Error("已切换对话，请确认后重新发送");
   if (files?.some((file) => file.workspaceKey && file.workspaceKey !== workspaceKeyForSessionId(sid))) {
     throw new Error("附件属于另一个工作区，请在当前工作区重新选择");
   }
   if (useUIStore.getState().configReady !== true || text.trimStart().startsWith("/")) {
-    startMessageStream(text, files, sid, displayText);
+    if (useChatStore.getState().isStreaming || useChatStore.getState().abortController) {
+      throw new Error("当前任务执行中，请通过对应按钮操作控制命令");
+    }
+    startMessageStream(text, files, sid, displayText, undefined, undefined, undefined, undefined, dispatchMode);
     return true;
   }
   preparingSubmission = true;
@@ -461,9 +505,12 @@ export async function sendMessage(text: string, files?: AttachedFile[], sessionI
       }
     }
     assertWorkbookRequestCurrent(request);
-    if (useChatStore.getState().isStreaming) return false;
+    const mode = dispatchMode ?? useUIStore.getState().messageDispatchDefault;
+    if (useChatStore.getState().isStreaming || useChatStore.getState().abortController || pendingDispatches.has(dispatchKey(request, files, mode))) {
+      return await dispatchDuringStream(request, files, mode);
+    }
     if (request.chatMode) useUIStore.getState().setChatMode(request.chatMode);
-    startMessageStream(request.text, files, sid, displayText, request.sheetContext, request.workbookAction, request.chatMode, request.sheetContexts);
+    startMessageStream(request.text, files, sid, displayText, request.sheetContext, request.workbookAction, request.chatMode, request.sheetContexts, dispatchMode);
     return true;
   } finally {
     preparingSubmission = false;
@@ -479,6 +526,7 @@ async function streamMessage(
   workbookAction?: PreparedWorkbookRequest["workbookAction"],
   requestedChatMode = useUIStore.getState().chatMode,
   sheetContexts?: WorkbookSheetContext[],
+  dispatchMode?: MessageDispatchMode,
 ) {
   const store = useChatStore.getState();
   const sessionStore = useSessionStore.getState();
@@ -545,6 +593,7 @@ async function streamMessage(
     }
   }
 
+  const uniqueFileUploadResults = dedupeFileAttachments(fileUploadResults);
   const effectiveSessionId = sessionId || getActiveSessionId();
   handleWorkbookMessageSent(effectiveSessionId);
   if (!text.trimStart().startsWith("/")) {
@@ -564,7 +613,7 @@ async function streamMessage(
   store.addUserMessage(
     userMsgId,
     displayText ?? text,
-    fileUploadResults.length > 0 ? fileUploadResults : undefined,
+    uniqueFileUploadResults.length > 0 ? uniqueFileUploadResults : undefined,
     workbookAction,
     sheetContexts && sheetContexts.length > 1 ? { sheet_context: sheetContext, sheet_contexts: sheetContexts } : undefined,
   );
@@ -578,6 +627,7 @@ async function streamMessage(
   // 鏂囦欢宸茬敱 ChatInput 棰勫厛涓婁紶銆傝繖閲屾敹闆嗚矾寰勫拰 base64 鏁版嵁鐢ㄤ簬 SSE 杞借嵎銆?
   const uploadedDocPaths: string[] = [];
   const uploadedImagePaths: string[] = [];
+  const uploadedPathMarkers = new Set<string>();
   const imageAttachments: ChatImagePayload[] = [];
   if (files && files.length > 0) {
     const successfulFiles = files.filter(
@@ -588,8 +638,12 @@ async function streamMessage(
     for (const af of successfulFiles) {
       const isImage = isVisionImageUpload(af.file);
       if (af.uploadResult && !af.fromWorkspace) {
-        if (isImage) uploadedImagePaths.push(af.uploadResult.path);
-        else uploadedDocPaths.push(af.uploadResult.path);
+        const marker = fileAttachmentMarker(af.uploadResult);
+        if (!uploadedPathMarkers.has(marker)) {
+          uploadedPathMarkers.add(marker);
+          if (isImage) uploadedImagePaths.push(af.uploadResult.path);
+          else uploadedDocPaths.push(af.uploadResult.path);
+        }
       }
     }
 
@@ -713,6 +767,8 @@ async function streamMessage(
         ...(sheetContexts?.length ? { sheet_contexts: sheetContexts } : {}),
         ...(workbookAction ? { workbook_action: workbookAction } : {}),
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
+        client_message_id: userMsgId,
+        dispatch_mode: dispatchMode ?? useUIStore.getState().messageDispatchDefault,
       },
       (event) => {
         if (abortController.signal.aborted || S().abortController !== abortController) return;
@@ -740,7 +796,7 @@ async function streamMessage(
                 iterations: (data.iterations as number) || 0,
               };
             } else {
-              S().upsertBlockByType(assistantMsgId, "token_stats", {
+              S().upsertBlockByType(sseCtx.assistantMsgId, "token_stats", {
                 type: "token_stats",
                 promptTokens: (data.prompt_tokens as number) || 0,
                 completionTokens: (data.completion_tokens as number) || 0,
@@ -806,20 +862,22 @@ async function streamMessage(
 export async function sendContinuation(
   text: string,
   sessionId?: string | null,
+  options?: { promptKind?: string },
 ) {
   const store = useChatStore.getState();
   if (store.isStreaming) return;
 
   const messages = store.messages;
-  let assistantMsgId: string | null = null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") {
-      assistantMsgId = messages[i].id;
-      break;
-    }
-  }
-  if (!assistantMsgId) {
-    return sendMessage(text, undefined, sessionId);
+  const last = messages[messages.length - 1];
+  let assistantMsgId: string;
+  if (last && last.role === "assistant") {
+    // 尾部是 assistant（失败卡/中断的工具调用）：复用它接续输出，不断开绿线。
+    assistantMsgId = last.id;
+  } else {
+    // 尾部是 user 消息或空会话（发出后未收到回复）：新建 assistant 气泡。
+    // 不回写更早的 assistant 消息，否则回复会出现在那条 user 消息之前。
+    assistantMsgId = uuid();
+    store.addAssistantMessage(assistantMsgId);
   }
 
   const effectiveSessionId = sessionId || getActiveSessionId();
@@ -865,7 +923,12 @@ export async function sendContinuation(
   try {
     await consumeSSE(
       buildApiUrl("/chat/stream", { direct: true }),
-      { message: text, session_id: effectiveSessionId, chat_mode: useUIStore.getState().chatMode },
+      {
+        message: text,
+        session_id: effectiveSessionId,
+        chat_mode: useUIStore.getState().chatMode,
+        ...(options?.promptKind ? { prompt_kind: options.promptKind } : {}),
+      },
       (event) => {
         if (abortController.signal.aborted || S().abortController !== abortController) return;
         if ((event as SSEEvent).event !== "heartbeat") _resetContStall();
@@ -1129,10 +1192,8 @@ export async function retryAssistantMessage(
   // 濡傛灉闇€瑕佸垏鎹㈡ā鍨嬶紝鍏堝垏鎹?
   if (switchToModel) {
     try {
-      const { apiPut } = await import("./api");
-      await apiPut("/models/active", { name: switchToModel });
-      useUIStore.getState().setCurrentModel(switchToModel);
-      useUIStore.getState().bumpModelProfiles();
+      const { activateModelProfile } = await import("./model-config-api");
+      await activateModelProfile(switchToModel);
     } catch (err) {
       console.error("Model switch failed:", err);
       return;
@@ -1262,13 +1323,8 @@ export async function subscribeToSession(sessionId: string) {
   if (_activeSubscribeSessionId === sessionId) return;
 
   const messages = store.messages;
-  let assistantMsgId: string | null = null;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") {
-      assistantMsgId = messages[i].id;
-      break;
-    }
-  }
+  const tail = messages.at(-1);
+  let assistantMsgId: string | null = tail?.role === "assistant" ? tail.id : null;
   if (!assistantMsgId) {
     assistantMsgId = uuid();
     store.addAssistantMessage(assistantMsgId);
@@ -1355,7 +1411,7 @@ export async function subscribeToSession(sessionId: string) {
             S().pendingApproval !== null || S().pendingQuestion !== null;
           const totalTokens = (data.total_tokens as number) || 0;
           if (totalTokens > 0 && !hasPendingInteraction) {
-            S().upsertBlockByType(msgId, "token_stats", {
+            S().upsertBlockByType(sseCtx.assistantMsgId, "token_stats", {
               type: "token_stats",
               promptTokens: (data.prompt_tokens as number) || 0,
               completionTokens: (data.completion_tokens as number) || 0,

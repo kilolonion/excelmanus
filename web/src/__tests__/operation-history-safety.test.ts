@@ -8,7 +8,7 @@ vi.mock("@/lib/api", () => ({ fetchOperations: vi.fn(), undoOperation: vi.fn(), 
 vi.mock("@/lib/excel-cell-edit", () => ({ flushWorkbookEdits: vi.fn(), hasPendingWorkbookEdits: vi.fn(), isWorkbookEditPaused: vi.fn() }));
 
 const operation: OperationRecord = {
-  approval_id: "op1", tool_name: "edit_spreadsheet", arguments_summary: {}, session_turn: 1,
+  approval_id: "op1", tool_name: "apply_spreadsheet_changes", arguments_summary: {}, session_turn: 1,
   created_at_utc: "2026-09-21T00:00:00Z", applied_at_utc: "2026-09-21T00:00:01Z",
   execution_status: "success", undoable: true, result_preview: "done",
   changes: [{ path: "book.xlsx", change_type: "modified", before_size: 1, after_size: 2, is_binary: true }],

@@ -42,6 +42,7 @@ class EventType(Enum):
     MUTATION = "mutation"
     PIPELINE_PROGRESS = "pipeline_progress"
     MEMORY_EXTRACTED = "memory_extracted"
+    COMPACTION = "compaction"
     FILE_DOWNLOAD = "file_download"
     PLAN_CREATED = "plan_created"
     VERIFICATION_REPORT = "verification_report"  # 仅用于读取历史，不再产生
@@ -61,6 +62,13 @@ class EventType(Enum):
     STEP_START = "step_start"
     STEP_END = "step_end"
     INBOX_CLAIMED = "inbox_claimed"
+    DISPATCH_ACCEPTED = "dispatch_accepted"
+    DISPATCH_QUEUED = "dispatch_queued"
+    DISPATCH_APPLYING = "dispatch_applying"
+    DISPATCH_APPLIED = "dispatch_applied"
+    DISPATCH_FAILED = "dispatch_failed"
+    DISPATCH_STATE = "dispatch_state"
+    TURN_REPLY = "turn_reply"
     UI_HINT = "ui_hint"  # 瞬态建议：不进消息块、不回放
     JEV_TRACE = "jev_trace"  # System One 决策：开启环节发出；不进消息块、默认不回放
 
@@ -228,6 +236,12 @@ class ToolCallEvent:
     parent_span_id: str = ""
     request_id: str = ""
     inbox_claimed: List[Dict[str, Any]] = field(default_factory=list)
+    dispatch_id: str = ""
+    client_message_id: str = ""
+    dispatch_mode: str = ""
+    dispatch_status: str = ""
+    dispatch_error: str = ""
+    dispatch: Dict[str, Any] = field(default_factory=dict)
     # ui_hint：回合末 UI 面建议（瞬态，不进消息块）
     ui_hint_surface: str = ""
     ui_hint_file_path: str = ""
@@ -236,6 +250,8 @@ class ToolCallEvent:
     ui_hint_suppress_auto_open: bool = False
     # jev_trace：有界决策卡（不含密钥 / 完整 state）
     jev_trace: Dict[str, Any] = field(default_factory=dict)
+    # compaction：上下文交接生命周期（可回放，非模型上下文）
+    compaction: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

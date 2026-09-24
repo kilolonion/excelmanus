@@ -2,8 +2,8 @@
 
 import { useMemo, useState } from "react";
 import {
-  Plus, Trash2, Pencil, Loader2, Zap, AlertTriangle, X, Bot, Database,
-  ExternalLink, Crown, Lock, Check, ChevronRight,
+  Plus, Trash2, Pencil, Loader2, Zap, Activity, AlertTriangle, X, Bot, Database,
+  ExternalLink, Crown, Lock, Check, ChevronDown, ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { formatModelIdForDisplay } from "@/lib/model-display";
@@ -13,8 +13,8 @@ import { ProviderLogo, ProviderAvatar } from "./ProviderLogo";
 import { CapabilityBadges } from "./capability-widgets";
 import {
   isModelUnhealthy, getHealthError, inferProfileProvider, getProviderBrandColor,
-  withAlpha, EMPTY_PROFILE_DRAFT, groupProfilesByProvider, getProfileProviderId,
-  isSubscriptionProfile, isProfileConnected, pickDefaultProfile, profileToDraft,
+  withAlpha, groupProfilesByProvider, getProfileProviderId, formatProviderModelLabel,
+  isSubscriptionProfile, isProfileConnected,
 } from "./helpers";
 import type { ProviderGroup } from "./helpers";
 import type { ModelCapabilities, ProfileEntry } from "./types";
@@ -26,37 +26,34 @@ function providerStatusText(group: ProviderGroup, unhealthy: boolean): string {
   const connectedCount = group.profiles.filter(isProfileConnected).length;
   if (unhealthy) return "连接失败";
   if (connectedCount === 0) return "需要填写 API Key";
-  return `已连接 · ${group.profiles.length} 个可用模型`;
+  return `已配置 · ${group.profiles.length} 个模型`;
 }
 
 export function ProviderSection() {
   const {
     config,
+    profileBusy,
+    deletingProfile,
     newProfile,
-    setNewProfile,
     editingProfile,
-    setEditingProfile,
     profileError,
     setProfileError,
     highlightProfile,
     profileDraft,
-    setProfileDraft,
     capsMap,
     probingKey,
     activatingProfile,
+    togglingFastProfile,
     applyPresetToProfileDraft,
     handleProbeOne,
     handleActivateProfile,
+    handleToggleFastMode,
     handleDeleteProfile,
     profileCardRefs,
-    setRemoteModelError,
-    setRemoteModelHint,
-    setTestResult,
     siblingSourceName,
-    setSiblingSourceName,
+    beginNewProfile,
+    beginEditProfile,
     beginAddSiblingProfile,
-    setRemoteModels,
-    setModelDropdownTarget,
   } = useAdminModel();
 
   const groups = useMemo(
@@ -64,7 +61,9 @@ export function ProviderSection() {
     [config?.profiles],
   );
 
+  const profiles = config?.profiles || [];
   const activeName = config?.active || null;
+  const activeProfile = profiles.find((profile) => profile.name === activeName);
   const defaultGroupId = useMemo(() => {
     const active = (config?.profiles || []).find((p) => p.name === activeName);
     return active ? getProfileProviderId(active) : null;
@@ -78,39 +77,17 @@ export function ProviderSection() {
 
   const beginAdd = () => {
     setSectionOpen(true);
-    setNewProfile(true);
-    setEditingProfile(null);
-    setSiblingSourceName(null);
-    setProfileDraft({ ...EMPTY_PROFILE_DRAFT });
-    setProfileError(null);
-    setRemoteModelError(null);
-    setRemoteModelHint(null);
-    setRemoteModels([]);
-    setModelDropdownTarget(null);
-    setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    beginNewProfile();
   };
 
   const beginEdit = (profile: ProfileEntry) => {
-    if (isSubscriptionProfile(profile)) return;
-    setEditingProfile(profile.name);
-    setNewProfile(false);
-    setSiblingSourceName(null);
-    setProfileDraft(profileToDraft(profile));
-    setRemoteModelError(null);
-    setRemoteModelHint(null);
-    setRemoteModels([]);
-    setModelDropdownTarget(null);
-    setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    if (!isSubscriptionProfile(profile)) beginEditProfile(profile);
   };
 
   const handleSelectProvider = (group: ProviderGroup) => {
     const wasSelected = selectedId === group.id && expandedProviderId === group.id;
     setSelectedProviderId(group.id);
     setExpandedProviderId(wasSelected ? null : group.id);
-    const alreadyDefault = group.profiles.some((p) => p.name === activeName);
-    if (alreadyDefault) return;
-    const next = pickDefaultProfile(group, activeName);
-    if (next) void handleActivateProfile(next);
   };
 
   return (
@@ -128,13 +105,50 @@ export function ProviderSection() {
           className="h-7 text-[11px] gap-1 shrink-0"
           style={{ color: "var(--em-primary)", borderColor: "color-mix(in srgb, var(--em-primary) 35%, transparent)" }}
           onClick={beginAdd}
+          disabled={profileBusy}
         >
           <Plus className="h-3 w-3" />
           添加提供商
         </Button>
       }
     >
-      <div className="px-3 pb-3 space-y-2">
+      <fieldset disabled={profileBusy} className="min-w-0">
+      <div className="p-3 space-y-2">
+        <div className="em-model-connection-summary">
+          <div className="em-model-connection-stat">
+            <span className="em-model-connection-stat-icon"><ServerIcon /></span>
+            <span><strong>{groups.length}</strong><small>个供应商</small></span>
+          </div>
+          <div className="em-model-connection-stat">
+            <span className="em-model-connection-stat-icon"><Check className="h-3.5 w-3.5" /></span>
+            <span><strong>{(config?.profiles || []).filter(isProfileConnected).length}</strong><small>个已配置模型</small></span>
+          </div>
+          <div className="em-model-connection-stat em-model-connection-stat-wide em-model-connection-picker">
+            <span className="em-model-connection-status-dot" />
+            <span className="em-model-connection-stat-copy">
+              <strong>主模型</strong>
+              <small>{activeProfile ? formatModelIdForDisplay(activeProfile.model) : profiles.length ? "点击选择模型" : "请先添加模型"}</small>
+            </span>
+            {activatingProfile ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+            <select
+              aria-label="快捷切换主模型"
+              title="快捷切换主模型"
+              value={activeProfile?.name || ""}
+              disabled={profileBusy || profiles.length === 0}
+              onChange={(event) => {
+                const profile = profiles.find((item) => item.name === event.target.value);
+                if (profile && profile.name !== activeName) void handleActivateProfile(profile);
+              }}
+            >
+              {!activeProfile && <option value="" disabled>请选择主模型</option>}
+              {profiles.map((profile) => (
+                <option key={profile.name} value={profile.name}>
+                  {formatProviderModelLabel(profile)} · {profile.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
         <button type="button" onClick={() => requestModelSubTab("subscription")} className="flex w-full items-center gap-3 rounded-xl border border-primary/20 bg-primary/5 p-3 text-left transition-colors hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <Crown className="size-4 shrink-0 text-primary" />
           <span className="min-w-0 flex-1">
@@ -195,10 +209,7 @@ export function ProviderSection() {
                     ? "border-[var(--em-primary)]/60 bg-[var(--em-primary)]/5 shadow-[0_0_0_1px_var(--em-primary-alpha-15)]"
                     : "border-dashed border-border bg-background hover:border-[var(--em-primary)]/40 hover:bg-[var(--em-primary)]/5"
                 }`}
-                onClick={() => {
-                  setProfileDraft({ ...EMPTY_PROFILE_DRAFT });
-                  setProfileError(null);
-                }}
+                onClick={beginNewProfile}
               >
                 <div className="flex items-center gap-1 sm:gap-1.5">
                   <span className="inline-flex h-4 w-4 items-center justify-center rounded-md border border-dashed text-[9px] text-muted-foreground">+</span>
@@ -323,12 +334,15 @@ export function ProviderSection() {
                           profile={p}
                           isActive={p.name === activeName}
                           isHighlighted={highlightProfile === p.name}
+                          deleting={deletingProfile === p.name}
                           onEdit={() => beginEdit(p)}
                           rowRef={(el) => { profileCardRefs.current[p.name] = el; }}
                           caps={capsMap[p.name]}
                           probing={probingKey === p.name}
                           activating={activatingProfile === p.name}
+                          togglingFast={togglingFastProfile === p.name}
                           onActivate={() => handleActivateProfile(p)}
+                          onToggleFast={() => handleToggleFastMode(p)}
                           onProbe={() => handleProbeOne(p.name)}
                           onDelete={() => handleDeleteProfile(p.name)}
                         />
@@ -338,6 +352,7 @@ export function ProviderSection() {
                           type="button"
                           className="w-full rounded-lg border border-dashed border-border/80 px-2.5 py-2 text-xs text-muted-foreground hover:text-foreground hover:border-[var(--em-primary)]/40 hover:bg-[var(--em-primary)]/5 transition-colors flex items-center gap-2"
                           onClick={() => beginAddSiblingProfile(siblingSource)}
+                          disabled={profileBusy}
                         >
                           <Plus className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--em-primary)" }} />
                           <span className="font-medium text-foreground/80">添加模型</span>
@@ -361,8 +376,13 @@ export function ProviderSection() {
             )}
         </div>
       </div>
+      </fieldset>
     </SettingsFoldSection>
   );
+}
+
+function ServerIcon() {
+  return <Database className="h-3.5 w-3.5" />;
 }
 
 function ProviderMemberRow({
@@ -372,8 +392,11 @@ function ProviderMemberRow({
   caps,
   probing,
   activating,
+  togglingFast,
+  deleting,
   onEdit,
   onActivate,
+  onToggleFast,
   onProbe,
   onDelete,
   rowRef,
@@ -384,14 +407,18 @@ function ProviderMemberRow({
   caps?: ModelCapabilities;
   probing: boolean;
   activating: boolean;
+  togglingFast: boolean;
+  deleting: boolean;
   onEdit: () => void;
   onActivate: () => void;
+  onToggleFast: () => void;
   onProbe: () => void;
   onDelete: () => void;
   rowRef: (el: HTMLDivElement | null) => void;
 }) {
   const isUnhealthy = isModelUnhealthy(caps);
   const codex = isSubscriptionProfile(profile);
+  const fastEnabled = profile.service_tier === "fast";
   const providerId = inferProfileProvider(profile);
   const providerColor = getProviderBrandColor(providerId);
 
@@ -424,6 +451,12 @@ function ProviderMemberRow({
                 当前
               </span>
             )}
+            {fastEnabled && !codex && (
+              <span className="inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold bg-[var(--em-primary-alpha-12)] text-[var(--em-primary)]" title="此模型使用 Fast 模式">
+                <Zap className="h-2.5 w-2.5" fill="currentColor" />
+                Fast
+              </span>
+            )}
           </div>
           <p className="text-[10px] font-mono text-muted-foreground truncate">
             {formatModelIdForDisplay(profile.model)}
@@ -454,13 +487,33 @@ function ProviderMemberRow({
               {activating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Crown className="h-3.5 w-3.5" />}
             </button>
           )}
+          {!codex && (
+            <button
+              type="button"
+              title={togglingFast ? "正在保存快速模式…" : fastEnabled ? "快速模式已开启，点击关闭" : "点击开启快速模式"}
+              aria-label="快速模式"
+              aria-pressed={fastEnabled}
+              aria-busy={togglingFast}
+              className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 ${
+                fastEnabled
+                  ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-12)] hover:bg-[var(--em-primary-alpha-20)]"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+              }`}
+              onClick={onToggleFast}
+              disabled={togglingFast}
+            >
+              {togglingFast ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" fill={fastEnabled ? "currentColor" : "none"} />}
+            </button>
+          )}
           <button
+            type="button"
             title="探测能力"
+            aria-label="探测能力"
             className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 disabled:opacity-40"
             onClick={onProbe}
             disabled={probing}
           >
-            {probing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+            {probing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
           </button>
           {!codex && (
             <button
@@ -472,11 +525,11 @@ function ProviderMemberRow({
             </button>
           )}
           <button
-            title="删除"
+            title={deleting ? "删除中" : "删除"}
             className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10"
             onClick={onDelete}
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
           </button>
         </div>
       </div>

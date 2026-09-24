@@ -3,12 +3,11 @@ import {
   fileCachePrefix,
   matchesFileCacheKey,
   normalizeExcelPath,
-  snapshotCacheKey,
   viewCacheKey,
   fetchWorkbookView,
   invalidateWorkbookViewCache,
 } from "@/lib/api";
-import { demoWorkbookView } from "@/lib/workbook-view";
+import { demoWorkbookObservation } from "@/lib/workbook-observation";
 
 describe("workbook cache identity", () => {
   it("normalizes Windows upload paths without losing drive or UNC roots", () => {
@@ -19,14 +18,14 @@ describe("workbook cache identity", () => {
   });
 
   it("invalidates Windows and POSIX spellings of the same workbook together", () => {
-    const key = snapshotCacheKey(".\\uploads\\report.xlsx", { workspaceKey: "id:ws-a" });
+    const key = viewCacheKey({ relative: ".\\uploads\\report.xlsx", workspaceKey: "id:ws-a" });
     expect(matchesFileCacheKey(key, { workspaceKey: "id:ws-a", relative: "uploads/report.xlsx" })).toBe(true);
   });
   it("uses the same workspaceKey|path prefix for snapshot and view keys", () => {
     const prefix = fileCachePrefix("id:ws-a", "./report.xlsx");
     expect(prefix).toBe("id:ws-a|./report.xlsx");
-    expect(snapshotCacheKey("./report.xlsx", { workspaceKey: "id:ws-a", maxRows: 500 }))
-      .toBe(`${prefix}|500|1`);
+    expect(viewCacheKey({ relative: "./report.xlsx", workspaceKey: "id:ws-a" }))
+      .toBe(`${prefix}|unknown|*|A1:AX200|1`);
     expect(viewCacheKey({
       workspaceKey: "id:ws-a",
       relative: "report.xlsx",
@@ -35,7 +34,7 @@ describe("workbook cache identity", () => {
   });
 
   it("invalidates snapshot keys by write identity, not path-only prefix", () => {
-    const key = snapshotCacheKey("report.xlsx", { workspaceKey: "id:ws-a", maxRows: 500 });
+    const key = viewCacheKey({ relative: "report.xlsx", workspaceKey: "id:ws-a" });
     expect(key.startsWith(`${normalizeExcelPath("report.xlsx")}|`)).toBe(false);
     expect(matchesFileCacheKey(key, { workspaceKey: "id:ws-a", relative: "./report.xlsx" })).toBe(true);
     expect(matchesFileCacheKey(key, { workspaceKey: "id:ws-b", relative: "./report.xlsx" })).toBe(false);
@@ -43,7 +42,7 @@ describe("workbook cache identity", () => {
 
   it("invalidates view keys with the same identity as snapshot", () => {
     const identity = { workspaceKey: "id:ws-a", relative: "./report.xlsx" };
-    const snapshot = snapshotCacheKey(identity.relative, { workspaceKey: identity.workspaceKey });
+    const snapshot = viewCacheKey({ relative: identity.relative, workspaceKey: identity.workspaceKey });
     const view = viewCacheKey({
       workspaceKey: identity.workspaceKey,
       relative: identity.relative,
@@ -56,7 +55,7 @@ describe("workbook cache identity", () => {
 
 describe("workbook request lifecycle", () => {
   const opts = { path: "book.xlsx", workspaceKey: "id:ws", sessionId: "session", withStyles: false };
-  const data = () => ({ ...demoWorkbookView("book.xlsx"), file: { workspaceKey: "id:ws", relative: "book.xlsx" } });
+  const data = () => ({ ...demoWorkbookObservation("book.xlsx"), file: { workspaceKey: "id:ws", relative: "book.xlsx" } });
   beforeEach(() => invalidateWorkbookViewCache());
   afterEach(() => { invalidateWorkbookViewCache(); vi.unstubAllGlobals(); });
 

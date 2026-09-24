@@ -206,6 +206,8 @@ import {
 } from "@/lib/sse-event-handler";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import { useJevStore } from "@/stores/jev-store";
+import { hydrateFailureGuidanceFromText } from "@/lib/failure-recovery";
+import type { Message } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -242,6 +244,22 @@ function makeEvent(event: string, data: Record<string, unknown> = {}): SSEEvent 
 // ---------------------------------------------------------------------------
 
 describe("sse-event-handler", () => {
+  it("replaces restored failures across categories and collapses duplicate replays", () => {
+    const restored = hydrateFailureGuidanceFromText("⚠️ 模型认证失败\n认证失败\n诊断 ID: auth-1")!;
+    let message: Extract<Message, { role: "assistant" }> = {
+      id: "a1", role: "assistant", blocks: [restored, { ...restored, category: "model" }],
+    };
+    chatActions.updateAssistantMessage.mockImplementationOnce((_id, update) => { message = update(message); });
+    const ctx = makeCtx();
+    dispatchSSEEvent(makeEvent("failure_guidance", {
+      category: "model", code: "model_oauth_expired", title: "订阅登录已失效", message: "请重新登录",
+      diagnostic_id: "auth-1", retryable: false, provider: "chatgpt", model: "test-model", stage: "calling_llm",
+    }), ctx);
+    expect(message.blocks).toHaveLength(1);
+    expect(message.blocks[0]).toMatchObject({ code: "model_oauth_expired", provider: "chatgpt", retryable: false });
+    expect(ctx.hadStreamError).toBe(true);
+  });
+
   it("retains the background identity needed when the main generation is stopped", () => {
     resetChatState();
     dispatchSSEEvent(makeEvent("subagent_start", {
@@ -872,7 +890,7 @@ describe("sse-event-handler", () => {
         makeEvent("pending_approval", {
           tool_call_id: "tc1",
           approval_id: "ap1",
-          approval_tool_name: "edit_spreadsheet",
+          approval_tool_name: "apply_spreadsheet_changes",
           risk_level: "high",
           args_summary: { cells: "A1:B5" },
         }),
@@ -887,7 +905,7 @@ describe("sse-event-handler", () => {
       expect(chatActions.setPendingApproval).toHaveBeenCalledWith(
         expect.objectContaining({
           id: "ap1",
-          toolName: "edit_spreadsheet",
+          toolName: "apply_spreadsheet_changes",
           riskLevel: "high",
         }),
       );
@@ -903,7 +921,7 @@ describe("sse-event-handler", () => {
         makeEvent("pending_approval", {
           tool_call_id: "tc1",
           approval_id: "ap1",
-          approval_tool_name: "edit_spreadsheet",
+          approval_tool_name: "apply_spreadsheet_changes",
         }),
         makeCtx(),
       );
@@ -914,11 +932,11 @@ describe("sse-event-handler", () => {
   describe("approval_resolved", () => {
     it("applies a recovered result to its original message after the chat stream changes", () => {
       const old = { id: "old-message", role: "assistant" as const, timestamp: 1, blocks: [{
-        type: "tool_call", toolCallId: "original-call", name: "edit_spreadsheet", args: {}, status: "error", result: "已停止",
+        type: "tool_call", toolCallId: "original-call", name: "apply_spreadsheet_changes", args: {}, status: "error", result: "已停止",
       }] };
       mockChatState.messages = [old];
       dispatchSSEEvent(makeEvent("tool_call_end", {
-        tool_call_id: "original-call", tool_name: "edit_spreadsheet", success: true, result: "恢复后已写入",
+        tool_call_id: "original-call", tool_name: "apply_spreadsheet_changes", success: true, result: "恢复后已写入",
       }), makeCtx());
       const [messageId, update] = chatActions.updateAssistantMessage.mock.calls[0];
       expect(messageId).toBe("old-message");
@@ -935,7 +953,7 @@ describe("sse-event-handler", () => {
         makeEvent("approval_resolved", {
           tool_call_id: "tc1",
           approval_id: "ap1",
-          approval_tool_name: "edit_spreadsheet",
+          approval_tool_name: "apply_spreadsheet_changes",
           success: true,
           result: "已执行",
         }),
@@ -1018,7 +1036,7 @@ describe("sse-event-handler", () => {
       dispatchSSEEvent(
         makeEvent("tool_call_start", {
           tool_call_id: "child-1",
-          tool_name: "inspect_spreadsheet",
+          tool_name: "observe_spreadsheet",
           arguments: { file_path: "book.xlsx" },
           parent_call_id: "run-1",
         }),
@@ -1030,7 +1048,7 @@ describe("sse-event-handler", () => {
         expect.objectContaining({
           type: "tool_call",
           toolCallId: "child-1",
-          name: "inspect_spreadsheet",
+          name: "observe_spreadsheet",
           parentCallId: "run-1",
         }),
       );

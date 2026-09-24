@@ -63,7 +63,7 @@ def _edit_operations() -> list[dict]:
 
 def _format_operations() -> list[dict]:
     return [
-        {"kind": "size", "sheet": "订单", "columns": {"D": 14}},
+        {"kind": "size", "sheet": "订单", 'column_widths': {"D": 14}},
         {"kind": "conditional_format", "sheet": "订单", "range": "A2:H13",
          "rule": {"type": "formula", "formula1": '=$D2="未匹配"',
                   "fill": {"patternType": "solid", "fgColor": "FFC7CE"},
@@ -73,7 +73,7 @@ def _format_operations() -> list[dict]:
 
 def test_reported_edit_batch(registry: ToolRegistry, order_book: Path) -> None:
     with use_workspace(order_book.parent):
-        result = registry.call_tool("edit_spreadsheet", {
+        result = registry.call_tool("apply_spreadsheet_changes", {
             "file_path": order_book.name, "expected_version": content_version_of_file(order_book),
             "operations": _edit_operations(),
         })
@@ -93,7 +93,7 @@ def test_reported_edit_batch(registry: ToolRegistry, order_book: Path) -> None:
 
 def test_reported_format_batch(registry: ToolRegistry, order_book: Path) -> None:
     with use_workspace(order_book.parent):
-        result = registry.call_tool("format_spreadsheet", {
+        result = registry.call_tool("apply_spreadsheet_changes", {
             "file_path": order_book.name, "expected_version": content_version_of_file(order_book),
             "operations": _format_operations(),
         })
@@ -112,7 +112,7 @@ def test_reported_format_batch(registry: ToolRegistry, order_book: Path) -> None
         wb.close()
 
 
-@pytest.mark.parametrize("tool_name", ["read_text_file", "inspect_spreadsheet"])
+@pytest.mark.parametrize("tool_name", ["read_text_file", "observe_spreadsheet"])
 @pytest.mark.parametrize("prefix", ["spill", "result_spill", "selection_spill"])
 def test_spill_reference_retrieval_across_registry(
     registry: ToolRegistry, tmp_path: Path, tool_name: str, prefix: str,
@@ -138,33 +138,33 @@ async def test_reported_calls_through_real_native_dispatcher(registry: ToolRegis
     ), registry)
 
     async def call(name: str, args: dict):
-        tc = SimpleNamespace(id=name, function=SimpleNamespace(name=name, arguments=json.dumps(args)))
+        tc = SimpleNamespace(id=name + str(len(engine.memory.messages)) + str(len(str(args))), function=SimpleNamespace(name=name, arguments=json.dumps(args)))
         out = await engine._tool_runtime.execute(tc, None, None, 1)
         assert out.success, out.result
         return json.loads(out.result)
 
-    edited = await call("edit_spreadsheet", {
+    edited = await call("apply_spreadsheet_changes", {
         "file_path": order_book.name, "expected_version": content_version_of_file(order_book),
         "operations": _edit_operations(),
     })
-    formatted = await call("format_spreadsheet", {
+    formatted = await call("apply_spreadsheet_changes", {
         "file_path": order_book.name, "expected_version": edited["content_version"],
         "operations": _format_operations(),
     })
-    read = await call("inspect_spreadsheet", {
+    read = await call("observe_spreadsheet", {
         "file_path": order_book.name, "mode": "range", "sheet": "订单", "range": "A1:H13",
-        "include": ["formulas"], "expected_version": formatted["content_version"],
+        "facets": ["data"], "expected_version": formatted["content_version"],
     })
     # Equivalent compatibility grids no longer force a retrieval call for
     # this modest range. Larger results still use the same recovery path.
     if read.get("result_spill"):
         assert read["result_spill"].startswith("spill:")
-        retrieved = await call("read_text_file", {"file_path": read["result_spill"].replace("spill:", "result_spill:")})
+        retrieved = await call("read_text_file", {"file_path": read["result_spill"]})
     else:
         retrieved = read
     assert retrieved["content_version"] == formatted["content_version"]
-    assert retrieved["shape"] == {"rows": 13, "columns": 8}
-    assert retrieved["formulas"][12][7] == '=IF($G13="","未匹配",$G13*$E13)'
+    assert retrieved["regions"][0]["rect"] == {"r0":1,"c0":1,"r1":13,"c1":8}
+    assert retrieved["regions"][0]["cells"]["13,8"]["f"] == '=IF($G13="","未匹配",$G13*$E13)'
 
 
 @pytest.mark.parametrize("addresses", [
@@ -178,10 +178,13 @@ async def test_reported_calls_through_real_native_dispatcher(registry: ToolRegis
 def test_copy_resolves_sheet_aliases(registry: ToolRegistry, order_book: Path, addresses: dict) -> None:
     op = {"kind": "copy", "source_range": "C1", "target_start": "D1", **addresses}
     with use_workspace(order_book.parent):
-        result = registry.call_tool("edit_spreadsheet", {
+        result = registry.call_tool("apply_spreadsheet_changes", {
             "file_path": order_book.name, "expected_version": content_version_of_file(order_book),
             "operations": [op],
         })
+    if "sheet_name" in addresses:
+        assert not result.success  # retired alias is intentionally not executable
+        return
     assert result.success, result.model_text
     wb = load_workbook(order_book)
     try:
@@ -201,7 +204,7 @@ def test_copy_resolves_sheet_aliases(registry: ToolRegistry, order_book: Path, a
 def test_copy_conflict_aborts_whole_batch(registry: ToolRegistry, order_book: Path, conflict: dict) -> None:
     before = order_book.read_bytes()
     with use_workspace(order_book.parent):
-        result = registry.call_tool("edit_spreadsheet", {
+        result = registry.call_tool("apply_spreadsheet_changes", {
             "file_path": order_book.name, "expected_version": content_version_of_file(order_book),
             "operations": [
                 {"kind": "write", "sheet": "订单", "start_cell": "A1", "values": [["MUST NOT COMMIT"]]},
@@ -228,7 +231,7 @@ def test_expression_fields_share_semantics(
     registry: ToolRegistry, order_book: Path, kind: str, rule_type: str, formula_fields: dict,
 ) -> None:
     with use_workspace(order_book.parent):
-        result = registry.call_tool("format_spreadsheet", {
+        result = registry.call_tool("apply_spreadsheet_changes", {
             "file_path": order_book.name, "expected_version": content_version_of_file(order_book),
             "operations": [{"kind": kind, "sheet": "订单", "range": "A2:H13",
                             "rule": {"type": rule_type, **formula_fields}}],
@@ -252,10 +255,10 @@ def test_formula_alias_conflict_aborts_format_batch(
 ) -> None:
     before = order_book.read_bytes()
     with use_workspace(order_book.parent):
-        result = registry.call_tool("format_spreadsheet", {
+        result = registry.call_tool("apply_spreadsheet_changes", {
             "file_path": order_book.name, "expected_version": content_version_of_file(order_book),
             "operations": [
-                {"kind": "size", "sheet": "订单", "columns": {"D": 14}},
+                {"kind": "size", "sheet": "订单", 'column_widths': {"D": 14}},
                 {"kind": kind, "sheet": "订单", "range": "A2:H13",
                  "rule": {"type": rule_type, "formula": "=$D2=1", "formula1": "=$D2=2"}},
             ],
@@ -271,10 +274,10 @@ def test_stale_edit_retry_never_duplicates_insert(registry: ToolRegistry, order_
     version = content_version_of_file(order_book)
     args = {"file_path": order_book.name, "expected_version": version, "operations": _edit_operations()}
     with use_workspace(order_book.parent):
-        first = registry.call_tool("edit_spreadsheet", args)
+        first = registry.call_tool("apply_spreadsheet_changes", args)
         assert first.success, first.model_text
         after = order_book.read_bytes()
-        retry = registry.call_tool("edit_spreadsheet", args)
+        retry = registry.call_tool("apply_spreadsheet_changes", args)
     assert not retry.success
     assert retry.error.code == "VERSION_CONFLICT"
     assert order_book.read_bytes() == after
@@ -329,11 +332,11 @@ async def test_generated_sdk_executes_same_calls(registry: ToolRegistry, order_b
     locator = SpillStore(order_book.parent).put(json.dumps({"values": [["complete result"]]}))
     code = (
         "import em, json\n"
-        "before = em.inspect_spreadsheet(file_path='orders.xlsx', sheet='订单', mode='overview')\n"
+        "before = em.observe_spreadsheet(file_path='orders.xlsx', sheet='订单', mode='overview')\n"
         f"edit_ops = json.loads({json.dumps(_edit_operations(), ensure_ascii=False)!r})\n"
         f"format_ops = json.loads({json.dumps(_format_operations(), ensure_ascii=False)!r})\n"
-        "edited = em.edit_spreadsheet(path='orders.xlsx', expected_version=before['content_version'], operations=edit_ops)\n"
-        "formatted = em.format_spreadsheet(path='orders.xlsx', expected_version=edited['content_version'], operations=format_ops)\n"
+        "edited = em.apply_spreadsheet_changes(file_path='orders.xlsx', expected_version=before['content_version'], operations=edit_ops)\n"
+        "formatted = em.apply_spreadsheet_changes(file_path='orders.xlsx', expected_version=edited['content_version'], operations=format_ops)\n"
         f"stored = em.read_text_file(file_path={locator.replace('spill:', 'result_spill:')!r})\n"
         "assert stored['values'] == [['complete result']]\n"
         "print('SDK calls completed')\n"

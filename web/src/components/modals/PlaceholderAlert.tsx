@@ -27,15 +27,19 @@ export function PlaceholderAlert() {
   const guideCompleted = useOnboardingStore((s) => s.coachMarksCompleted && s.advancedGuideCompleted && s.settingsGuideCompleted);
   const skippedAt = useOnboardingStore((s) => s.skippedAt);
   const backendConfigured = useOnboardingStore((s) => s.backendConfigured);
+  const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
   // A deliberate skip must not be replaced by another blocking config dialog.
   // Keep configReady=false so a real task still asks the user to connect a model.
   const canPrompt = wizardCompleted && guideCompleted && !skippedAt;
 
   useEffect(() => {
     let cancelled = false;
+    const version = useUIStore.getState().modelProfileVersion;
     checkModelPlaceholder()
       .then((result) => {
-        if (cancelled) return;
+        if (cancelled || version !== useUIStore.getState().modelProfileVersion) return;
+        useUIStore.getState().setConfigError(null);
+        useOnboardingStore.getState().setBackendConfigured(!result.has_placeholder);
         setData(result);
         if (result?.has_placeholder) {
           setConfigReady(false);
@@ -54,12 +58,11 @@ export function PlaceholderAlert() {
         }
       })
       .catch(() => {
-        if (cancelled) return;
-        setConfigReady(true);
-        setConfigPlaceholderItems([]);
+        if (cancelled || version !== useUIStore.getState().modelProfileVersion) return;
+        useUIStore.getState().setConfigError("模型配置检查失败，请重新检查。");
       });
     return () => { cancelled = true; };
-  }, [setConfigReady, setConfigPlaceholderItems, canPrompt, backendConfigured]);
+  }, [setConfigReady, setConfigPlaceholderItems, canPrompt, backendConfigured, modelProfileVersion]);
 
   const handleDismiss = () => {
     setOpen(false);

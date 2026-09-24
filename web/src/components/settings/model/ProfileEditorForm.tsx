@@ -17,7 +17,9 @@ import {
 import { glassMenuItemClass, glassMenuPanelClass } from "@/components/ui/menu-panel";
 import { cn } from "@/lib/utils";
 import { useAdminModel } from "./admin-model-context";
-import { isSubscriptionProfile, uniqueSiblingProfileName, filterModelPickerList } from "./helpers";
+import { isSubscriptionProfile, uniqueSiblingProfileName } from "./helpers";
+
+import { ModelIdCombobox } from "./ModelIdCombobox";
 
 const FIELD = "h-9 text-xs rounded-lg";
 
@@ -34,12 +36,20 @@ const THINKING_OPTIONS = [
   { value: "disabled", label: "disabled（禁用思考）" },
   { value: "claude", label: "claude（原生 Extended Thinking）" },
   { value: "claude_compat", label: "claude_compat（OAI 代理透传）" },
+  { value: "gemini", label: "gemini（思考预算）" },
+  { value: "gemini_level", label: "gemini_level（思考等级）" },
   { value: "enable_thinking", label: "enable_thinking（DashScope/硅基流动）" },
-  { value: "glm_thinking", label: "glm_thinking（智谱 GLM）" },
-  { value: "openai_reasoning", label: "openai_reasoning（OpenAI o系列）" },
+  { value: "chat_template", label: "chat_template（vLLM / SGLang / Qwen）" },
+  { value: "glm_thinking", label: "glm_thinking（DeepSeek / GLM）" },
+  { value: "openai_reasoning", label: "openai_reasoning（OpenAI / WorkBuddy）" },
   { value: "openrouter", label: "openrouter（OpenRouter）" },
   { value: "deepseek", label: "deepseek（自动输出推理）" },
   { value: "reasoning_content_auto", label: "reasoning_content_auto（自动）" },
+];
+
+const SERVICE_TIER_OPTIONS = [
+  { value: "", label: "标准（默认）" },
+  { value: "fast", label: "快速（Fast）" },
 ];
 
 const FAMILY_OPTIONS = [
@@ -104,13 +114,12 @@ function GlassSelect({
 }) {
   const current = options.find((option) => option.value === value)?.label ?? value;
   return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild disabled={disabled}>
         <button
           type="button"
           aria-label={ariaLabel}
-          disabled={disabled}
-          className="inline-flex items-center gap-1.5 w-full h-9 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40 disabled:opacity-60 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+          className="inline-flex items-center gap-1.5 w-full h-9 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60 disabled:hover:bg-transparent disabled:cursor-not-allowed"
         >
           <span className="flex-1 truncate">{current}</span>
           <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
@@ -119,13 +128,14 @@ function GlassSelect({
       <DropdownMenuContent
         align="end"
         sideOffset={6}
-        className={cn(glassMenuPanelClass, "z-[80] min-w-[16rem]")}
+        collisionPadding={12}
+        className={cn(glassMenuPanelClass, "z-[80] min-w-[16rem] max-w-[calc(100vw-1.5rem)] overflow-y-auto")}
       >
         {options.map((option) => (
           <DropdownMenuItem
             key={option.value || "empty"}
             className={glassMenuItemClass}
-            onClick={() => onChange(option.value)}
+            onSelect={() => onChange(option.value)}
           >
             <span className="flex-1">{option.label}</span>
             {option.value === value && (
@@ -248,12 +258,12 @@ export function ProfileEditorForm() {
     }
     return ids;
   }, [config?.profiles, profileDraft.base_url]);
-  const filteredRemoteModels = filterModelPickerList(remoteModels, profileDraft.model);
   const listOpen = modelDropdownTarget === "_profile" && remoteModels.length > 0;
   const keySaved = Boolean(editingProfile && !profileDraft.api_key.trim());
   const keyInherited = Boolean(addingSibling && !profileDraft.api_key.trim());
   const advancedConfigured = Boolean(
     profileDraft.thinking_mode !== "auto"
+      || profileDraft.service_tier === "fast"
       || profileDraft.model_family
       || profileDraft.custom_extra_body
       || profileDraft.custom_extra_headers,
@@ -262,11 +272,11 @@ export function ProfileEditorForm() {
   const formHint = editingProfile
     ? "修改连接信息。API Key 留空则继续使用已保存的凭证。"
     : codexSibling
-      ? "沿用 ChatGPT 订阅 OAuth 凭证，从可用列表选择要加入的模型。"
+      ? "沿用此订阅账号的授权，从可用列表选择要加入的模型。"
       : addingSibling
         ? "沿用此提供商的地址和凭证，从已检测列表中选择要加入的模型。"
         : "填写服务地址和凭证，然后检测可用模型。";
-  const canSubmit = Boolean(profileDraft.model) && (Boolean(profileDraft.name.trim()) || addingSibling) && !addingProfile;
+  const canSubmit = Boolean(profileDraft.model.trim()) && (Boolean(profileDraft.name.trim()) || addingSibling) && !addingProfile;
 
   return (
     <div
@@ -278,6 +288,7 @@ export function ProfileEditorForm() {
           : "border-[var(--em-primary-alpha-25)] bg-[var(--em-primary-alpha-04)]",
       )}
     >
+      <fieldset disabled={addingProfile} className="min-w-0">
       <div className="flex items-start gap-2.5 px-3.5 py-3 bg-background/90 border-b border-border/50">
         <div
           className="h-8 w-8 rounded-lg flex items-center justify-center shrink-0"
@@ -318,7 +329,7 @@ export function ProfileEditorForm() {
         {codexSibling ? (
           <div className="flex items-center gap-1.5 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
             <Lock className="h-3 w-3 shrink-0" style={{ color: "var(--em-primary)" }} />
-            使用 ChatGPT 订阅 OAuth 凭证，无需 API Key
+            使用此订阅账号的授权，无需 API Key
           </div>
         ) : (
         <Field
@@ -396,42 +407,26 @@ export function ProfileEditorForm() {
             ) : null}
           >
             <div className="flex gap-1.5">
-              <div className="relative flex-1 min-w-0">
-                <Input
-                  value={profileDraft.model}
-                  onChange={(e) => setProfileDraft((d) => ({ ...d, model: e.target.value }))}
-                  onMouseDown={(e) => {
-                    if (e.button !== 0 || remoteModels.length === 0) return;
-                    if (document.activeElement !== e.currentTarget) return;
-                    setModelDropdownTarget((current) => (current === "_profile" ? null : "_profile"));
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape" && listOpen) {
-                      e.preventDefault();
-                      setModelDropdownTarget(null);
-                    }
-                  }}
-                  aria-expanded={listOpen}
-                  aria-haspopup="listbox"
-                  className={cn(FIELD, "font-mono", remoteModels.length > 0 && "pr-8")}
-                  placeholder={
-                    remoteModels.length > 0
-                      ? (listOpen ? `在 ${remoteModels.length} 个模型中搜索` : "输入，再点一次展开列表")
-                      : addingSibling
-                        ? "检测后可从列表选择，或直接填写"
-                        : "例如：claude-sonnet-4"
-                  }
-                  spellCheck={false}
-                />
-                {remoteModels.length > 0 ? (
-                  <ChevronDown
-                    className={cn(
-                      "absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none transition-transform",
-                      listOpen && "rotate-180",
-                    )}
-                  />
-                ) : null}
-              </div>
+              <ModelIdCombobox
+                value={profileDraft.model}
+                models={remoteModels}
+                usedModelIds={usedModelIds}
+                open={listOpen}
+                disabled={addingProfile}
+                onOpenChange={(open) => setModelDropdownTarget(open ? "_profile" : null)}
+                onChange={(model) => setProfileDraft((draft) => ({ ...draft, model }))}
+                onSelect={(model) => setProfileDraft((draft) => ({
+                  ...draft,
+                  model: model.id,
+                  name: draft.name.trim()
+                    || (codexSibling && !existingNames.includes(model.id)
+                      ? model.id
+                      : uniqueSiblingProfileName(model.id, existingNames)),
+                  description: codexSibling && !draft.description.trim() && model.owned_by
+                    ? `${model.owned_by} — OAuth 登录（无需 API Key）`
+                    : draft.description,
+                }))}
+              />
               <Button
                 type="button"
                 size="sm"
@@ -489,63 +484,7 @@ export function ProfileEditorForm() {
               />
             </div>
           ) : null}
-          {listOpen && (
-            <div
-              className={cn(glassMenuPanelClass, "relative z-20 mt-1.5 overflow-hidden p-1.5")}
-              onMouseDown={(e) => e.preventDefault()}
-            >
-              <p className="text-[11px] font-medium text-muted-foreground px-2 py-1.5">
-                {filteredRemoteModels.length === remoteModels.length
-                  ? `检测到 ${remoteModels.length} 个模型`
-                  : `${filteredRemoteModels.length} / ${remoteModels.length} 个匹配`}
-              </p>
-              <div className="max-h-56 overflow-y-auto overscroll-contain">
-                {filteredRemoteModels.map((m) => {
-                  const selected = profileDraft.model === m.id;
-                  const alreadyAdded = usedModelIds.has(m.id);
-                  return (
-                    <button
-                      key={m.id}
-                      type="button"
-                      className={cn(
-                        "w-full text-left px-2.5 py-2 rounded-xl text-xs font-mono transition-colors flex items-center justify-between gap-2",
-                        selected
-                          ? "bg-[var(--em-primary-alpha-10)] text-foreground"
-                          : "hover:bg-muted/60",
-                      )}
-                      onClick={() => {
-                        setProfileDraft((d) => ({
-                          ...d,
-                          model: m.id,
-                          name: d.name.trim()
-                            || (codexSibling && !existingNames.includes(m.id)
-                              ? m.id
-                              : uniqueSiblingProfileName(m.id, existingNames)),
-                          description: codexSibling && !d.description.trim() && m.owned_by
-                            ? `${m.owned_by} — OAuth 登录（无需 API Key）`
-                            : d.description,
-                        }));
-                      }}
-                    >
-                      <span className="truncate">{m.id}</span>
-                      <span className="flex items-center gap-1.5 shrink-0">
-                        {alreadyAdded ? (
-                          <span className="text-[10px] font-sans text-muted-foreground">已添加</span>
-                        ) : null}
-                        {m.owned_by ? (
-                          <span className="text-[10px] font-sans text-muted-foreground">{m.owned_by}</span>
-                        ) : null}
-                        {selected ? <Check className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} /> : null}
-                      </span>
-                    </button>
-                  );
-                })}
-                {filteredRemoteModels.length === 0 && (
-                  <p className="px-2.5 py-2 text-[11px] text-muted-foreground">无匹配模型</p>
-                )}
-              </div>
-            </div>
-          )}
+
         </div>
 
         <div className="rounded-xl border border-border/60 overflow-hidden">
@@ -581,6 +520,18 @@ export function ProfileEditorForm() {
                   />
                 </Field>
               </div>
+              <Field
+                label="响应速度"
+                hint="支持 Fast 的 OpenAI API 模型会使用快速处理；可能产生更高费用。其他协议保持标准模式。"
+              >
+                <GlassSelect
+                  ariaLabel="响应速度"
+                  value={profileDraft.service_tier || ""}
+                  options={SERVICE_TIER_OPTIONS}
+                  onChange={(next) => setProfileDraft((d) => ({ ...d, service_tier: next as "" | "fast" }))}
+                  disabled={isSubscriptionProfile(profileDraft)}
+                />
+              </Field>
               <Field label="自定义请求体 (JSON)">
                 <textarea
                   value={profileDraft.custom_extra_body || ""}
@@ -622,6 +573,7 @@ export function ProfileEditorForm() {
           variant="ghost"
           className="h-9 text-xs gap-1"
           onClick={resetProfileFormUi}
+          disabled={addingProfile}
         >
           <X className="h-3.5 w-3.5" /> 取消
         </Button>
@@ -653,10 +605,11 @@ export function ProfileEditorForm() {
             }
           >
             {addingProfile ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-            {addingProfile ? "添加中..." : editingProfile ? "更新" : addingSibling ? "添加模型" : "添加"}
+            {addingProfile ? "保存中..." : editingProfile ? "更新" : addingSibling ? "添加模型" : "添加"}
           </Button>
         </div>
       </div>
+      </fieldset>
     </div>
   );
 }

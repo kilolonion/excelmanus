@@ -7,6 +7,20 @@ import sys
 from pathlib import Path
 
 
+if getattr(sys, "frozen", False):
+    browser_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "playwright-browsers"
+    if not browser_root.is_dir():
+        raise RuntimeError(f"Bundled browser payload is missing: {browser_root}")
+    # A damaged package must not silently pass smoke by using a developer's
+    # machine-wide Playwright cache or inherited browser override.
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browser_root)
+    # Reuse the relocatable Node already shipped for Next instead of installing
+    # another ~100 MB executable just for Playwright's driver.
+    node = Path(sys.executable).parents[2] / "runtime" / ("node.exe" if sys.platform == "win32" else "node")
+    if not node.is_file():
+        raise RuntimeError(f"Bundled Node runtime is missing: {node}")
+    os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(node)
+
 if sys.platform == "win32":
     from windows_runtime import initialize_windows_runtime
     initialize_windows_runtime()
@@ -44,6 +58,11 @@ if "--check-runtime" in sys.argv:
     # Fixed, offline smoke path; no user-supplied code and no model calls.
     from runtime_smoke import check_runtime
     check_runtime()
+    raise SystemExit(0)
+
+if "--workbook-preview-worker" in sys.argv:
+    from excelmanus.workbook.preview_worker import main as preview_main
+    preview_main(sys.argv[sys.argv.index("--workbook-preview-worker") + 1:])
     raise SystemExit(0)
 
 from excelmanus.api import main  # noqa: E402

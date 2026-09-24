@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any
+from uuid import uuid4
+from excelmanus.agent.dispatch import DISPATCH_MODES
 
 from excelmanus.engine_types import (
     ApprovalResolver,
@@ -51,6 +53,60 @@ def push_interrupt_message(
     if text:
         engine._driver.enqueue_followup(text, extra=extra)
 
+
+def dispatch_message(
+    engine: Any,
+    message: str,
+    *,
+    mode: str,
+    client_message_id: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """投递运行中消息；只支持不会强杀当前工具的 steer/queue。"""
+    text = str(message or "").strip()
+    if not text and not (extra or {}).get("images"):
+        raise ValueError("消息内容不能为空")
+    if mode not in DISPATCH_MODES:
+        raise ValueError("未知发送策略")
+    existing = engine._driver.check_dispatch(client_message_id, text, mode, extra or {})
+    if existing is not None:
+        return dict(existing)
+    dispatch_id = f"dsp_{uuid4().hex}"
+    engine._driver.enqueue_dispatch(
+        text,
+        mode=mode,
+        dispatch_id=dispatch_id,
+        client_message_id=client_message_id,
+        extra=extra,
+    )
+    return engine._driver.dispatch_receipt(client_message_id)
+
+async def append_steer_input(engine: Any, item: Any) -> None:
+    from excelmanus.chat_turn import resolve_mentions
+    from excelmanus.attachments.store import get_attachment_store
+    from excelmanus.attachments.types import AttachmentError
+    from excelmanus.workbook.ui_context import render_workbook_ui_context
+
+    extra = item.extra
+    text, mentions = await resolve_mentions(extra.get("raw_message") or item.content, engine)
+    engine._mention_contexts = mentions or []
+    engine._ingest_mention_versions(mentions)
+    parts = [{"type": "text", "text": text}] if text else []
+    for image in extra.get("images") or []:
+        ref = get_attachment_store().get_ref(image["attachment_id"])
+        if ref is None:
+            raise AttachmentError("图片附件已过期", "ATTACHMENT_MISSING")
+        parts.append({"type": "image", "attachment": ref.to_dict(), "detail": image.get("detail", "auto")})
+    context = extra.get("context_input") or {}
+    engine.memory.add_user_message(parts if extra.get("images") else text,
+        dispatch={**{key: extra[key] for key in ("dispatch_id", "client_message_id", "dispatch_mode")},
+                  "created_at": (engine._driver.dispatch_receipt(extra["client_message_id"]) or {}).get("created_at")},
+        workbook_context=context if context.get("sheet_contexts") else None)
+    hint = render_workbook_ui_context(engine, context, text)
+    if hint:
+        engine.memory.add_user_message(hint, hidden=True, prompt_kind="dispatch_context")
+
+
 def drain_interrupt_messages(engine) -> list[str]:
     """取出并清空未认领的 next-turn（兼容旧 API）。"""
     return engine._driver.inbox.drain_unclaimed("next-turn")
@@ -82,6 +138,9 @@ async def followup(
     chat_mode: str = "write",
     context_input: dict[str, Any] | None = None,
     jev_budget: Any = None,
+    prompt_kind: str | None = None,
+    dispatch_mode: str | None = None,
+    client_message_id: str | None = None,
 ) -> ChatResult:
     """用户后续：控制面处理完毕后入 inbox next-turn 并 wakeup。
 
@@ -111,8 +170,6 @@ async def followup(
             [img["media_type"] for img in normalized_images],
             [img.get("attachment_id", "") for img in normalized_images],
         )
-        for img in normalized_images:
-            engine._tool_dispatcher._injected_image_hashes.add(img["attachment_id"])
 
     # ── 视觉能力前置检查：附件只交给激活模型阅读 ──
     if normalized_images and not engine._is_vision_capable:
@@ -127,6 +184,16 @@ async def followup(
         return ChatResult(reply=reject_msg)
 
     command_parts = user_message.strip().split(maxsplit=1)
+    if command_parts and command_parts[0].lower() == "/resume-queue":
+        item = engine._driver.inbox.peek_turn()
+        if item is None:
+            engine._driver.inbox.promote_orphaned_steer()
+            item = engine._driver.inbox.peek_turn()
+        if item is None:
+            return ChatResult(reply="没有待处理消息。")
+        for queued in engine._driver.inbox.next_turn:
+            queued.extra["on_event"] = on_event
+        return await engine._driver.wait_for_item(item)
     if command_parts and command_parts[0].lower() == "/resume":
         return await engine._driver.resume(
             command_parts[1] if len(command_parts) > 1 else "", on_event=on_event,
@@ -181,9 +248,11 @@ async def followup(
         return ChatResult(reply=control_reply)
 
     # 待审批只卡住同一 tool_call_id 的回执路径，不阻塞无关的新用户回合。
-    item = engine._driver.enqueue_followup(
-        user_message,
-        extra={
+    effective_dispatch_mode = dispatch_mode
+    if effective_dispatch_mode not in DISPATCH_MODES:
+        configured = str(getattr(getattr(engine, "config", None), "message_dispatch_default", "steer") or "steer")
+        effective_dispatch_mode = configured if configured in DISPATCH_MODES else "steer"
+    extra = {
             "on_event": on_event,
             "slash_command": slash_command,
             "raw_args": raw_args or "",
@@ -194,8 +263,19 @@ async def followup(
             "chat_mode": chat_mode,
             "context_input": context_input or {},
             "jev_budget": jev_budget,
-        },
-    )
+            "prompt_kind": prompt_kind,
+        }
+    if client_message_id:
+        existing = engine._driver.check_dispatch(client_message_id, user_message, effective_dispatch_mode, extra)
+        if existing is not None:
+            item = engine._driver.inbox.find_item(existing["item_id"])
+            if item is None or existing["status"] in {"completed", "interrupted", "failed", "cancelled"}:
+                return ChatResult(reply=existing.get("reply", "消息已处理。"))
+        else:
+            item = engine._driver.enqueue_dispatch(user_message, mode=effective_dispatch_mode,
+                dispatch_id=f"dsp_{uuid4().hex}", client_message_id=client_message_id, extra=extra)
+    else:
+        item = engine._driver.enqueue_followup(user_message, extra=extra)
     result = await engine._driver.wait_for_item(item)
     return result if isinstance(result, ChatResult) else ChatResult(reply="")
 
@@ -289,6 +369,10 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     chat_mode = extra.get("chat_mode") or "write"
     chat_start = time.monotonic()
 
+    if extra.get("raw_message"):
+        from excelmanus.chat_turn import resolve_mentions
+        user_message, mention_contexts = await resolve_mentions(extra["raw_message"], engine)
+
     # 认领后先替换引用快照；技能短路分支也不能留下上一轮的待注入引用。
     engine._mention_contexts = mention_contexts or []
     engine._ingest_mention_versions(mention_contexts)
@@ -307,10 +391,21 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
         incoming = extra.get("context_input") or {}
         action = incoming.get("workbook_action")
         metadata = {"workbook_action": action} if isinstance(action, dict) else {}
+        if extra.get("dispatch_id"):
+            metadata["dispatch"] = {key: extra[key] for key in ("dispatch_id", "client_message_id", "dispatch_mode")}
+            metadata["dispatch"]["created_at"] = (engine._driver.dispatch_receipt(extra["client_message_id"]) or {}).get("created_at")
         from excelmanus.workbook.ui_context import render_workbook_ui_context
         group = incoming.get("sheet_contexts")
         if isinstance(group, list) and len(group) > 1 and render_workbook_ui_context(engine, incoming, text):
             metadata["workbook_context"] = {"sheet_context": incoming.get("sheet_context"), "sheet_contexts": group}
+        prompt_kind = extra.get("prompt_kind")
+        if prompt_kind:
+            # 隐藏注入消息（如「继续」按钮发送的 continue）：进入模型上下文，
+            # 但以 _ui_hidden/_prompt_kind 落库，前端不渲染用户气泡。
+            engine._memory.add_user_message(
+                text, hidden=True, prompt_kind=str(prompt_kind), **metadata,
+            )
+            return
         if not normalized_images:
             engine._memory.add_user_message(text, **metadata)
             return
@@ -329,8 +424,7 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
                     f"附件不存在或已过期: {attachment_id}",
                     "ATTACHMENT_MISSING",
                 )
-            parts.append({"type": "image", "attachment": ref.to_dict()})
-            engine._tool_dispatcher._injected_image_hashes.add(ref.attachment_id)
+            parts.append({"type": "image", "attachment": ref.to_dict(), "detail": image.get("detail", "auto")})
         engine._memory.add_user_message(parts if parts else text, **metadata)
 
     effective_slash_command = slash_command

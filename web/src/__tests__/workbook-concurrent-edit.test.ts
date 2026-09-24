@@ -56,7 +56,7 @@ describe("concurrent workbook editing", () => {
     const write = vi.fn();
     const result = await persistExcelCellEdits({path: file.relative, workspaceKey: file.workspaceKey,
       workspaceId: "ws", changes: [{cell:"A1",value:1}], expectedVersion: null}, {
-      writeExcelCells: write, getExpectedVersion: () => "remote-v99",
+      applyWorkbookChanges: write, getExpectedVersion: () => "remote-v99",
     });
     expect(result.kind).toBe("conflict");
     expect(write).not.toHaveBeenCalled();
@@ -66,11 +66,11 @@ describe("concurrent workbook editing", () => {
     const persist = vi.fn(async () => ({ kind: "error" as const, message: "offline" }));
     setPersistExcelCellEditsForTests(persist);
     edit("A1");
-    enqueueWorkbookCommand({path:file.relative,file,expectedVersion:"v1",operations:[{op:"insert_axis",axis:"row",index:1,count:1}]});
+    enqueueWorkbookCommand({path:file.relative,file,expectedVersion:"v1",operations:[{kind:"insert",axis:"row",at:1,count:1}]});
     edit("A2");
     await flushWorkbookEdits(file);
     const ops = JSON.parse(workbookEditDraft(file)).batches[0].operations;
-    expect(ops.map((op: {op:string}) => op.op)).toEqual(["set_values","insert_axis","set_values"]);
+    expect(ops.map((op: {kind:string}) => op.kind)).toEqual(["cells.patch","insert","cells.patch"]);
     expect(ops[0].cells[0].cell).toBe("A1");
     expect(ops[2].cells[0].cell).toBe("A2");
   });
@@ -90,7 +90,7 @@ it.each(["remote-v3", undefined])("a late local save response preserves a remote
   const setVersion = vi.fn();
   const result = await persistExcelCellEdits({path:file.relative,workspaceKey:file.workspaceKey,workspaceId:"ws",
     changes:[{cell:"A1",value:1}],expectedVersion:"v1"}, {
-    writeExcelCells: async () => {
+    applyWorkbookChanges: async () => {
       useExcelStore.getState().notifyWorkbookChanged(file.relative, file.workspaceKey, remoteVersion, "remote");
       return {status:"success",cells_written:1,content_version:"v2"};
     },

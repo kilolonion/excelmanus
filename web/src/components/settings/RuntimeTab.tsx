@@ -34,7 +34,9 @@ import { apiGet, apiPut } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
+import { DISPATCH_LABELS } from "@/stores/dispatch-store";
 import { WorkbookChatSettings } from "./WorkbookChatSettings";
+import { SettingsPageLayout, SettingsPagePanel } from "./SettingsPageLayout";
 
 interface RuntimeConfig {
   // 会话
@@ -42,6 +44,7 @@ interface RuntimeConfig {
   max_sessions: number;
   max_consecutive_failures: number;
   turn_timeout_seconds: number;
+  message_dispatch_default: "steer" | "interrupt" | "queue";
   responses_continuation_enabled: boolean;
   responses_background_enabled: boolean;
   turn_token_budget: number;
@@ -103,6 +106,7 @@ interface RuntimeConfig {
   skills_discovery_scan_workspace_ancestors: boolean;
   skills_discovery_include_agents: boolean;
   skills_discovery_scan_external_tool_dirs: boolean;
+  jev_experimental_enabled: boolean;
 }
 
 interface SelectOption {
@@ -133,6 +137,18 @@ const BASIC_GROUPS: ItemGroup[] = [
     title: "对话与上下文",
     icon: <Layers className="h-3.5 w-3.5" />,
     items: [
+      {
+        key: "message_dispatch_default",
+        label: "执行中消息的发送方式",
+        desc: "引导当前任务：下一步采用新要求；中断并发送：停止当前任务并等待操作收尾；排队发送：当前任务完成后处理。",
+        icon: <MessageSquare className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "steer", label: DISPATCH_LABELS.steer },
+          { value: "interrupt", label: DISPATCH_LABELS.interrupt },
+          { value: "queue", label: DISPATCH_LABELS.queue },
+        ],
+      },
       {
         key: "max_context_tokens",
         label: "默认上下文窗口",
@@ -166,7 +182,7 @@ const BASIC_GROUPS: ItemGroup[] = [
       {
         key: "agent_self_management_enabled",
         label: "Agent 自我管理",
-        desc: "默认关闭。开启后提供自我管理技能及查询、配置工具，可查看自身能力并调整当前对话的推理、上下文和工具开关。仅影响当前对话，不修改密钥或审批权限；保存开关后立即生效。",
+        desc: "默认开启。提供自我管理技能及查询、配置工具，可查看自身能力并调整当前对话的推理、上下文和工具开关。仅影响当前对话，不修改密钥或审批权限；保存开关后立即生效。",
         icon: <SlidersHorizontal className="h-4 w-4" />,
         type: "bool",
       },
@@ -491,11 +507,19 @@ export function RuntimeTab() {
   const [saved, setSaved] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const triggerRestart = useConnectionStore((s) => s.triggerRestart);
+  const setMessageDispatchDefault = useUIStore((s) => s.setMessageDispatchDefault);
 
   const fetchConfig = useCallback(async (force = false) => {
     if (!force) {
       const cached = settingsCache.get<RuntimeConfig>("/config/runtime");
-      if (cached) { setConfig(cached); setDraft({}); return; }
+      if (cached) {
+        setConfig(cached);
+        setDraft({});
+        if (cached.message_dispatch_default) {
+          setMessageDispatchDefault(cached.message_dispatch_default);
+        }
+        return;
+      }
     }
     setLoading(true);
     try {
@@ -503,12 +527,15 @@ export function RuntimeTab() {
       settingsCache.set("/config/runtime", data);
       setConfig(data);
       setDraft({});
+      if (data.message_dispatch_default) {
+        setMessageDispatchDefault(data.message_dispatch_default);
+      }
     } catch {
       // 后端未就绪或未授权
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [setMessageDispatchDefault]);
 
   useEffect(() => {
     fetchConfig();
@@ -542,30 +569,30 @@ export function RuntimeTab() {
 
   if (loading && !config) {
     return (
-      <div className="space-y-5">
-        <WorkbookChatSettings />
+      <SettingsPageLayout className="space-y-5">
+        <SettingsPagePanel><WorkbookChatSettings /></SettingsPagePanel>
         <div className="flex items-center justify-center py-12 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin mr-2" />
           加载配置…
         </div>
-      </div>
+      </SettingsPageLayout>
     );
   }
 
   if (!merged) {
     return (
-      <div className="space-y-5">
-        <WorkbookChatSettings />
+      <SettingsPageLayout className="space-y-5">
+        <SettingsPagePanel><WorkbookChatSettings /></SettingsPagePanel>
         <div className="text-center py-12 text-muted-foreground text-sm">
           无法获取系统配置
         </div>
-      </div>
+      </SettingsPageLayout>
     );
   }
 
   const renderGroups = (groups: ItemGroup[]) =>
     groups.map((group) => (
-      <div key={group.title}>
+      <section key={group.title} className="em-settings-runtime-group">
         <div className="flex items-center gap-1.5 mb-2.5">
           <span style={{ color: "var(--em-primary)" }}>{group.icon}</span>
           <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
@@ -573,7 +600,7 @@ export function RuntimeTab() {
           </h3>
         </div>
         <div className="space-y-3">
-          {group.items.map((item) => {
+          {group.items.map((item, index) => {
             const value = merged[item.key];
             return (
               <div key={item.key} data-coach-id={item.coachId}>
@@ -607,6 +634,7 @@ export function RuntimeTab() {
                     </div>
                     {item.type === "select" && item.options ? (
                       <select
+                        aria-label={item.label}
                         className="w-full sm:w-32 h-9 sm:h-8 text-sm rounded-md border border-input bg-background px-2 flex-shrink-0 ml-0 sm:ml-auto"
                         value={value as string}
                         onChange={(e) =>
@@ -650,54 +678,55 @@ export function RuntimeTab() {
                     )}
                   </div>
                 )}
-                <Separator className="mt-3" />
+                {index < group.items.length - 1 && <Separator className="mt-3" />}
               </div>
             );
           })}
         </div>
         <div className="h-2" />
-      </div>
+      </section>
     ));
 
   return (
-    <div className="space-y-5">
-      <WorkbookChatSettings />
-      {renderGroups(BASIC_GROUPS)}
+    <SettingsPageLayout className="space-y-5">
+      <SettingsPagePanel><WorkbookChatSettings /></SettingsPagePanel>
+      <SettingsPagePanel className="em-settings-runtime-panel">
+        {renderGroups(BASIC_GROUPS)}
 
-      <button
-        onClick={() => setShowAdvanced((prev) => !prev)}
-        className="flex items-center gap-1.5 w-full text-left py-1.5 group"
-        data-coach-id="coach-settings-advanced-toggle"
-      >
-        <ChevronDown
-          className={`h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${showAdvanced ? "" : "-rotate-90"}`}
-        />
-        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider group-hover:text-foreground transition-colors">
-          高级设置
-        </span>
-      </button>
-
-      {showAdvanced && renderGroups(ADVANCED_GROUPS)}
-
-      <OnboardingReplayCard />
-
-      <div className="flex justify-end pt-2">
-        <Button
-          size="sm"
-          disabled={!hasChanges || saving}
-          onClick={handleSave}
-          className="gap-1.5"
+        <button
+          onClick={() => setShowAdvanced((prev) => !prev)}
+          className="flex items-center gap-1.5 w-full text-left px-4 py-3 border-t border-border/60 group"
+          data-coach-id="coach-settings-advanced-toggle"
         >
-          {saving ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : saved ? (
-            <CheckCircle2 className="h-3.5 w-3.5" />
-          ) : (
-            <Save className="h-3.5 w-3.5" />
-          )}
-          {saved ? "已保存" : "保存"}
-        </Button>
-      </div>
-    </div>
+          <ChevronDown
+            className={`h-3.5 w-3.5 text-muted-foreground transition-transform duration-200 ${showAdvanced ? "" : "-rotate-90"}`}
+          />
+          <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider group-hover:text-foreground transition-colors">
+            高级设置
+          </span>
+        </button>
+
+        {showAdvanced && renderGroups(ADVANCED_GROUPS)}
+
+        <div className="em-settings-card-footer">
+          <Button
+            size="sm"
+            disabled={!hasChanges || saving}
+            onClick={handleSave}
+            className="gap-1.5"
+          >
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : saved ? (
+              <CheckCircle2 className="h-3.5 w-3.5" />
+            ) : (
+              <Save className="h-3.5 w-3.5" />
+            )}
+            {saved ? "已保存" : "保存"}
+          </Button>
+        </div>
+      </SettingsPagePanel>
+      <OnboardingReplayCard />
+    </SettingsPageLayout>
   );
 }

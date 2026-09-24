@@ -156,10 +156,13 @@ scripts/*
 !scripts/migrate_skills_to_standard.py
 !scripts/check_prompt_contracts.py
 !scripts/check_prompt_budgets.py
+!scripts/generate_workbook_contracts.py
+!scripts/check_workbook_v2.py
 !scripts/security/
 scripts/security/*
 !scripts/security/scan_secrets.sh
 !scripts/package-release.mjs
+!scripts/release-output.mjs
 !scripts/package-release.ps1
 !scripts/package-release-macos.sh
 

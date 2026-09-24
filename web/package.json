@@ -1,18 +1,19 @@
 {
   "name": "web",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "private": true,
   "scripts": {
     "sync-version": "node -e \"const fs=require('fs');const t=fs.readFileSync('../pyproject.toml','utf8');const m=t.match(/^version\\s*=\\s*\\\"([^\\\"]+)\\\"/m);if(m){const p=JSON.parse(fs.readFileSync('package.json','utf8'));if(p.version!==m[1]){p.version=m[1];fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');console.log('synced version to '+m[1])}}\"",
     "predev": "npm run sync-version",
-    "prebuild": "npm run sync-version",
+    "prebuild": "npm run sync-version && npm run build:preview",
     "dev": "next dev --webpack --hostname 127.0.0.1",
     "build": "next build --webpack",
     "build:webpack": "next build --webpack",
     "start": "next start --hostname 127.0.0.1",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:preview": "node scripts/build-workbook-preview.mjs"
   },
   "engines": {
     "node": ">=20.9.0"

@@ -23,20 +23,19 @@ from openpyxl import Workbook, load_workbook
 
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools import ToolRegistry, intent_tools, reference_tools
+from excelmanus.tools import ToolRegistry, workbook_tools, reference_tools
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import (
-    _coerce_operations,
+from excelmanus.tools.workbook_tools import (
     analyze_spreadsheet,
-    edit_spreadsheet,
-    format_spreadsheet,
+    apply_spreadsheet_changes,
+    apply_spreadsheet_changes,
 )
 
 
 def _bind_workspace(root: Path) -> None:
     workspace = str(root)
     set_guard(FileAccessGuard(workspace))
-    intent_tools.init_guard(workspace)
+    workbook_tools.init_guard(workspace)
     reference_tools.init_guard(workspace)
 
 
@@ -65,7 +64,7 @@ def _version(result: ToolResult) -> str:
 def _edit(path: Path, operations: list[dict[str, Any]]) -> ToolResult:
     from excelmanus.workbook_commit import content_version_of_file
 
-    return edit_spreadsheet(
+    return apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=operations,
@@ -75,7 +74,7 @@ def _edit(path: Path, operations: list[dict[str, Any]]) -> ToolResult:
 def _format(path: Path, operations: list[dict[str, Any]]) -> ToolResult:
     from excelmanus.workbook_commit import content_version_of_file
 
-    return format_spreadsheet(
+    return apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=operations,
@@ -85,47 +84,6 @@ def _format(path: Path, operations: list[dict[str, Any]]) -> ToolResult:
 # ── C: _coerce_operations ───────────────────────────────────
 
 
-class TestCoerceOperationsRecovery:
-    def test_trailing_extra_brace_recovered(self) -> None:
-        ops = [{"kind": "write", "sheet": "S", "start_cell": "A1", "values": [[1, 2], [3, 4]]}]
-        raw = json.dumps(ops, ensure_ascii=False) + "}"
-        out = _coerce_operations(raw)
-        assert isinstance(out, list)
-        assert out == ops
-
-    def test_trailing_junk_then_whitespace_recovered(self) -> None:
-        ops = [{"kind": "write", "sheet": "S", "values": [[1]]}]
-        raw = json.dumps(ops) + "}   \n"
-        out = _coerce_operations(raw)
-        assert isinstance(out, list)
-
-    def test_unrecoverable_extra_data_not_mislabeled_truncated(self) -> None:
-        raw = '[{"kind":"write"}] xyz-not-json'
-        out = _coerce_operations(raw)
-        assert isinstance(out, ToolResult)
-        assert out.success is False
-        text = out.model_text or ""
-        assert "截断" not in text
-        assert "多余内容" in text or "重试" in text
-
-    def test_real_truncation_still_reports_truncated(self) -> None:
-        raw = '[{"kind":"write","values":[[1,2,3],'
-        out = _coerce_operations(raw)
-        assert isinstance(out, ToolResult)
-        assert out.success is False
-        assert "截断" in (out.model_text or "")
-
-    def test_mid_string_garbage_is_invalid_not_truncated(self) -> None:
-        raw = '[{"kind":oops,"values":[[1]]}]'
-        out = _coerce_operations(raw)
-        assert isinstance(out, ToolResult)
-        assert out.success is False
-        assert "截断" not in (out.model_text or "")
-
-    def test_single_object_and_string_items_still_coerce(self) -> None:
-        assert _coerce_operations({"kind": "write"}) == [{"kind": "write"}]
-        out = _coerce_operations(['{"kind": "write"}'])
-        assert out == [{"kind": "write"}]
 
 
 # ── A2: pivot margins ───────────────────────────────────────
@@ -240,7 +198,7 @@ class TestWriteValuesLocator:
         assert ws["A2"].value == "华东" and ws["B3"].value == 50
         wb.close()
 
-    def test_values_json_string_coerced(self, tmp_path: Path) -> None:
+    def test_values_json_string_rejected_by_v2(self, tmp_path: Path) -> None:
         _bind_workspace(tmp_path)
         path = _book(tmp_path / "book.xlsx", [["h1"]])
         result = _edit(path, [{
@@ -250,9 +208,10 @@ class TestWriteValuesLocator:
                 "values": json.dumps([[9, 8]]),
             }],
         )
-        assert result.success, result.model_text
+        assert not result.success
+        assert result.error.code == "INVALID_ARGS"
         wb = load_workbook(path)
-        assert wb["Sheet1"]["A2"].value == 9
+        assert wb["Sheet1"]["A2"].value is None
         wb.close()
 
     def test_values_records_spill_rejected_with_guidance(self, tmp_path: Path) -> None:
@@ -691,9 +650,10 @@ class TestConditionalFormatWrite:
             }],
         )
         assert removed.success, removed.model_text
-        assert "removed:1" in (removed.model_text or "") or "removed" in (
-            removed.model_text or ""
-        )
+        assert removed.value["observation"]["operations"][0]["applied"] == "conditional_format:removed:1"
+        wb=load_workbook(path)
+        assert len(wb.active.conditional_formatting)==0
+        wb.close()
         assert self._cf_rules(path) == []
 
     def test_remove_without_rule_no_misleading_error(self, tmp_path: Path) -> None:
@@ -795,7 +755,7 @@ class TestPaginationCanonical:
         groups = _payload(result).get("groups") or []
         assert len(groups) == 3
 
-    def test_filter_limit_alias_still_works(self, tmp_path: Path) -> None:
+    def test_filter_canonical_max_rows_works(self, tmp_path: Path) -> None:
         _bind_workspace(tmp_path)
         rows = [["区域", "金额"]] + [[f"R{i}", i] for i in range(10)]
         path = _book(tmp_path / "d.xlsx", rows)
@@ -805,7 +765,7 @@ class TestPaginationCanonical:
             column="金额",
             operator="ge",
             value=0,
-            limit=4,
+            max_rows=4,
         )
         assert result.success
         data = _payload(result)

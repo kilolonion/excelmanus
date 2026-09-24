@@ -1,30 +1,33 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useState, useSyncExternalStore } from "react";
 import {
   Loader2, ExternalLink, ChevronRight, ChevronDown, Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { apiPost, apiDelete } from "@/lib/api";
 import {
   codexOAuthStart,
   codexOAuthExchange,
   codexDeviceCodeStart,
   codexDeviceCodePoll,
-  connectCodex,
-  disconnectCodex,
-  refreshCodexToken,
 } from "@/lib/auth-api";
 import { SubscriptionAccountCard } from "./SubscriptionAccountCard";
-import { useSubscriptionAccount } from "./useSubscriptionAccount";
+import { useSubscriptionProvider } from "./useSubscriptionProvider";
+import type { ProfileEntry } from "./types";
 import { useOAuthLogin, usePollingLogin } from "./useSubscriptionLogin";
 import { OAuthLoginProgress, PollingLoginProgress } from "./OAuthLoginProgress";
 import { CODEX_OAUTH_PRESET, CODEX_MODELS } from "./constants";
 import type { CodexModelEntry } from "./types";
 
+function codexCatalogEntry(entry: CodexModelEntry) {
+  return { model: entry.modelId, public_model_id: entry.publicId, profile_name: entry.profileName, display_name: entry.displayName };
+}
+const CODEX_CATALOG = CODEX_MODELS.map(codexCatalogEntry);
+
 const CODEX_AUTH_ORIGIN = "https://auth.openai.com";
 const CODEX_CALLBACK_PATH = "/auth/callback";
+const subscribeClient = () => () => {};
 
 function assertCodexAuthUrl(value: string): string {
   const parsed = new URL(value);
@@ -35,67 +38,29 @@ function assertCodexAuthUrl(value: string): string {
 }
 
 export function CodexOAuthCard({
-  onProfileCreated,
-  existingProfileNames,
+  profiles,
 }: {
-  onProfileCreated: () => void;
-  existingProfileNames: string[];
+  profiles: ProfileEntry[];
 }) {
-  const [error, setError] = useState("");
-  const [androidClient, setAndroidClient] = useState(false);
-  useEffect(() => { setAndroidClient(window.excelManusAndroid?.version === 1); }, []);
-
-  // Manual paste
-  const [tokenInput, setTokenInput] = useState("");
-  const [connecting, setConnecting] = useState(false);
+  const androidClient = useSyncExternalStore(subscribeClient, () => window.excelManusAndroid?.version === 1, () => false);
   const [showFallback, setShowFallback] = useState(false);
-  const [showManual, setShowManual] = useState(false);
-
-  // Disconnect / Refresh
-  const [disconnecting, setDisconnecting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-
-  // Multi-model profile management
-  const [addingModel, setAddingModel] = useState<string | null>(null);
-  const [removingModel, setRemovingModel] = useState<string | null>(null);
   const [codexModelsExpanded, setCodexModelsExpanded] = useState(false);
-
-  // Build a Set of existing codex profile names for quick lookup.
-  // Map legacy short names and old defaults to current full openai-codex/xxx format.
-  const _LEGACY_NAME_MAP: Record<string, string> = {
-    "Codex 5.3": "openai-codex/gpt-5.3-codex",
-    "Codex Spark": "openai-codex/gpt-5.3-codex-spark",
-    "codex-oauth": "openai-codex/gpt-5.2-codex",
-    "codex-spark": "openai-codex/gpt-5.3-codex-spark",
-    "codex-5.3": "openai-codex/gpt-5.3-codex",
-    "codex-5.2": "openai-codex/gpt-5.2-codex",
-    "codex-5.1": "openai-codex/gpt-5.1-codex",
-    "codex-mini": "openai-codex/gpt-5.1-codex-mini",
-    "codex-max": "openai-codex/gpt-5.1-codex-max",
-    "codex-mini-latest": "openai-codex/gpt-5-codex-mini",
-    "codex-gpt-5.2": "openai-codex/gpt-5.2",
-    "codex-gpt-5.1": "openai-codex/gpt-5.1",
-    "codex-gpt-6": "openai-codex/gpt-5.2-codex",
-    "codex-gpt-5.6": "openai-codex/gpt-5.2",
-  };
-  const existingCodexProfiles = new Set<string>();
-  for (const n of existingProfileNames) {
-    const cm = CODEX_MODELS.find((m) => m.profileName === n);
-    if (cm) existingCodexProfiles.add(cm.profileName);
-    const mapped = _LEGACY_NAME_MAP[n];
-    if (mapped) existingCodexProfiles.add(mapped);
-  }
-  // Check legacy short names that should be cleaned up
-  const hasLegacyCodexProfile = existingProfileNames.some((n) => n in _LEGACY_NAME_MAP && !n.startsWith("openai-codex/"));
-
-  const { status, setStatus, loading, statusError, reloadStatus, completeLogin } = useSubscriptionAccount("openai-codex", onProfileCreated);
+  const controller = useSubscriptionProvider("openai-codex", profiles, CODEX_OAUTH_PRESET, CODEX_CATALOG);
+  const {
+    status, loading, statusError, reloadStatus, completeLogin, error, setError,
+    tokenInput, setTokenInput, connecting, showManual, setShowManual, disconnecting, refreshing,
+    addingModel, removingModel, providerProfiles, profileForModel,
+    handleManualConnect, handleDisconnect, handleRefresh, handleAddModel, handleRemoveModel,
+  } = controller;
   const oauth = useOAuthLogin({
+    lock: controller.lock,
     name: "codex-oauth", messageType: "codex-oauth-callback",
     start: () => codexOAuthStart(["localhost", "127.0.0.1"].includes(window.location.hostname) ? window.location.origin + CODEX_CALLBACK_PATH : undefined),
     validateUrl: assertCodexAuthUrl, exchange: codexOAuthExchange,
     onConnected: completeLogin, onError: setError,
   });
   const device = usePollingLogin({
+    lock: controller.lock,
     start: async () => {
       const data = await codexDeviceCodeStart();
       return { ...data, url: assertCodexAuthUrl(data.verification_url), code: data.user_code };
@@ -106,68 +71,7 @@ export function CodexOAuthCard({
   const handleDeviceCode = device.start;
   const oauthBusy = oauth.busy;
   const handleOAuthLogin = oauth.start;
-  const busy = oauthBusy || authorizing || connecting || disconnecting || refreshing || !!addingModel || !!removingModel;
-
-  const handleManualConnect = useCallback(async () => {
-    if (!tokenInput.trim() || connecting) return;
-    setConnecting(true); setError("");
-    try {
-      const parsed = JSON.parse(tokenInput.trim());
-      await connectCodex(parsed);
-      await completeLogin();
-      setTokenInput(""); setShowManual(false);
-    } catch (e) {
-      setError(e instanceof SyntaxError ? "JSON 格式无效" : (e instanceof Error ? e.message : "连接失败"));
-    } finally { setConnecting(false); }
-  }, [tokenInput, connecting, completeLogin]);
-
-  const handleDisconnect = useCallback(async () => {
-    if (disconnecting) return;
-    setDisconnecting(true); setError("");
-    try { await disconnectCodex(); onProfileCreated(); setStatus({ status: "disconnected", provider: "openai-codex" }); }
-    catch (e) { setError(e instanceof Error ? e.message : "断开失败"); }
-    finally { setDisconnecting(false); }
-  }, [disconnecting, onProfileCreated, setStatus]);
-
-  const handleRefresh = useCallback(async () => {
-    if (refreshing) return;
-    setRefreshing(true); setError("");
-    try {
-      const result = await refreshCodexToken();
-      setStatus((prev) => prev ? { ...prev, status: "connected", expires_at: result.expires_at } : prev);
-      onProfileCreated();
-    } catch (e) { setError(e instanceof Error ? e.message : "刷新失败"); }
-    finally { setRefreshing(false); }
-  }, [refreshing, onProfileCreated, setStatus]);
-
-  const handleAddCodexModel = useCallback(async (entry: CodexModelEntry) => {
-    setAddingModel(entry.profileName); setError("");
-    try {
-      await apiPost("/config/models/profiles", {
-        name: entry.profileName,
-        model: entry.publicId,
-        api_key: "",
-        base_url: CODEX_OAUTH_PRESET.base_url,
-        description: `${entry.displayName} — OAuth 登录（无需 API Key）`,
-        protocol: CODEX_OAUTH_PRESET.protocol,
-        thinking_mode: CODEX_OAUTH_PRESET.thinking_mode,
-        model_family: CODEX_OAUTH_PRESET.model_family,
-        custom_extra_body: "",
-        custom_extra_headers: "",
-      }, { direct: true });
-      onProfileCreated();
-    } catch (e) { setError(e instanceof Error ? e.message : "创建档案失败"); }
-    finally { setAddingModel(null); }
-  }, [onProfileCreated]);
-
-  const handleRemoveCodexModel = useCallback(async (profileName: string) => {
-    setRemovingModel(profileName); setError("");
-    try {
-      await apiDelete(`/config/models/profiles/${encodeURIComponent(profileName)}`, { direct: true });
-      onProfileCreated();
-    } catch (e) { setError(e instanceof Error ? e.message : "删除档案失败"); }
-    finally { setRemovingModel(null); }
-  }, [onProfileCreated]);
+  const busy = oauthBusy || authorizing || controller.busy;
 
   const isConnected = status?.status === "connected";
   const isExpired = status?.status === "expired";
@@ -175,11 +79,11 @@ export function CodexOAuthCard({
   return (
     <SubscriptionAccountCard
       provider={"openai-codex"} title="GPT Codex" description="使用 ChatGPT 订阅连接" account={[status?.email, status?.plan_type].filter(Boolean).join(" · ")}
-      status={status?.status} loading={loading} busy={busy} modelCount={existingCodexProfiles.size}
+      status={status?.status} loading={loading} busy={busy} modelCount={providerProfiles.length}
       error={error} statusError={statusError} onRetry={reloadStatus}
     >
       {/* ── Connected / Expired ── */}
-      {!loading && (isConnected || isExpired) && (
+      {(isConnected || isExpired) && (
         <>
           <div className="flex items-center gap-2">
             <div className={`h-2 w-2 rounded-full ${isExpired ? "bg-amber-500" : "bg-green-500"}`} />
@@ -207,7 +111,7 @@ export function CodexOAuthCard({
               )}
               <span className="text-[11px] text-muted-foreground">管理可用模型</span>
               <Badge variant="secondary" className="text-[10px] ml-auto">
-                {existingCodexProfiles.size}/{CODEX_MODELS.length}
+                {providerProfiles.length}/{CODEX_MODELS.length}
               </Badge>
             </button>
             {codexModelsExpanded && (
@@ -216,8 +120,9 @@ export function CodexOAuthCard({
                 <div className="space-y-1">
                   {CODEX_MODELS.map((m) => {
                     const isProLocked = m.proOnly && status?.plan_type !== "pro";
-                    const isAdded = existingCodexProfiles.has(m.profileName);
-                    const isBusy = addingModel === m.profileName || removingModel === m.profileName;
+                    const existing = profileForModel(codexCatalogEntry(m));
+                    const isAdded = Boolean(existing);
+                    const isBusy = addingModel === m.profileName || removingModel === existing?.name;
                     return (
                       <div
                         key={m.profileName}
@@ -232,15 +137,15 @@ export function CodexOAuthCard({
                         <span className="font-medium truncate min-w-0 flex-1">{m.displayName}</span>
                         <code className="text-[10px] font-mono text-muted-foreground hidden sm:inline truncate max-w-[30%]">{m.modelId}</code>
                         {m.proOnly && <Badge variant="secondary" className="text-[10px] shrink-0">Pro</Badge>}
-                        {isProLocked ? (
+                        {isProLocked && !isAdded ? (
                           <Lock className="h-3 w-3 text-muted-foreground shrink-0" />
                         ) : isAdded ? (
                           <Button
                             size="sm"
                             variant="ghost"
                             className="h-8 px-1.5 text-[11px] text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950 shrink-0"
-                            onClick={() => handleRemoveCodexModel(m.profileName)}
-                            disabled={busy || isExpired}
+                            onClick={() => handleRemoveModel(existing!.name)}
+                            disabled={busy}
                           >
                             {isBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : "移除"}
                           </Button>
@@ -250,7 +155,7 @@ export function CodexOAuthCard({
                             variant="ghost"
                             className="h-8 px-1.5 text-[11px] shrink-0"
                             style={{ color: "var(--em-primary)" }}
-                            onClick={() => handleAddCodexModel(m)}
+                            onClick={() => handleAddModel(codexCatalogEntry(m))}
                             disabled={busy || isExpired}
                           >
                             {isBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : "添加"}
@@ -260,11 +165,6 @@ export function CodexOAuthCard({
                     );
                   })}
                 </div>
-                {hasLegacyCodexProfile && (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
-                    检测到旧版 codex-oauth 档案，建议删除后使用上方按钮重新添加
-                  </p>
-                )}
               </>
             )}
           </div>
@@ -283,7 +183,7 @@ export function CodexOAuthCard({
       )}
 
       {/* ── Not connected ── */}
-      {!loading && !isConnected && (
+      {(!loading || status) && !isConnected && (
         <>
           <p className="text-xs text-muted-foreground leading-relaxed">
             使用 ChatGPT Plus/Pro 订阅，无需 API Key。登录后自动创建模型档案。

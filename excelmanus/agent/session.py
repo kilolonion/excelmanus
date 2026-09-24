@@ -193,7 +193,7 @@ class AgentEngine:
                     on_exit_submitted=lambda plan: request_exit_plan_approval(self, plan),
                 )
             )
-            register_introspection_tools(self._registry)
+            register_introspection_tools(self._registry, engine=self)
             from excelmanus.self_management import get_tools as get_self_management_tools
             self._registry.register_tools(get_self_management_tools(self))
         # 会话级权限控制：从持久化配置读取，继承上次设置
@@ -1224,6 +1224,10 @@ class AgentEngine:
         from excelmanus.agent.session_api import push_interrupt_message as _impl
         return _impl(self, message, extra=extra)
 
+    def dispatch_message(self, message: str, *, mode: str, client_message_id: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        from excelmanus.agent.session_api import dispatch_message as _impl
+        return _impl(self, message, mode=mode, client_message_id=client_message_id, extra=extra)
+
 
     def drain_interrupt_messages(self) -> list[str]:
         from excelmanus.agent.session_api import drain_interrupt_messages as _impl
@@ -1251,10 +1255,10 @@ class AgentEngine:
 
     # ── Session snapshot 持久化（循环计数 / 任务列表，不是文件检查点）──
 
-    def save_session_snapshot(self) -> None:
+    def save_session_snapshot(self) -> bool:
         """保存当前 SessionState + TaskStore 状态到数据库。"""
         if self._checkpoint_store is None or self._session_id is None:
-            return
+            return True
         try:
             # 任务状态所引用的对话边界先落盘，避免恢复到了比消息更新的步骤。
             persist_messages = getattr(self, "_persist_session_messages", None)
@@ -1277,14 +1281,16 @@ class AgentEngine:
                 self._state.to_dict(),
                 getattr(self, "_envelope_prefix_snapshot", None),
             )
-            self._checkpoint_store.save_session_snapshot(
+            saved = self._checkpoint_store.save_session_snapshot(
                 session_id=self._session_id,
                 state_dict=state_dict,
                 task_list_dict=self._task_store.to_dict(),
                 turn_number=self._state.session_turn,
             )
+            return saved is not None
         except Exception:
             logger.debug("save_session_snapshot 失败", exc_info=True)
+            return False
 
     save_checkpoint = save_session_snapshot
 
@@ -1379,16 +1385,23 @@ class AgentEngine:
         max_tokens / usage_ratio 以 ContextBudget 为准，避免 CompactionManager
         持有的 config 快照与设置页、当前模型窗口脱节。
         """
+        from excelmanus.prompt.envelope import compaction_wire_context
+        from excelmanus.compaction_runtime import operations
+        from copy import deepcopy
+        try:
+            system, tools = compaction_wire_context(self)
+        except Exception:
+            system, tools = self._last_system_msgs, None
         status = self._compaction_manager.get_status(
-            self._memory, self._last_system_msgs,
+            self._memory, system or self._last_system_msgs, tools,
         )
+        status["operations"] = deepcopy(operations(self))
         max_tokens = self.max_context_tokens
         status["max_tokens"] = max_tokens
         current = int(status.get("current_tokens") or 0)
         status["usage_ratio"] = (
             round(current / max_tokens, 3) if max_tokens > 0 else 0.0
         )
-        from copy import deepcopy
         from excelmanus.compaction import handoff_from_memory
 
         artifact, error = handoff_from_memory(self._memory)
@@ -1465,6 +1478,8 @@ class AgentEngine:
     def apply_execution_budget(
         self,
         *,
+        max_iterations: int | None = None,
+        subagent_max_iterations: int | None = None,
         turn_timeout_seconds: int | None = None,
         turn_token_budget: int | None = None,
         turn_cost_budget_usd: float | None = None,
@@ -1476,6 +1491,8 @@ class AgentEngine:
         An already running turn keeps its immutable deadline and counters.
         """
         values = {
+            "max_iterations": max_iterations,
+            "subagent_max_iterations": subagent_max_iterations,
             "turn_timeout_seconds": turn_timeout_seconds,
             "turn_token_budget": turn_token_budget,
             "turn_cost_budget_usd": turn_cost_budget_usd,
@@ -2024,6 +2041,9 @@ class AgentEngine:
         chat_mode: str = "write",
         context_input: dict[str, Any] | None = None,
         jev_budget: Any = None,
+        prompt_kind: str | None = None,
+        dispatch_mode: str | None = None,
+        client_message_id: str | None = None,
     ) -> ChatResult:
         from excelmanus.agent.session_api import followup as _impl
         return await _impl(
@@ -2039,6 +2059,9 @@ class AgentEngine:
             chat_mode=chat_mode,
             context_input=context_input,
             jev_budget=jev_budget,
+            prompt_kind=prompt_kind,
+            dispatch_mode=dispatch_mode,
+            client_message_id=client_message_id,
         )
 
 
@@ -2935,6 +2958,7 @@ class AgentEngine:
         reset_system_projection(self)
         self._last_envelope = None
         self._compaction_handoff = {}
+        self._state.compaction_operations = []
         self._compaction_generation = self._memory._compaction_generation = 0
         self._envelope_prefix_snapshot = None
         self._restored_envelope_prefix = None
@@ -3157,8 +3181,20 @@ class AgentEngine:
         resolver = self._credential_resolver
         if resolver is None:
             return
+        from excelmanus.auth.providers.registry import managed_provider_for
+
+        # A named API profile owns its configured credential, even when its
+        # model ID also matches a subscription provider's model-name pattern.
+        # Only managed subscription profiles may refresh through OAuth.
+        managed_name = managed_provider_for(self._active_model_name or "")
+        managed_model = managed_provider_for(_original_model)
+        if self._active_model_name and managed_name is None and managed_model is None:
+            self._pool_account_id = None
+            self._pool_profile_name = None
+            self._oauth_extra_headers = None
+            return
         try:
-            resolved = await resolver.resolve(_original_model)
+            resolved = await resolver.resolve(self._active_model_name if managed_name else _original_model)
         except Exception:
             logger.debug("OAuth 凭证刷新检查失败", exc_info=True)
             # 刷新失败，通知前端

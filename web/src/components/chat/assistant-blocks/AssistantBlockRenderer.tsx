@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, ChevronsUpDown, CircleStop, Info, Repeat, Wrench, XCircle, Zap } from "lucide-react";
+import { CheckCircle2, ChevronsUpDown, CircleStop, Info, Loader2, Repeat, Wrench, XCircle, Zap } from "lucide-react";
 import { isHiddenAssistantChrome } from "@/lib/assistant-chrome";
 import { ThinkingBlock } from "../ThinkingBlock";
 import { ToolCallCard, ToolCallCancelButton } from "../ToolCallCard";
@@ -34,7 +34,6 @@ export interface AssistantBlockRendererProps {
   onCollapse?: () => void;
   defaultExpanded?: boolean;
   skipRender?: boolean;
-  onRetry?: () => void;
   onRetryWithModel?: (modelName: string) => void;
 }
 
@@ -48,7 +47,6 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
   onCollapse,
   defaultExpanded,
   skipRender,
-  onRetry,
   onRetryWithModel,
 }: AssistantBlockRendererProps) {
   if (skipRender || isHiddenAssistantChrome(block)) return null;
@@ -175,6 +173,29 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
       );
     case "memory_extracted":
       return <MemoryExtractedBlock block={block} />;
+    case "compaction": {
+      const running = block.status === "queued" || block.status === "running";
+      const failed = block.status === "failed";
+      return (
+        <div className={`my-2 flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-[13px] ${
+          failed ? "border-red-500/25 bg-red-500/5 text-red-700" : "border-border/60 bg-muted/25 text-foreground"
+        }`}>
+          {running ? <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-[var(--em-primary)]" />
+            : failed ? <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+              : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />}
+          <div className="min-w-0">
+            <div className="font-medium">{block.message}</div>
+            {block.detail && <div className="mt-0.5 text-xs text-muted-foreground">{block.detail}</div>}
+            {block.status === "completed" && block.tokensBefore != null && block.tokensAfter != null && (
+              <div className="mt-1 text-[11px] text-muted-foreground">
+                上下文 {block.tokensBefore.toLocaleString()} → {block.tokensAfter.toLocaleString()} tokens
+                {block.preservedQuotes ? ` · 保留 ${block.preservedQuotes} 段原文` : ""}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
     case "file_download":
       return <FileDownloadCard block={block} />;
     case "verification_report":
@@ -197,7 +218,6 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
           actions={block.actions}
           provider={block.provider}
           model={block.model}
-          onRetry={onRetry}
           onRetryWithModel={onRetryWithModel}
         />
       );

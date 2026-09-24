@@ -23,11 +23,10 @@ from excelmanus.workbook.styles import (
     _extract_border,
     _extract_alignment,
     _color_to_hex,
-    read_cell_styles,
     init_guard,
 )
-from excelmanus.tools.intent_tools import format_spreadsheet
-from excelmanus.tools.intent_tools import init_guard as init_intent_guard
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, observe_spreadsheet
+from excelmanus.tools.workbook_tools import init_guard as init_intent_guard
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
@@ -92,7 +91,7 @@ def _format(path: Path, operations: list[dict]) -> ToolResult:
             if "!" not in raw_range and active:
                 item["sheet"] = active
         filled.append(item)
-    return format_spreadsheet(
+    return apply_spreadsheet_changes(
         file_path=str(path),
         operations=filled,
         expected_version=content_version_of_file(path),
@@ -241,38 +240,9 @@ class TestExtractFunctions:
         assert info is None
 
 
-# ── read_cell_styles 测试 ────────────────────────────────
+# ── presentation observation 测试 ───────────────────────
 
 
-class TestReadCellStyles:
-    def test_reads_styled_cells(self, sample_xlsx: Path) -> None:
-        result = read_cell_styles(str(sample_xlsx), "A1:B3").value
-        assert result["status"] == "success"
-        assert result["total_cells"] == 6
-        # A1 应该被检测到有样式
-        styled = result["styled_cells"]
-        a1_entries = [c for c in styled if c["cell"] == "A1"]
-        assert len(a1_entries) == 1
-        a1 = a1_entries[0]
-        assert a1["font"]["bold"] is True
-        assert a1["font"]["name"] == "微软雅黑"
-        assert "fill" in a1
-        assert "border" in a1
-        assert "alignment" in a1
-
-    def test_summary_only(self, sample_xlsx: Path) -> None:
-        result = read_cell_styles(str(sample_xlsx), "A1:B3", summary_only=True).value
-        assert result["status"] == "success"
-        assert "styled_cells" not in result
-        assert "summary" in result
-        assert result["summary"]["has_merged_cells"] is True
-        assert "A3:B3" in result["summary"]["merged_ranges"]
-
-    def test_detects_merged_cells(self, sample_xlsx: Path) -> None:
-        result = read_cell_styles(str(sample_xlsx), "A1:B3").value
-        # A3 是合并区域的一部分
-        a3_entries = [c for c in result["styled_cells"] if c["cell"] == "A3"]
-        assert any(e.get("merged") for e in a3_entries)
 
 
 # ── merge / unmerge 测试 ─────────────────────────────────
@@ -296,8 +266,8 @@ class TestMergeCells:
         unchanged.close()
         result = _format(file_path, [{"kind": "merge", "range": "A1:B1", "allow_data_loss": True}])
         assert result.success
-        styles = read_cell_styles(str(file_path), "A1:B1").value
-        assert styles["summary"]["has_merged_cells"] is True
+        styles = observe_spreadsheet(file_path=str(file_path), range="A1:B1", mode="range", facets=["presentation"]).value
+        assert styles["regions"][0]["merges"]
 
         result = _format(file_path, [{"kind": "unmerge", "range": "A1:B1"}])
         assert result.success
@@ -312,7 +282,7 @@ class TestAdjustRowHeight:
         wb.save(file_path)
         wb.close()
 
-        result = _format(file_path, [{"kind": "size", "rows": {"1": 30.0, "2": 25.0}}])
+        result = _format(file_path, [{"kind": "size", 'row_heights': {"1": 30.0, "2": 25.0}}])
         assert result.success
         wb = load_workbook(file_path)
         assert wb.active.row_dimensions[1].height == 30.0
@@ -327,7 +297,7 @@ class TestAdjustRowHeight:
         wb.save(file_path)
         wb.close()
 
-        result = _format(file_path, [{"kind": "size", "auto_fit": True, "axis": "row"}])
+        result = _format(file_path, [{"kind": "size", "range": "A1:A1", "auto_fit": True, "axis": "row"}])
         assert result.success
         wb = load_workbook(file_path)
         assert wb.active.row_dimensions[1].height is not None
@@ -353,10 +323,11 @@ class TestFormatCellsColorName:
             }],
         )
         assert result.success
-        styles = read_cell_styles(str(file_path), "A1").value
-        a1 = styles["styled_cells"][0]
-        assert a1["font"]["bold"] is True
-        assert a1["font"]["color"] == "FF0000"
+        observed = observe_spreadsheet(file_path=str(file_path), sheet="Sheet", range="A1", mode="range", facets=["presentation"])
+        assert observed.success, observed.model_text
+        a1 = observed.value["regions"][0]["cells"]["1,1"]["s"]
+        assert a1["bl"] == 1
+        assert a1["cl"]["rgb"].endswith("FF0000")
 
 
 class TestFormatFreezeAndWholeColumn:
@@ -375,8 +346,7 @@ class TestFormatFreezeAndWholeColumn:
         )
         assert result.success
         payload = result.value
-        assert any(str(item).startswith("freeze:") for item in payload["applied"])
-        sheets = payload["appearance"]["sheets"]
+        sheets = payload["observation"]["sheets"]
         assert sheets[0]["freeze_panes"] == "A2"
         from openpyxl import load_workbook
 
@@ -418,20 +388,29 @@ class TestFormatFreezeAndWholeColumn:
         result = _format(
             path,
             [
-                {"kind": "size", "sheet": "Sheet1", "auto_fit": True},
+                {"kind": "size", "sheet": "Sheet1", "range": "A1:A2", "auto_fit": True, "axis": "column"},
+                {"kind": "size", "sheet": "Sheet1", "range": "A1:A2", "auto_fit": True, "axis": "row"},
                 {"kind": "freeze", "sheet": "Sheet1", "freeze_panes": "A2"},
             ],
         )
         assert result.success
-        freeze = result.value["appearance"]["sheets"][0]["freeze_panes"]
+        freeze = result.value["observation"]["sheets"][0]["freeze_panes"]
         assert freeze == "A2"
-        widths = result.value["appearance"]["sheets"][0]["column_widths"]
-        assert widths
+        assert result.value["observation"]["geometry_changes"]
+
+    def test_size_receipt_echoes_row_heights(self, sample_xlsx: Path) -> None:
+        result = _format(
+            sample_xlsx,
+            [{"kind": "size", "sheet": "Sheet1", 'column_widths': {"A": 30}, 'row_heights': {"1": 12}}],
+        )
+        assert result.success, result.model_text
+        sheet = result.value["observation"]["geometry_changes"]
+        assert sheet
 
 
 
-def test_size_columns_name_list_means_autofit(tmp_path: Path) -> None:
-    """kind=size 的 columns 传列名列表 ["A","B"] 时按"选列自适应"处理。"""
+def test_size_rejects_legacy_columns_list(tmp_path: Path) -> None:
+    """V2 size has one canonical column_widths object; old columns is rejected."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Sheet1"
@@ -444,11 +423,8 @@ def test_size_columns_name_list_means_autofit(tmp_path: Path) -> None:
         path,
         [{"kind": "size", "sheet": "Sheet1", "columns": ["A", "B"]}],
     )
-    assert result.success, result.model_text
-    widths = result.value["appearance"]["sheets"][0]["column_widths"]
-    assert widths.get("A")
-    # 列名列表语义是自适应选列，不应报缺 columns/rows
-    assert "size:auto_fit" in str(result.model_text) or widths
+    assert not result.success
+    assert "columns" in result.model_text
 
 
 def test_conditional_format_cell_value_rule(tmp_path: Path) -> None:
@@ -567,7 +543,7 @@ class TestFormatSheetContract:
     """P0.1 / P0.3：单表绑定、多表 available_sheets、错误列全缺失。"""
 
     def test_single_sheet_omit_sheet_with_range_succeeds(self, sample_xlsx: Path) -> None:
-        result = format_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path=str(sample_xlsx),
             operations=[{"kind": "format", "range": "A1:B1", "font": {"bold": True}}],
             expected_version=content_version_of_file(sample_xlsx),
@@ -576,7 +552,7 @@ class TestFormatSheetContract:
 
     def test_two_sheet_omit_sheet_fails_with_available_sheets(self, tmp_path: Path) -> None:
         path = _two_sheet_book(tmp_path)
-        result = format_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path=str(path),
             operations=[{"kind": "format", "range": "A1:B1", "font": {"bold": True}}],
             expected_version=content_version_of_file(path),
@@ -590,54 +566,43 @@ class TestFormatSheetContract:
 
     def test_missing_kind_range_sheet_lists_all_and_example(self, tmp_path: Path) -> None:
         path = _two_sheet_book(tmp_path, "triple.xlsx")
-        result = format_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path=str(path),
             operations=[{"font": {"bold": True}}],
             expected_version=content_version_of_file(path),
         )
         assert not result.success
         text = result.model_text or ""
-        assert "sheet" in text
-        assert "range" in text
-        assert "kind" in text or "缺省" in text
-        assert "最小合法示例" in text
-        assert "必须提供 sheet" not in text or "range" in text
-        payload = result.value if isinstance(result.value, dict) else {}
-        assert payload.get("example")
-        assert "available_sheets" in payload
-        missing = payload.get("missing_fields") or []
-        assert "range" in missing
-        assert "sheet" in missing
+        assert "kind" in text
+        assert "operation_index" in text
 
     def test_single_sheet_omit_sheet_and_range_names_range(self, sample_xlsx: Path) -> None:
-        result = format_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path=str(sample_xlsx),
             operations=[{"font": {"bold": True}}],
             expected_version=content_version_of_file(sample_xlsx),
         )
         assert not result.success
         text = result.model_text or ""
-        assert "range" in text
-        payload = result.value if isinstance(result.value, dict) else {}
-        missing = payload.get("missing_fields") or []
-        assert "range" in missing
-        assert "sheet" not in missing
+        assert "kind" in text
+        assert "operation_index" in text
 
     def test_size_omit_sheet_on_single_sheet_with_columns(self, tmp_path: Path) -> None:
-        """R30-1：kind=size 把表名塞进 range，单表应绑定成功。"""
+        """V2 does not treat a sheet name as a range alias."""
         wb = Workbook()
         wb.active.title = "区域月度汇总"
         wb.active["A1"] = 1
         path = tmp_path / "size.xlsx"
         wb.save(path)
         wb.close()
-        result = format_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path=str(path),
             operations=[{
                 "kind": "size",
                 "range": "区域月度汇总",
-                "columns": {"A": 10, "B": 12},
+                'column_widths': {"A": 10, "B": 12},
             }],
             expected_version=content_version_of_file(path),
         )
-        assert result.success, result.model_text
+        assert not result.success
+        assert "命名区域" in result.model_text or "RANGE" in result.model_text

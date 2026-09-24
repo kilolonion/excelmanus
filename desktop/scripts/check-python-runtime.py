@@ -3,6 +3,13 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
+
+# A fresh isolated child also starts real spawn workers and checks package data.
+subprocess.run([
+    sys.executable, "-I", "-B", "-X", "utf8", str(Path(__file__).with_name("check-python-stdlib.py")),
+], check=True, timeout=60)
 
 with tempfile.TemporaryDirectory(prefix="excelmanus-runtime-") as directory:
     root = Path(directory)

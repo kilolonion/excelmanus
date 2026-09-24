@@ -40,12 +40,10 @@ import {
 } from "lucide-react";
 
 const TOOL_ICONS: Record<string, LucideIcon> = {
-  inspect_spreadsheet: Table2,
+  observe_spreadsheet: Table2,
   analyze_spreadsheet: ChartColumn,
   compare_spreadsheets: ArrowLeftRight,
-  edit_spreadsheet: Pencil,
-  format_spreadsheet: Paintbrush,
-  manage_spreadsheet_objects: Shapes,
+  apply_spreadsheet_changes: Shapes,
   trace_spreadsheet_formulas: SquareFunction,
   manage_spreadsheet_versions: History,
   run_code: SquareCode,

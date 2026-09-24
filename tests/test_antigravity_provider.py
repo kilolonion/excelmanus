@@ -28,8 +28,8 @@ from excelmanus.providers.antigravity import (
 @pytest.fixture(autouse=True)
 def _inject_test_oauth_client(monkeypatch):
     """测试注入占位凭据，不依赖真实 OAuth 客户端配置。"""
-    monkeypatch.setattr(antigravity_mod, "_CLIENT_ID", "test-client-id")
-    monkeypatch.setattr(antigravity_mod, "_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("EXCELMANUS_ANTIGRAVITY_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("EXCELMANUS_ANTIGRAVITY_CLIENT_SECRET", "test-client-secret")
 
 
 def _make_record(**over) -> AuthProfileRecord:
@@ -146,11 +146,19 @@ def test_build_authorize_url(provider):
     assert qs["redirect_uri"] == ["http://localhost:51121/oauth-callback"]
     assert qs["access_type"] == ["offline"]
     assert qs["prompt"] == ["consent"]
-    assert "client_id" in qs
+    assert qs["client_id"] == ["test-client-id"]
     scope = qs["scope"][0]
     assert "cloud-platform" in scope
     assert "userinfo.email" in scope
     assert "cclog" in scope
+
+
+def test_oauth_client_falls_back_to_builtin(monkeypatch):
+    """未配置环境变量时使用内置的 Antigravity 公开客户端凭据。"""
+    monkeypatch.delenv("EXCELMANUS_ANTIGRAVITY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("EXCELMANUS_ANTIGRAVITY_CLIENT_SECRET", raising=False)
+    assert antigravity_mod._client_id().endswith(".apps.googleusercontent.com")
+    assert antigravity_mod._client_secret().startswith("GOCSPX-")
 
 
 @pytest.mark.asyncio
@@ -318,6 +326,48 @@ def test_list_supported_model_entries(provider):
         assert e["public_model_id"] == e["profile_name"]
     ids = [e["model"] for e in entries]
     assert "claude-sonnet-4-6" in ids
+
+
+@pytest.mark.asyncio
+async def test_list_model_entries_dynamic(provider):
+    """已连接时从 fetchAvailableModels 拉取动态目录，过滤内部模型。"""
+    fake = _FakeOAuthClient({
+        ("POST", "fetchAvailableModels"): _FakeResp(200, {
+            "models": {
+                "gemini-99-pro": {"displayName": "Gemini 99 Pro"},
+                "internal-x": {"displayName": "x", "isInternal": True},
+                "claude-9-opus": {},
+            },
+        }),
+    })
+    with patch(
+        "excelmanus.auth.providers.antigravity._http_client", lambda: fake,
+    ):
+        entries = await provider.list_model_entries(_make_record())
+    assert [e["model"] for e in entries] == ["gemini-99-pro", "claude-9-opus"]
+    assert entries[0]["display_name"] == "Gemini 99 Pro"
+    assert entries[0]["profile_name"] == "antigravity/gemini-99-pro"
+    req = fake.requests[0]
+    assert req["json"] == {"project": "proj-abc-123"}
+    assert req["headers"]["Authorization"] == "Bearer ya29.access-token"
+
+
+@pytest.mark.asyncio
+async def test_list_model_entries_fallback_on_failure(provider):
+    fake = _FakeOAuthClient({
+        ("POST", "fetchAvailableModels"): _FakeResp(500, {}, "boom"),
+    })
+    with patch(
+        "excelmanus.auth.providers.antigravity._http_client", lambda: fake,
+    ):
+        entries = await provider.list_model_entries(_make_record())
+    assert any(e["model"] == "claude-sonnet-4-6" for e in entries)
+
+
+@pytest.mark.asyncio
+async def test_list_model_entries_without_record(provider):
+    entries = await provider.list_model_entries(None)
+    assert any(e["model"] == "claude-sonnet-4-6" for e in entries)
 
 
 @pytest.mark.asyncio

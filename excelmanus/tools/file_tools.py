@@ -1080,7 +1080,7 @@ def get_tools() -> list[ToolDef]:
                 "读取文本文件内容（md、txt、py、json、csv、yaml、toml 等）。"
                 "也可取回工具大结果：file_path 原样传 spill/result_spill/selection_spill 字段的值（spill:…）；返回完整原始结果，不按文本行数截断。"
                 "适用场景：查看脚本源码、配置文件、文档、日志等非 Excel 文本文件。"
-                "不适用：Excel/二进制文件请用 inspect_spreadsheet。"
+                "不适用：Excel/二进制文件请用 observe_spreadsheet。"
                 "返回文件内容与行数信息；超长文件自动截断。"
             ),
             input_schema={

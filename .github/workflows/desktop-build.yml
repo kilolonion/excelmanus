@@ -84,7 +84,7 @@ jobs:
         if: matrix.target == 'win'
         shell: pwsh
         run: |
-          .venv/Scripts/python.exe -m pytest tests/test_desktop_runtime.py tests/test_windows_desktop.py -q
+          .venv/Scripts/python.exe -m pytest tests/test_desktop_packaging.py tests/test_desktop_runtime.py tests/test_windows_desktop.py -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .venv/Scripts/python.exe desktop/scripts/check-graceful-shutdown.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -143,7 +143,8 @@ jobs:
         working-directory: source-中文/desktop
         shell: pwsh
         run: |
-          $installer = Get-ChildItem dist -Filter '*Setup*.exe' | Select-Object -First 1
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = Get-Item "dist/ExcelManus Setup $version.exe"
           node scripts/package-report.mjs dist/win-unpacked --installer $installer.FullName --output dist/package-report.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -157,3 +158,11 @@ jobs:
             source-中文/desktop/dist/*.blockmap
             source-中文/desktop/dist/package-report.json
           if-no-files-found: error
+
+      - name: Upload Windows install timings
+        if: always() && matrix.target == 'win'
+        uses: actions/upload-artifact@v4
+        with:
+          name: excelmanus-win-install-timings
+          path: source-中文/desktop/dist/install-timings.json
+          if-no-files-found: ignore

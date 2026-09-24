@@ -33,6 +33,9 @@ class ImageAttachmentRef:
     height: int
     name: str | None = None
     original_dimensions: ImageDimensions | None = None
+    source_digest: str | None = None
+    parent_attachment_id: str | None = None
+    crop_in_parent: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -46,6 +49,11 @@ class ImageAttachmentRef:
             payload["name"] = self.name
         if self.original_dimensions is not None:
             payload["originalDimensions"] = asdict(self.original_dimensions)
+        if self.source_digest:
+            payload["sourceDigest"] = self.source_digest
+        if self.parent_attachment_id:
+            payload["parentAttachmentId"] = self.parent_attachment_id
+            payload["cropInParent"] = self.crop_in_parent
         return payload
 
     @classmethod
@@ -62,6 +70,9 @@ class ImageAttachmentRef:
             height=int(data.get("height") or 0),
             name=data.get("name"),
             original_dimensions=orig,
+            source_digest=data.get("sourceDigest"),
+            parent_attachment_id=data.get("parentAttachmentId"),
+            crop_in_parent=data.get("cropInParent"),
         )
 
 

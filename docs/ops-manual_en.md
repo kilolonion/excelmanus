@@ -1,6 +1,6 @@
 # ExcelManus operations guide
 
-Applies to: 1.8.0 source tree · Updated: 2026-09-21
+Applies to: 1.8.1 source tree · Updated: 2026-09-21
 
 [Documentation](README.md) · [中文](ops-manual.md) · [Configuration](configuration_en.md)
 

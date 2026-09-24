@@ -199,9 +199,9 @@ def test_tool_result_contract_error_is_returned_not_raised(tmp_path: Path) -> No
 
     payload, record = manager.execute_and_audit(
         approval_id=approval_id,
-        tool_name="edit_spreadsheet",
+        tool_name="apply_spreadsheet_changes",
         arguments={"file_path": "book.xlsx"},
-        tool_scope=["edit_spreadsheet"],
+        tool_scope=["apply_spreadsheet_changes"],
         execute=execute,
         undoable=True,
         created_at_utc=manager.utc_now(),
@@ -536,9 +536,9 @@ def test_manifest_survives_non_json_typed_arguments(tmp_path: Path) -> None:
     }
     _, record = manager.execute_and_audit(
         approval_id=approval_id,
-        tool_name="edit_spreadsheet",
+        tool_name="apply_spreadsheet_changes",
         arguments=args,
-        tool_scope=["edit_spreadsheet"],
+        tool_scope=["apply_spreadsheet_changes"],
         execute=execute,
         undoable=True,
         created_at_utc=manager.utc_now(),

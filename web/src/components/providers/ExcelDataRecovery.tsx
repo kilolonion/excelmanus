@@ -53,7 +53,7 @@ export function ExcelDataRecovery() {
           }).then((view) => {
             if (cancelled || useSessionStore.getState().activeSessionId !== loadedSessionId) return;
             useWorkbookConversationStore.getState().observe(loadedSessionId, target.file, {
-              status: "ready", sheet: view.active_sheet || view.windows[0]?.sheet, version: view.content_version,
+              status: "ready", sheet: view.active_sheet || view.regions[0]?.sheet, version: view.content_version,
             });
           }).catch((err) => {
             if (cancelled || useSessionStore.getState().activeSessionId !== loadedSessionId) return;

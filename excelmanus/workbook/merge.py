@@ -1,4 +1,9 @@
-"""Three-way UI draft review. Rebuild on the latest bytes inside the write CAS."""
+"""Three-way review for canonical V2 cell patch operations.
+
+The reviewer computes a plan only.  Publishing the plan is deliberately left to
+``WorkbookService.apply`` so UI conflict resolution and agent writes share the
+same ChangeSet transaction, version check, serialization checks, and receipt.
+"""
 
 from copy import copy
 from io import BytesIO
@@ -8,7 +13,8 @@ from typing import Any
 from openpyxl import load_workbook
 from openpyxl.utils.cell import coordinate_to_tuple
 
-from excelmanus.workbook.view_mutate import apply_workbook_operations
+from excelmanus.workbook.mutation import execute_operation
+from excelmanus.workbook.contracts import validate_operations
 
 MAX_CELLS = 5000
 FACETS = ("value", "font", "fill", "border", "alignment", "number_format", "protection")
@@ -55,10 +61,15 @@ def _display(value: Any, facet: str = "value") -> Any:
 def review_merge(base: bytes, current: bytes, operations: list[dict], *,
                  choices: dict[str, str] | None = None, apply: bool = False,
                  keep_vba: bool = False) -> tuple[dict, bytes | None]:
-    """Only cell values/styles have stable merge semantics. Structural drafts need a new plan."""
+    """Review canonical ``cells.patch`` changes against a newer workbook.
+
+    ``operations`` are never committed here.  The returned ``operations`` field
+    is a filtered V2 ChangeSet that the caller must submit through the domain
+    service after checking the current content version.
+    """
     cells: set[tuple[str, str]] = set()
     for op in operations:
-        if op.get("op") not in {"set_values", "set_styles"}:
+        if op.get("kind") != "cells.patch":
             return {"status": "replan", "reason": "草稿包含行列、工作表或其他结构操作，请让 Agent 重新制定方案。"}, None
         sheet = op.get("sheet")
         if not isinstance(sheet, str) or not sheet:
@@ -78,11 +89,14 @@ def review_merge(base: bytes, current: bytes, operations: list[dict], *,
         original, local, remote = books
         if _shape(original) != _shape(remote):
             return {"status": "replan", "reason": "工作表结构或数据边界已改变，旧坐标需要重新核对，请让 Agent 重新制定方案。"}, None
-        apply_workbook_operations(local, operations)
+        canonical_operations = validate_operations(operations)
+        for operation in canonical_operations:
+            execute_operation(local, operation)
         rows = []
         safe_count = 0
         conflict_count = 0
         updates = []
+        decisions: dict[tuple[str, str, str], bool] = {}
         for sheet, address in sorted(cells):
             before, mine, theirs = (book[sheet][address] for book in books)
             for facet in FACETS:
@@ -93,6 +107,7 @@ def review_merge(base: bytes, current: bytes, operations: list[dict], *,
                 local_value = (b, mine.data_type) if facet == "value" else b
                 remote_value = (c, theirs.data_type) if facet == "value" else c
                 if base_value == local_value:
+                    decisions[(sheet, address, facet)] = False
                     continue
                 conflict = remote_value != base_value and remote_value != local_value
                 key = json.dumps([sheet, address, facet], ensure_ascii=False, separators=(",", ":"))
@@ -104,9 +119,41 @@ def review_merge(base: bytes, current: bytes, operations: list[dict], *,
                         raise ValueError("请为每个冲突选择保留当前文件还是我的修改")
                 else:
                     safe_count += 1
-                if not conflict or (choices or {}).get(key) == "local":
+                keep_local = not conflict or (choices or {}).get(key) == "local"
+                decisions[(sheet, address, facet)] = keep_local
+                if keep_local:
                     updates.append((theirs, facet, b, mine.data_type))
-        result = {"status": "review", "cells": rows, "safe_count": safe_count, "conflict_count": conflict_count}
+        merged_operations: list[dict] = []
+        for operation in canonical_operations:
+            grouped: dict[str, list[dict]] = {}
+            for item in operation["cells"]:
+                address = str(item["cell"]).upper()
+                merged: dict[str, Any] = {"cell": address}
+                if "value" in item and decisions.get((operation["sheet"], address, "value"), False):
+                    merged["value"] = item["value"]
+                if "style" in item:
+                    style = item["style"]
+                    if style is None:
+                        style_facets = {facet for facet in FACETS if facet != "value"}
+                        if any(decisions.get((operation["sheet"], address, facet), False) for facet in style_facets):
+                            merged["style"] = None
+                    elif isinstance(style, dict):
+                        style_fields = {
+                            "font": "font", "fill": "fill", "border": "border",
+                            "alignment": "alignment", "number_format": "number_format",
+                        }
+                        selected = {
+                            field: value for field, value in style.items()
+                            if decisions.get((operation["sheet"], address, style_fields.get(field, field)), False)
+                        }
+                        if selected:
+                            merged["style"] = selected
+                if len(merged) > 1:
+                    grouped.setdefault(operation["sheet"], []).append(merged)
+            for sheet_name, merged_cells in grouped.items():
+                merged_operations.append({"kind": "cells.patch", "sheet": sheet_name, "cells": merged_cells})
+        result = {"status": "review", "cells": rows, "safe_count": safe_count,
+                  "conflict_count": conflict_count, "operations": merged_operations}
         if not apply:
             return result, None
         for cell, facet, value, data_type in updates:

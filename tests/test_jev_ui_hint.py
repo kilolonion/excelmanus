@@ -43,7 +43,7 @@ def _ok_result(*, truncated: bool = False) -> ChatResult:
         reply="done",
         tool_calls=[
             ToolCallResult(
-                tool_name="edit_spreadsheet",
+                tool_name="apply_spreadsheet_changes",
                 arguments={"file_path": "a.xlsx"},
                 result="ok",
                 success=True,

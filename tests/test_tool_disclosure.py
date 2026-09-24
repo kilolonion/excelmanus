@@ -31,7 +31,7 @@ def engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     registry = ToolRegistry()
     names = DEFAULT_DISCLOSURE_CORE_TOOLS - {"introspect_capability"} | {
         "compare_spreadsheets", "trace_spreadsheet_formulas", "split_spreadsheet",
-        "manage_spreadsheet_objects", "manage_spreadsheet_versions",
+        "manage_spreadsheet_versions",
         "copy_file", "run_shell", "read_word", "write_word",
         "delegate", "list_subagents", "manage_skills", "memory_read_topic",
         "mcp_docs_search", "mcp_private_search",
@@ -87,7 +87,7 @@ def test_discover_load_compile_and_call_keeps_sdk_complete(engine: SimpleNamespa
     builder = MetaToolBuilder(engine)
     initial = builder.build_v5_tools()
     assert "mcp_docs_search" not in _names(initial)
-    assert {"inspect_spreadsheet", "run_code", "introspect_capability"} <= _names(initial)
+    assert {"observe_spreadsheet", "run_code", "introspect_capability"} <= _names(initial)
     description = next(row["function"]["description"] for row in initial if row["function"]["name"] == "introspect_capability")
     assert "MCP" in description and "can_i_do" in description and "tool_detail" in description
     assert builder.build_v5_tools() is initial
@@ -118,7 +118,7 @@ def test_default_core_is_explicit_and_every_deferred_tool_is_discoverable(engine
     deferred = catalog.name_set() - _names(schemas)
     assert {
         "compare_spreadsheets", "trace_spreadsheet_formulas", "split_spreadsheet",
-        "manage_spreadsheet_objects", "manage_spreadsheet_versions",
+        "manage_spreadsheet_versions",
         "copy_file", "run_shell", "read_word", "write_word",
         "delegate", "list_subagents", "manage_skills", "memory_read_topic",
         "mcp_docs_search", "mcp_private_search",
@@ -131,7 +131,7 @@ def test_default_core_is_explicit_and_every_deferred_tool_is_discoverable(engine
         assert name in status
         assert name in _detail(engine, query_type="can_i_do", query=name).model_text
     for category, expected in {
-        "objects": "manage_spreadsheet_objects", "versions": "manage_spreadsheet_versions",
+        "objects": "apply_spreadsheet_changes", "versions": "manage_spreadsheet_versions",
         "word": "read_word", "file": "copy_file", "agents": "delegate",
         "skills": "manage_skills", "mcp": "mcp_docs_search",
     }.items():
@@ -148,12 +148,12 @@ def test_builtin_batch_detail_loads_schemas_without_narrowing_sdk(engine: Simple
         {"query_type": "tool_detail", "query": "compare_spreadsheets"},
         "malformed query",
         {"query_type": "tool_detail", "query": "manage_spreadsheet_versions.query"},
-        {"query_type": "tool_detail", "query": "manage_spreadsheet_objects.missing"},
+        {"query_type": "tool_detail", "query": "apply_spreadsheet_changes.missing"},
     ])
     loaded = _names(builder.build_v5_tools())
     assert loaded - initial == {"compare_spreadsheets", "manage_spreadsheet_versions"}
     session = build_session_for_run_code(SimpleNamespace(_engine=engine), root_call_id="builtins")
-    assert {"manage_spreadsheet_objects", "split_spreadsheet", "read_word", "run_shell"} <= session.bound_names
+    assert {"apply_spreadsheet_changes", "split_spreadsheet", "read_word", "run_shell"} <= session.bound_names
 
 
 def test_registration_schema_change_and_removal_refresh_disclosure(engine: SimpleNamespace) -> None:

@@ -87,7 +87,7 @@ def test_builtin_explorer_is_readonly_restricted(tmp_path: Path) -> None:
     explorer = loaded["explorer"]
     assert explorer.permission_mode == "readOnly"
     assert explorer.capability_mode == "restricted"
-    assert "inspect_spreadsheet" in explorer.allowed_tools
+    assert "observe_spreadsheet" in explorer.allowed_tools
     assert explorer.source == "builtin"
 
 
@@ -269,6 +269,22 @@ def test_external_agent_explicit_thresholds_override_global_defaults(
     assert finance.max_consecutive_failures == 1
 
 
+def test_external_agent_can_disable_iteration_limit(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user_agents"
+    project_dir = tmp_path / "project_agents"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    _write_agent(
+        project_dir, "finance.md", name="finance_checker",
+        description="财务校验子代理", max_iterations=0,
+    )
+    registry = SubagentRegistry(_make_config(
+        tmp_path, user_dir=user_dir, project_dir=project_dir,
+        subagent_max_iterations=9,
+    ))
+    assert registry.load_all()["finance_checker"].max_iterations == 0
+
+
 def test_builtin_agents_keep_explicit_thresholds_when_global_defaults_change(
     tmp_path: Path,
 ) -> None:
@@ -287,8 +303,8 @@ def test_builtin_agents_keep_explicit_thresholds_when_global_defaults_change(
         )
     )
     loaded = registry.load_all()
-    # v6: 唯一的内置 subagent 保持自身声明的阈值
-    assert loaded["subagent"].max_iterations == 120
+    # 内置 subagent 保持自身声明的不限制轮次配置。
+    assert loaded["subagent"].max_iterations == 0
     assert loaded["subagent"].max_consecutive_failures == 3
 
 

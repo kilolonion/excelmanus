@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from excelmanus.replica_spec import SpecValidationError, validate_workbook_spec
+from excelmanus.workbook.spec import SpecValidationError, validate_workbook_spec
 
 
 def _minimal_workbook_spec(**overrides: object) -> dict:
@@ -97,14 +97,15 @@ class TestCompileFromWorkbookSpec:
     def test_compile_writes_xlsx_from_blocks(self, tmp_path: Path) -> None:
         from openpyxl import load_workbook
 
-        from excelmanus.replica_spec import compile_workbook_spec_to_bytes, validate_workbook_spec
+        from excelmanus.workbook.spec import validate_workbook_spec
+        from tests.workbook_support import create_document_bytes
 
         spec = validate_workbook_spec(_minimal_workbook_spec())
-        data, summary = compile_workbook_spec_to_bytes(spec)
+        data, summary = create_document_bytes(spec)
         xlsx_path = tmp_path / "out.xlsx"
         xlsx_path.write_bytes(data)
         assert xlsx_path.is_file()
-        assert summary["cells_written"] >= 4
+        assert summary["applied"].count("write") >= 4
         wb = load_workbook(str(xlsx_path))
         ws = wb["Sheet1"]
         assert ws["A1"].value == "Name"
@@ -137,35 +138,28 @@ class TestValidateWorkbookSpec:
 
 def test_workbook_spec_commit_includes_verification(tmp_path: Path) -> None:
     from excelmanus.security import FileAccessGuard
-    from excelmanus.tools import intent_tools, reference_tools
+    from excelmanus.tools import workbook_tools, reference_tools
     from excelmanus.tools._guard_ctx import set_guard
-    from excelmanus.tools.intent_tools import edit_spreadsheet
+    from excelmanus.tools.workbook_tools import apply_spreadsheet_changes
 
     workspace = str(tmp_path)
     set_guard(FileAccessGuard(workspace))
-    intent_tools.init_guard(workspace)
+    workbook_tools.init_guard(workspace)
     reference_tools.init_guard(workspace)
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(tmp_path / "created.xlsx"),
         workbook_spec=_minimal_workbook_spec(),
     )
     assert result.success, result.model_text
-    verification = result.value["verification"]
-    assert "mismatches" in verification
-    assert verification["ok"] is True
-    assert verification["mismatches"] == []
+    observation = result.value["observation"]
+    assert all(item["verified"] for item in observation["cell_checks"])
+    assert all(item["verified"] for item in observation["geometry_changes"])
 
 
-def test_truncated_json_string_reports_chunking_guidance() -> None:
-    """JSON 字符串在末尾被截断时给出分块/替代路径指引，而非泛化"非法 JSON"。"""
+def test_json_string_is_rejected_without_compatibility_coercion() -> None:
+    """WorkbookSpec V2 accepts an object only; callers must decode JSON first."""
     truncated = '{"name":"x","sheets":[{"name":"S1","dimensions":{"rows":2,"cols":2'
     with pytest.raises(SpecValidationError) as excinfo:
         validate_workbook_spec(truncated)
     message = str(excinfo.value)
-    assert "截断" in message
-    assert "source_csv" in message or "operations" in message
-
-    # 中段语法错误仍是普通非法 JSON 文案
-    with pytest.raises(SpecValidationError) as excinfo2:
-        validate_workbook_spec('{"name":"x" bad}')
-    assert "截断" not in str(excinfo2.value)
+    assert "必须是对象" in message

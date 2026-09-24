@@ -11,7 +11,7 @@ export function RevisionWorkbookPreview({ data, loading, onSheet }: {
   loading: boolean;
   onSheet: (sheet: string) => void;
 }) {
-  const win = data.windows?.[0];
+  const win = data.regions?.[0];
   if (!win) return null;
   const used = data.sheets?.find((s) => s.name === win.sheet)?.used;
   const r1 = Math.min(win.rect.r1, Math.max(used?.rows ?? win.rect.r1, win.rect.r0));
@@ -30,9 +30,9 @@ export function RevisionWorkbookPreview({ data, loading, onSheet }: {
     </div>
     <div className="max-h-[50vh] overflow-auto rounded border bg-white text-black">
       <table className="border-collapse text-xs" style={{ tableLayout: "fixed", width: "max-content" }} aria-label="历史工作表预览">
-        <colgroup><col style={{ width: 36 }} />{cols.map((c) => <col key={c} style={{ width: (win.col_widths?.[letter(c)] ?? 11.73) * 7.5 }} />)}</colgroup>
+        <colgroup><col style={{ width: 36 }} />{cols.map((c) => <col key={c} style={{ width: win.geometry?.columns.find((d) => d.index === c)?.pixels ?? 64 }} />)}</colgroup>
         <thead><tr><th className="border bg-gray-100" />{cols.map((c) => <th key={c} className="border bg-gray-100 px-2 font-normal">{letter(c)}</th>)}</tr></thead>
-        <tbody>{rows.map((r) => <tr key={r} style={{ height: (win.row_heights?.[String(r)] ?? 18) / 0.75 }}>
+        <tbody>{rows.map((r) => <tr key={r} style={{ height: win.geometry?.rows.find((d) => d.index === r)?.pixels ?? 20 }}>
           <th className="border bg-gray-100 px-1 font-normal">{r}</th>
           {cols.map((c) => {
             // Check only the displayed cells; expanding a whole-column merge into

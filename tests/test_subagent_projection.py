@@ -12,7 +12,7 @@ def test_tool_call_start_projects_with_conversation_id() -> None:
     projected = project_child_event(
         ToolCallEvent(
             event_type=EventType.TOOL_CALL_START,
-            tool_name="inspect_spreadsheet",
+            tool_name="observe_spreadsheet",
             iteration=2,
         ),
         descriptor=descriptor,
@@ -22,16 +22,16 @@ def test_tool_call_start_projects_with_conversation_id() -> None:
     assert projected.event_type == EventType.SUBAGENT_TOOL_START
     assert projected.subagent_conversation_id == "child-7"
     assert projected.subagent_name == "explorer"
-    assert projected.tool_name == "inspect_spreadsheet"
+    assert projected.tool_name == "observe_spreadsheet"
 
 
 def test_wrap_on_event_remaps_and_drops_parent_surface() -> None:
     descriptor = SubagentDescriptor(run_id="child-8", agent_name="explorer")
     events: list[ToolCallEvent] = []
     wrapped = wrap_on_event(events.append, descriptor)
-    wrapped(ToolCallEvent(event_type=EventType.TOOL_CALL_START, tool_name="inspect_spreadsheet"))
+    wrapped(ToolCallEvent(event_type=EventType.TOOL_CALL_START, tool_name="observe_spreadsheet"))
     wrapped(ToolCallEvent(event_type=EventType.ITERATION_START, iteration=1))
-    wrapped(ToolCallEvent(event_type=EventType.TOOL_CALL_END, tool_name="inspect_spreadsheet", success=True))
+    wrapped(ToolCallEvent(event_type=EventType.TOOL_CALL_END, tool_name="observe_spreadsheet", success=True))
     wrapped(ToolCallEvent(event_type=EventType.TURN_START))
     kinds = [event.event_type for event in events]
     assert kinds == [

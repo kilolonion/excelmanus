@@ -59,6 +59,9 @@ const nextConfig: NextConfig = {
   // 固定 tracing 根目录为 web/，防止上级目录中的残留 lockfile
   // 被误判为 workspace root，导致 standalone 产物嵌套错位。
   outputFileTracingRoot: __dirname,
+  // Native folder selection waits for the user (up to five minutes).
+  // The rewrite proxy must not cut that request off at its default 30 seconds.
+  experimental: { proxyTimeout: 310_000 },
   typescript: { ignoreBuildErrors: false },
   allowedDevOrigins: getLocalNetworkOrigins(getDevFrontendPort()),
   env: {

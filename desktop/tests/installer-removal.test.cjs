@@ -35,7 +35,13 @@ test('native removal preserves user files and rejects traversal and junctions', 
     const compiled = run(compiler.path, ['-WX', '-INPUTCHARSET', 'UTF8', `-DPROJECT_DIR=${path.resolve(__dirname, '..')}`, `-DTEST_EXE=${exe}`, `-DTEST_INSTALL_DIR=${installed}`, `-DTEST_MANIFEST=${manifest}`, path.join(__dirname, 'fixtures', 'installer-removal.nsi')], compiler.env);
     assert.equal(compiled.status, 0, compiled.stdout + compiled.stderr);
     writeManifest(['missing\\new.js']);
+    assert.equal(run(exe, ['/verify']).status, 2, 'incomplete extraction cannot report success');
     assert.equal(run(exe, []).status, 0, 'nonexistent destinations are valid during a first install');
+    writeManifest(['resources']);
+    assert.equal(run(exe, ['/verify']).status, 2, 'directories cannot replace expected files');
+    writeManifest(owned);
+    assert.equal(run(exe, ['/verify']).status, 0);
+    assert.equal(fs.readFileSync(path.join(installed, 'ExcelManus.exe'), 'utf8'), 'program', 'verification must not remove files');
     for (const invalid of ['..\\outside.txt', '\\absolute.txt', 'C:\\absolute.txt', 'nested/escape.js', 'nested\\*.js', 'nested\\?.js', 'file.txt:stream', 'nested\\..\\outside.txt']) {
       writeManifest([...owned, invalid]);
       assert.equal(run(exe, []).status, 2, invalid);

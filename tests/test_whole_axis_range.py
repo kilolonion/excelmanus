@@ -9,12 +9,13 @@ from openpyxl import Workbook, load_workbook
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import (
+from excelmanus.tools.workbook_tools import (
     analyze_spreadsheet,
-    edit_spreadsheet,
+    apply_spreadsheet_changes,
     init_guard,
-    inspect_spreadsheet,
+    observe_spreadsheet,
 )
+from tests.workbook_support import region_matrix
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
@@ -53,33 +54,33 @@ def _column_book(path: Path) -> Path:
 def test_inspect_whole_column_clips_to_used_range(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _column_book(tmp_path / "cols.xlsx")
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="range",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         range="A:A",
     )
     assert result.success, _err(result)
     payload = _payload(result)
-    assert payload.get("resolved_range") == "A1:A4"
-    assert payload.get("data") == [["部门"], ["销售"], ["研发"], ["财务"]]
-    assert payload.get("start_row") == 1
-    assert payload.get("end_row") == 4
+    assert payload["regions"][0]["range"] == "A1:A4"
+    assert region_matrix(payload["regions"][0]) == [["部门"], ["销售"], ["研发"], ["财务"]]
+    assert payload["regions"][0]["rect"]["r0"] == 1
+    assert payload["regions"][0]["rect"]["r1"] == 4
 
 
 def test_inspect_whole_row_clips_to_used_range(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _column_book(tmp_path / "rows.xlsx")
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="range",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         range="1:1",
     )
     assert result.success, _err(result)
     payload = _payload(result)
-    assert payload.get("resolved_range") == "A1:B1"
-    assert payload.get("data") == [["部门", 10]]
+    assert payload["regions"][0]["range"] == "A1:B1"
+    assert region_matrix(payload["regions"][0]) == [["部门", 10]]
 
 
 def test_inspect_whole_column_truncates_over_cap(tmp_path: Path, monkeypatch) -> None:
@@ -88,40 +89,40 @@ def test_inspect_whole_column_truncates_over_cap(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(address_mod, "MAX_WHOLE_RANGE_CELLS", 2)
     _bind(tmp_path)
     path = _column_book(tmp_path / "cap.xlsx")
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="range",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         range="A:A",
     )
     assert result.success, _err(result)
     payload = _payload(result)
-    assert payload.get("resolved_range") == "A1:A2"
-    assert payload.get("data") == [["部门"], ["销售"]]
-    assert payload.get("is_truncated") is True
+    assert payload["regions"][0]["range"] == "A1:A2"
+    assert region_matrix(payload["regions"][0]) == [["部门"], ["销售"]]
+    assert payload["regions"][0].get("truncated") is True
 
 
 def test_inspect_multi_area_range_reads_all_regions(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _column_book(tmp_path / "multi.xlsx")
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="range",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         range="A1:A2,B1:B2",
     )
     assert result.success, _err(result)
     payload = _payload(result)
-    areas = payload.get("areas") or []
+    areas = payload.get("regions") or []
     assert len(areas) == 2
-    assert (areas[0].get("values") or areas[0].get("data")) == [["部门"], ["销售"]]
-    assert (areas[1].get("values") or areas[1].get("data")) == [[10], [20]]
+    assert region_matrix(areas[0]) == [["部门"], ["销售"]]
+    assert region_matrix(areas[1]) == [[10], [20]]
 
 
 def test_copy_whole_column_clips_to_used_range(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _column_book(tmp_path / "copy.xlsx")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -133,7 +134,7 @@ def test_copy_whole_column_clips_to_used_range(tmp_path: Path) -> None:
         }],
     )
     assert result.success, _err(result)
-    applied = _payload(result).get("applied") or []
+    applied = _payload(result)["observation"].get("operations") or []
     assert any("A1:A4" in str(item) for item in applied)
     wb = load_workbook(path)
     try:
@@ -148,7 +149,7 @@ def test_copy_whole_column_clips_to_used_range(tmp_path: Path) -> None:
 def test_copy_whole_row_clips_to_used_range(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = _column_book(tmp_path / "copy_row.xlsx")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -175,7 +176,7 @@ def test_filter_rejects_whole_column_address_as_column_name(tmp_path: Path) -> N
     result = analyze_spreadsheet(
         mode="filter",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         column="A:A",
         operator="eq",
         value="销售",
@@ -193,7 +194,7 @@ def test_filter_by_header_still_works_on_full_column_sheet(tmp_path: Path) -> No
     result = analyze_spreadsheet(
         mode="filter",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         column="部门",
         operator="eq",
         value="销售",

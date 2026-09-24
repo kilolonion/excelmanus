@@ -5,8 +5,6 @@
   Var /GLOBAL ExcelManusDestination
   Var /GLOBAL ExcelManusFind
   Var /GLOBAL ExcelManusEntry
-  Var /GLOBAL ExcelManusCopyAttempt
-  Var /GLOBAL ExcelManusMoveAttempt
 
   StrCpy $ExcelManusDestination $OUTDIR
   ; Stage on the destination volume, with its inherited permissions. Moving a
@@ -19,6 +17,9 @@
   IfErrors ExcelManusExtractFailed
   SetOutPath $ExcelManusStage
   Nsis7z::Extract "${FILE}"
+  !ifmacrodef ExcelManusVerifyExtractedPayload
+    !insertmacro ExcelManusVerifyExtractedPayload
+  !endif
   !ifmacrodef ExcelManusRecordExtractStage
     !insertmacro ExcelManusRecordExtractStage
   !endif
@@ -31,43 +32,15 @@
     StrCmp $ExcelManusEntry "" ExcelManusMoveDone
     StrCmp $ExcelManusEntry "." ExcelManusMoveSkip
     StrCmp $ExcelManusEntry ".." ExcelManusMoveSkip
-    StrCpy $ExcelManusMoveAttempt 0
-  ExcelManusMoveRetry:
-    ClearErrors
-    Rename "$ExcelManusStage\$ExcelManusEntry" "$ExcelManusDestination\$ExcelManusEntry"
-    IfErrors 0 ExcelManusMoveSkip
-    ; A scanner can briefly retain a just-written child. Retry the cheap move
-    ; before falling back to copying the entire remaining tree.
-    IntOp $ExcelManusMoveAttempt $ExcelManusMoveAttempt + 1
-    ${If} $ExcelManusMoveAttempt < 8
-      Sleep 250
-      Goto ExcelManusMoveRetry
-    ${EndIf}
-    Goto ExcelManusCopyRemaining
+    Push "$ExcelManusStage\$ExcelManusEntry"
+    Push "$ExcelManusDestination\$ExcelManusEntry"
+    Call ExcelManusMoveTree
   ExcelManusMoveSkip:
     FindNext $ExcelManusFind $ExcelManusEntry
     Goto ExcelManusMoveNext
 
-  ExcelManusCopyRemaining:
-    FindClose $ExcelManusFind
-    ; A nonempty existing target or a file lock can prevent a rename. Preserve
-    ; existing unrelated files and use the original copy behavior for leftovers.
-    StrCpy $ExcelManusCopyAttempt 0
-  ExcelManusCopyRetry:
-    ClearErrors
-    CopyFiles /SILENT "$ExcelManusStage\*" $ExcelManusDestination
-    IfErrors 0 ExcelManusExtractDone
-    IntOp $ExcelManusCopyAttempt $ExcelManusCopyAttempt + 1
-    ${If} $ExcelManusCopyAttempt < 5
-      Sleep 1000
-      Goto ExcelManusCopyRetry
-    ${EndIf}
-    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(appCannotBeClosed)" /SD IDCANCEL IDRETRY ExcelManusCopyRetry
-    Goto ExcelManusExtractFailed
-
   ExcelManusMoveDone:
     FindClose $ExcelManusFind
-  ExcelManusExtractDone:
     ; This path was created by GetTempFileName under the destination; never
     ; recursively remove the destination itself or an existing user directory.
     RMDir /r $ExcelManusStage

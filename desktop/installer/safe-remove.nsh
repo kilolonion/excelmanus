@@ -96,6 +96,13 @@ Function ${PREFIX}ExcelManusReadOwnedFiles
     StrCpy $R2 "$INSTDIR\$R1"
     Call ${PREFIX}ExcelManusCanonicalPath
     Call ${PREFIX}ExcelManusValidateOwnedPath
+    ${If} $R8 == 2
+      System::Call 'kernel32::GetFileAttributesW(w "$R2") i.s'
+      Pop $R4
+      IntCmp $R4 -1 incomplete
+      IntOp $R4 $R4 & 0x10
+      IntCmp $R4 0 next incomplete incomplete
+    ${EndIf}
     ${If} $R8 == 1
       ClearErrors
       IfFileExists "$R2" 0 next
@@ -124,9 +131,22 @@ Function ${PREFIX}ExcelManusReadOwnedFiles
     FileClose $R0
     SetErrorLevel 2
     Abort "Close ExcelManus and retry. Cannot remove: $R2"
+  incomplete:
+    FileClose $R0
+    SetErrorLevel 2
+    Abort "Incomplete ExcelManus payload. Please download the installer again: $R2"
   invalidManifest:
     FileClose $R0
     SetErrorLevel 2
     Abort "Invalid ExcelManus application file manifest. No recursive removal is allowed."
+FunctionEnd
+!macroend
+
+!macro ExcelManusVerificationFunctions
+Function ExcelManusVerifyOwnedFiles
+  ; A trusted build-time manifest is required: never trust the extracted list
+  ; to prove completeness. Nsis7z can return after skipping unsupported blocks.
+  StrCpy $R8 2
+  Call ExcelManusReadOwnedFiles
 FunctionEnd
 !macroend

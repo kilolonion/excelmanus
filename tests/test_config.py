@@ -128,9 +128,9 @@ class TestDefaultValues:
             load_config(values={'EXCELMANUS_API_KEY': 'test-key', 'EXCELMANUS_BASE_URL': 'https://example.com/v1'})
 
     def test_default_max_iterations(self, monkeypatch) -> None:
-        """默认最大迭代次数为 120。"""
+        """默认不限制迭代次数。"""
         cfg = _load()
-        assert cfg.max_iterations == 120
+        assert cfg.max_iterations == 0
 
     def test_default_yellow_auto_approve_is_false(self, monkeypatch, tmp_path) -> None:
         monkeypatch.chdir(tmp_path)
@@ -200,6 +200,10 @@ class TestDefaultValues:
         cfg = _load()
         assert cfg.tool_result_hard_cap_chars == 12000
 
+    def test_jev_experimental_frontend_gate_defaults_off_and_reads_store_value(self) -> None:
+        assert _load().jev_experimental_enabled is False
+        assert _load(EXCELMANUS_JEV_EXPERIMENTAL_ENABLED="true").jev_experimental_enabled is True
+
     def test_tool_result_hard_cap_chars_from_env(self, monkeypatch) -> None:
         """允许覆盖工具结果全局硬截断上限。"""
         cfg = _load(EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS='2048')
@@ -224,7 +228,7 @@ class TestDefaultValues:
         """subagent 配置默认值。"""
         cfg = _load()
         assert cfg.subagent_enabled is True
-        assert cfg.subagent_max_iterations == 120
+        assert cfg.subagent_max_iterations == 0
         assert cfg.subagent_max_consecutive_failures == 6
         assert cfg.subagent_user_dir == '~/.excelmanus/agents'
         assert cfg.subagent_project_dir == os.path.join(cfg.workspace_root, '.excelmanus', 'agents')
@@ -289,10 +293,10 @@ class TestIntegerParsing:
         with pytest.raises(ConfigError, match='整数'):
             _load(EXCELMANUS_MAX_ITERATIONS='not-a-number')
 
-    def test_zero_integer_raises_error(self, monkeypatch) -> None:
-        """零值应抛出 ConfigError（要求正整数）。"""
-        with pytest.raises(ConfigError, match='正整数'):
-            _load(EXCELMANUS_MAX_ITERATIONS='0')
+    def test_zero_iteration_limits_are_unlimited(self, monkeypatch) -> None:
+        cfg = _load(EXCELMANUS_MAX_ITERATIONS='0', EXCELMANUS_SUBAGENT_MAX_ITERATIONS='0')
+        assert cfg.max_iterations == 0
+        assert cfg.subagent_max_iterations == 0
 
     def test_negative_integer_raises_error(self, monkeypatch) -> None:
         """负值应抛出 ConfigError。"""

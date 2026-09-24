@@ -544,7 +544,7 @@ class TestSaveContentVersion:
             },
         )
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         from openpyxl import load_workbook
         wb2 = load_workbook(str(target))
         assert wb2.active["A1"].value == "external"
@@ -563,7 +563,7 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         assert not xlsx.exists()
         assert _parse_pending_writes(result.stderr) == []
 
@@ -587,7 +587,7 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         from openpyxl import load_workbook
         orig = load_workbook(str(target))
         assert orig.active["A1"].value == "initial"
@@ -639,7 +639,7 @@ class TestSaveContentVersion:
             env_override={"EXCELMANUS_SAVE_VERSIONS_LOG": str(log)},
         )
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         assert not log.exists()
         assert not xlsx.exists()
 
@@ -681,7 +681,7 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         assert not target.exists()
 
 
@@ -699,7 +699,7 @@ class TestYellowIoWrappers:
         )
         result = _run_in_sandbox(workspace, code, "YELLOW")
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         assert target.read_bytes() == b"original-xlsx"
 
     def test_os_replace_xlsx_does_not_replace_original(self, workspace: Path) -> None:

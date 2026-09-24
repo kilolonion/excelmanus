@@ -2,20 +2,63 @@
 
 from __future__ import annotations
 
+from ipaddress import ip_address
+from urllib.parse import urlsplit
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from excelmanus.api_app_state import (
     error_json_response as _error_json_response,
+    get_config,
     get_session_manager,
 )
 from excelmanus.logger import get_logger
 from excelmanus.stores.workspace_store import WorkspacePathError
+from excelmanus.workspace.folder_picker import FolderPickerError, select_local_folder
 
 logger = get_logger("api.workspaces")
 
 router = APIRouter()
+
+
+def _is_loopback(host: str | None) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        address = ip_address(host or "")
+        return address.is_loopback or bool(getattr(address, "ipv4_mapped", None) and address.ipv4_mapped.is_loopback)
+    except ValueError:
+        return False
+
+
+@router.post("/api/v1/workspaces/select-folder")
+async def select_workspace_folder(request: Request) -> JSONResponse:
+    from excelmanus.auth.access import require_browser_header
+
+    require_browser_header(request)
+    config = get_config()
+    try:
+        origin = urlsplit(request.headers.get("origin", ""))
+        local_origin = origin.scheme in {"http", "https"} and _is_loopback(origin.hostname)
+    except ValueError:
+        local_origin = False
+    # A reverse proxy can make a remote request look like a loopback peer.
+    # Require the browser origin and every forwarded peer to be local as well.
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if (
+        (config is not None and config.is_server)
+        or not _is_loopback(request.client.host if request.client else None)
+        or not local_origin
+        or any(not _is_loopback(host.strip()) for host in forwarded.split(",") if host.strip())
+    ):
+        return _error_json_response(403, "系统文件夹选择器仅支持在运行 ExcelManus 的电脑上通过 localhost 打开网页；远程访问请填写服务所在电脑的文件夹路径")
+    try:
+        path = await run_in_threadpool(select_local_folder)
+    except FolderPickerError as exc:
+        return _error_json_response(exc.status_code, str(exc))
+    return JSONResponse(content={"path": path}, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/v1/workspaces")

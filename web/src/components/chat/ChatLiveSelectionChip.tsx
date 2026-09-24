@@ -1,13 +1,12 @@
 "use client";
 
-import { MousePointerSquareDashed } from "lucide-react";
+import { MousePointerSquareDashed, X } from "lucide-react";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWorkbookConversation } from "@/components/excel/WorkbookConversation";
 import { normalizeRelativePath } from "@/lib/workspace-file-ref";
-import { buildSelectionAgentPrompt } from "@/lib/excel-ribbon-actions";
 
 /**
- * 显示表格实时上报的当前选区，提供一键「引用 / 分析」入口。
+ * 显示表格实时上报的当前选区，提供一键「引用」入口。
  * 仅在普通模式（非选区引用模式）且选区属于当前对话关联的表格时显示。
  */
 export function ChatLiveSelectionChip() {
@@ -26,31 +25,31 @@ export function ChatLiveSelectionChip() {
   const { path, sheet, range, contentVersion } = liveSelection;
   return (
     <div
-      className="flex items-center gap-1.5 px-3 py-1 text-xs text-muted-foreground"
+      className="em-composer-tab em-composer-tab--selection text-xs"
       data-em-live-selection={`${sheet}!${range}`}
     >
-      <MousePointerSquareDashed className="h-3.5 w-3.5 shrink-0" />
-      <span className="truncate min-w-0">当前选区 {sheet} · {range}</span>
-      <span className="ml-auto flex shrink-0 items-center gap-1">
+      <span className="em-composer-tab-icon" aria-hidden="true"><MousePointerSquareDashed className="h-3.5 w-3.5" /></span>
+      <span className="em-composer-tab-label truncate min-w-0">当前选区 <strong>{sheet}</strong><span aria-hidden="true"> · </span>{range}</span>
+      <span className="flex shrink-0 items-center gap-1">
         <button
           type="button"
           data-em-live-selection-action="reference"
-          className="inline-flex items-center rounded-full border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] px-2 py-0.5 text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-12)]"
+          className="em-composer-tab-action inline-flex items-center"
           onClick={() => useExcelStore.getState().confirmSelection({ filePath: path, sheet, range, contentVersion })}
         >
           引用
         </button>
-        <button
-          type="button"
-          data-em-live-selection-action="analyze"
-          className="inline-flex items-center rounded-full border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] px-2 py-0.5 text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-12)]"
-          onClick={() => useExcelStore.getState().setPendingTemplateMessage(
-            buildSelectionAgentPrompt("analyze-selection", { path, sheet, range, version: contentVersion }),
-          )}
-        >
-          分析
-        </button>
       </span>
+      <button
+        type="button"
+        data-em-live-selection-action="cancel"
+        className="em-composer-tab-dismiss em-composer-tab-cancel shrink-0"
+        aria-label="取消选择区域"
+        title="取消选择区域"
+        onClick={() => useExcelStore.getState().setLiveSelection(null)}
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
     </div>
   );
 }

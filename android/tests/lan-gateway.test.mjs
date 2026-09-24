@@ -14,7 +14,7 @@ test('rejects missing credentials and non-loopback upstreams', () => {
 });
 test('protects APIs, preserves uploads, and tells clients authentication is required', async (t) => {
   const backend = http.createServer((req, res) => {
-    if (req.url === '/api/v1/health') return res.end(JSON.stringify({ status: 'ok', version: '1.8.0', api_schema_version: 1, auth_required: false }));
+    if (req.url === '/api/v1/health') return res.end(JSON.stringify({ status: 'ok', version: '1.8.1', api_schema_version: 1, auth_required: false }));
     const chunks = [];
     req.on('data', (data) => chunks.push(data));
     req.on('end', () => { res.setHeader('x-auth-received', req.headers.authorization || ''); res.end(Buffer.concat(chunks)); });

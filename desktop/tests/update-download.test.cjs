@@ -99,7 +99,7 @@ test('deduplicates downloads, cancels safely, retries and preserves a blocked re
   let transfers = 0;
   const installed = [];
   const events = [];
-  const service = createUpdateService({ current: '1.8.0', platform: 'win32', arch: 'x64',
+  const service = createUpdateService({ current: '1.8.1', platform: 'win32', arch: 'x64',
     downloadDirectory: () => options.directory, onStatus: state => events.push(state),
     installImpl: async file => { installed.push(file); return false; },
     fetchImpl: async (url, { signal }) => {
@@ -136,7 +136,7 @@ test('deduplicates downloads, cancels safely, retries and preserves a blocked re
 
 test('an installation launch failure keeps the verified download available for retry', async t => {
   const options = await fixture(t);
-  const service = createUpdateService({ current: '1.8.0', platform: 'win32', arch: 'x64', downloadDirectory: () => options.directory,
+  const service = createUpdateService({ current: '1.8.1', platform: 'win32', arch: 'x64', downloadDirectory: () => options.directory,
     fetchImpl: async url => new Response(url.includes('api.github.com') ? JSON.stringify(release) : contents),
     installImpl: async () => { throw new Error('OS rejected launch'); },
   });

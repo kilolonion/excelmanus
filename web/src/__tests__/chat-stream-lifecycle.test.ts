@@ -30,6 +30,55 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("sendContinuation", () => {
+  it("sends prompt_kind and never creates a user bubble", async () => {
+    vi.mocked(consumeSSE).mockImplementation((_url, _body, emit) => {
+      emit({ event: "reply", data: { content: "已继续", total_tokens: 0 } });
+      emit({ event: "done", data: {} });
+      return Promise.resolve();
+    });
+    useChatStore.getState().addAssistantMessage("a1");
+    await sendContinuation("continue", "s1", { promptKind: "continue" });
+    const body = vi.mocked(consumeSSE).mock.calls[0][1] as Record<string, unknown>;
+    expect(body).toMatchObject({ message: "continue", session_id: "s1", prompt_kind: "continue" });
+    // 没有产生新的用户消息，回复仍落在原 assistant 气泡上
+    const messages = useChatStore.getState().messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe("a1");
+    expect(messages[0].role).toBe("assistant");
+    expect(JSON.stringify(messages[0])).toContain("已继续");
+  });
+
+  it("omits prompt_kind when not provided", async () => {
+    vi.mocked(consumeSSE).mockResolvedValue(undefined);
+    useChatStore.getState().addAssistantMessage("a1");
+    await sendContinuation("/resume", "s1");
+    const body = vi.mocked(consumeSSE).mock.calls[0][1] as Record<string, unknown>;
+    expect(body).not.toHaveProperty("prompt_kind");
+  });
+
+  it("creates a fresh assistant bubble when the tail is a user message", async () => {
+    vi.mocked(consumeSSE).mockImplementation((_url, _body, emit) => {
+      emit({ event: "reply", data: { content: "已继续", total_tokens: 0 } });
+      emit({ event: "done", data: {} });
+      return Promise.resolve();
+    });
+    // 尾部是 user 消息（发出后没有回复，进程被杀/流中断）
+    useChatStore.getState().setMessages([
+      { id: "a-old", role: "assistant", blocks: [{ type: "text", content: "旧回复" }] },
+      { id: "u1", role: "user", content: "触发后无回复的消息" },
+    ]);
+    await sendContinuation("continue", "s1", { promptKind: "continue" });
+    const messages = useChatStore.getState().messages;
+    expect(messages).toHaveLength(3);
+    expect(messages[2].role).toBe("assistant");
+    expect(messages[2].id).not.toBe("a-old");
+    expect(JSON.stringify(messages[2])).toContain("已继续");
+    // 旧 assistant 消息未被写入
+    expect(JSON.stringify(messages[0])).not.toContain("已继续");
+  });
+});
+
 describe("stream ownership", () => {
   it.each(["send", "continuation", "subscribe"])("a stopped %s cannot clear or append into the next live request", async (kind) => {
     const readers: { finish: () => void; emit: Parameters<typeof consumeSSE>[2] }[] = [];

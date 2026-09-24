@@ -204,7 +204,7 @@ class TestUnconditionalStrategy:
         strats = tmp_path / "strategies"
         strats.mkdir()
         (strats / "16_inspect.md").write_text(
-            '---\nname: tool:inspect\nversion: "1.0.0"\npriority: 100\nlayer: strategy\n'
+            '---\nname: tool:observe\nversion: "1.0.0"\npriority: 100\nlayer: strategy\n'
             'conditions: {}\n---\n沙箱安全机制内容。',
             encoding="utf-8",
         )
@@ -234,9 +234,9 @@ class TestUnconditionalStrategy:
         if not inspect_file.exists():
             pytest.skip("16_inspect.md 不存在")
         inspect_seg = parse_prompt_file(inspect_file)
-        assert inspect_seg.name == "tool:inspect"
-        assert inspect_seg.conditions == {"tool": "inspect_spreadsheet"}
-        assert "inspect_spreadsheet" not in inspect_seg.content
+        assert inspect_seg.name == "tool:observe"
+        assert inspect_seg.conditions == {"tool": "observe_spreadsheet"}
+        assert "observe_spreadsheet" in inspect_seg.content
         spec_seg = parse_prompt_file(spec_file)
         assert "WorkbookSpec" in spec_seg.content
         edit_seg = parse_prompt_file(edit_file)
@@ -310,7 +310,7 @@ class TestErrorRecoveryInUnconditional:
         if not inspect_file.exists():
             pytest.skip("16_inspect.md 不存在")
         inspect_seg = parse_prompt_file(inspect_file)
-        assert "inspect_spreadsheet" not in inspect_seg.content
+        assert "observe_spreadsheet" in inspect_seg.content
         spec_seg = parse_prompt_file(prompts_dir / "strategies" / "18_workbook_spec.md")
         assert "WorkbookSpec" in spec_seg.content
         edit_seg = parse_prompt_file(prompts_dir / "strategies" / "19_edit.md")
@@ -326,7 +326,7 @@ class TestErrorRecoveryInUnconditional:
         strats = tmp_path / "strategies"
         strats.mkdir()
         (strats / "16_inspect.md").write_text(
-            '---\nname: tool:inspect\nversion: "1.0.0"\npriority: 100\nlayer: strategy\n'
+            '---\nname: tool:observe\nversion: "1.0.0"\npriority: 100\nlayer: strategy\n'
             'conditions: {}\n---\n错误恢复策略内容。',
             encoding="utf-8",
         )
@@ -353,7 +353,7 @@ class TestInheritStrategies:
         strats = tmp_path / "strategies"
         strats.mkdir()
         (strats / "16_inspect.md").write_text(
-            '---\nname: tool:inspect\nversion: "1.0"\npriority: 15\nlayer: strategy\n'
+            '---\nname: tool:observe\nversion: "1.0"\npriority: 15\nlayer: strategy\n'
             'conditions: {}\n---\n默认约束内容。',
             encoding="utf-8",
         )
@@ -391,7 +391,7 @@ class TestInheritStrategies:
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
         result = composer.compose_for_subagent(
-            "explorer", inherit_strategies=["tool:inspect"]
+            "explorer", inherit_strategies=["tool:observe"]
         )
         assert result is not None
         assert "默认约束内容。" in result
@@ -413,7 +413,7 @@ class TestInheritStrategies:
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
         result = composer.compose_for_subagent(
-            "worker", inherit_strategies=["tool:inspect", "tool:run_code"]
+            "worker", inherit_strategies=["tool:observe", "tool:run_code"]
         )
         assert result is not None
         assert "默认约束内容。" in result
@@ -424,7 +424,7 @@ class TestInheritStrategies:
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
         result = composer.compose_for_subagent(
-            "worker", inherit_strategies=["tool:inspect", "tool:run_code"]
+            "worker", inherit_strategies=["tool:observe", "tool:run_code"]
         )
         assert result is not None
         always_on_pos = result.index("默认约束内容。")
@@ -449,11 +449,11 @@ class TestInheritStrategies:
         result = composer.compose_for_subagent(
             "subagent",
             inherit_strategies=[
-                "tool:inspect",
+                "tool:observe",
                 "tool:analyze",
-                "tool:edit",
-                "tool:format",
-                "spreadsheet:workbook_spec",
+                "tool:changes",
+                "tool:preview",
+                "spreadsheet:document",
                 "tool:run_code",
             ],
         )
@@ -461,20 +461,20 @@ class TestInheritStrategies:
         assert "WorkbookSpec" in result
         assert "写入串行" in result
         result = composer.compose_for_subagent(
-            "explorer", inherit_strategies=["tool:inspect", "tool:analyze"]
+            "explorer", inherit_strategies=["tool:observe", "tool:analyze"]
         )
         assert result is not None
         assert "WorkbookSpec" not in result
         assert "overview" in result
         explorer_with_run = composer.compose_for_subagent(
             "explorer",
-            inherit_strategies=["tool:inspect", "tool:analyze", "tool:run_code"],
+            inherit_strategies=["tool:observe", "tool:analyze", "tool:run_code"],
         )
         assert explorer_with_run is not None
         assert "写入串行" in explorer_with_run
         full = composer.compose_for_subagent(
             "subagent",
-            inherit_strategies=["spreadsheet:workbook_spec", "tool:edit"],
+            inherit_strategies=["spreadsheet:document", "tool:changes"],
         )
         assert full is not None
         assert "WorkbookSpec" in full
@@ -536,11 +536,11 @@ class TestPromptArchitectureNoTagStrategies:
         composer.load_all()
         names = {seg.name: seg.order for seg in composer.strategy_segments}
         assert names["plan:policy"] == 50
-        assert names["tool:inspect"] == 100
+        assert names["tool:observe"] == 100
         assert names["tool:analyze"] == 102
-        assert names["tool:edit"] == 104
-        assert names["tool:format"] == 106
-        assert names["spreadsheet:workbook_spec"] == 110
+        assert names["tool:changes"] == 104
+        assert names["tool:preview"] == 106
+        assert names["spreadsheet:document"] == 110
         assert names["tool:run_code"] == 150
         core_names = {seg.name: seg.order for seg in composer.core_segments}
         assert core_names["spreadsheet:invariants"] == 50

@@ -62,6 +62,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { fetchSessionMessages } from "@/lib/api";
 import { refreshSessionMessagesFromBackend } from "@/stores/chat-store";
 import type { Message, AssistantBlock, SubagentRun } from "@/lib/types";
+import { hydrateFailureGuidanceFromText } from "@/lib/failure-recovery";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -116,6 +117,47 @@ function makeAssistantMsg(id: string, blocks: AssistantBlock[] = []): Message {
   return { id, role: "assistant", blocks, timestamp: Date.now() };
 }
 
+describe("failure history reconciliation", () => {
+  const text = "⚠️ 模型认证失败\n认证失败\n诊断 ID: auth-1";
+  const restored = hydrateFailureGuidanceFromText(text)!;
+  const detailed = { ...restored, category: "model" as const, code: "model_auth_failed",
+    provider: "chatgpt", model: "test-model", stage: "calling_llm", retryable: false };
+  beforeEach(() => { resetStore(); });
+
+  it("repairs duplicate cards from a cached snapshot", () => {
+    useChatStore.getState().setMessages([makeAssistantMsg("a1", [restored, detailed])]);
+    expect(useChatStore.getState().messages[0]).toMatchObject({ blocks: [detailed] });
+    assertIndexConsistency();
+  });
+
+  it("retains one structured failure across repeated backend refreshes", async () => {
+    useChatStore.setState({ loadedSessionId: "failure-history" });
+    useChatStore.getState().setMessages([makeUserMsg("u1"), makeAssistantMsg("a1", [detailed])]);
+    for (let i = 0; i < 2; i++) {
+      vi.mocked(fetchSessionMessages).mockResolvedValueOnce({ messages: [
+        { role: "user", content: "hello", message_id: "u1" },
+        { role: "assistant", content: text, message_id: "a1" },
+      ], total: 2, offset: 0, hasMore: false } as never);
+      await refreshSessionMessagesFromBackend("failure-history");
+      expect(useChatStore.getState().messages[1]).toMatchObject({ blocks: [detailed] });
+      assertIndexConsistency();
+    }
+  });
+
+  it("does not consume an unrelated backend block when preserving a failure", async () => {
+    useChatStore.setState({ loadedSessionId: "failure-new-block" });
+    useChatStore.getState().setMessages([makeUserMsg("u1"), makeAssistantMsg("a1", [detailed])]);
+    vi.mocked(fetchSessionMessages).mockResolvedValueOnce({ messages: [
+      { role: "user", content: "hello", message_id: "u1" },
+      { role: "assistant", content: "⚠️ 网络连接失败\n请重试\n诊断 ID: network-2", message_id: "a1" },
+    ], total: 2, offset: 0, hasMore: false } as never);
+    await refreshSessionMessagesFromBackend("failure-new-block");
+    const message = useChatStore.getState().messages[1];
+    expect(message.role === "assistant" && message.blocks.filter((b) => b.type === "failure_guidance")
+      .map((b) => b.diagnosticId)).toEqual(["auth-1", "network-2"]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -128,7 +170,7 @@ describe("background task reconciliation", () => {
   const completed: SubagentRun = {
     run_id: "run-1", agent_name: "explorer", task: "统计", file_paths: [], background: true,
     status: "completed", created_at: 1, started_at: 2, finished_at: 3, iteration: 3,
-    tool_calls: 4, last_tool: "edit_spreadsheet", resumed_from: null, changed_files: ["./sales.xlsx"],
+    tool_calls: 4, last_tool: "apply_spreadsheet_changes", resumed_from: null, changed_files: ["./sales.xlsx"],
     result: { stop_reason: "completed", output: "统计完成", diagnostic: null, iterations: 3,
       tool_calls_count: 4, structured_changes: [], observed_files: [] },
   };
@@ -320,6 +362,17 @@ describe("chat-store", () => {
       expect(msg.role).toBe("user");
       expect((msg as Extract<Message, { role: "user" }>).files?.length).toBe(1);
     });
+
+    it("乐观消息也不保存自动注入的工作簿上下文", () => {
+      useChatStore.getState().addUserMessage(
+        "u-context",
+        "收款收据.xlsx\n当前工作表：\"收款收据\"\n\n拉宽一点",
+      );
+      expect(useChatStore.getState().messagesById["u-context"]).toMatchObject({
+        role: "user",
+        content: "拉宽一点",
+      });
+    });
   });
 
   // ── addAssistantMessage ─────────────────────────────────────
@@ -365,7 +418,7 @@ describe("chat-store", () => {
       useChatStore.getState().appendBlock("a1", { type: "text", content: "2" });
       useChatStore.getState().appendBlock("a1", {
         type: "tool_call",
-        name: "inspect_spreadsheet",
+        name: "observe_spreadsheet",
         args: {},
         status: "running",
       });
@@ -506,14 +559,14 @@ describe("chat-store", () => {
       useChatStore.getState().appendBlock("a1", {
         type: "tool_call",
         toolCallId: "tc1",
-        name: "inspect_spreadsheet",
+        name: "observe_spreadsheet",
         args: {},
         status: "running",
       });
       useChatStore.getState().appendBlock("a1", {
         type: "tool_call",
         toolCallId: "tc2",
-        name: "edit_spreadsheet",
+        name: "apply_spreadsheet_changes",
         args: {},
         status: "running",
       });
@@ -603,7 +656,10 @@ describe("chat-store", () => {
   describe("addAffectedFiles", () => {
     it("添加受影响文件到 assistant 消息", () => {
       useChatStore.getState().addAssistantMessage("a1");
-      useChatStore.getState().addAffectedFiles("a1", ["/workspace/data.xlsx"]);
+      useChatStore.getState().addAffectedFiles("a1", ["/workspace/unknown.xlsx"]);
+      const unscoped = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
+      expect(unscoped.affectedFiles).toEqual([]);
+      useChatStore.getState().addAffectedFiles("a1", ["data.xlsx"]);
 
       const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.affectedFiles).toEqual(["./data.xlsx"]);

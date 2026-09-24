@@ -178,17 +178,16 @@ async def test_native_dispatcher_sends_projected_result_with_original_sdk_value(
         workspace_root=str(tmp_path), jev_enabled="off",
     ), registry)
     call = SimpleNamespace(id="read", function=SimpleNamespace(
-        name="inspect_spreadsheet", arguments=json.dumps({
-            "file_path": "receipt.xlsx", "mode": "range", "range": "A1:B2", "include": ["formulas"],
+        name="observe_spreadsheet", arguments=json.dumps({
+            "file_path": "receipt.xlsx", "mode": "range", "range": "A1:B2", "facets": ["data"],
         }),
     ))
     output = await engine._tool_runtime.execute(call, None, None, 1)
     assert output.success, output.result
     model = json.loads(output.result)
-    assert model["values"] == [["客户", "金额"], ["甲", None]]
-    assert model["formulas"][1][1] == "=3*4"
-    assert "data" not in model and "formula_grid" not in model
-    assert output.structured.value["data"] == model["values"]
-    assert output.structured.value["formula_grid"] == model["formulas"]
+    from tests.workbook_support import region_matrix
+    assert region_matrix(model["regions"][0]) == [["客户","金额"],["甲",None]]
+    assert model["regions"][0]["cells"]["2,2"]["f"] == "=3*4"
+    assert model["regions"] == output.structured.value["regions"]
     assert output.structured.ui_meta.files == ["receipt.xlsx"]
     assert output.structured.ui_meta.content_version == model["content_version"]

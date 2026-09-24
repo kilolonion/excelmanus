@@ -34,8 +34,8 @@ class OutputContract:
     branches: dict[str, frozenset[str]] = field(default_factory=dict)
     # 参数分支：arguments[arg_mode_key] 非空时查 ``"present"`` 分支，
     # 为空/缺失时查 ``"absent"`` 分支；未传 arguments 时跳过该校验。
-    # 例：edit_spreadsheet(workbook_spec=...) → present 分支要求
-    # build_summary；无 spec 的 operations 编辑 → absent 分支要求 applied。
+    # 例：apply_spreadsheet_changes 返回统一 receipt/files/observation；
+    # 不为 WorkbookSpec 和 operations 维护两套旧返回合同。
     arg_mode_key: str | None = None
     arg_branches: dict[str, frozenset[str]] = field(default_factory=dict)
     # object = 成功 value 必须是 dict；str = 整段字符串；any = 不校验。
@@ -76,7 +76,7 @@ class OutputContract:
         """SDK 段里的一行返回形状提示，如 ``dict{status, file_path, applied?…}``。
 
         必有键在前、可选键带 ``?`` 后缀——脚本据此判断哪些键可直接读、
-        哪些要先 ``in`` 检查（如 edit_spreadsheet 的 applied 仅编辑分支有）。
+        哪些要先 ``in`` 检查（如 apply_spreadsheet_changes 的 observation 为可选字段）。
         """
         if self.schema is not None:
             return _schema_return_hint(self.schema)
@@ -92,7 +92,7 @@ class OutputContract:
         if len(text) > 150:
             head = ", ".join(req)
             preferred_names = (
-                "applied", "build_summary", "verification", "warnings",
+                "applied", "observation", "warnings",
                 "selection", "coverage", "content_version",
             )
             preferred = [
@@ -128,6 +128,9 @@ def _obj(
 
 # ── 已核实的成功返回顶层键（真实工具输出驱动，非猜测） ──
 OUTPUT_CONTRACTS: dict[str, OutputContract] = {
+    "observe_spreadsheet": _obj({"status": "str", "schema_version": "str", "file_path": "str", "content_version": "str"}, {"observation_id", "snapshot_id", "request", "sheets", "regions", "coverage", "file", "active_sheet", "matches"}),
+    "preview_spreadsheet": _obj({"status": "str", "schema_version": "str", "file_path": "str", "content_version": "str", "attachment_id": "str", "render_id": "str"}, {"snapshot_id", "observation_id", "surface", "sheet", "range", "renderer_digest", "measured", "geometry", "coverage", "limitations", "objects", "source_pixel_size", "attachment_pixel_size", "request_pixel_size", "source_to_attachment", "cell_to_pixel_map", "renderer_version", "font_fingerprint", "locale", "dpi", "zoom", "device_scale"}),
+    "apply_spreadsheet_changes": _obj({"status": "str", "schema_version": "str", "files": "list", "receipt": "dict", "committed": "bool", "applied": "list"}, {"file_path", "content_version", "previous_version", "observation", "document", "operation_id", "dry_run", "planned"}, optional_types={"observation":"dict", "document":"dict", "dry_run":"bool"}),
     "calculate_spreadsheet": _obj(
         {"status": "str"}, {"file_path", "content_version", "source_version", "formula_recalculation", "receipt", "committed"}
     ),
@@ -142,22 +145,6 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
     ),
     "query_spreadsheet": _obj(
         {"status": "str"}, {"columns", "values", "total_rows", "truncated", "sources", "engine", "storage", "file_path", "content_version", "receipt"}
-    ),
-    "inspect_spreadsheet": _obj(
-        {"status": "str"},
-        {
-            "result_kind", "file", "file_path", "content_version", "sheets",
-            "sheet", "resolved_sheet", "data", "values", "columns",
-            "coverage", "selection", "spill", "matches", "has_more",
-            "truncated", "capabilities", "directory", "files", "meta",
-            "snapshot_id", "shape", "formulas", "range",
-            "source_cols", "source_rows", "selection_spill", "result_spill", "warnings", "include_warning",
-        },
-        mode_key="meta.kind",
-        branches={
-            "overview": frozenset({"coverage", "values"}),
-            "range": frozenset({"data", "content_version", "coverage"}),
-        },
     ),
     "analyze_spreadsheet": _obj(
         {"status": "str"},
@@ -176,36 +163,6 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
             "files": frozenset({"files"}),
             "filter": frozenset({"selection"}),
         },
-    ),
-    "edit_spreadsheet": _obj(
-        {
-            "status": "str",
-            "file_path": "str",
-            "content_version": "str",
-        },
-        # applied 仅 operations 编辑分支必有；workbook_spec 创建分支
-        # 返回 build_summary/verification/uncertainties，不带 applied。
-        {
-            "applied", "operations", "warnings", "skipped", "summary",
-            "build_summary", "verification", "uncertainties",
-            "data_loss_warnings", "committed", "transaction", "files",
-            "formula_recalculation",
-        },
-        arg_mode_key="workbook_spec",
-        arg_branches={
-            "present": frozenset({"build_summary"}),
-            "absent": frozenset({"applied"}),
-        },
-        optional_types={"applied": "list"},
-    ),
-    "format_spreadsheet": _obj(
-        {
-            "status": "str",
-            "file_path": "str",
-            "content_version": "str",
-            "applied": "list",
-        },
-        {"appearance", "skipped_merged_non_anchors", "warnings"},
     ),
     "split_spreadsheet": _obj(
         {"status": "str", "file_path": "str", "files": "list"},
@@ -234,19 +191,6 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
             "target", "formula", "precedents", "dependents",
             "direct_impact", "total_affected_cells", "affected_sheets", "scope",
             "content_version", "coverage", "resolved_sheet",
-        },
-    ),
-    "manage_spreadsheet_objects": _obj(
-        {
-            "status": "str",
-            "file_path": "str",
-            "content_version": "str",
-            "applied": "list",
-        },
-        {
-            "chart_type", "data_range", "target_sheet", "target_cell",
-            "chart_info", "total_charts_on_sheet",
-            "warnings", "verification", "objects",
         },
     ),
     "manage_spreadsheet_versions": _obj(
@@ -346,9 +290,36 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
     "parallel_search": _obj(
         {"status": "str", "query": "str", "variants_used": "list", "total_results": "int", "query_summaries": "list", "results": "list"},
     ),
+    "introspect_capability": OutputContract(schema={
+        "type": ["string", "object"],
+        "description": "旧式详情/批量查询返回文本；JSON Schema 节点与统一认知门户返回对象。",
+        "properties": {
+            "portal_version": {"type": "integer"},
+            "product_version": {"type": "string"},
+            "catalog_digest": {"type": "string"},
+            "revision": {"type": "string"},
+            "status": {"type": "string", "description": "门户状态：ok/unavailable/not_found/stale/invalid_query。"},
+            "ref": {"type": "string"},
+            "content": {"type": "string"},
+            "data": {"type": "object"},
+            "items": {"type": ["array", "object", "boolean"], "description": "门户列表为对象数组；工具详情中的 JSON Schema 节点也可能带 items schema。"},
+            "links": {"type": "array", "items": {"type": "object"}},
+            "page": {"type": "integer"},
+            "pages": {"type": "integer"},
+            "next_call": {"type": "object", "description": "还有后续页面时返回；原样调用。"},
+            "index_call": {"type": "object", "description": "返回认知目录的可执行调用。"},
+            "restart_call": {"type": "object", "description": "引用过期或页码错误时重新读取第一页。"},
+            "content_revision": {"type": "string"},
+            "citation": {"type": "object", "description": "可重取的资源 ref、正文哈希、行号和列号。内部引用不冒充公开 URL。"},
+            "coverage": {"type": "object"},
+        },
+        "allOf": [{"if": {"type": "object", "required": ["portal_version"]},
+                   "then": {"properties": {"items": {"type": "array", "items": {"type": "object"}}}}}],
+        "additionalProperties": True,
+    }),
     **{name: OutputContract(value_kind="str") for name in (
         "skill", "manage_skills", "list_subagents", "memory_read_topic", "memory_save", "sleep",
-        "task_create", "task_update", "write_plan", "exit_plan_mode", "introspect_capability",
+        "task_create", "task_update", "write_plan", "exit_plan_mode",
     )},
     "ask_user": OutputContract(schema={"oneOf": [
         {"type": "object", "required": ["raw_input"]},
@@ -419,7 +390,7 @@ def contract_summary(tool_name: str, *, tool_def: Any = None) -> str | None:
         lines.append(f"{contract.mode_key}={branch} required: {', '.join(sorted(keys))}")
     for branch, keys in contract.arg_branches.items():
         lines.append(f"argument {contract.arg_mode_key} {branch} required: {', '.join(sorted(keys))}")
-    if tool_name in {"read_text_file", "inspect_spreadsheet"}:
+    if tool_name in {"read_text_file", "observe_spreadsheet"}:
         lines.append(
             "file_path 为 spill:… 结果句柄时，返回原始完整 JSON 或文本，不套普通文件 content 包装；"
             "将 spill/result_spill/selection_spill 字段的完整值原样传入，或照返回的 next_call 调用。"
@@ -437,7 +408,7 @@ def output_schema_for(tool_name: str, *, tool_def: Any = None) -> dict[str, Any]
     if contract is None:
         return None
     schema = contract.as_schema()
-    if name in {"read_text_file", "inspect_spreadsheet"}:
+    if name in {"read_text_file", "observe_spreadsheet"}:
         schema["x-spill-result-types"] = ["object", "array", "string"]
     return schema
 

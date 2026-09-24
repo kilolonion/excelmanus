@@ -390,6 +390,16 @@ def classify_failure(
             model=model,
         )
 
+    # OAuth 登录失效需要重新授权，不能引导用户去更新 API Key。
+    if any(marker in exc_text for marker in (
+        "token_revoked", "invalidated oauth token", "expired oauth token", "oauth token expired",
+    )):
+        return _fg(
+            "model", "model_oauth_expired", "订阅登录已失效",
+            "当前订阅登录凭证已失效或被撤销。请在模型设置的「订阅」页面重新登录对应账号，再继续对话。",
+            retryable=False,
+        )
+
     # ── 0. 视觉/图片拒绝：不能包装成 API Key 无效 ──
     if _is_vision_request_rejected(exc_text):
         return _fg(
@@ -533,17 +543,11 @@ def classify_failure(
         )
 
     if status_code == 422:
-        return FailureGuidance(
-            category="model",
-            code="invalid_request",
-            title="请求参数无效",
-            message="模型服务无法处理当前请求参数，请检查模型配置。",
-            stage=stage,
+        return _fg(
+            "model", "invalid_request", "请求参数无效",
+            "模型服务无法处理当前请求参数，请检查模型配置。",
             retryable=False,
-            diagnostic_id=diagnostic_id,
-            actions=_actions_for(False),
-            provider=provider,
-            model=model,
+            with_detail=True,
         )
 
     if status_code is not None and 500 <= status_code < 600:

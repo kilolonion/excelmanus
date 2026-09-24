@@ -41,6 +41,13 @@ def _json(resp) -> dict:
     return json.loads(resp.body)
 
 
+def _patches(*cells: dict) -> list[dict]:
+    by_sheet: dict[str, list[dict]] = {}
+    for cell in cells:
+        by_sheet.setdefault(str(cell.get("sheet") or "Sheet"), []).append({k: v for k, v in cell.items() if k != "sheet"})
+    return [{"kind": "cells.patch", "sheet": sheet, "cells": values} for sheet, values in by_sheet.items()]
+
+
 @pytest.mark.asyncio
 async def test_list_revisions_empty_before_any_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -72,10 +79,10 @@ async def test_write_records_history_then_restore(
         restore_revision,
     )
 
-    write_resp = await api_module.write_excel_cells(
-        api_module.ExcelWriteRequest(
+    write_resp = await api_module.apply_workbook_changes(
+        api_module.WorkbookChangesRequest(
             path="book.xlsx",
-            changes=[{"cell": "A1", "value": "v1"}],
+            operations=_patches({"cell": "A1", "value": "v1"}),
             expected_version=ver0,
         ),
         MagicMock(),
@@ -126,10 +133,10 @@ async def test_restore_stale_version_returns_409(
         restore_revision,
     )
 
-    write_resp = await api_module.write_excel_cells(
-        api_module.ExcelWriteRequest(
+    write_resp = await api_module.apply_workbook_changes(
+        api_module.WorkbookChangesRequest(
             path="book.xlsx",
-            changes=[{"cell": "A1", "value": "v1"}],
+            operations=_patches({"cell": "A1", "value": "v1"}),
             expected_version=ver0,
         ),
         MagicMock(),
@@ -213,4 +220,4 @@ async def test_preview_revision_reads_immutable_workbook_bytes(
     assert response.status_code == 200
     body = _json(response)
     assert body["revision_id"] == revision_id
-    assert body["windows"][0]["cells"]["1,1"]["v"] == "historical"
+    assert body["regions"][0]["cells"]["1,1"]["v"] == "historical"

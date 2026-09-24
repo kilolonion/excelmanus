@@ -40,7 +40,7 @@ def _generated_model_text() -> str:
     """Render the highest-risk generated model surfaces when dependencies exist."""
     try:
         from excelmanus.code_mode import render_sdk_section
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools.workbook_tools import get_tools
 
         return render_sdk_section(get_tools())
     except Exception as exc:  # noqa: BLE001

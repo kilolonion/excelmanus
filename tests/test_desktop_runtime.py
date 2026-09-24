@@ -61,8 +61,8 @@ def test_version_expression_is_not_a_version(tmp_path):
     package.mkdir()
     (package / '__init__.py').write_text('__version__ = _read_version()\n')
     assert _read_version_from_disk(tmp_path) == 'unknown'
-    (package / '__init__.py').write_text('__version__ = "1.8.0"\n')
-    assert _read_version_from_disk(tmp_path) == '1.8.0'
+    (package / '__init__.py').write_text('__version__ = "1.8.1"\n')
+    assert _read_version_from_disk(tmp_path) == '1.8.1'
 
 
 def test_fresh_profile_loads_packaged_skills_outside_repo(monkeypatch, tmp_path):

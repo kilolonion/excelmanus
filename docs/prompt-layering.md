@@ -2,7 +2,7 @@
 
 本页描述分层规则。
 
-适用版本：1.8.0 源码 · 当前规则更新日期：2026-09-21。
+适用版本：1.8.1 源码 · 当前规则更新日期：2026-09-21。
 
 [文档导航](README.md) · [Skillpack 协议](skillpack_protocol.md)
 
@@ -20,6 +20,8 @@
 | Host（`error_payload`、守卫、提交） | 权限、路径、版本、原子提交 | 替模型决定业务策略 |
 
 组装入口：`PromptComposer` / `PromptRegistry` → `build_stable_system_prompt`。直接工具与 `run_code` 共存；内部 `em.*` 绑定完整授权执行目录，字段、Python 签名与输出细节通过 `introspect_capability` 按需加载。默认常驻集合由 `tools/policy.py` 的 `DEFAULT_DISCLOSURE_CORE_TOOLS` 定义，其余内置/MCP 工具按需披露；无发现入口时保留全部授权 schema。
+
+产品设计、流程、配置和运行限制通过同一工具的 `knowledge_index` / `knowledge_search` / `knowledge_read` 按需查询；系统仅保留导航。文章随包发布，动态状态使用当前调用的目录和会话，详细约定见 [Agent 统一认知门户](knowledge-portal.md)。
 
 子代理也走此入口：`PromptComposer.fork()` 复用正文素材并创建独立注册表，工具和动态上下文回调绑定子会话。每次请求按子代理的固定权限、当前授权目录和工作簿状态重新组装，热重载不影响父会话的注册表。core 总是保留；非空 `inherit_strategies` 选择具名策略子集，但仍须满足运行时条件，且计划模式保留 `plan:policy`。空列表使用全部符合条件的策略，不授予额外工具权限。
 
@@ -50,7 +52,7 @@ uv run python -c "from excelmanus.prompt.budget import collect_report, format_re
 ## 维护方法
 
 1. 改正文只改 `excelmanus/prompts/*.md`。不要在 `canonical.py` 再写一份。
-2. 改参数说明改 Pydantic / `intent_tools` schema；字段查询走 `schema_walk`。
+2. 改参数说明改 Pydantic / `workbook_tools` schema；字段查询走 `schema_walk`。
 3. 改错误恢复改 `error_payload._REMEDIATION_BY_CODE` 与错误发生处的 extra 字段。
 4. 组装快照：`tests/prompt_snapshots/{write,plan,read}.txt`。
 5. 热重载仍走 `PromptComposer.reload_if_changed`；加载失败要暴露，不回退旧正文。
@@ -62,7 +64,7 @@ uv run python -c "from excelmanus.prompt.budget import collect_report, format_re
 - 真实模型对照（计划 8.2）部分执行：wave-r5u 同 10 用例已在 qwen-3.8-27b 上重跑（`bench/reports/09-prompt-layering-p5r-vs-r5u.md`）——error 断言 3→1（唯一 e1 为答复措辞 regex，业务动作正确）、工具失败 23→12、R30 code mode 显著提效；tokens 总体 +27% 集中于 R27 operator 试错与 R31 多轮累积。其余场景用例已备好——S01/S03/S05 复用 suite_realistic 的 R19/R11/R26，S04/S07/S10/S11/S14 在 `bench/cases/suite_prompt_contract.json`（`include_in_all: false`，期望值由 `bench/prompt_contract_checks.py` 运行时现算），S13 由 `tests/test_write_contract.py` 覆盖。R01 的 pandas 评审口径已同步为「结果与适用性」。
 - pandas 工作区直读：本地 `run_code` GREEN 包装已能 `pd.read_excel` 读取工作区 xlsx，并拒绝 `to_excel` / 产品源码路径；复审后读取守卫与 Native 数据路径规则对齐——区外数据、`.excelmanus` 保留目录、敏感文件、越界符号链接、其他 run 的 pending 均被拒或对元数据隐藏。改回工作簿仍要求 SDK `content_version`，不把 pandas 读取当观察版本。
 - 2026-09-19 起取消 Code Mode 外层 wire 坍缩；直接业务工具与 `run_code` 同时可用。策略段与能力地图仍按授权执行目录可达集门控；按需加载的工具不得被业务 profile 再隐藏。
-- `write_new` 与 `write_existing` 的 tools JSON 相同：新建能力不靠 `new_workbook` 从目录里拿掉 `edit_spreadsheet`。
+- `write_new` 与 `write_existing` 的 tools JSON 相同：新建能力不靠 `new_workbook` 从目录里拿掉 `apply_spreadsheet_changes`。
 
 ---
 
@@ -92,9 +94,9 @@ uv run python -c "from excelmanus.prompt.budget import collect_report, format_re
 
 ### P2 完成记录
 
-- 修改文件与关键行为：`workbook_spec_json_schema()` 嵌入 `edit_spreadsheet`；`$defs` 提升到工具 schema；`schema_walk` 穿过 properties/items/$ref/additionalProperties；introspection 不再截 240 字、不再指向系统规格段。join / 条件格式 rule / expected_version 补全。
+- 修改文件与关键行为：`workbook_spec_json_schema()` 嵌入 `apply_spreadsheet_changes`；`$defs` 提升到工具 schema；`schema_walk` 穿过 properties/items/$ref/additionalProperties；introspection 不再截 240 字、不再指向系统规格段。join / 条件格式 rule / expected_version 补全。
 - 本阶段依赖是否满足：是。
-- 已执行命令及结果：`tests/test_schema_walk.py`、`tests/test_capability_discovery.py`、`tests/test_intent_tools.py` 通过；可用查询结果构造并编译最小 WorkbookSpec。
+- 已执行命令及结果：`tests/test_schema_walk.py`、`tests/test_capability_discovery.py`、`tests/test_workbook_tools.py` 通过；可用查询结果构造并编译最小 WorkbookSpec。
 - 场景证据：S10 本地行为通过（`test_discovered_workbook_spec_compiles_via_edit`）。
 - 预算变化：tools JSON 与发现消耗上升（嵌套 schema 完整）。
 - 兼容影响及精确回退范围：schema 仍接受字符串字体、列宽字典、CSV 省略 dimensions。
@@ -135,9 +137,9 @@ uv run python -c "from excelmanus.prompt.budget import collect_report, format_re
 针对评审提出的 5 个缺口：
 
 - **沙盒读取边界（原 P1 缺口）**：`sandbox_hook` 读取守卫统一数据路径规则——工作区外用户数据、`.excelmanus`/`.versions` 保留目录、敏感文件（`.env`/`config.env`/`excelmanus.db`/`installations.json`）、产品源码、越界符号链接、其他 run pending 均拒读；元数据探查（stat/exists/listdir/scandir）将被拒路径表现为不存在，`open` 内容读取抛 `PermissionError`；tmpdir 写后探查保持可见。`test_sandbox_hook.py`/`test_pandas_workspace_read.py`/`test_write_contract.py` 覆盖正负向用例。
-- **数据验证发现与 schema（原 P1 缺口）**：`can_i_do` 意图路由补「下拉框/数据验证/下拉/validation」→ `format_spreadsheet`；能力描述如实报告 `operations.kind=data_validation`；format rule schema 合并条件格式与数据验证（`type=list` 等可执行）；`TestDataValidationWrite` 验证落盘。
+- **数据验证发现与 schema（原 P1 缺口）**：`can_i_do` 意图路由补「下拉框/数据验证/下拉/validation」→ `apply_spreadsheet_changes`；能力描述如实报告 `operations.kind=data_validation`；format rule schema 合并条件格式与数据验证（`type=list` 等可执行）；`TestDataValidationWrite` 验证落盘。
 - **Schema↔实现对齐（原 P2 缺口）**：join 如实声明单键 + `header_row` + 别名；`workbook_spec`/`operations`/`values`/`selection`/`conditions`/`aggregations` 接受 JSON 字符串与 `spill:` 句柄；edit/format op 别名与字段补齐（`additionalProperties:false` 仍生效）；`tests/test_tool_schema_validation.py` 正负向回归。
 - **预算口径（原 P2 缺口）**：`prompt/budget.py` 统计真实 wire envelope，含 task/plan 等会话级工具；2026-09-19 起旧 native/code 输入采用统一披露。发现查询绑定授权执行目录，wire 与 SDK 工具数仍分列。
-- **场景证据（原 P2 缺口）**：S05 阻塞式 ask_user 挂起/恢复有引擎级测试；S08 新增 `inspect_spreadsheet(expected_version=)` 跨页版本漂移检测（STALE_SNAPSHOT + 新版本字段）；S13 新增真实 SDK bridge + registry 的冲突恢复链路测试。S10 明确为「Spec 建簿 + format 加验证」两段路径。
+- **场景证据（原 P2 缺口）**：S05 阻塞式 ask_user 挂起/恢复有引擎级测试；S08 新增 `observe_spreadsheet(expected_version=)` 跨页版本漂移检测（STALE_SNAPSHOT + 新版本字段）；S13 新增真实 SDK bridge + registry 的冲突恢复链路测试。S10 明确为「Spec 建簿 + format 加验证」两段路径。
 
 仍未交付：计划 8.2 真实模型对照（需授权与凭据）；模型是否主动使用新发现面无线上样本。

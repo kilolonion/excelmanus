@@ -21,12 +21,12 @@ const history: RevisionListResponse = { path: "book.xlsx", content_version: "liv
 const preview: RevisionPreviewResponse = {
   content_version: "saved-version", revision_id: "saved", revision_reason: "checkpoint", revision_label: "发版前",
   sheets: [{ name: "收据", sheet_id: "s1", used: { rows: 3, cols: 3 } }, { name: "明细", sheet_id: "s2", used: { rows: 2, cols: 2 } }],
-  windows: [{ sheet: "收据", rect: { r0: 1, c0: 1, r1: 50, c1: 26 }, cells: {
+  regions: [{ sheet: "收据", rect: { r0: 1, c0: 1, r1: 50, c1: 26 }, cells: {
     "1,1": { t: "s", v: "收款收据", cached: "yes", s: { bg: { rgb: "#195D85" }, cl: { rgb: "#FFFFFF" }, bl: 1 } },
     "2,1": { t: "n", v: 128, cached: "yes", s: { n: { pattern: "0.00" } } },
     "2,2": { t: "z", v: null, cached: "no", f: "=A2*6" },
     "3,3": { t: "z", v: null, cached: "yes", s: { bg: { rgb: "#FF0000" }, bd: { b: { s: 7, cl: { rgb: "#000000" } } } } },
-  }, merges: [{ min_row: 1, max_row: 1, min_col: 1, max_col: 3 }], col_widths: { A: 25 }, row_heights: { "1": 36 } }],
+  }, merges: [{ min_row: 1, max_row: 1, min_col: 1, max_col: 3 }], geometry: { columns: [{ index: 1, native: 25, pixels: 180, hidden: false }], rows: [{ index: 1, native: 36, pixels: 48, hidden: false }], width_px: 308, height_px: 88 } }],
 };
 
 function deferred<T>() {
@@ -168,7 +168,7 @@ describe("styled historical workbook preview", () => {
     expect(title.style.backgroundColor).toBe("rgb(25, 93, 133)");
     expect(title.style.color).toBe("rgb(255, 255, 255)");
     expect(title.parentElement?.style.height).toBe("48px");
-    expect((container.querySelectorAll("col")[1] as HTMLElement).style.width).toBe("187.5px");
+    expect((container.querySelectorAll("col")[1] as HTMLElement).style.width).toBe("180px");
     expect(screen.getByText("128.00")).toBeTruthy();
     expect(screen.getByText("=A2*6").title).toBe("公式：=A2*6");
     const blank = container.querySelector("tbody tr:last-child td:last-child") as HTMLElement;

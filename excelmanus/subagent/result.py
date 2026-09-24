@@ -20,15 +20,13 @@ from excelmanus.tools.policy import (
 _DIAGNOSTIC_LIMIT = 4096
 
 _CHANGE_TYPE = {
-    "edit_spreadsheet": "write",
-    "format_spreadsheet": "format",
+    "apply_spreadsheet_changes": "write",
     "delete_file": "delete",
     "write_text_file": "write",
     "edit_text_file": "write",
     "copy_file": "create",
     "rename_file": "write",
     "write_word": "write",
-    "manage_spreadsheet_objects": "write",
     "manage_spreadsheet_versions": "write",
     "split_spreadsheet": "create",
     "run_shell": "write",
@@ -60,7 +58,7 @@ def _paths_from_args(arguments: dict[str, Any] | None, tool_name: str) -> list[s
             batch = json.loads(batch)
         except (TypeError, ValueError):
             batch = None
-    if tool_name == "edit_spreadsheet" and isinstance(batch, list):
+    if tool_name == "apply_spreadsheet_changes" and isinstance(batch, list):
         batch_paths = [
             str(item.get("file_path") or item.get("path") or "").strip()
             for item in batch
@@ -92,7 +90,7 @@ def collect_structured_changes(tool_calls: list[Any]) -> list[SubagentFileChange
         if getattr(tc, "success", False) is False:
             continue
         args = getattr(tc, "arguments", None)
-        sheets = args.get("sheet_name") if isinstance(args, dict) else None
+        sheets = args.get("sheet") if isinstance(args, dict) else None
         sheet_tuple: tuple[str, ...] = ()
         if isinstance(sheets, str) and sheets.strip():
             sheet_tuple = (sheets.strip(),)

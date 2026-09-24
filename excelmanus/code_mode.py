@@ -775,6 +775,8 @@ def render_sdk_section(tool_defs: list[ToolDef]) -> str:
         return ""
     if any(tool.name == "introspect_capability" for tool in tool_defs):
         lines.append('参数不清楚时，先直接调用 introspect_capability(query_type="tool_detail", query="工具名.字段")，读取详情后再生成程序；不要读取 em.py 猜参数。')
+    if any(tool.name == "observe_spreadsheet" for tool in tool_defs):
+        lines.append("已有文件的 expected_version 取自 observe_spreadsheet 返回的 content_version 字段；核对读到的目标内容后再写入。")
     lines.append("大结果中间数据可写 scripts/temp/*.json 供后续 run_code 复用；不要为同一数据反复全量拉取。")
     lines.append("读取 `spill:` 句柄返回原始 payload：JSON 对象→dict，数组→list，其余→原始 str；按返回类型分支处理，不要假设必是 dict。")
     return "\n".join(lines)
@@ -1171,7 +1173,7 @@ _SDK_PREAMBLE = '''\
 
 用法::
 
-    from em import inspect_spreadsheet, edit_spreadsheet, split_spreadsheet
+    from em import observe_spreadsheet, apply_spreadsheet_changes, split_spreadsheet
 
 首次用某工具前可 introspect_capability(query_type="tool_detail", query="工具名")。
 """
@@ -1181,6 +1183,16 @@ import json
 import os
 import time
 from typing import Any, Literal
+
+
+def __getattr__(name):
+    if name == "content_version":
+        raise AttributeError(
+            "em.content_version 不是 SDK 方法。先调用当前可用的 "
+            "observe_spreadsheet(file_path=..., mode='overview')，"
+            "从返回字典读取 content_version；核对目标内容后作为 expected_version 使用。"
+        )
+    raise AttributeError("module 'em' has no attribute %r" % name)
 
 
 class HostToolError(Exception):

@@ -25,57 +25,54 @@ def test_discovery_uses_calling_registry_after_other_session_binds(tmp_path):
     writer = registry_at(tmp_path)
     reader = registry_at(tmp_path)
     reader.bind_catalog(mode="read")
-    assert "edit_spreadsheet" in query(writer, "can_i_do", "写入")
-    assert "edit_spreadsheet" not in query(reader, "can_i_do", "写入")
+    assert "apply_spreadsheet_changes" in query(writer, "can_i_do", "写入")
+    assert "apply_spreadsheet_changes" not in query(reader, "can_i_do", "写入")
     fork = writer.fork()
     fork.bind_catalog(mode="read")
-    assert "不可用" in query(fork, "tool_detail", "edit_spreadsheet")
+    assert "不可用" in query(fork, "tool_detail", "apply_spreadsheet_changes")
 
 
-def test_specific_unsupported_capability_is_not_matched_as_generic_format(tmp_path):
-    registry = registry_at(tmp_path)
-    text = query(registry, "can_i_do", "已有表添加自动筛选")
-    assert "当前不可用" in text
-    assert "产品意图匹配" not in text
-    # 数据验证已真实可用（format_spreadsheet kind=data_validation），不应再报不可用
-    dv = query(registry, "can_i_do", "已有表添加数据验证下拉框")
-    assert "可见工具可做" in dv
-    assert "data_validation" in dv
-    assert "审批由执行策略决定" in query(registry, "can_i_do", "哪些工具需要用户审批或更高权限")
+def test_language_search_is_navigation_not_a_guarantee(tmp_path):
+    registry=registry_at(tmp_path)
+    text=query(registry,"can_i_do","已有表添加自动筛选")
+    assert "候选工具" in text
+    assert "具体输入和引擎支持见合同" in text
+    unknown=query(registry,"can_i_do","xyz_qzx_123")
+    assert "unknown" in unknown and "不表示能力不存在" in unknown
 
 
 def test_tool_detail_keeps_schema_and_can_select_nested_field(tmp_path):
     registry = registry_at(tmp_path)
-    result = query(registry, "tool_detail", "edit_spreadsheet.operations.kind")
+    result = query(registry, "tool_detail", "apply_spreadsheet_changes.operations.kind")
     assert '"write"' in result and '"delete_rows"' in result
     assert "结果已截断" not in result
 
 
 def test_tool_detail_workbook_spec_nested_styles_returns_contract(tmp_path):
     registry = registry_at(tmp_path)
-    result = query(registry, "tool_detail", "edit_spreadsheet.workbook_spec.sheets.styles")
+    result = query(registry, "tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets.styles")
     assert "字段不存在" not in result
     assert "border" in result or "font" in result
     assert "不要继续 introspect" not in result
     assert "以系统规格段为准" not in result
-    missing = query(registry, "tool_detail", "edit_spreadsheet.workbook_spec.styles")
+    missing = query(registry, "tool_detail", "apply_spreadsheet_changes.workbook_spec.styles")
     assert "字段不存在" in missing
     assert "sheets" in missing
-    border = query(registry, "tool_detail", "edit_spreadsheet.workbook_spec.sheets.styles.border")
+    border = query(registry, "tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets.styles.border")
     assert "字段不存在" not in border
     assert "top" in border or "style" in border
 
 
 def test_discovered_workbook_spec_compiles_via_edit(tmp_path):
     from excelmanus.tools.context import bind_workspace
-    from excelmanus.tools.intent_tools import edit_spreadsheet, init_guard
+    from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, init_guard
 
     bind_workspace(str(tmp_path))
     init_guard(str(tmp_path))
     registry = registry_at(tmp_path)
-    sheets = query(registry, "tool_detail", "edit_spreadsheet.workbook_spec.sheets")
+    sheets = query(registry, "tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets")
     assert "value_blocks" in sheets
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path="预算.xlsx",
         workbook_spec={
             "sheets": [{
@@ -197,25 +194,18 @@ def test_skill_catalog_reappears_after_compaction_and_clears_after_uninstall(tmp
 
 
 def test_versions_and_formula_values_survive_model_projection(tmp_path):
-    from excelmanus.tools.intent_tools import inspect_spreadsheet, edit_spreadsheet, manage_spreadsheet_versions
-    from excelmanus.engine_core.spill import verify_write, attach_write_verification
+    from excelmanus.tools.workbook_tools import observe_spreadsheet, apply_spreadsheet_changes, manage_spreadsheet_versions
     from excelmanus.tools.context import bind_workspace
-
-    registry_at(tmp_path)
-    bind_workspace(tmp_path)
-    wb = Workbook()
-    wb.active.title = "销售"
-    wb.active.append(["销量", "总额"])
-    wb.active.append([3, "=A2*10"])
-    wb.save(tmp_path / "book.xlsx")
-    read = inspect_spreadsheet(file_path="book.xlsx", mode="range", sheet="销售", range="A2:B2", include=["formulas"])
-    assert "A2" in read.model_text and "=A2*10" in read.model_text
-    args = {"file_path": "book.xlsx", "expected_version": read.value["content_version"], "operations": [{"kind": "write", "sheet": "销售", "start_cell": "A2", "values": [[3]]}]}
-    result = edit_spreadsheet(**args)
+    from tests.workbook_support import model_projection
+    registry_at(tmp_path); bind_workspace(tmp_path)
+    wb=Workbook(); wb.active.title="销售"; wb.active.append(["销量","总额"]); wb.active.append([3,"=A2*10"]); wb.save(tmp_path/"book.xlsx"); wb.close()
+    read=observe_spreadsheet(file_path="book.xlsx",mode="range",sheet="销售",range="A2:B2",facets=["data"])
+    assert "=A2*10" in model_projection(read,tmp_path)
+    result=apply_spreadsheet_changes(file_path="book.xlsx",expected_version=read.value["content_version"],operations=[{"kind":"write","sheet":"销售","start_cell":"A2","values":[[3]]}])
     assert result.success
-    verification = verify_write("edit_spreadsheet", args, workspace_root=str(tmp_path))
-    _, text = attach_write_verification(result, verification, result.model_text)
-    assert "值变更" not in text and "A2" in text and "仅写后值" in text
-    versions = manage_spreadsheet_versions("book.xlsx", "list")
+    assert result.value["observation"]["cell_checks"][0]["cell"]=="A2"
+    assert result.value["observation"]["visual_observed"] is False
+    assert "cell_checks" in model_projection(result,tmp_path)
+    versions=manage_spreadsheet_versions(file_path="book.xlsx",action="list")
     assert versions.value["revisions"]
-    assert versions.value["revisions"][-1]["revision_id"] in versions.model_text
+    assert versions.value["revisions"][-1]["revision_id"] in model_projection(versions,tmp_path)

@@ -11,7 +11,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.formatting.rule import CellIsRule
 
 from excelmanus.tools.context import use_workspace
-from excelmanus.tools.intent_tools import edit_spreadsheet, manage_spreadsheet_objects, inspect_spreadsheet, analyze_spreadsheet
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, apply_spreadsheet_changes, observe_spreadsheet, analyze_spreadsheet
 from excelmanus.workbook_commit import content_version_of_file
 from excelmanus.tools.spreadsheet_data_tools import validate_spreadsheet, query_spreadsheet
 from excelmanus.tools.spreadsheet_engine_tools import calculate_spreadsheet, convert_spreadsheet, render_spreadsheet
@@ -31,13 +31,13 @@ def book(path, rows, name="Data"):
 
 
 def edit(path, operations):
-    result=edit_spreadsheet(file_path=path.name,expected_version=content_version_of_file(path),operations=operations)
+    result=apply_spreadsheet_changes(file_path=path.name,expected_version=content_version_of_file(path),operations=operations)
     assert result.success, result.model_text
     return result
 
 
 def objects(path, operations):
-    result=manage_spreadsheet_objects(file_path=path.name,expected_version=content_version_of_file(path),operations=operations)
+    result=apply_spreadsheet_changes(file_path=path.name,expected_version=content_version_of_file(path),operations=operations)
     assert result.success, result.model_text
     return result
 
@@ -91,7 +91,7 @@ def test_formula_pivot_uses_cache_and_rejects_stale_cache(tmp_path):
         ws.write_row(2,0,["A","Q1"]); ws.write_formula(2,2,"=5*3",None,15)
     pivot={"kind":"pivot","sheet":"Data","target_sheet":"Summary","index":["group"],"columns":["period"],"values":["amount"]}
     before=path.read_bytes()
-    result=edit_spreadsheet(file_path=path.name,expected_version=content_version_of_file(path),operations=[{"kind":"write","sheet":"Data","start_cell":"A2","values":[["B"]]},pivot])
+    result=apply_spreadsheet_changes(file_path=path.name,expected_version=content_version_of_file(path),operations=[{"kind":"write","sheet":"Data","start_cell":"A2","values":[["B"]]},pivot])
     assert not result.success and result.value["error_code"]=="FORMULA_CACHE_STALE"
     assert path.read_bytes()==before
     edit(path,[pivot]); wb=load_workbook(path); assert wb["Summary"]["B2"].value==35; wb.close()
@@ -120,8 +120,8 @@ def test_table_name_comment_hyperlink_append_and_inventory(tmp_path):
     objects(path,[{"kind":"table","sheet":"Data","name":"Sales","ref":"A1:B2"},{"kind":"defined_name","sheet":"Data","name":"Amounts","refers_to":"Data!$B$2:$B$2"},{"kind":"comment","sheet":"Data","cell":"B1","text":"Amount in CNY"},{"kind":"hyperlink","sheet":"Data","cell":"D1","target":"https://example.com","display":"Source"}])
     edit(path,[{"kind":"append","sheet":"Data","table":"Sales","values":[[2,20]]}])
     wb=load_workbook(path); assert wb.active.tables["Sales"].ref=="A1:B3"; assert wb.active["B1"].comment.text=="Amount in CNY"; wb.close()
-    result=inspect_spreadsheet(file_path=path.name,mode="objects")
-    assert result.success and {x["kind"] for x in result.value["objects"]}>={"table","defined_name","comment","hyperlink"}
+    result=observe_spreadsheet(file_path=path.name,mode="objects")
+    assert result.success and {x["kind"] for x in result.value["regions"][0]["objects"]}>={"table","defined_name","comment","hyperlink"}
 
 
 def test_native_pivot_serializes_cache_and_can_refresh(tmp_path):

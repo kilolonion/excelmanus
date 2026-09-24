@@ -6,6 +6,17 @@
   !include "${PROJECT_DIR}\installer\upgrade.nsh"
 !endif
 !ifndef BUILD_UNINSTALLER
+  !ifdef APP_GUID
+    !macro ExcelManusVerifyExtractedPayload
+      ; Validate the extracted tree before moving it into place. Read the copy
+      ; embedded directly by installSection, not a possibly truncated archive.
+      Push $INSTDIR
+      StrCpy $INSTDIR $ExcelManusStage
+      StrCpy $R9 "$PLUGINSDIR\excelmanus-new-files.txt"
+      Call ExcelManusVerifyOwnedFiles
+      Pop $INSTDIR
+    !macroend
+  !endif
   ; Keep upstream pages available when selecting our extraction wrapper later.
   !addincludedir "${PROJECT_DIR}\node_modules\app-builder-lib\templates\nsis"
   Var ExcelManusProgress
@@ -39,13 +50,15 @@
   !macroend
 
   !macro customHeader
+    !include "${PROJECT_DIR}\installer\move-files.nsh"
     !ifmacrodef ExcelManusUpgradeFunctions
       !insertmacro ExcelManusUpgradeFunctions
+      !insertmacro ExcelManusVerificationFunctions
     !endif
     ; Change include resolution only after upstream pages/multiUser.nsh have
     ; loaded. Doing this in the initial header selects NSIS's unrelated
     ; MultiUser.nsh on Windows, where filenames are case-insensitive.
-    !cd "${PROJECT_DIR}\installer"
+    !cd "${PROJECT_DIR}/installer"
     Function ExcelManusProgressShow
       Push $0
       Push $2
@@ -94,6 +107,9 @@
 
   !macro customInstall
     !ifdef APP_GUID
+      !ifndef EXCELMANUS_NO_INSTALLER_CACHE_ACTIVE
+        !error "ExcelManus installer cache override was not loaded"
+      !endif
       !ifndef EXCELMANUS_SAFE_UPGRADE_ACTIVE
         !error "ExcelManus safe upgrade override was not loaded"
       !endif

@@ -23,9 +23,9 @@ from tests.prompt_support import (
 )
 
 _VARS = VARS
-_EDIT_MARKER = "VERSION_CONFLICT 表示这次没有落盘"
-_SPEC_MARKER = "WorkbookSpec 经 edit_spreadsheet 的 workbook_spec 一次编译出新工作簿"
-_FORMAT_MARKER = "一次性指定某格外观用直接 format"
+_EDIT_MARKER = "已有文件必填 observed content_version"
+_SPEC_MARKER = "WorkbookSpec V2 只用于新建"
+_FORMAT_MARKER = "preview_spreadsheet 同次返回图像"
 _RUN_CODE_MARKER = "写入串行。stdout 不证明业务正确"
 _INVARIANT_MARKER = "结论以实际读取的数据为依据"
 
@@ -47,20 +47,20 @@ def _section_names(mode: str) -> list[str]:
 
 def test_edit_frontmatter_gates_write_catalog_mode() -> None:
     seg = parse_prompt_file(PROMPTS_DIR / "strategies" / "19_edit.md")
-    assert seg.name == "tool:edit"
+    assert seg.name == "tool:changes"
     assert seg.conditions["catalog_mode"] == "write"
     assert _EDIT_MARKER in seg.content
 
 
 def test_write_related_frontmatter_gates_write_catalog_mode() -> None:
     for rel, name, marker in (
-        ("18_workbook_spec.md", "spreadsheet:workbook_spec", _SPEC_MARKER),
-        ("21_format.md", "tool:format", _FORMAT_MARKER),
+        ("18_workbook_spec.md", "spreadsheet:document", _SPEC_MARKER),
+        ("21_format.md", "tool:preview", _FORMAT_MARKER),
         ("35_run_code_patterns.md", "tool:run_code", _RUN_CODE_MARKER),
     ):
         seg = parse_prompt_file(PROMPTS_DIR / "strategies" / rel)
         assert seg.name == name
-        assert seg.conditions["catalog_mode"] == "write"
+        assert seg.conditions.get("catalog_mode") == (None if name == "tool:preview" else "write")
         assert marker in seg.content
 
 
@@ -90,7 +90,7 @@ def test_read_and_plan_system_omit_write_related_strategies() -> None:
     write_text = _system("write")
     for mode in ("read", "plan"):
         text = _system(mode)
-        assert _FORMAT_MARKER not in text
+        assert _FORMAT_MARKER in text
         assert _SPEC_MARKER not in text
         assert _RUN_CODE_MARKER not in text
         assert "overview" in text
@@ -141,7 +141,7 @@ def test_prompt_uses_execution_catalog_for_strategies(
     catalog = catalog_from_engine(engine)
     assert catalog is not None
     assert catalog.mode == "write"
-    assert "inspect_spreadsheet" in catalog.name_set()
+    assert "observe_spreadsheet" in catalog.name_set()
     schemas = catalog.tool_schemas()
     schema_names = sorted(
         (s.get("function") or {}).get("name") or s.get("name") or ""
@@ -152,7 +152,7 @@ def test_prompt_uses_execution_catalog_for_strategies(
     exec_catalog = execution_catalog_from_engine(engine)
     assert exec_catalog is not None
     reachable = set(exec_catalog.names())
-    assert {"inspect_spreadsheet", "edit_spreadsheet", "format_spreadsheet"} <= reachable
+    assert {"observe_spreadsheet", "apply_spreadsheet_changes", "apply_spreadsheet_changes"} <= reachable
     assert "run_code" in reachable
 
     engine._tool_runtime = SimpleNamespace(
@@ -166,7 +166,7 @@ def test_prompt_uses_execution_catalog_for_strategies(
     assert "tool_detail" in text
     engine._tool_runtime.render_sdk_section.assert_not_called()
     nav = exec_catalog.capability_map_text()
-    assert "edit_spreadsheet" in nav
+    assert "apply_spreadsheet_changes" in nav
 
 
 def test_tool_strategy_requires_tool_in_execution_catalog(
@@ -179,12 +179,12 @@ def test_tool_strategy_requires_tool_in_execution_catalog(
         chat_mode="write",
         visible_tools=frozenset({"run_code"}),
     )
-    assert not strategy_conditions_match({"tool": ["edit_spreadsheet"]}, ctx)
+    assert not strategy_conditions_match({"tool": ["apply_spreadsheet_changes"]}, ctx)
     assert strategy_conditions_match(
-        {"tool": ["edit_spreadsheet"]},
+        {"tool": ["apply_spreadsheet_changes"]},
         AssembleContext(
             chat_mode="write",
-            visible_tools=frozenset({"edit_spreadsheet", "run_code"}),
+            visible_tools=frozenset({"apply_spreadsheet_changes", "run_code"}),
         ),
     )
 
@@ -212,7 +212,7 @@ def test_gating_is_not_hardcoded_filenames() -> None:
     source = Path(__file__).resolve().parent.parent / "excelmanus" / "prompt" / "load.py"
     blob = source.read_text(encoding="utf-8")
     assert "19_edit.md" not in blob
-    assert "tool:edit" not in blob
+    assert "tool:changes" not in blob
     assert 'seg.name == "plan:policy"' not in blob
 
 

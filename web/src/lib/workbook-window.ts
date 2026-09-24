@@ -1,4 +1,4 @@
-import type { ViewRect, WorkbookViewSnapshot } from "@/lib/workbook-view";
+import type { ViewRect, WorkbookObservation } from "@/lib/workbook-observation";
 import { cellRefFromIndex } from "@/lib/excel-cell-edit";
 
 /**
@@ -10,11 +10,11 @@ import { cellRefFromIndex } from "@/lib/excel-cell-edit";
  */
 export const INITIAL_WORKBOOK_VIEW_RECT = "A1:Z80";
 
-export function rangeIsLoaded(view: WorkbookViewSnapshot, sheet: string, rect: ViewRect): boolean {
+export function rangeIsLoaded(view: WorkbookObservation, sheet: string, rect: ViewRect): boolean {
   return firstUnloadedCell(view, sheet, rect) === null;
 }
 
-export function firstUnloadedCell(view: WorkbookViewSnapshot, sheet: string, rect: ViewRect): { row: number; col: number } | null {
+export function firstUnloadedCell(view: WorkbookObservation, sheet: string, rect: ViewRect): { row: number; col: number } | null {
   const remaining = uncoveredRects(rect, view.coverage.loaded.filter((r) => r.sheet === sheet));
   return remaining.length ? { row: remaining[0].r0 - 1, col: remaining[0].c0 - 1 } : null;
 }
@@ -43,12 +43,15 @@ export function pageForCell(row: number, col: number): { rect: ViewRect; address
     address: `${cellRefFromIndex(r0, c0)}:${cellRefFromIndex(r1, c1)}` };
 }
 
-export function mergeViewWindows(current: WorkbookViewSnapshot, next: WorkbookViewSnapshot): WorkbookViewSnapshot {
+export function mergeViewWindows(current: WorkbookObservation, next: WorkbookObservation): WorkbookObservation {
   if (current.content_version !== next.content_version || current.file.workspaceKey !== next.file.workspaceKey || current.file.relative !== next.file.relative) {
     throw new Error("STALE_VIEW: 不能合并不同文件或版本的范围");
   }
-  let windows = [...current.windows];
-  for (const win of next.windows) {
+  const scoped = (view: WorkbookObservation) => view.regions.map((win) => ({ ...win,
+    coverage: win.coverage ?? { presentation: { status: view.request?.facets.includes("presentation") ? "complete" : "not_requested" } },
+  }));
+  let windows = scoped(current);
+  for (const win of scoped(next)) {
     // Refresh and the style pass replace a matching page even if its values
     // were already loaded. Old versions are rejected above, never relabelled.
     windows = windows.filter((old) => !(old.sheet === win.sheet
@@ -57,7 +60,7 @@ export function mergeViewWindows(current: WorkbookViewSnapshot, next: WorkbookVi
     windows.push(win);
   }
   const loaded = windows.map((win) => ({ ...win.rect, sheet: win.sheet }));
-  return { ...next, windows, coverage: { ...next.coverage, loaded,
+  return { ...next, regions: windows, coverage: { ...next.coverage, loaded,
     unloaded: next.sheets.flatMap((s) => uncoveredRects(
       { sheet: s.name, r0: 1, c0: 1, r1: s.used.rows, c1: s.used.cols },
       loaded.filter((r) => r.sheet === s.name),
@@ -74,4 +77,12 @@ export function pagesForViewport(range: { startRow: number; endRow: number; star
     }
   }
   return pages;
+}
+
+
+/** A data-only prefetch in another window cannot revoke already loaded styling. */
+export function rangeHasPresentation(view: WorkbookObservation, sheet: string, rect: ViewRect): boolean {
+  const loaded = view.regions.filter((r) => r.sheet === sheet &&
+    (r.coverage ? ["complete", "partial"].includes(r.coverage.presentation?.status) : view.request?.facets.includes("presentation")));
+  return uncoveredRects(rect, loaded.map((r) => r.rect)).length === 0;
 }

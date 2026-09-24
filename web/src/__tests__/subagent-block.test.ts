@@ -15,7 +15,7 @@ describe("SubagentBlock", () => {
         tools: [
           {
             index: 0,
-            name: "inspect_spreadsheet",
+            name: "observe_spreadsheet",
             argsSummary: "overview",
             status: "success",
             args: { mode: "overview", file_path: "sales.xlsx" },
@@ -56,7 +56,7 @@ describe("SubagentBlock", () => {
         tools: [
           {
             index: 0,
-            name: "edit_spreadsheet",
+            name: "apply_spreadsheet_changes",
             argsSummary: "write",
             status: "error",
             error: "写入被拒绝",
@@ -64,7 +64,7 @@ describe("SubagentBlock", () => {
           },
           {
             index: 1,
-            name: "inspect_spreadsheet",
+            name: "observe_spreadsheet",
             argsSummary: "overview",
             status: "running",
           },

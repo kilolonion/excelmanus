@@ -81,7 +81,7 @@ def command_touches_product_source(command: str, workspace_root: str | Path | No
     text = (command or "").replace("\\", "/")
     if re.search(r"(^|[^\w./])(" + "|".join(PRODUCT_SOURCE_ROOTS) + r")/", text):
         return True
-    if "replica_spec.py" in text or "intent_tools.py" in text:
+    if "workbook/spec.py" in text or "workbook_tools.py" in text:
         return True
     if re.search(r"\b(?:import|from)\s+excelmanus\b", text):
         return True

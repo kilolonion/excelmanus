@@ -1,6 +1,6 @@
 # Skillpack 协议
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-21
+适用版本：1.8.1 源码 · 更新日期：2026-09-21
 
 [文档导航](README.md) · [English](skillpack_protocol_en.md) · [配置参考](configuration.md)
 
@@ -79,7 +79,7 @@ user-invocable: true
 | `word_code_runner` | 复杂 Word 处理 |
 | `agent_self_management` | 查询自身能力并调整当前会话配置；默认关闭 |
 
-个别内置技能受运行时开关门控：`agent_self_management` 仅在「设置 → 系统 → 能力 → Agent 自我管理」开启后可加载，未开启时对技能列表、按名获取与增量加载均不可见。
+个别内置技能受运行时开关门控：`agent_self_management` 默认启用，仅在「设置 → 系统 → 能力 → Agent 自我管理」开关开启时可加载，关闭时对技能列表、按名获取与增量加载均不可见。
 
 ## 6. 维护与验证
 

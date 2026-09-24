@@ -26,7 +26,7 @@ def workbook(**values):
 
 
 def ops(**values):
-    return [{"op": "set_values", "sheet": "销售", "cells": [{"cell": cell, "value": value} for cell, value in values.items()]}]
+    return [{"kind": "cells.patch", "sheet": "销售", "cells": [{"cell": cell, "value": value} for cell, value in values.items()]}]
 
 
 def test_merges_non_overlapping_values_and_formulas():
@@ -62,7 +62,7 @@ def test_style_and_value_changes_can_merge_on_the_same_cell():
     data = BytesIO()
     remote.save(data)
     remote.close()
-    style_ops = [{"op": "set_styles", "sheet": "销售", "cells": [{"cell": "A1", "style": {"bl": 1}}]}]
+    style_ops = [{"kind": "cells.patch", "sheet": "销售", "cells": [{"cell": "A1", "style": {"font": {"bold": True}}}]}]
     review, merged = review_merge(base, data.getvalue(), style_ops, apply=True)
     assert review["conflict_count"] == 0
     wb = load_workbook(BytesIO(merged))
@@ -75,7 +75,7 @@ def test_structural_changes_and_commands_require_replanning():
     base = workbook()
     review, merged = review_merge(base, workbook(A3=3), ops(A1=10), apply=True)
     assert review["status"] == "replan" and merged is None
-    review, merged = review_merge(base, base, [{"op": "insert_axis", "sheet": "销售", "axis": "row", "index": 1, "count": 1}], apply=True)
+    review, merged = review_merge(base, base, [{"kind": "insert", "sheet": "销售", "axis": "row", "at": 1, "count": 1}], apply=True)
     assert review["status"] == "replan" and merged is None
 
 
@@ -100,22 +100,22 @@ async def test_api_review_then_compare_and_swap_merge(tmp_path):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             sid = (await client.post("/api/v1/sessions", json={})).json()["id"]
             request = {"path": "book.xlsx", "session_id": sid, "batches": [{"expected_version": original, "operations": ops(A1=10, A2=20)}]}
-            review_response = await client.post("/api/v1/files/excel/merge", json=request)
+            review_response = await client.post("/api/v1/workbooks/merge-review", json=request)
             assert review_response.status_code == 200, review_response.text
             review = review_response.json()
             assert review["conflict_count"] == 1
             assert content_version_of_file(path) == receipt.primary_version()  # preview never writes
-            missing = await client.post("/api/v1/files/excel/merge", json={**request, "apply": True, "expected_version": review["content_version"]})
+            missing = await client.post("/api/v1/workbooks/merge-review", json={**request, "apply": True, "expected_version": review["content_version"]})
             assert missing.status_code == 400
             conflict_id = next(c["id"] for c in review["cells"] if c["conflict"])
             apply = {**request, "apply": True, "expected_version": review["content_version"], "choices": {conflict_id: "local"}}
             # A further Agent write invalidates the entire review, even with selected choices.
             later = svc.update("book.xlsx", workbook(A1=40, B2="new agent edit"), expected_version=review["content_version"])
-            stale = await client.post("/api/v1/files/excel/merge", json=apply)
+            stale = await client.post("/api/v1/workbooks/merge-review", json=apply)
             assert stale.status_code == 409
             assert content_version_of_file(path) == later.primary_version()
-            refreshed = (await client.post("/api/v1/files/excel/merge", json=request)).json()
-            done = await client.post("/api/v1/files/excel/merge", json={**apply, "expected_version": refreshed["content_version"]})
+            refreshed = (await client.post("/api/v1/workbooks/merge-review", json=request)).json()
+            done = await client.post("/api/v1/workbooks/merge-review", json={**apply, "expected_version": refreshed["content_version"]})
             assert done.status_code == 200 and done.json()["status"] == "merged", done.text
     wb = load_workbook(path)
     assert [wb.active[c].value for c in ("A1", "A2", "B2")] == [10, 20, "new agent edit"]
@@ -128,9 +128,9 @@ async def test_api_requires_scope_and_retains_unavailable_baseline(tmp_path):
     with _setup_api_globals(config=_test_config(workspace_root=str(tmp_path))):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             request = {"path": "book.xlsx", "batches": [{"expected_version": "sha256:" + "a" * 64, "operations": ops(A1=10)}]}
-            assert (await client.post("/api/v1/files/excel/merge", json=request)).status_code == 400
+            assert (await client.post("/api/v1/workbooks/merge-review", json=request)).status_code == 400
             sid = (await client.post("/api/v1/sessions", json={})).json()["id"]
-            response = await client.post("/api/v1/files/excel/merge", json={**request, "session_id": sid})
+            response = await client.post("/api/v1/workbooks/merge-review", json={**request, "session_id": sid})
             assert response.json()["status"] == "replan"
-            escaped = await client.post("/api/v1/files/excel/merge", json={**request, "session_id": sid, "path": "../book.xlsx"})
+            escaped = await client.post("/api/v1/workbooks/merge-review", json={**request, "session_id": sid, "path": "../book.xlsx"})
             assert escaped.status_code == 404

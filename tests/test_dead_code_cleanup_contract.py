@@ -47,7 +47,7 @@ def test_all_tools_modules_importable() -> None:
 
 def test_image_to_excel_pipeline_modules_importable() -> None:
     for module_name in (
-        "excelmanus.replica_spec",
+        "excelmanus.workbook.spec",
         "excelmanus.tools.image_tools",
     ):
         importlib.import_module(module_name)

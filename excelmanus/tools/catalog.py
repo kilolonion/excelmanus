@@ -44,7 +44,7 @@ _WORKBOOK_SUFFIXES: frozenset[str] = _XLSX_SUFFIXES | _CSV_SUFFIXES
 _DOCX_SUFFIXES: frozenset[str] = frozenset({".docx"})
 _DEFAULT_FAMILIES: frozenset[str] = frozenset({"xlsx"})
 _CSV_ONLY_DISALLOWED: frozenset[str] = frozenset(
-    {"trace_spreadsheet_formulas", "manage_spreadsheet_objects"}
+    {"trace_spreadsheet_formulas", "apply_spreadsheet_changes"}
 )
 
 
@@ -139,7 +139,15 @@ def _prune_schema_node(node: Any, depth: int) -> tuple[Any, bool]:
         if key == "description" and depth >= 3:
             pruned = True
             continue
-        if key in ("properties", "items") and isinstance(value, dict):
+        if key in ("oneOf", "anyOf", "allOf", "prefixItems") and isinstance(value, list):
+            items = [_prune_schema_node(branch, depth) for branch in value]
+            out[key] = [item for item, _ in items]
+            pruned = pruned or any(flag for _, flag in items)
+        elif key in ("additionalProperties", "if", "then", "else", "not") and isinstance(value, dict):
+            sub, flag = _prune_schema_node(value, depth + 1)
+            out[key] = sub
+            pruned = pruned or flag
+        elif key in ("properties", "items") and isinstance(value, dict):
             if key == "items":
                 sub, sub_pruned = _prune_schema_node(value, depth + 1)
             else:
@@ -448,6 +456,7 @@ class EffectiveToolCatalog:
             "用 introspect_capability 的 can_i_do/category_tools 查找能力，"
             "tool_detail 获取具体工具或字段详情后，下一步可直接调用；"
             "system_status 可列出完整目录。未展示 schema 不表示能力不可用。"
+            "需要 ExcelManus 的流程、设计、配置或限制时，用 knowledge_index 浏览、knowledge_search 定位后 knowledge_read 取正文；knowledge_spec 查工具规范与示例。"
             if "introspect_capability" in visible else ""
         )
         return "\n".join(filter(None, ["## 能力地图（当前目录）", guidance, *routes]))

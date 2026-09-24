@@ -5,8 +5,8 @@ describe("nestToolCallsByParent", () => {
   it("nests SDK subcalls under the parent run_code card", () => {
     const nested = nestToolCallsByParent([
       { toolCallId: "run-1", name: "run_code" },
-      { toolCallId: "child-1", name: "inspect_spreadsheet", parentCallId: "run-1" },
-      { toolCallId: "child-2", name: "inspect_spreadsheet", parentCallId: "run-1" },
+      { toolCallId: "child-1", name: "observe_spreadsheet", parentCallId: "run-1" },
+      { toolCallId: "child-2", name: "observe_spreadsheet", parentCallId: "run-1" },
     ]);
     expect(nested).toHaveLength(1);
     expect(nested[0].item.toolCallId).toBe("run-1");

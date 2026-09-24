@@ -38,7 +38,7 @@ function mockDeps(writeImpl: (opts: unknown) => Promise<ExcelWriteResponse>) {
   const setContentVersion = vi.fn();
   const invalidate = vi.fn();
   const deps: PersistExcelCellEditsDeps = {
-    writeExcelCells: vi.fn(writeImpl),
+    applyWorkbookChanges: vi.fn(writeImpl),
     getSessionId: () => "sess-active",
     getExpectedVersion: vi.fn(() => "sha256:current"),
     setContentVersion,
@@ -127,7 +127,7 @@ describe("isExcelWriteConflict / persistExcelCellEdits", () => {
       expectedVersion: "v1", viewGeneration: -1,
     }, deps);
     expect(result.kind).toBe("ok");
-    expect(deps.writeExcelCells).toHaveBeenCalledWith(expect.objectContaining({
+    expect(deps.applyWorkbookChanges).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "original-session", workspaceId: null, expectedVersion: "v1",
     }));
   });
@@ -153,12 +153,10 @@ describe("isExcelWriteConflict / persistExcelCellEdits", () => {
     );
 
     expect(result).toEqual({ kind: "ok", contentVersion: "sha256:next" });
-    expect(deps.writeExcelCells).toHaveBeenCalledWith(
+    expect(deps.applyWorkbookChanges).toHaveBeenCalledWith(
       expect.objectContaining({
         path: "./book.xlsx",
-        sheet: "Sheet1",
-        changes: [],
-        operations: [{ op: "set_values", sheet: "Sheet1", cells: [{ cell: "A1", value: 3, style: undefined }] }],
+        operations: [{ kind: "cells.patch", sheet: "Sheet1", cells: [{ cell: "A1", value: 3 }] }],
         sessionId: "sess-active",
         expectedVersion: "sha256:current",
       }),
@@ -191,7 +189,7 @@ describe("isExcelWriteConflict / persistExcelCellEdits", () => {
       deps,
     );
     expect(result).toEqual({ kind: "conflict", code: "VERSION_CONFLICT" });
-    expect(deps.writeExcelCells).not.toHaveBeenCalled();
+    expect(deps.applyWorkbookChanges).not.toHaveBeenCalled();
   });
 
   it("skips demo files", async () => {
@@ -201,7 +199,7 @@ describe("isExcelWriteConflict / persistExcelCellEdits", () => {
       deps,
     );
     expect(result.kind).toBe("skipped");
-    expect(deps.writeExcelCells).not.toHaveBeenCalled();
+    expect(deps.applyWorkbookChanges).not.toHaveBeenCalled();
   });
 });
 

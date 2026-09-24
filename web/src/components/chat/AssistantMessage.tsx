@@ -156,7 +156,6 @@ export const AssistantMessage = React.memo(function AssistantMessage({
       isThinkingActive={block.type === "thinking" && origIndex === lastBlockIdx && isThinkingActive}
       isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
       skipRender={skipIndices.has(origIndex) || (hideFailure && block.type === "failure_guidance")}
-      onRetry={onRetry}
       onRetryWithModel={onRetryWithModel}
     />
   );
@@ -202,7 +201,6 @@ export const AssistantMessage = React.memo(function AssistantMessage({
                   isStreamingText={isStreaming && block.type === "text" && origIndex === lastBlockIdx}
                   defaultExpanded={block.type === "text"}
                   skipRender={skipIndices.has(origIndex) || (hideFailure && block.type === "failure_guidance")}
-                  onRetry={onRetry}
                   onRetryWithModel={onRetryWithModel}
                 />
               );

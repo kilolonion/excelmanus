@@ -479,3 +479,36 @@ def test_register_workspace_runs_overlay_migration(tmp_path: Path) -> None:
         assert recs
         assert any(r.label == "migrated-overlay" for r in recs)
         assert (ws / ".excelmanus" / "migrations" / "overlay-backups.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_file_list_uses_historical_session_after_workspace_unregistered(tmp_path: Path) -> None:
+    folder = tmp_path / "historical"
+    folder.mkdir()
+    (folder / "report.csv").write_text("name,value\na,1\n", encoding="utf-8")
+
+    with _workspace_api(tmp_path) as state:
+        manager = state["manager"]
+        registered, _ = manager.register_workspace(str(folder))
+        session = await manager.create_or_reuse_session(workspace_id=registered["id"])
+        assert manager.delete_workspace_registration(registered["id"])
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get("/api/v1/files/workspace/list", params={
+                "session_id": session["id"], "workspace_id": registered["id"],
+            })
+            assert response.status_code == 200
+            assert "report.csv" in {item["path"] for item in response.json()["files"]}
+
+            mismatch = await client.get("/api/v1/files/workspace/list", params={
+                "session_id": session["id"], "workspace_id": "not-the-session-workspace",
+            })
+            assert mismatch.status_code == 400
+            assert mismatch.json()["detail"]["code"] == "FILE_SCOPE_REQUIRED"
+
+            wrong_registered = await client.get("/api/v1/files/workspace/list", params={
+                "session_id": session["id"],
+                "workspace_id": manager.ensure_default_workspace()["id"],
+            })
+            assert wrong_registered.status_code == 409
+            assert wrong_registered.json()["detail"]["code"] == "FILE_SCOPE_MISMATCH"

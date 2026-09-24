@@ -607,7 +607,7 @@ async def run_tool_loop(
         if engine._tool_dispatcher is not None:
             engine._tool_dispatcher.reset_cancel()
             engine._tool_dispatcher.begin_call_budget(
-                max_iterations,
+                max_iterations or None,
                 reason=f"已达到本轮工具调用上限 ({max_iterations})",
             )
     tool_access = "may_write"
@@ -622,8 +622,8 @@ async def run_tool_loop(
         budget_dead = (
             dispatcher is not None and not dispatcher.has_call_budget_remaining()
         )
-        if iteration > max_iterations or budget_dead:
-            if iteration > max_iterations:
+        if (max_iterations > 0 and iteration > max_iterations) or budget_dead:
+            if max_iterations > 0 and iteration > max_iterations:
                 reply = f"已达到最大迭代次数 ({max_iterations})，已停止。"
                 done_iter = max_iterations
             else:

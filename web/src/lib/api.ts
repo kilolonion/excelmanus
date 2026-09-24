@@ -1,4 +1,6 @@
+import { WORKBOOK_PROTOCOL } from "./workbook-contracts.generated";
 import type { SessionDetail, SessionTaskList, SubagentRun, WorkspaceFolder } from "@/lib/types";
+import type { DispatchReceipt, MessageDispatchMode } from "@/lib/types";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 import { saveBlob } from "@/lib/save-blob";
 import { formatApiErrorMessage } from "@/lib/api-error";
@@ -173,7 +175,7 @@ export async function directFetch(
 
 async function handleAuthError(res: Response): Promise<never> {
   const data = await res.json().catch(() => ({}));
-  throw new Error(formatApiErrorMessage(data, res.status));
+  throw Object.assign(new Error(formatApiErrorMessage(data, res.status)), { status: res.status });
 }
 
 export async function apiGet<T = unknown>(
@@ -362,6 +364,14 @@ export async function createWorkspaceFolder(path: string, title?: string): Promi
   created: boolean;
 }> {
   return apiPost("/workspaces", { path, title: title || undefined });
+}
+
+export async function selectWorkspaceFolder(): Promise<string | null> {
+  // Leave time to use the native dialog; ordinary REST calls time out after 30s.
+  const result = await apiPost<{ path: string | null }>(
+    "/workspaces/select-folder", {}, { timeoutMs: 310_000 },
+  );
+  return result.path;
 }
 
 export async function updateWorkspaceFolder(
@@ -747,6 +757,24 @@ export async function abortChat(sessionId: string): Promise<{ status: string }> 
   return res.json();
 }
 
+export async function dispatchChatMessage(
+  sessionId: string,
+  body: { message: string; mode?: MessageDispatchMode; client_message_id: string; [key: string]: unknown },
+): Promise<DispatchReceipt> {
+  const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/dispatch`, { direct: true });
+  const res = await apiFetch(url, _withCredentials(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify(body),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+  }));
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw Object.assign(new Error(formatApiErrorMessage(data, res.status)), { code: data.code, status: res.status });
+  }
+  return res.json();
+}
+
 export async function rollbackChat(opts: {
   sessionId: string;
   turnIndex: number;
@@ -808,18 +836,6 @@ export async function rollbackPreview(
 
 // ── Excel 预览 API ────────────────────────────────────────
 
-export interface ExcelSnapshot {
-  file: string;
-  sheet: string;
-  sheets: string[];
-  shape: { rows: number; columns: number };
-  column_letters: string[];
-  headers: string[];
-  rows: (string | number | null)[][];
-  total_rows: number;
-  truncated: boolean;
-}
-
 /**
  * Normalize a file path for API calls and comparisons.
  *
@@ -842,17 +858,6 @@ export interface WorkspaceRequestScope {
 function appendWorkspaceScope(params: URLSearchParams, scope?: WorkspaceRequestScope): void {
   if (scope?.sessionId) params.set("session_id", scope.sessionId);
   if (scope?.workspaceId) params.set("workspace_id", scope.workspaceId);
-}
-
-function buildExcelSnapshotUrl(
-  path: string,
-  opts?: { sheet?: string; maxRows?: number } & WorkspaceRequestScope,
-): string {
-  const params = new URLSearchParams({ path: normalizeExcelPath(path) });
-  if (opts?.sheet) params.set("sheet", opts.sheet);
-  if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
-  appendWorkspaceScope(params, opts);
-  return buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
 }
 
 export function buildExcelFileUrl(path: string, sessionId?: string | null, workspaceId?: string | null): string {
@@ -1131,12 +1136,13 @@ export interface SharedColumnAPI {
 }
 
 export interface CompareResponse {
-  file_a: AllSheetsSnapshotResponse;
-  file_b: AllSheetsSnapshotResponse;
-  relationships: {
+  file_a: WorkbookViewResponse;
+  file_b: WorkbookViewResponse;
+  relationships?: {
     shared_columns: SharedColumnAPI[];
     merge_hint?: { file_a: string; file_b: string; key_column_a: string; key_column_b: string; suggested_join: string };
   };
+  comparison?: Record<string, unknown>;
 }
 
 export async function fetchExcelCompare(
@@ -1145,12 +1151,12 @@ export async function fetchExcelCompare(
   opts?: WorkspaceRequestScope & { maxRows?: number },
 ): Promise<CompareResponse> {
   const params = new URLSearchParams({
-    path_a: normalizeExcelPath(pathA),
-    path_b: normalizeExcelPath(pathB),
+    file_a: normalizeExcelPath(pathA),
+    file_b: normalizeExcelPath(pathB),
   });
   appendWorkspaceScope(params, opts);
   if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
-  const url = buildApiUrl(`/files/excel/compare?${params.toString()}`);
+  const url = buildApiUrl(`/workbooks/compare?${params.toString()}`);
   const res = await apiFetch(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS, opts?.signal),
@@ -1244,18 +1250,6 @@ export async function uploadFileToFolder(
   return res.json();
 }
 
-export interface AllSheetsSnapshotResponse {
-  file: string;
-  sheets: string[];
-  all_snapshots: ExcelSnapshot[];
-  content_version?: string;
-}
-
-// ── Snapshot 缓存（TTL 30s，避免重复请求同一文件） ──
-const _snapshotCache = new Map<string, { data: AllSheetsSnapshotResponse; ts: number }>();
-const _snapshotInflight = new Map<string, Promise<AllSheetsSnapshotResponse>>();
-const _SNAPSHOT_TTL_MS = 30_000;
-
 export function fileCachePrefix(workspaceKey: string, relative: string): string {
   return `${workspaceKey}|${normalizeExcelPath(relative)}`;
 }
@@ -1288,95 +1282,7 @@ function dropCacheKeys(
   }
 }
 
-export function snapshotCacheKey(
-  path: string,
-  opts?: { maxRows?: number; withStyles?: boolean; workspaceKey?: string } & WorkspaceRequestScope,
-): string {
-  return [
-    fileCachePrefix(opts?.workspaceKey || "_", path),
-    opts?.maxRows ?? "",
-    opts?.withStyles !== false ? "1" : "0",
-  ].join("|");
-}
-
-/** 使指定文件的 snapshot 缓存失效（文件变更后调用） */
-export function invalidateSnapshotCache(opts?: { workspaceKey?: string; relative?: string }) {
-  dropCacheKeys(
-    [_snapshotCache as Map<string, unknown>, _snapshotInflight as Map<string, unknown>],
-    opts,
-  );
-}
-
-/** @deprecated 编辑器请用 prefetchWorkbookView */
-export function prefetchExcelSnapshot(
-  path: string,
-  opts?: { maxRows?: number; withStyles?: boolean; workspaceKey?: string } & WorkspaceRequestScope,
-) {
-  if (!path || (!opts?.sessionId && !opts?.workspaceId)) return;
-  void fetchAllSheetsSnapshot(path, {
-    maxRows: opts?.maxRows ?? 500,
-    withStyles: opts?.withStyles !== false,
-    sessionId: opts.sessionId,
-    workspaceId: opts.workspaceId,
-    workspaceKey: opts.workspaceKey,
-  }).catch(() => null);
-}
-
-export async function fetchAllSheetsSnapshot(
-  path: string,
-  opts?: { maxRows?: number; withStyles?: boolean; workspaceKey?: string } & WorkspaceRequestScope,
-): Promise<AllSheetsSnapshotResponse> {
-  const cacheKey = snapshotCacheKey(path, opts);
-  const cached = _snapshotCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < _SNAPSHOT_TTL_MS) {
-    return cached.data;
-  }
-
-  const inflight = _snapshotInflight.get(cacheKey);
-  if (inflight) return inflight;
-
-  const pending = (async () => {
-    const params = new URLSearchParams({ path: normalizeExcelPath(path), all_sheets: "1" });
-    if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
-    appendWorkspaceScope(params, opts);
-    params.set("with_styles", opts?.withStyles !== false ? "1" : "0");
-    const url = buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
-    const res = await apiFetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(formatApiErrorMessage(data, res.status));
-    }
-    const result: AllSheetsSnapshotResponse = await res.json();
-    _snapshotCache.set(cacheKey, { data: result, ts: Date.now() });
-    return result;
-  })();
-
-  _snapshotInflight.set(cacheKey, pending);
-  try {
-    return await pending;
-  } finally {
-    if (_snapshotInflight.get(cacheKey) === pending) {
-      _snapshotInflight.delete(cacheKey);
-    }
-  }
-}
-
-export async function fetchExcelSnapshot(
-  path: string,
-  opts?: { sheet?: string; maxRows?: number } & WorkspaceRequestScope,
-): Promise<ExcelSnapshot> {
-  const res = await apiFetch(buildExcelSnapshotUrl(path, opts), {
-    headers: { ...getAuthHeaders() },
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(formatApiErrorMessage(data, res.status));
-  }
-  return res.json();
-}
-
-export type WorkbookViewResponse = import("@/lib/workbook-view").WorkbookViewSnapshot;
+export type WorkbookViewResponse = import("@/lib/workbook-observation").WorkbookObservation;
 
 const _viewCache = new Map<string, { data: WorkbookViewResponse; ts: number }>();
 type ViewFlight = {
@@ -1445,7 +1351,6 @@ export function invalidateWorkbookCaches(opts?: {
   workspaceKey?: string;
   relative?: string;
 }): void {
-  invalidateSnapshotCache(opts);
   invalidateWorkbookViewCache(opts);
 }
 
@@ -1492,14 +1397,14 @@ export async function fetchWorkbookView(opts: {
     });
     const wildCached = _viewCache.get(wildKey);
     if (wildCached && Date.now() - wildCached.ts < _VIEW_OPEN_TTL_MS
-      && wildCached.data.windows.length === 1 && wildCached.data.windows[0].sheet === opts.sheet) {
+      && wildCached.data.regions.length === 1 && wildCached.data.regions[0].sheet === opts.sheet) {
       return wildCached.data;
     }
     const wildFlight = _viewInflight.get(wildKey);
     if (wildFlight && !wildFlight.controller.signal.aborted) {
       const view = await readViewFlight(wildFlight, opts.signal).catch(() => null);
       opts.signal?.throwIfAborted();
-      if (view && view.windows.length === 1 && view.windows[0].sheet === opts.sheet) return view;
+      if (view && view.regions.length === 1 && view.regions[0].sheet === opts.sheet) return view;
     }
   }
 
@@ -1510,10 +1415,10 @@ export async function fetchWorkbookView(opts: {
     if (opts.sessionId) params.set("session_id", opts.sessionId);
     if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
     if (opts.sheet) params.set("sheet", opts.sheet);
-    if (opts.rect) params.set("rect", opts.rect);
-    params.set("with_styles", opts.withStyles !== false ? "1" : "0");
+    if (opts.rect) params.set("range", opts.rect);
+    params.set("facets", opts.withStyles !== false ? "data,presentation,geometry,objects" : "data,geometry");
     if (opts.expectedVersion) params.set("expected_version", opts.expectedVersion);
-    const res = await apiFetch(buildApiUrl(`/files/excel/view?${params.toString()}`), {
+    const res = await apiFetch(buildApiUrl(`/workbooks/observe?${params.toString()}`), {
       headers: { ...getAuthHeaders() },
       signal: _withTimeout(_DEFAULT_TIMEOUT_MS, controller.signal),
     });
@@ -1543,6 +1448,9 @@ export async function fetchWorkbookView(opts: {
       }
       throw err;
     }
+    if ((data.schema_version && data.schema_version !== WORKBOOK_PROTOCOL) || !Array.isArray(data.regions) || !data.coverage) {
+      throw new Error("WORKBOOK_PROTOCOL_MISMATCH: 请刷新页面并使用匹配的服务端版本");
+    }
     const result = data as WorkbookViewResponse;
     if (!result.content_version || result.file?.workspaceKey !== opts.workspaceKey
       || normalizeExcelPath(result.file.relative) !== normalizeExcelPath(opts.path)
@@ -1553,13 +1461,13 @@ export async function fetchWorkbookView(opts: {
     cacheView(viewCacheKey({ workspaceKey: opts.workspaceKey, relative: opts.path,
       version: result.content_version, sheet: opts.sheet, rect: opts.rect, withStyles: opts.withStyles }), result);
     // An implicit active-sheet request can be reused by an explicit tab request.
-    if (!opts.sheet && result.windows.length === 1) cacheView(viewCacheKey({
+    if (!opts.sheet && result.regions.length === 1) cacheView(viewCacheKey({
       workspaceKey: opts.workspaceKey, relative: opts.path, version: result.content_version,
-      sheet: result.windows[0].sheet, rect: opts.rect, withStyles: opts.withStyles,
+      sheet: result.regions[0].sheet, rect: opts.rect, withStyles: opts.withStyles,
     }), result);
     // …and vice versa: an explicit request that resolved to the active sheet
     // also satisfies a later implicit open.
-    if (opts.sheet && result.windows.length === 1 && result.active_sheet === result.windows[0].sheet) {
+    if (opts.sheet && result.regions.length === 1 && result.active_sheet === result.regions[0].sheet) {
       cacheView(viewCacheKey({ workspaceKey: opts.workspaceKey, relative: opts.path,
         version: result.content_version, rect: opts.rect, withStyles: opts.withStyles }), result);
       if (!opts.expectedVersion) cacheView(viewCacheKey({ workspaceKey: opts.workspaceKey,
@@ -1598,24 +1506,20 @@ export interface ExcelWriteResponse {
   state?: string;
 }
 
-export async function writeExcelCells(opts: {
+export async function applyWorkbookChanges(opts: {
   path: string;
-  sheet?: string;
-  changes?: { cell: string; value: unknown; sheet?: string; style?: unknown }[];
-  operations?: Record<string, unknown>[];
+  operations: Record<string, unknown>[];
   sessionId?: string;
   workspaceId?: string | null;
   expectedVersion?: string | null;
   operationId?: string;
 }): Promise<ExcelWriteResponse> {
-  const url = buildApiUrl("/files/excel/write");
+  const url = buildApiUrl("/workbooks/changes");
   const res = await apiFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
       path: normalizeExcelPath(opts.path),
-      sheet: opts.sheet ?? null,
-      changes: opts.changes ?? [],
       operations: opts.operations ?? null,
       session_id: opts.sessionId ?? null,
       workspace_id: opts.workspaceId ?? null,
@@ -1960,7 +1864,7 @@ export async function deleteRevision(opts: {
   });
 }
 
-export type RevisionPreviewResponse = Partial<import("@/lib/workbook-view").WorkbookViewSnapshot> & {
+export type RevisionPreviewResponse = Partial<import("@/lib/workbook-observation").WorkbookObservation> & {
   revision_id: string;
   revision_reason: string;
   revision_label: string;
@@ -1980,7 +1884,7 @@ export async function fetchRevisionPreview(opts: {
   if (opts.sessionId) params.set("session_id", opts.sessionId);
   if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
   if (opts.sheet) params.set("sheet", opts.sheet);
-  if (opts.rect) params.set("rect", opts.rect);
+  if (opts.rect) params.set("range", opts.rect);
   return apiGet(`/revisions/preview?${params.toString()}`, { signal: opts.signal });
 }
 

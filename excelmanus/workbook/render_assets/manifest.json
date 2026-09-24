@@ -1,0 +1,14 @@
+{
+  "protocol": "workbook/2",
+  "sources": {
+    "web/src/lib/workbook-preview-entry.ts": "8df089731d5308cb0aabb52c1dcafcceffcace7819dac321e3025fcd234fed7e",
+    "web/src/lib/workbook-observation.ts": "b6d7e357476de3e9a6f5380ad00c750afda6172feb609205f108971f139cb615",
+    "web/package-lock.json": "ff7cafa69371ccead26a568e087e082e41b6297b741d27e6daade8d8e73114d7",
+    "web/scripts/build-workbook-preview.mjs": "9e2acafa01f9770f2f585b4aac1d573f80a3d51f99e50a7e239f68027761863c"
+  },
+  "outputs": {
+    "workbench.js": "74f5b4e0fdf59e8d485073ed4cb20f22a14afd37910157237b834b0efe8fad3a",
+    "workbench.css": "3950edca46a8cc3c992e6655b6573341c689c149b1adfc575c746f041c3f65e3",
+    "workbench.html": "8cb15a32aaae505a90f9f0de0813cffed8fcec6fa095a4c81d46f925ed5cde10"
+  }
+}

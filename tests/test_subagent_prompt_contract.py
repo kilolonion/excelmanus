@@ -63,8 +63,8 @@ async def test_child_wire_has_core_and_effective_permissions(parent, mode):
     assert "本次授权工具目录" in text
     assert "delegate" not in names
     assert "write_plan" not in names
-    assert ("VERSION_CONFLICT 表示这次没有落盘" in text) == (mode == "write")
-    assert ("edit_spreadsheet" in names) == (mode == "write")
+    assert ("已有文件必填 observed content_version" in text) == (mode == "write")
+    assert ("apply_spreadsheet_changes" in names) == (mode == "write")
     assert ("当前是计划模式" in text) == (mode == "plan")
 
 
@@ -81,10 +81,10 @@ async def test_explorer_does_not_inherit_write_strategies_or_parent_callbacks(pa
     names = {item["function"]["name"] for item in request.get("tools", [])}
     assert "run_code 只做只读计算" in text
     assert "程序写工作区走 em.*" not in text
-    assert "WorkbookSpec 经 edit_spreadsheet" not in text
+    assert "WorkbookSpec V2 只用于新建" not in text
     assert "parent-private-context" not in json.dumps(request, ensure_ascii=False)
     assert names <= set(child._registry.get_tool_names())
-    assert "edit_spreadsheet" not in names
+    assert "apply_spreadsheet_changes" not in names
     assert build_stable_system_prompt(parent) == parent_before
 
 
@@ -113,10 +113,10 @@ def add_strategy(parent, name, conditions, marker):
 async def test_runtime_conditions_update_without_recreating_child(parent):
     add_strategy(parent, "only_new", {"new_workbook": True}, "NEW_WORKBOOK_ONLY")
     add_strategy(parent, "only_full", {"full_access": True}, "FULL_ACCESS_ONLY")
-    add_strategy(parent, "only_write_tool", {"tool": "edit_spreadsheet"}, "WRITE_TOOL_ONLY")
+    add_strategy(parent, "only_write_tool", {"tool": "apply_spreadsheet_changes"}, "WRITE_TOOL_ONLY")
     child = compose_child(parent, SubagentConfig(
         name="探查.团队", description="custom", source="user", permission_mode="readOnly",
-        system_prompt="受托处理数据。", allowed_tools=["inspect_spreadsheet", "run_code"],
+        system_prompt="受托处理数据。", allowed_tools=["observe_spreadsheet", "run_code"],
     ))
     text = build_stable_system_prompt(child)
     assert "NEW_WORKBOOK_ONLY" in text
@@ -144,7 +144,7 @@ async def test_existing_child_reloads_role_and_core_without_parent_rebinding(par
     request = await wire(child)
     text = json.dumps(request, ensure_ascii=False)
     assert "共享核心更新" in text and "探索角色更新" in text
-    assert "edit_spreadsheet" not in {t["function"]["name"] for t in request.get("tools", [])}
+    assert "apply_spreadsheet_changes" not in {t["function"]["name"] for t in request.get("tools", [])}
     assert child._prompt_composer.registry is not parent._prompt_composer.registry
 
 

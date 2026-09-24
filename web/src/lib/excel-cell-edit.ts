@@ -1,7 +1,8 @@
+import { workbookStylePatch } from "@/lib/workbook-style";
 import {
   invalidateWorkbookCaches,
   normalizeExcelPath,
-  writeExcelCells,
+  applyWorkbookChanges,
   type ExcelWriteResponse,
 } from "@/lib/api";
 import { useExcelStore } from "@/stores/excel-store";
@@ -29,7 +30,7 @@ export type PersistExcelCellEditsResult =
   | { kind: "skipped" };
 
 export interface PersistExcelCellEditsDeps {
-  writeExcelCells: typeof writeExcelCells;
+  applyWorkbookChanges: typeof applyWorkbookChanges;
   getSessionId: () => string | null | undefined;
   getExpectedVersion: (path: string, workspaceKey?: string | null) => string | null;
   setContentVersion: (path: string, version: string | null | undefined, workspaceKey?: string | null) => void;
@@ -296,7 +297,7 @@ export function extractWorkbookOpsFromMutation(params: {
   const ranges = (payload.ranges || (payload.range && typeof payload.range === "object" ? [payload.range] : [])) as MutationRect[];
   const sheet = params.sheet;
   if (id === "sheet.mutation.add-worksheet-merge" || id === "sheet.mutation.remove-worksheet-merge") {
-    return ranges.map((range) => ({ op: id.includes("add-") ? "merge" : "unmerge", sheet, range: rangeA1(range) }));
+    return ranges.map((range) => ({ kind: id.includes("add-") ? "merge" : "unmerge", sheet, range: rangeA1(range) }));
   }
   if (id === "sheet.mutation.set-worksheet-col-width" || id === "sheet.mutation.set-worksheet-row-height") {
     const columns: Record<string, number> = {};
@@ -307,11 +308,11 @@ export function extractWorkbookOpsFromMutation(params: {
       for (let i = col ? range.startColumn : range.startRow; i <= (col ? range.endColumn : range.endRow); i++) {
         const size = typeof value === "number" ? value : (value as Record<number, number>)?.[i];
         if (typeof size !== "number") continue;
-        if (col) columns[colIndexToLetter(i)] = size / 7.5;
-        else rows[String(i + 1)] = size * 0.75;
+        if (col) columns[String(i + 1)] = size;
+        else rows[String(i + 1)] = size;
       }
     }
-    return [{ op: "set_dims", sheet, columns, rows }];
+    return [{ kind: "geometry.resize", sheet, axis: id.includes("col-width") ? "column" : "row", sizes: id.includes("col-width") ? columns : rows, unit: "css_px" }];
   }
   if (id === SET_RANGE_VALUES_MUTATION_ID) {
     const values: { cell: string; value: unknown; style?: unknown }[] = [];
@@ -321,28 +322,28 @@ export function extractWorkbookOpsFromMutation(params: {
       for (const [colKey, cell] of Object.entries(row || {})) {
         const address = cellRefFromIndex(Number(rowKey), Number(colKey));
         const parsed = cellDataToWriteValue(cell);
-        const style = cell && typeof cell === "object" && "s" in cell ? { style: cell.s } : {};
+        const style = cell && typeof cell === "object" && "s" in cell ? { style: workbookStylePatch(cell.s) } : {};
         if (!parsed.skip) values.push({ cell: address, value: parsed.value, ...style });
         else if ("style" in style) styles.push({ cell: address, style: style.style });
       }
     }
-    return [...(values.length ? [{ op: "set_values", sheet, cells: values }] : []),
-      ...(styles.length ? [{ op: "set_styles", sheet, cells: styles }] : [])];
+    return [...(values.length ? [{ kind: "cells.patch", sheet, cells: values }] : []),
+      ...(styles.length ? [{ kind: "cells.patch", sheet, cells: styles }] : [])];
   }
   if (["sheet.mutation.insert-row", "sheet.mutation.insert-col", "sheet.mutation.remove-rows", "sheet.mutation.remove-col"].includes(id)) {
     return ranges.map((range) => {
       const col = id.includes("col");
       const start = col ? range.startColumn : range.startRow;
       const end = col ? range.endColumn : range.endRow;
-      return { op: id.includes("remove") ? "delete_axis" : "insert_axis", sheet, axis: col ? "col" : "row", index: start + 1, count: end - start + 1 };
+      return id.includes("remove") ? { kind: col ? "delete_columns" : "delete_rows", sheet, at: start + 1, count: end - start + 1 } : { kind: "insert", sheet, axis: col ? "column" : "row", at: start + 1, count: end - start + 1 };
     });
   }
   if (id === "sheet.mutation.insert-sheet") {
     const inserted = payload.sheet as { name?: string } | undefined;
-    return [{ op: "sheet_add", name: inserted?.name }];
+    return [{ kind: "sheet", action: "create", new_name: inserted?.name }];
   }
-  if (id === "sheet.mutation.remove-sheet") return [{ op: "sheet_delete", name: sheet }];
-  if (id === "sheet.mutation.set-worksheet-name") return [{ op: "sheet_rename", from: sheet, to: payload.name }];
+  if (id === "sheet.mutation.remove-sheet") return [{ kind: "sheet", action: "delete", sheet }];
+  if (id === "sheet.mutation.set-worksheet-name") return [{ kind: "sheet", action: "rename", sheet, new_name: payload.name }];
   return [];
 }
 
@@ -353,7 +354,7 @@ export function hasPendingWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceK
 
 function defaultDeps(): PersistExcelCellEditsDeps {
   return {
-    writeExcelCells,
+    applyWorkbookChanges,
     getSessionId: () => useSessionStore.getState().activeSessionId,
     getExpectedVersion: (path, workspaceKey) =>
       useExcelStore.getState().getContentVersion(path, workspaceKey),
@@ -365,7 +366,7 @@ function defaultDeps(): PersistExcelCellEditsDeps {
 
 export type WorkbookOp = Record<string, unknown>;
 
-export function changesToSetValuesOps(
+export function cellChangesToOperations(
   changes: { cell: string; value: unknown; sheet?: string; style?: unknown }[],
   defaultSheet?: string,
 ): WorkbookOp[] {
@@ -373,11 +374,11 @@ export function changesToSetValuesOps(
   for (const change of changes) {
     const sheet = String(change.sheet || defaultSheet || "");
     const list = grouped.get(sheet) ?? [];
-    list.push({ cell: change.cell, value: change.value, style: change.style });
+    list.push({ cell: change.cell, value: change.value, ...(change.style !== undefined ? { style: workbookStylePatch(change.style) } : {}) });
     grouped.set(sheet, list);
   }
   return [...grouped.entries()].map(([sheet, cells]) => ({
-    op: "set_values",
+    kind: "cells.patch",
     sheet: sheet || undefined,
     cells,
   }));
@@ -398,7 +399,7 @@ export async function persistExcelCellEdits(
   deps?: Partial<PersistExcelCellEditsDeps>,
 ): Promise<PersistExcelCellEditsResult> {
   const changes = opts.changes ?? [];
-  const operations = [...(opts.operations || []), ...changesToSetValuesOps(changes, opts.sheet)];
+  const operations = [...(opts.operations || []), ...cellChangesToOperations(changes, opts.sheet)];
   if (!opts.path || (changes.length === 0 && operations.length === 0)) return { kind: "skipped" };
   if (isDemoExcelPath(opts.path)) return { kind: "skipped" };
 
@@ -425,10 +426,8 @@ export async function persistExcelCellEdits(
   const changeKey = versionStoreKey(opts.path, workspaceKey);
   const changeSequence = useExcelStore.getState().workbookChanges[changeKey]?.sequence;
   try {
-    const result = await resolved.writeExcelCells({
+    const result = await resolved.applyWorkbookChanges({
       path: opts.path,
-      sheet: opts.sheet,
-      changes: [],
       operations,
       sessionId,
       workspaceId: opts.workspaceKey ? opts.workspaceId ?? null : opts.workspaceId ?? session?.workspaceId ?? null,
@@ -512,7 +511,7 @@ export function discardWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceKey"
 export function workbookEditDraft(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): string {
   return JSON.stringify({ file, batches: [...(unsavedByPath.get(fileRefKey(file)) || [])].map((batch) => ({
     expected_version: acknowledgedWorkbookVersion(file, batch.expectedVersion ?? undefined),
-    operations: [...batch.operations, ...changesToSetValuesOps(batch.changes, batch.sheet)],
+    operations: [...batch.operations, ...cellChangesToOperations(batch.changes, batch.sheet)],
   })) }, null, 2);
 }
 
@@ -621,7 +620,7 @@ export function enqueueWorkbookCommand(opts: {
   }
   if (opts.onConflict) batch.onConflict = opts.onConflict;
   if (opts.onError) batch.onError = opts.onError;
-  batch.operations.push(...changesToSetValuesOps(batch.changes, batch.sheet), ...opts.operations);
+  batch.operations.push(...cellChangesToOperations(batch.changes, batch.sheet), ...opts.operations);
   batch.changes = [];
   if (batch.timer) clearTimeout(batch.timer);
   batch.timer = setTimeout(() => {
@@ -668,7 +667,7 @@ async function flushPath(key: string): Promise<void> {
     }
     if (result.kind === "ok" && result.contentVersion && expected) {
       const versions = acknowledgedVersions.get(key) || new Map<string, string>();
-      const structural = batch.operations.some((op) => !["set_values", "set_styles", "set_dims"].includes(String(op.op)));
+      const structural = batch.operations.some((op) => !["cells.patch", "size", "format"].includes(String(op.kind)));
       const changed = structurallyChangedVersions.get(key) ?? new Set<string>();
       if (structural) {
         changed.add(expected);

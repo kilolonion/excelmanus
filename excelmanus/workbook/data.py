@@ -1,6 +1,14 @@
-"""数据工具：Excel 读取、过滤、探查与对比（模型面经八类意图调用）。"""
+"""Analysis helpers for the V2 workbook query service.
+
+This module keeps DataFrame-oriented filtering, aggregation, relationships and
+file scans. Version-bound facts and layout belong to ``WorkbookService`` and
+``observe_snapshot``.
+"""
 
 from __future__ import annotations
+
+from excelmanus.workbook.presentation import _collect_charts, _collect_column_widths, _collect_conditional_formatting, _collect_data_validation, _collect_formulas, _collect_freeze_panes, _collect_images, _collect_print_settings, _collect_row_heights, _collect_styles_compressed, _color_to_hex_short, _extract_style_tuple, _style_tuple_to_dict
+
 
 import functools
 import json
@@ -1251,312 +1259,10 @@ def _value_window_truncated(values: Any, max_rows: int, max_cols: int) -> bool:
     return any(isinstance(row, list) and len(row) > max_cols for row in values)
 
 
-def _formula_items_for_projection(
-    formulas: Any,
-    *,
-    col0: int | None = None,
-    row0: int | None = None,
-    max_items: int = 80,
-) -> list[dict[str, Any]]:
-    from openpyxl.utils.cell import get_column_letter
-
-    items: list[dict[str, Any]] = []
-    if not isinstance(formulas, list) or not formulas:
-        return items
-    if _is_nested_grids(formulas):
-        for grid in formulas:
-            remain = max_items - len(items)
-            if remain <= 0:
-                break
-            items.extend(
-                _formula_items_for_projection(
-                    grid, col0=None, row0=None, max_items=remain,
-                )
-            )
-        return items[:max_items]
-    for ri, frow in enumerate(formulas):
-        if not isinstance(frow, list):
-            continue
-        for ci, formula in enumerate(frow):
-            if not formula:
-                continue
-            item: dict[str, Any] = {"formula": formula}
-            if col0 is not None and row0 is not None:
-                item["cell"] = f"{get_column_letter(col0 + ci)}{row0 + ri}"
-            items.append(item)
-            if len(items) >= max_items:
-                return items
-    return items
 
 
-def _append_range_projection(
-    lines: list[str],
-    summary: dict[str, Any],
-    *,
-    complete: bool,
-) -> None:
-    areas = summary.get("areas")
-    if isinstance(areas, list) and len(areas) > 1:
-        for part in areas:
-            if not isinstance(part, dict):
-                continue
-            sheet = str(part.get("resolved_sheet") or "").strip()
-            rng = str(part.get("resolved_range") or part.get("range") or "").strip()
-            label = f"{sheet} [{rng}]" if sheet else f"[{rng}]"
-            lines.append(label)
-            _append_range_projection(lines, part, complete=complete)
-        return
-    values = summary.get("values")
-    if not isinstance(values, list) or not values:
-        return
-    origin: tuple[int, int] | None = None
-    try:
-        from openpyxl.utils.cell import range_boundaries
-
-        from excelmanus.workbook.address import parse_sheet_address
-
-        local_range = parse_sheet_address(
-            str(summary.get("resolved_range") or summary["range"])
-        ).address
-        col0, row0, _, _ = range_boundaries(local_range)
-        origin = (col0, row0)
-    except (ValueError, TypeError, AttributeError, KeyError):
-        origin = None
-
-    formulas = summary.get("formulas") or summary.get("formula_grid") or []
-    items = _formula_items_for_projection(
-        formulas,
-        col0=origin[0] if origin else None,
-        row0=origin[1] if origin else None,
-    )
-    if items:
-        lines.append("formulas: " + json.dumps(items, ensure_ascii=False, default=str))
-
-    max_rows = _RANGE_PROJECT_MAX_ROWS if complete else 3
-    max_cols = _RANGE_PROJECT_MAX_COLS if complete else 8
-    window = _clip_value_window(values, max_rows, max_cols)
-    dumped = json.dumps(window, ensure_ascii=False, default=str)
-    while len(dumped) > _RANGE_PROJECT_MAX_CHARS and (max_rows > 3 or max_cols > 4):
-        max_rows = max(3, max_rows // 2)
-        max_cols = max(4, max_cols // 2)
-        window = _clip_value_window(values, max_rows, max_cols)
-        dumped = json.dumps(window, ensure_ascii=False, default=str)
-    truncated = _value_window_truncated(values, max_rows, max_cols)
-    label = "values" if not truncated else f"values（投影 {max_rows} 行 × {max_cols} 列）"
-    lines.append(f"{label}: {dumped}")
-    if truncated:
-        # 全量出口：投影丢弃的行不丢数据——外置到 spill 仓并给句柄，
-        # 模型把句柄当 file_path 传给 inspect_spreadsheet 即可取回全量。
-        try:
-            from excelmanus.engine_core.spill import SpillStore
-
-            full_text = json.dumps(values, ensure_ascii=False, default=str)
-            locator = SpillStore(_get_guard().workspace_root).put(full_text)
-            summary["spill"] = str(locator)
-            lines.append(
-                f"全量 values 已外置 {locator}：该句柄不是磁盘路径，把句柄本身当 file_path 传给 "
-                "inspect_spreadsheet 即可取回全部行列；不要再对原工作簿分段分页重读。"
-            )
-        except Exception:
-            logger.debug("range 全量 spill 失败，仅保留投影", exc_info=True)
 
 
-def _finalize_read_excel_result(
-    summary: dict[str, Any],
-    *,
-    rel_path: str,
-    sheet_name: str | None,
-    sample_rows: int | None = None,
-    file_path: str | None = None,
-    content_version: str | None = None,
-    header_row: Any = None,
-    snapshot: Any = None,
-) -> ToolResult:
-    if summary.get("error") and "shape" not in summary and "columns" not in summary:
-        return error_result(
-            str(summary.get("error")),
-            code=str(summary.get("error_code") or summary.get("code") or "EXECUTION_FAILED"),
-            fields={k: v for k, v in summary.items() if k not in {"error", "code", "error_code", "status", "message"}},
-        )
-
-    shape = summary.get("shape") or {}
-    rows = int(shape.get("rows") or 0)
-    cols = int(shape.get("columns") or 0)
-    is_truncated = bool(summary.get("is_truncated"))
-    has_sample = "sample_preview" in summary
-    if is_truncated:
-        coverage_kind = "truncated"
-    elif has_sample:
-        coverage_kind = "sampled"
-    elif summary.get("range"):
-        coverage_kind = "complete"
-    else:
-        coverage_kind = "complete"
-
-    total_rows = summary.get("total_rows_in_sheet", rows)
-    coverage: dict[str, Any] = {
-        "kind": coverage_kind,
-        "rows": rows,
-        "cols": cols,
-    }
-    if summary.get("total_rows_in_sheet") is not None:
-        coverage["total_rows_in_sheet"] = total_rows
-
-    columns = summary.get("columns") or []
-    preview = summary.get("preview")
-    if preview is None and isinstance(summary.get("data"), list):
-        preview = summary.get("data")
-
-    col_preview = ", ".join(str(c) for c in columns[:8])
-    if len(columns) > 8:
-        col_preview = f"{col_preview} …(+{len(columns) - 8})"
-
-    sheets = [str(item) for item in (summary.get("resolved_sheets") or []) if str(item).strip()]
-    areas = summary.get("areas")
-    range_text = str(summary.get("requested_range") or summary.get("range") or "").strip()
-    if isinstance(areas, list) and len(areas) > 1:
-        names = "、".join(sheets) if sheets else "多表"
-        sheet_part = f" / {names}"
-        if range_text:
-            sheet_part = f"{sheet_part} [{range_text}]"
-        size_part = f"{len(areas)} 个区域"
-    else:
-        sheet_part = f" / {sheet_name}" if sheet_name else ""
-        if summary.get("range"):
-            sheet_part = f"{sheet_part} [{summary['range']}]" if sheet_part else f"[{summary['range']}]"
-        size_part = f"{rows} 行 × {cols} 列"
-
-    lines = [
-        f"文件 {summary.get('file', rel_path)}{sheet_part}：{size_part}。",
-    ]
-    if col_preview:
-        lines.append(f"列：{col_preview}")
-    if is_truncated:
-        lines.append(
-            f"⚠️ 截断样本：工作表共 {total_rows} 行，仅返回 {rows} 行；不可当作全表事实。"
-        )
-    elif has_sample:
-        lines.append(f"⚠️ 等距采样预览（{summary.get('sample_note', '')}）。")
-    if summary.get("truncation_note"):
-        lines.append(str(summary["truncation_note"]))
-    warns = summary.get("warnings")
-    if isinstance(warns, list):
-        for item in warns:
-            lines.append(f"⚠️ {item}")
-    if isinstance(preview, list) and preview and not summary.get("range"):
-        sample_n = min(3, len(preview))
-        lines.append(
-            f"前 {sample_n} 行样本："
-            f"{json.dumps(preview[:sample_n], ensure_ascii=False, default=str)}"
-        )
-    if summary.get("include_warning"):
-        lines.append(f"⚠️ {summary['include_warning']}")
-    if summary.get("csv_unsupported_dimensions"):
-        lines.append(f"⚠️ {summary['csv_unsupported_dimensions']}")
-    if summary.get("detected_form_type"):
-        lines.append("版式表单，质量信号按数据框不适用。")
-    merged_summary = summary.get("merged_cell_summary")
-    if merged_summary:
-        lines.append(f"合并摘要：{merged_summary}")
-
-    ui_preview: dict[str, Any] | None = None
-    if columns and isinstance(preview, list) and preview:
-        rows_data: list[list[Any]] = []
-        for record in preview[:50]:
-            if isinstance(record, dict):
-                rows_data.append([record.get(c) for c in columns])
-            elif isinstance(record, list):
-                rows_data.append(record)
-        ui_preview = {
-            "columns": columns,
-            "preview": preview[:50],
-            "rows": rows_data[:50],
-            "total_rows": int(total_rows) if total_rows else rows,
-            "truncated": is_truncated,
-            "sheet": sheet_name or "",
-        }
-
-    if snapshot is not None:
-        content_version = snapshot.content_version
-        rel_path = snapshot.file.relative
-    if content_version:
-        summary["content_version"] = content_version
-    if rel_path:
-        summary["file_path"] = rel_path
-    if sheet_name:
-        summary.setdefault("resolved_sheet", sheet_name)
-
-    kind = "range" if summary.get("range") else "overview"
-    public_header = header_row
-    if public_header is None:
-        public_header = summary.get("detected_header_row")
-    if snapshot is not None:
-        from excelmanus.workbook.snapshot import Coverage, apply_read_contract, selection_from_rows
-
-        source_rows = summary.get("source_rows")
-        sampled = bool(sample_rows) or bool(summary.get("sample_preview"))
-        truncated = is_truncated
-        cov = Coverage(
-            kind="sampled" if sampled and not truncated else ("truncated" if truncated else "complete"),
-            returned_rows=int(summary.get("shape", {}).get("rows") or len(summary.get("values") or summary.get("preview") or [])),
-            total_rows=int(total_rows) if total_rows else None,
-            offset=int(summary.get("offset") or 0),
-            truncated_reason="max_rows" if truncated else None,
-        )
-        apply_read_contract(
-            summary,
-            snapshot=snapshot,
-            result_kind="areas" if summary.get("areas") else ("matrix" if kind == "range" else "records"),
-            sheet=sheet_name,
-            header_row=public_header,
-            source_rows=source_rows,
-            source_cols=summary.get("source_cols"),
-            coverage=cov,
-            formulas_uncached=summary.get("formulas_uncached", "unknown"),
-            selection=selection_from_rows(
-                snapshot,
-                sheet=str(sheet_name or ""),
-                rows=source_rows or [],
-                cols=summary.get("source_cols"),
-                origin="range" if kind == "range" else "read",
-                header_row=public_header,
-            ) if source_rows and not summary.get("areas") else None,
-            meta_kind=kind,
-        )
-        if summary.get("areas"):
-            for area in summary["areas"]:
-                area["selection"] = selection_from_rows(
-                    snapshot, sheet=area["resolved_sheet"], rows=area["source_rows"],
-                    cols=area["source_cols"], origin="range", header_row=public_header,
-                ).to_json()
-    elif snapshot is None:
-        raise RuntimeError("read finalize 必须提供 WorkbookSnapshot")
-    if sample_rows:
-        summary["meta"]["sampled"] = True
-
-    selection_hint = _selection_model_hint(summary)
-    if selection_hint:
-        lines.append(selection_hint)
-
-    if summary["meta"].get("formulas_uncached"):
-        lines.append("缓存值未保证重算；null 可能是无公式缓存，不能据此判断为空白格。")
-    if kind == "range":
-        _append_range_projection(
-            lines, summary, complete=(coverage_kind == "complete"),
-        )
-
-    return ToolResult(
-        success=True,
-        model_text="\n".join(lines),
-        value=summary,
-        ui_meta=ToolUiMeta(
-            files=[rel_path],
-            preview=ui_preview,
-            content_version=content_version,
-        ),
-        truncated=is_truncated,
-        coverage=coverage,
-    )
 
 
 def _finalize_compare_excel_result(
@@ -1749,7 +1455,7 @@ def _selection_model_hint(payload: dict[str, Any], *, max_inline_rows: int = 200
             payload["selection_spill"] = str(locator)
             return (
                 f"可写回 selection 已外置：{locator}；"
-                "把该句柄作为 edit_spreadsheet.operations[].selection 传入，"
+                "把该句柄作为 apply_spreadsheet_changes.operations[].selection 传入，"
                 "不要把它当文件路径。"
             )
         except Exception:
@@ -1869,7 +1575,7 @@ def _finalize_filter_data_result(
             result["spill"] = str(locator)
             lines.append(
                 f"全量 {len(data)} 条 records+source_rows 已外置 {locator}："
-                "该句柄不是磁盘路径，把句柄本身当 file_path 传给 inspect_spreadsheet 即可取回全部；"
+                "该句柄不是磁盘路径，把句柄本身当 file_path 传给 observe_spreadsheet 即可取回全部；"
                 "不要再对原工作簿分段分页重读。"
             )
         except Exception:
@@ -2205,423 +1911,8 @@ def _finalize_discover_file_relationships_result(
     )
 
 
-def _read_range_direct(
-    safe_path: Any,
-    sheet_name: str | None,
-    cell_range: str,
-    *,
-    include_formulas: bool = False,
-) -> dict[str, Any]:
-    """读取指定引用：单矩形走快路径，并集逐区域读取后合并。"""
-    from openpyxl import load_workbook
-
-    from excelmanus.workbook.address import worksheet_used_shape
-
-    area = parse_ref(cell_range, default_sheet=sheet_name)
-    needs_bind = any(not isinstance(part, RectRef) for part in area.areas)
-    wb = load_workbook(safe_path, read_only=not needs_bind, data_only=True)
-    parts: list[dict[str, Any]] = []
-    try:
-        rects = _bind_area_in_workbook(wb, area, default_sheet=sheet_name)
-        used_cache: dict[str, tuple[int, int]] = {}
-        for rect in rects:
-            title = rect.sheet
-            if not title or title not in wb.sheetnames:
-                raise WorkbookRefBindError("无法打开工作表", code=SHEET_NOT_FOUND)
-            ws = wb[title]
-            used = used_cache.get(ws.title)
-            if used is None:
-                used = worksheet_used_shape(ws)
-                used_cache[ws.title] = used
-            parts.append(
-                _read_rect_from_ws(
-                    ws, rect, used_max_row=used[0], used_max_col=used[1],
-                )
-            )
-    finally:
-        wb.close()
-
-    payload = _merge_range_parts(parts, requested=cell_range)
-    payload["formulas_uncached"] = "unknown"
-
-    cell_count = 0
-    for part in parts:
-        shape = part.get("shape") or {}
-        cell_count += int(shape.get("rows") or 0) * int(shape.get("columns") or 0)
-    load_formulas = include_formulas or (
-        0 < cell_count <= _SMALL_RANGE_FORMULA_CELLS
-    )
-
-    if load_formulas:
-        wb_f = load_workbook(safe_path, read_only=True, data_only=False)
-        try:
-            formula_grids: list[list[list[Any]]] = []
-            for part in parts:
-                title = str(part.get("resolved_sheet") or "")
-                if title not in wb_f.sheetnames:
-                    raise WorkbookRefBindError("无法打开工作表", code=SHEET_NOT_FOUND)
-                formula_grids.append(_read_formula_grid(wb_f[title], part))
-            if len(formula_grids) == 1:
-                payload["formula_grid"] = formula_grids[0]
-                payload["formulas"] = formula_grids[0]
-            else:
-                payload["formula_grid"] = formula_grids
-                payload["formulas"] = formula_grids
-                for part, grid in zip(parts, formula_grids):
-                    part["formula_grid"] = grid
-                    part["formulas"] = grid
-            has_formula = False
-            uncached = False
-            for grid, part in zip(formula_grids, parts):
-                values = part.get("values") or []
-                for ri, frow in enumerate(grid):
-                    for ci, formula in enumerate(frow):
-                        if not formula:
-                            continue
-                        has_formula = True
-                        value = None
-                        if ri < len(values) and isinstance(values[ri], list) and ci < len(values[ri]):
-                            value = values[ri][ci]
-                        if value is None:
-                            uncached = True
-            payload["formulas_uncached"] = uncached if has_formula else False
-        finally:
-            wb_f.close()
-    return payload
 
 
-def read_excel(
-    file_path: str,
-    sheet_name: str | None = None,
-    max_rows: int | None = None,
-    header_row: int | None = None,
-    include: list[str] | None = None,
-    max_style_scan_rows: int = 200,
-    range: str | None = None,
-    offset: int | None = None,
-    sample_rows: int | None = None,
-    expected_version: str | None = None,
-) -> ToolResult:
-    """读取 Excel/CSV 文件并返回数据摘要，可通过 include 按需附加额外维度。
-
-    Args:
-        file_path: Excel/CSV 文件路径（相对或绝对）。支持 .xlsx/.xls/.xlsm/.xlsb/.csv/.tsv。
-        sheet_name: 工作表名称，默认读取第一个（CSV 时忽略）。
-        max_rows: 最大读取行数，默认全部读取。
-        header_row: 列头所在行号（Excel 行号，1-based），默认自动检测。
-            当工作表有合并标题行时，需指定真正的列头行号。
-        include: 按需请求的额外维度列表。可选值：
-            styles — 压缩样式类（Style Classes + cell_style_map + merged_ranges）
-            charts — 嵌入图表元信息
-            images — 嵌入图片元信息
-            freeze_panes — 冻结窗格位置
-            conditional_formatting — 条件格式规则
-            data_validation — 数据验证规则
-            print_settings — 打印设置
-            column_widths — 非默认列宽
-            formulas — 含公式的单元格
-            categorical_summary — 分类列的 value_counts（unique 值 < 阈值的列）
-            summary — 每列数据质量概要（null 率、unique 数、min/max、高频值）
-            vba — VBA 宏信息（仅 .xlsm 文件有效，含模块列表及可选源码）
-        max_style_scan_rows: styles/formulas 维度扫描的最大行数，默认 200。
-        range: Excel 坐标范围（如 "A1:F20"、"B100:D200"），指定后进入精确读取模式，
-            绕过 pandas 直接用 openpyxl 读取指定区域，大文件友好。CSV 文件自动忽略此参数。
-        offset: 数据行偏移（从0开始，header 之后起算），与 max_rows 组合实现分页。
-        sample_rows: 等距采样行数，用于了解大表数据分布。
-
-    Returns:
-        ToolResult（value 含结构化摘要，model_text 为短摘要）。
-    """
-    guard = _get_guard()
-    live_path = guard.resolve_and_validate(file_path)
-    not_found = check_file_exists(live_path, file_path, guard)
-    if not_found is not None:
-        return not_found
-
-    from excelmanus.workbook.address import combine_sheet_names, parse_sheet_address
-    from excelmanus.workbook.snapshot import (
-        Coverage,
-        SnapshotError,
-        apply_read_contract,
-        require_default_sheet,
-        selection_from_rows,
-    )
-
-    snap, snap_err = _open_tool_snapshot(
-        file_path, expected_version=expected_version,
-    )
-    if snap_err is not None:
-        return snap_err
-    safe_path = snap.backing_path
-    rel_path = snap.file.relative
-    bound_version = snap.content_version
-
-    if range is not None:
-        try:
-            parsed_range = parse_sheet_address(str(range))
-        except InvalidRefError as exc:
-            return error_result(str(exc), code=RANGE_INVALID)
-        range = parsed_range.address or None
-        try:
-            sheet_name = combine_sheet_names(sheet_name, parsed_range.sheet)
-        except ValueError as exc:
-            return _error_payload_result(
-                {"error": str(exc), "code": "INVALID_ARGS"},
-                code="INVALID_ARGS",
-            )
-
-    if range is not None and _is_csv_file(safe_path):
-        return _error_payload_result(
-            {"error": "CSV 不支持 range，请去掉 range 或改用 xlsx。", "code": "INVALID_ARGS"},
-            code="INVALID_ARGS",
-        )
-    if range is not None and (max_rows is not None or offset is not None or sample_rows is not None):
-        extras = [name for name, val in (("max_rows", max_rows), ("offset", offset), ("sample_rows", sample_rows)) if val is not None]
-        warnings_list = [f"精确 range 已忽略 {', '.join(extras)}"]
-        max_rows = None
-        offset = None
-        sample_rows = None
-    else:
-        warnings_list = []
-
-    def _finish_read(summary: dict[str, Any], **kwargs: Any) -> ToolResult:
-        if warnings_list:
-            existing = summary.get("warnings")
-            if isinstance(existing, list):
-                summary["warnings"] = [*existing, *warnings_list]
-            else:
-                summary["warnings"] = list(warnings_list)
-        if sheet_name and "resolved_sheet" not in summary:
-            summary["resolved_sheet"] = sheet_name
-        public_header = header_row
-        if public_header is None:
-            public_header = summary.get("detected_header_row")
-        return _finalize_read_excel_result(
-            summary,
-            rel_path=rel_path,
-            sheet_name=sheet_name or summary.get("resolved_sheet"),
-            file_path=str(safe_path),
-            content_version=bound_version,
-            header_row=public_header,
-            snapshot=snap,
-            **kwargs,
-        )
-
-    if not snap.is_csv():
-        wb_names = snap.open_workbook(data_only=True, read_only=True)
-        try:
-            try:
-                range_names_sheet = False
-                if range is not None:
-                    try:
-                        range_names_sheet = bool(
-                            parse_ref(str(range), default_sheet=None).sheets()
-                        )
-                    except InvalidRefError:
-                        range_names_sheet = False
-                if not range_names_sheet:
-                    sheet_name = require_default_sheet(list(wb_names.sheetnames), sheet_name)
-            except SnapshotError as exc:
-                return error_result(str(exc), code=exc.code, fields=exc.fields or None)
-        finally:
-            wb_names.close()
-    else:
-        sheet_name = sheet_name or "Sheet1"
-
-    # ── range 模式：精确读取指定坐标范围 ──
-    if range is not None and not _is_csv_file(safe_path):
-        include_set = set(include or [])
-        extra_include = sorted(include_set - {"formulas"})
-        try:
-            result = _read_range_direct(
-                safe_path,
-                sheet_name,
-                range,
-                include_formulas="formulas" in include_set,
-            )
-        except WorkbookRefBindError as exc:
-            return error_result(str(exc), code=exc.code)
-        except InvalidRefError as exc:
-            return error_result(str(exc), code=RANGE_INVALID)
-        except Exception as exc:
-            from excelmanus.workbook.address import looks_like_coordinate_error
-
-            code = RANGE_INVALID if looks_like_coordinate_error(exc) else "EXECUTION_FAILED"
-            return error_result(
-                str(exc) if looks_like_coordinate_error(exc) else f"range={range!r} 读取失败：{exc}",
-                code=code,
-            )
-        result["file"] = snap.file.relative
-        if extra_include:
-            result["include_warning"] = (
-                "range 模式只支持 include=formulas；"
-                f"已忽略 {extra_include}。"
-            )
-        if result.get("resolved_sheet"):
-            sheet_name = result["resolved_sheet"]
-        return _finish_read(result)
-
-    # ── 标准模式 ──
-    # offset 调整：读取 offset + max_rows 行再切片
-    effective_max_rows = max_rows
-    if offset is not None and offset > 0 and max_rows is not None:
-        effective_max_rows = offset + max_rows
-
-    df, effective_header = _read_df(safe_path, sheet_name, max_rows=effective_max_rows, header_row=header_row)
-
-    skip = int(offset or 0)
-    if skip > 0:
-        df = df.iloc[skip:].reset_index(drop=True)
-
-    # 当 max_rows/offset 限制了读取范围时，获取 sheet 实际总行数
-    total_rows_in_sheet: int | None = None
-    if max_rows is not None or (offset is not None and offset > 0):
-        total_rows_in_sheet = _get_sheet_total_rows(safe_path, sheet_name)
-
-    # 构建摘要信息
-    # 对外报告原工作区相对名；safe_path 是快照 backing（内容寻址缓存），不外泄。
-    summary: dict[str, Any] = {
-        "file": rel_path,
-        "shape": {"rows": df.shape[0], "columns": df.shape[1]},
-    }
-
-    # 数据完整性指示：截断元数据放在 columns/preview 之前，确保即使被引擎层截断也能保留
-    if total_rows_in_sheet is not None and total_rows_in_sheet > df.shape[0]:
-        completeness = build_completeness_meta(
-            total_available=total_rows_in_sheet,
-            returned=df.shape[0],
-        )
-        summary["total_rows_in_sheet"] = total_rows_in_sheet
-        summary["is_truncated"] = completeness.get("is_truncated", False)
-        summary["truncation_note"] = completeness.get("truncation_note", "")
-
-    summary["columns"] = [str(c) for c in df.columns]
-    summary["dtypes"] = {str(col): str(dtype) for col, dtype in df.dtypes.items()}
-    _null_info = _build_null_info(df)
-    if _null_info:
-        summary["null_info"] = _null_info
-    summary["preview"] = _df_to_compact_records(df.head(10))
-    summary["data"] = _df_to_compact_records(df)
-    summary["source_cols"] = list(_builtin_range(1, len(df.columns) + 1))
-
-    # 自动 tail 预览：表格 > 20 行时附加最后 5 行
-    if df.shape[0] > 20:
-        tail_start = df.shape[0] - 5
-        summary["tail_preview"] = _df_to_compact_records(df.tail(5))
-        summary["tail_note"] = f"显示最后 5 行（第 {tail_start + 1}~{df.shape[0]} 行）"
-
-    # 等距采样：sample_rows 指定时附加采样数据
-    if sample_rows is not None and sample_rows > 0 and len(df) > sample_rows:
-        step = max(1, len(df) // sample_rows)
-        indices = list(_builtin_range(0, len(df), step))[:sample_rows]
-        sampled_df = df.iloc[indices]
-        summary["sample_preview"] = _df_to_compact_records(sampled_df)
-        summary["sample_note"] = f"等距采样 {len(indices)} 行（共 {len(df)} 行，间隔 {step}）"
-
-    formula_meta = df.attrs.get("formula_resolution")
-    if isinstance(formula_meta, dict):
-        if formula_meta.get("resolved_columns") or formula_meta.get("unresolved_columns"):
-            summary["formula_resolution"] = formula_meta
-
-    if header_row is None:
-        if effective_header == -1:
-            summary["detected_form_type"] = True
-        summary["detected_header_row"] = _to_public_header_row(effective_header)
-    if offset:
-        summary["offset"] = int(offset)
-    if effective_header == -1:
-        summary["source_rows"] = [i + 1 + skip for i in _builtin_range(len(df))]
-    else:
-        summary["source_rows"] = [
-            _excel_source_row(effective_header, i + skip) for i in _builtin_range(len(df))
-        ]
-
-    # Unnamed 列名警告：提醒 LLM 列名不可靠，建议指定 header_row
-    # 表单类文档不使用此警告
-    unnamed_cols = [str(c) for c in df.columns if str(c).startswith("Unnamed")]
-    if unnamed_cols and effective_header != -1:
-        summary["unnamed_columns_warning"] = (
-            f"检测到 {len(unnamed_cols)} 个 Unnamed 列名（共 {len(df.columns)} 列），"
-            f"可能是合并标题行导致。建议使用 header_row 参数指定真正的列头行号重新读取。"
-        )
-
-    # 合并单元格警告：高合并率时提醒 LLM 注意值传播。普通工作簿没有
-    # mergeCell 元数据时直接跳过一次昂贵的 full-mode openpyxl 解析；有
-    # 合并区域的文件保留原有完整摘要语义。
-    if not _is_csv_file(safe_path) and _workbook_may_have_merged_cells(safe_path):
-        try:
-            from openpyxl import load_workbook as _lw
-            _wb_mc = _lw(safe_path, read_only=False, data_only=True)
-            try:
-                _ws_mc = (
-                    _wb_mc[sheet_name]
-                    if sheet_name and sheet_name in _wb_mc.sheetnames
-                    else _wb_mc.active
-                )
-                if _ws_mc is not None:
-                    _mc_summary = _collect_merged_cell_summary(_ws_mc)
-                    if _mc_summary:
-                        summary["merged_cell_summary"] = _mc_summary
-            finally:
-                _wb_mc.close()
-        except Exception:
-            pass
-
-    include_set: set[str] = set()
-    if include:
-        include_set.update(include)
-
-    # 校验 include 维度
-    invalid_dims = include_set - set(INCLUDE_DIMENSIONS)
-    if invalid_dims:
-        summary["include_warning"] = f"未知的 include 维度已忽略: {sorted(invalid_dims)}"
-        include_set -= invalid_dims
-
-    # 分发基于 DataFrame 的 include 维度（不需要 openpyxl）
-    if "categorical_summary" in include_set:
-        summary["categorical_summary"] = _collect_categorical_summary(df)
-        include_set.discard("categorical_summary")
-
-    if "summary" in include_set:
-        summary["data_summary"] = _collect_data_summary(df)
-        include_set.discard("summary")
-
-    # vba 维度：基于文件级别，不依赖 worksheet
-    if "vba" in include_set:
-        summary["vba"] = _collect_vba_info(safe_path)
-        include_set.discard("vba")
-
-    # 分发 include 维度采集（需要用 openpyxl 打开，CSV 不支持）
-    _CSV_UNSUPPORTED_DIMS = {"styles", "charts", "images", "freeze_panes",
-                             "conditional_formatting", "data_validation",
-                             "print_settings", "column_widths", "row_heights", "formulas",
-                             "merges"}
-    if include_set and _is_csv_file(safe_path):
-        skipped = include_set & _CSV_UNSUPPORTED_DIMS
-        if skipped:
-            summary["csv_unsupported_dimensions"] = (
-                f"CSV 文件不支持以下维度（已跳过）: {sorted(skipped)}"
-            )
-            include_set -= skipped
-    if include_set and not _is_csv_file(safe_path):
-        from openpyxl import load_workbook
-
-        # styles/charts/images/freeze_panes 等需要非 data_only 模式
-        # formulas 也需要非 data_only 模式以读取公式文本
-        needs_formulas = "formulas" in include_set
-        wb_include = load_workbook(safe_path, data_only=not needs_formulas)
-        try:
-            ws_include = (
-                wb_include[sheet_name]
-                if sheet_name and sheet_name in wb_include.sheetnames
-                else wb_include.active
-            )
-            extra = _dispatch_include_dimensions(ws_include, include_set, max_style_scan_rows)
-            summary.update(extra)
-        finally:
-            wb_include.close()
-
-    return _finish_read(summary, sample_rows=sample_rows)
 
 
 def _load_df_for_tool(
@@ -2689,6 +1980,11 @@ def _load_df_for_tool(
     else:
         sheet_name = sheet_name or "Sheet1"
 
+    if not snap.is_csv():
+        from excelmanus.workbook.formula_values import snapshot_cache_status
+        caches = snapshot_cache_status(snap, sheet_name)
+        if caches["missing_or_error_count"]:
+            return None, error_result("Formula caches are missing or erroneous; calculate before numeric analysis", code="FORMULA_CACHE_MISSING", fields={"formula_cache":caches,"content_version":snap.content_version})
     df, effective_header = _read_df(safe_path, sheet_name, header_row=header_row)
     ctx = {
         "df": df,
@@ -4925,25 +4221,6 @@ INCLUDE_DIMENSIONS = (
 _CATEGORICAL_UNIQUE_THRESHOLD = 20
 
 
-def _collect_categorical_summary(
-    df: "pd.DataFrame",
-    threshold: int = _CATEGORICAL_UNIQUE_THRESHOLD,
-) -> dict[str, Any]:
-    """对分类列（unique 值 < threshold）计算 value_counts，返回摘要字典。
-
-    Returns:
-        {"threshold": int, "columns": {col: {val: count, ...}, ...}}
-    """
-    result: dict[str, dict[str, int]] = {}
-    for col in df.columns:
-        series = _scan_non_blank(df[col])
-        if series.empty:
-            continue
-        n_unique = series.nunique()
-        if 0 < n_unique <= threshold:
-            vc = series.value_counts(dropna=True)
-            result[str(col)] = {str(k): int(v) for k, v in vc.items()}
-    return {"threshold": threshold, "columns": result}
 
 
 def _collect_data_summary(df: "pd.DataFrame") -> dict[str, Any]:
@@ -4972,509 +4249,32 @@ def _collect_data_summary(df: "pd.DataFrame") -> dict[str, Any]:
     return result
 
 
-def _color_to_hex_short(color: Any) -> str | None:
-    """将 openpyxl Color 对象转为 6 位十六进制字符串，无效或默认色返回 None。"""
-    if color is None:
-        return None
-    from excelmanus.tools._style_extract import resolve_color
-
-    color_type = getattr(color, "type", None)
-    if color_type == "theme":
-        resolved = resolve_color(color)
-        return resolved.lstrip("#") if resolved else None
-    if color_type == "indexed":
-        resolved = resolve_color(color)
-        return resolved.lstrip("#") if resolved else None
-    if color_type == "rgb":
-        resolved = resolve_color(color)
-        if resolved is None:
-            return None
-        hex_val = resolved.lstrip("#")
-        if hex_val in {"000000", "FFFFFF"} and str(getattr(color, "rgb", "")).upper() in {
-            "00000000",
-            "FFFFFFFF",
-        }:
-            return None
-        return hex_val
-    resolved = resolve_color(color)
-    return resolved.lstrip("#") if resolved else None
-
-
-def _extract_style_tuple(cell: Any) -> tuple | None:
-    """从单元格提取样式关键属性元组，全默认样式返回 None。"""
-    parts: list[Any] = []
-    has_custom = False
-
-    # 字体
-    f = cell.font
-    if f:
-        font_info: dict[str, Any] = {}
-        if f.name and f.name != "Calibri":
-            font_info["name"] = f.name
-        if f.size and f.size != 11:
-            font_info["size"] = f.size
-        if f.bold:
-            font_info["bold"] = True
-        if f.italic:
-            font_info["italic"] = True
-        if f.underline and f.underline != "none":
-            font_info["underline"] = f.underline
-        if f.strike:
-            font_info["strike"] = True
-        c = _color_to_hex_short(f.color)
-        if c and c != "000000":
-            font_info["color"] = c
-        if font_info:
-            has_custom = True
-        parts.append(tuple(sorted(font_info.items())) if font_info else ())
-    else:
-        parts.append(())
-
-    # 填充
-    fl = cell.fill
-    if fl:
-        fill_type = fl.fill_type or fl.patternType
-        if fill_type and fill_type != "none":
-            fg = _color_to_hex_short(fl.fgColor)
-            parts.append(("fill", fill_type, fg))
-            has_custom = True
-        else:
-            parts.append(())
-    else:
-        parts.append(())
-
-    # 边框
-    b = cell.border
-    if b:
-        border_parts: list[tuple[str, str]] = []
-        for side_name in ("left", "right", "top", "bottom"):
-            side = getattr(b, side_name, None)
-            if side and side.style and side.style != "none":
-                border_parts.append((side_name, side.style))
-        if border_parts:
-            has_custom = True
-        parts.append(tuple(border_parts))
-    else:
-        parts.append(())
-
-    # 对齐
-    a = cell.alignment
-    if a:
-        align_info: dict[str, Any] = {}
-        if a.horizontal and a.horizontal != "general":
-            align_info["horizontal"] = a.horizontal
-        if a.vertical and a.vertical != "bottom":
-            align_info["vertical"] = a.vertical
-        if a.wrap_text:
-            align_info["wrap_text"] = True
-        if align_info:
-            has_custom = True
-        parts.append(tuple(sorted(align_info.items())) if align_info else ())
-    else:
-        parts.append(())
-
-    # 数字格式
-    nf = cell.number_format
-    if nf and nf != "General":
-        parts.append(nf)
-        has_custom = True
-    else:
-        parts.append("")
-
-    if not has_custom:
-        return None
-    return tuple(parts)
-
-
-def _style_tuple_to_dict(st: tuple) -> dict[str, Any]:
-    """将样式元组还原为可读字典。"""
-    result: dict[str, Any] = {}
-    font_parts, fill_parts, border_parts, align_parts, num_fmt = st
-
-    if font_parts:
-        result["font"] = dict(font_parts)
-    if fill_parts:
-        _, fill_type, fg = fill_parts
-        info: dict[str, Any] = {"type": fill_type}
-        if fg:
-            info["color"] = fg
-        result["fill"] = info
-    if border_parts:
-        result["border"] = {side: style for side, style in border_parts}
-    if align_parts:
-        result["alignment"] = dict(align_parts)
-    if num_fmt:
-        result["number_format"] = num_fmt
-    return result
-
-
-def _collect_styles_compressed(
-    ws: Any,
-    max_rows: int = 200,
-) -> dict[str, Any]:
-    """扫描工作表，以 Style Classes 压缩方式返回样式信息。
-
-    算法：
-    1. 逐单元格提取样式元组
-    2. 为唯一组合分配 sN ID
-    3. 按列扫描合并连续相同样式的单元格为范围
-
-    Returns:
-        包含 style_classes, cell_style_map, merged_ranges 的字典。
-    """
-    from openpyxl.utils import get_column_letter
-
-    scan_rows = min(ws.max_row or 0, max_rows)
-    scan_cols = ws.max_column or 0
-    if scan_rows == 0 or scan_cols == 0:
-        return {
-            "style_classes": {},
-            "cell_style_map": {},
-            "merged_ranges": [str(mr) for mr in ws.merged_cells.ranges],
-            "rows_scanned": scan_rows,
-            "truncated": (ws.max_row or 0) > max_rows,
-        }
-
-    # 第一遍：收集所有样式元组，分配 ID
-    style_to_id: dict[tuple, str] = {}
-    # cell_map[col_idx][row_idx] = style_id
-    cell_map: dict[int, dict[int, str]] = {}
-    id_counter = 0
-
-    for row in ws.iter_rows(min_row=1, max_row=scan_rows, min_col=1, max_col=scan_cols):
-        for cell in row:
-            st = _extract_style_tuple(cell)
-            if st is None:
-                continue
-            if st not in style_to_id:
-                style_to_id[st] = f"s{id_counter}"
-                id_counter += 1
-            sid = style_to_id[st]
-            col_idx = cell.column
-            row_idx = cell.row
-            if col_idx not in cell_map:
-                cell_map[col_idx] = {}
-            cell_map[col_idx][row_idx] = sid
-
-    # 构建 style_classes 字典
-    style_classes = {sid: _style_tuple_to_dict(st) for st, sid in style_to_id.items()}
-
-    # 第二遍：按列合并连续相同 style_id 为范围
-    range_map: dict[str, str] = {}  # "A1:A10" -> "s0"
-
-    for col_idx in sorted(cell_map.keys()):
-        col_letter = get_column_letter(col_idx)
-        rows_dict = cell_map[col_idx]
-        sorted_rows = sorted(rows_dict.keys())
-        if not sorted_rows:
-            continue
-
-        # 合并连续行
-        start_row = sorted_rows[0]
-        current_sid = rows_dict[start_row]
-        prev_row = start_row
-
-        for r in sorted_rows[1:]:
-            sid = rows_dict[r]
-            if sid == current_sid and r == prev_row + 1:
-                # 连续且相同
-                prev_row = r
-            else:
-                # 输出前一段
-                if start_row == prev_row:
-                    range_map[f"{col_letter}{start_row}"] = current_sid
-                else:
-                    range_map[f"{col_letter}{start_row}:{col_letter}{prev_row}"] = current_sid
-                start_row = r
-                current_sid = sid
-                prev_row = r
-
-        # 输出最后一段
-        if start_row == prev_row:
-            range_map[f"{col_letter}{start_row}"] = current_sid
-        else:
-            range_map[f"{col_letter}{start_row}:{col_letter}{prev_row}"] = current_sid
-
-    merged_ranges = [str(mr) for mr in ws.merged_cells.ranges]
-
-    return {
-        "style_classes": style_classes,
-        "cell_style_map": range_map,
-        "merged_ranges": merged_ranges,
-        "rows_scanned": scan_rows,
-        "truncated": (ws.max_row or 0) > max_rows,
-    }
-
-
-def _collect_charts(ws: Any) -> list[dict[str, Any]]:
-    """检测工作表中嵌入的图表，返回元信息列表。"""
-    charts_info: list[dict[str, Any]] = []
-    chart_list = getattr(ws, "_charts", [])
-    for chart in chart_list:
-        info: dict[str, Any] = {}
-        # 图表类型
-        type_name = type(chart).__name__.replace("Chart", "").lower()
-        info["type"] = type_name
-        if hasattr(chart, "title") and chart.title:
-            title = chart.title
-            if isinstance(title, str):
-                info["title"] = title
-            else:
-                # openpyxl Title/Text object: drill into rich text paragraphs
-                text_obj = title.text if hasattr(title, "text") else title
-                rich = getattr(text_obj, "rich", None)
-                if rich is not None:
-                    parts: list[str] = []
-                    for p in getattr(rich, "p", []):
-                        for r in (getattr(p, "r", None) or []):
-                            if getattr(r, "t", None):
-                                parts.append(r.t)
-                    if parts:
-                        info["title"] = "".join(parts)
-        info["series_count"] = len(chart.series) if hasattr(chart, "series") else 0
-        # 锚点位置
-        if hasattr(chart, "anchor") and chart.anchor:
-            anchor = chart.anchor
-            if hasattr(anchor, "_from") and anchor._from:
-                f = anchor._from
-                from openpyxl.utils import get_column_letter as gcl
-                info["anchor_cell"] = f"{gcl(f.col + 1)}{f.row + 1}"
-        charts_info.append(info)
-    return charts_info
-
-
-def _collect_images(ws: Any) -> list[dict[str, Any]]:
-    """检测工作表中嵌入的图片，返回元信息列表。"""
-    images_info: list[dict[str, Any]] = []
-    image_list = getattr(ws, "_images", [])
-    for img in image_list:
-        info: dict[str, Any] = {}
-        if hasattr(img, "width") and img.width:
-            info["width_px"] = img.width
-        if hasattr(img, "height") and img.height:
-            info["height_px"] = img.height
-        # 图片格式
-        if hasattr(img, "format"):
-            info["format"] = img.format
-        elif hasattr(img, "path") and img.path:
-            ext = str(img.path).rsplit(".", 1)[-1] if "." in str(img.path) else "unknown"
-            info["format"] = ext
-        # 锚点位置
-        if hasattr(img, "anchor") and img.anchor:
-            anchor = img.anchor
-            if isinstance(anchor, str):
-                info["anchor_cell"] = anchor
-            elif hasattr(anchor, "_from") and anchor._from:
-                f = anchor._from
-                from openpyxl.utils import get_column_letter as gcl
-                info["anchor_cell"] = f"{gcl(f.col + 1)}{f.row + 1}"
-        images_info.append(info)
-    return images_info
-
-
-def _collect_freeze_panes(ws: Any) -> str | None:
-    """返回冻结窗格位置（如 'A4'），未冻结返回 None。"""
-    fp = ws.freeze_panes
-    return str(fp) if fp else None
-
-
-def _collect_conditional_formatting(ws: Any) -> list[dict[str, Any]]:
-    """收集条件格式规则列表。"""
-    rules_info: list[dict[str, Any]] = []
-    for cf in ws.conditional_formatting:
-        ranges_str = str(cf)
-        for rule in cf.rules:
-            info: dict[str, Any] = {"range": ranges_str}
-            if hasattr(rule, "type") and rule.type:
-                info["type"] = rule.type
-            if hasattr(rule, "priority") and rule.priority is not None:
-                info["priority"] = rule.priority
-            if hasattr(rule, "formula") and rule.formula:
-                info["formula"] = list(rule.formula) if not isinstance(rule.formula, str) else [rule.formula]
-            if hasattr(rule, "operator") and rule.operator:
-                info["operator"] = rule.operator
-            rules_info.append(info)
-    return rules_info
-
-
-def _collect_data_validation(ws: Any) -> list[dict[str, Any]]:
-    """收集数据验证规则列表。"""
-    validations: list[dict[str, Any]] = []
-    dv_list = getattr(ws, "data_validations", None)
-    if dv_list is None:
-        return validations
-    dv_items = getattr(dv_list, "dataValidation", [])
-    for dv in dv_items:
-        info: dict[str, Any] = {}
-        if hasattr(dv, "sqref") and dv.sqref:
-            info["range"] = str(dv.sqref)
-        if hasattr(dv, "type") and dv.type:
-            info["type"] = dv.type
-        if hasattr(dv, "formula1") and dv.formula1:
-            info["formula1"] = str(dv.formula1)
-        if hasattr(dv, "formula2") and dv.formula2:
-            info["formula2"] = str(dv.formula2)
-        if hasattr(dv, "allow_blank") and dv.allow_blank is not None:
-            info["allow_blank"] = bool(dv.allow_blank)
-        if hasattr(dv, "showDropDown") and dv.showDropDown is not None:
-            info["show_dropdown"] = bool(dv.showDropDown)
-        validations.append(info)
-    return validations
-
-
-def _collect_print_settings(ws: Any) -> dict[str, Any]:
-    """收集打印设置信息。"""
-    info: dict[str, Any] = {}
-    setup = ws.sheet_properties.pageSetUpPr
-    fit_to_page = bool(setup is not None and setup.fitToPage)
-    info["fit_to_page"] = fit_to_page
-    info["scaling_mode"] = "fit_to_page" if fit_to_page else "scale"
-    if ws.print_area:
-        info["print_area"] = ws.print_area
-    ps = ws.page_setup
-    if ps:
-        if ps.orientation:
-            info["orientation"] = ps.orientation
-        if ps.paperSize is not None:
-            info["paper_size"] = ps.paperSize
-        if ps.fitToWidth is not None:
-            info["fit_to_width"] = ps.fitToWidth
-        if ps.fitToHeight is not None:
-            info["fit_to_height"] = ps.fitToHeight
-        if ps.scale is not None:
-            info["scale"] = ps.scale
-    if ws.print_title_rows:
-        info["repeat_rows"] = ws.print_title_rows
-    if ws.print_title_cols:
-        info["repeat_columns"] = ws.print_title_cols
-    # Preserve legacy OOXML fields above; this named subset can be passed
-    # directly to format_spreadsheet(kind=print_layout). Never collapse
-    # multiple print areas into a single range or activate inactive fit sizes.
-    layout: dict[str, Any] = {"fit_to_page": fit_to_page}
-    from openpyxl.worksheet.print_settings import PrintArea
-
-    ranges = sorted(str(area) for area in PrintArea.from_string(str(ws.print_area)).ranges) if ws.print_area else []
-    unsupported: list[str] = []
-    if len(ranges) <= 1:
-        layout["print_area"] = ranges[0] if ranges else ""
-    else:
-        unsupported.append("multiple_print_areas")
-    if ps.orientation in {"portrait", "landscape"}:
-        layout["orientation"] = ps.orientation
-    paper = {"1": "Letter", "5": "Legal", "8": "A3", "9": "A4", "11": "A5"}.get(str(ps.paperSize))
-    if paper:
-        layout["paper_size"] = paper
-    elif ps.paperSize is not None:
-        unsupported.append("paper_size")
-    if fit_to_page:
-        for key, value in (("fit_to_width", ps.fitToWidth), ("fit_to_height", ps.fitToHeight)):
-            if value is not None and 0 <= value <= 32767:
-                layout[key] = value
-    elif ps.scale is not None:
-        if 10 <= ps.scale <= 400:
-            layout["scale"] = ps.scale
-        else:
-            unsupported.append("scale")
-    info["print_layout"] = layout
-    if unsupported:
-        info["print_layout_omitted"] = unsupported
-    return info
-
-
-def _collect_column_widths(ws: Any) -> dict[str, float]:
-    """收集非默认列宽映射。"""
-    widths: dict[str, float] = {}
-    from openpyxl.utils.cell import column_index_from_string, get_column_letter
-
-    for col_letter, dim in ws.column_dimensions.items():
-        if dim.width is not None:
-            first = dim.min or column_index_from_string(col_letter)
-            last = dim.max or first
-            for col in range(first, min(last, 16384) + 1):
-                widths[get_column_letter(col)] = round(dim.width, 2)
-    return widths
-
-
-def _collect_row_heights(ws: Any) -> dict[str, float]:
-    return {
-        str(row): round(dim.height, 2)
-        for row, dim in ws.row_dimensions.items() if dim.height is not None
-    }
-
-
-def _collect_formulas(ws: Any, max_rows: int = 200) -> dict[str, Any]:
-    """收集含公式的单元格位置和公式内容。"""
-    from openpyxl.utils import get_column_letter
-
-    formulas: list[dict[str, str]] = []
-    total_rows = ws.max_row or 0
-    scan_rows = min(total_rows, max_rows)
-    scan_cols = ws.max_column or 0
-    if scan_rows == 0 or scan_cols == 0:
-        return {
-            "items": formulas,
-            "rows_scanned": scan_rows,
-            "truncated": False,
-        }
-
-    for row in ws.iter_rows(min_row=1, max_row=scan_rows, min_col=1, max_col=scan_cols):
-        for cell in row:
-            val = cell.value
-            if isinstance(val, str) and val.startswith("="):
-                coord = f"{get_column_letter(cell.column)}{cell.row}"
-                formulas.append({"cell": coord, "formula": val})
-    return {
-        "items": formulas,
-        "rows_scanned": scan_rows,
-        "truncated": total_rows > max_rows,
-    }
-
-
-def _dispatch_include_dimensions(
-    ws_for_include: Any,
-    include_set: set[str],
-    max_style_scan_rows: int,
-) -> dict[str, Any]:
-    """根据 include 集合分发各维度采集，返回合并字典。"""
-    extra: dict[str, Any] = {}
-
-    if "styles" in include_set:
-        extra["styles"] = _collect_styles_compressed(ws_for_include, max_rows=max_style_scan_rows)
-
-    if "charts" in include_set:
-        extra["charts"] = _collect_charts(ws_for_include)
-
-    if "images" in include_set:
-        extra["images"] = _collect_images(ws_for_include)
-
-    if "freeze_panes" in include_set:
-        extra["freeze_panes"] = _collect_freeze_panes(ws_for_include)
-
-    if "conditional_formatting" in include_set:
-        extra["conditional_formatting"] = _collect_conditional_formatting(ws_for_include)
-
-    if "data_validation" in include_set:
-        extra["data_validation"] = _collect_data_validation(ws_for_include)
-
-    if "print_settings" in include_set:
-        extra["print_settings"] = _collect_print_settings(ws_for_include)
-
-    if "column_widths" in include_set:
-        extra["column_widths"] = _collect_column_widths(ws_for_include)
-
-    if "row_heights" in include_set:
-        extra["row_heights"] = _collect_row_heights(ws_for_include)
-
-    if "formulas" in include_set:
-        extra["formulas"] = _collect_formulas(ws_for_include, max_rows=max_style_scan_rows)
-
-    if "merges" in include_set:
-        ranges = [str(item) for item in ws_for_include.merged_cells.ranges]
-        extra["merges"] = {"count": len(ranges), "ranges": ranges[:20]}
-
-    # vba 维度在调用方单独处理（需要 file path，不依赖 worksheet）
-
-    return extra
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ── VBA 信息提取 ──────────────────────────────────────────
@@ -6504,19 +5304,24 @@ def scan_excel_snapshot(
             })
             continue
 
+        from excelmanus.workbook.formula_values import snapshot_cache_status
+        cache_status = snapshot_cache_status(snap, sheet_name, max_row=(max_sample_rows + int(internal_header or 0) + 1) if sampled else None)
         # 列统计
         columns_stats: list[dict[str, Any]] = []
         col_names: list[str] = []
-        for col in df.columns:
+        for col_index, col in enumerate(df.columns, 1):
             col_str = str(col)
             col_names.append(col_str)
+            if col_index in cache_status["columns"]:
+                columns_stats.append({"name":col_str,"type":"unknown","statistics_status":"unavailable","reason":"formula_cache_missing_or_error"})
+                continue
             inferred = _infer_column_type(df[col])
             stats = _compute_column_stats(df[col], inferred, col_str)
             columns_stats.append(stats)
 
         # 重复行检测
         dup_count: int | None = None
-        if data_rows <= 10000:
+        if data_rows <= 10000 and not cache_status["missing_or_error_count"]:
             try:
                 dup_count = int(df.duplicated().sum())
             except Exception:
@@ -6527,7 +5332,7 @@ def scan_excel_snapshot(
             "header_row": public_header,
             "duplicate_row_count": dup_count,
             "columns": columns_stats,
-            "is_form_document": bool(form_type),
+            "is_form_document": bool(form_type), "formula_cache":cache_status,
         }
         if sampled:
             sheet_data["sampled"] = True
@@ -6535,12 +5340,13 @@ def scan_excel_snapshot(
 
         sheets_data.append(sheet_data)
         sheet_columns[sheet_name] = col_names
-        sheet_dfs[sheet_name] = df
+        if not cache_status["missing_or_error_count"]:
+            sheet_dfs[sheet_name] = df
 
     # 跨 Sheet 关联
     relationships: list[dict[str, Any]] = []
     if include_relationships and len(sheet_columns) >= 2:
-        relationships = _detect_cross_sheet_relationships(sheet_columns, sheet_dfs)
+        relationships = _detect_cross_sheet_relationships({k:v for k,v in sheet_columns.items() if k in sheet_dfs}, sheet_dfs)
 
     # 质量信号
     quality_signals = _generate_quality_signals(sheets_data)
@@ -7376,6 +6182,7 @@ def discover_file_relationships(
 
     file_columns: dict[str, dict[str, list[str]]] = {}  # rel_path → {sheet → [cols]}
     file_dfs: dict[str, dict[str, pd.DataFrame]] = {}  # rel_path → {sheet → df}
+    source_versions: dict[str, str] = {}
     file_display: dict[str, str] = {}  # rel_path → display_name
 
     for fp in paths:
@@ -7387,6 +6194,7 @@ def discover_file_relationships(
             logger.debug("跨文件关系发现：无法打开快照 %s", rel_path)
             continue
         read_path = snap.backing_path
+        source_versions[rel_path] = snap.content_version
 
         try:
             if snap.is_csv():
@@ -7426,6 +6234,7 @@ def discover_file_relationships(
         return _finalize_discover_file_relationships_result(
             {
                 "files_analyzed": len(file_columns),
+                "source_versions": source_versions,
                 "file_pairs": [],
                 "summary": "可读取的文件不足 2 个，无法分析跨文件关系",
             },
@@ -7500,6 +6309,7 @@ def discover_file_relationships(
 
     result: dict[str, Any] = {
         "files_analyzed": len(file_columns),
+                "source_versions": source_versions,
         "file_pairs": file_pairs,
         "summary": summary,
     }

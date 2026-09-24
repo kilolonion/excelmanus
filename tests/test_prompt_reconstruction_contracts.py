@@ -13,8 +13,9 @@ from excelmanus.prompt.skill_catalog import (
     collect_skill_entries,
     render_available_skills,
 )
-from excelmanus.replica_spec import StyleClass, compile_replica_to_bytes, workbook_spec_to_replica
-from excelmanus.replica_spec import (
+from excelmanus.workbook.spec import StyleClass
+from tests.workbook_support import create_document_bytes
+from excelmanus.workbook.spec import (
     BorderSpec,
     FillSpec,
     MergedRange,
@@ -28,17 +29,16 @@ from excelmanus.security.source_isolation import (
     is_probe_path,
 )
 from excelmanus.tools.file_tools import copy_file, init_guard as init_file_guard
-from excelmanus.tools.intent_tools import (
-    _MODEL_CAPABILITIES,
+from excelmanus.tools.workbook_tools import (
     analyze_spreadsheet,
-    edit_spreadsheet,
-    format_spreadsheet,
+    apply_spreadsheet_changes,
+    apply_spreadsheet_changes,
     init_guard as init_intent_guard,
-    inspect_spreadsheet,
+    observe_spreadsheet,
 )
 from excelmanus.tools.shell_tools import init_guard as init_shell_guard, run_shell
 from excelmanus.workbook.data import init_guard as init_data_guard
-from excelmanus.workbook.sheets import init_guard as init_sheets_guard, list_sheets
+from excelmanus.tools.workbook_tools import init_guard as init_sheets_guard
 
 
 def _bind(tmp_path: Path) -> Path:
@@ -100,15 +100,12 @@ def test_meta_tools_use_names_not_chinese_catalog() -> None:
     assert "适用场景" not in manage["function"]["description"]
 
 
-def test_capabilities_notes_are_facts_not_procedures() -> None:
-    notes = "\n".join(_MODEL_CAPABILITIES["notes"])
-    assert "截断" in notes
-    assert "content_version" in notes
-    assert "结束工具" in notes
-    assert "rebase" not in notes.lower()
-    assert "对照源图" not in notes
-    assert "run_code" not in notes
-    assert "并行" not in notes
+def test_capabilities_come_from_registered_tools() -> None:
+    from excelmanus.tools.workbook_tools import get_tools
+    tools = {tool.name: tool for tool in get_tools()}
+    assert {"observe_spreadsheet", "preview_spreadsheet", "apply_spreadsheet_changes"} <= tools.keys()
+    modes = tools["observe_spreadsheet"].input_schema["properties"]["mode"]["enum"]
+    assert "objects" in modes and "capabilities" not in modes
 
 
 def test_system_skill_texts_are_not_procedures() -> None:
@@ -150,19 +147,17 @@ def test_overview_include_styles_merges_formulas(tmp_path: Path) -> None:
     path = tmp_path / "form.xlsx"
     wb.save(path)
 
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="overview",
         file_path=str(path),
-        include=["styles", "merges", "formulas", "not_a_dim"],
+        facets=['presentation', 'data'],
     )
     assert result.success
     payload = _payload(result)
-    sheet = payload["sheets"][0]
-    assert "styles" in sheet
-    assert sheet["merges"]["count"] >= 1
-    assert sheet["formulas"]["count"] >= 1
-    assert "include_warning" in payload
-    assert "include_warning" in result.model_text or "未知的 include" in result.model_text
+    region = payload["regions"][0]
+    assert region["cells"]["2,1"]["s"]["bg"]["rgb"] == "#FFFF00"
+    assert region["cells"]["2,1"]["f"] == "=B2"
+    assert region["merges"][0]["anchor"] == "A1"
 
 
 def test_range_include_declares_ignored(tmp_path: Path) -> None:
@@ -173,16 +168,17 @@ def test_range_include_declares_ignored(tmp_path: Path) -> None:
     ws["A1"] = 1
     path = tmp_path / "grid.xlsx"
     wb.save(path)
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="range",
         file_path=str(path),
         range="A1:A1",
-        include=["styles"],
+        facets=['presentation'],
     )
-    assert not result.success
-    assert result.error is not None
-    assert result.error.code == "INVALID_ARGS"
-    assert "formulas" in result.model_text or "ignored_fields" in result.value
+    assert result.success
+    region = result.value["regions"][0]
+    assert "s" in region["cells"]["1,1"]
+    assert "v" not in region["cells"]["1,1"]
+    assert region["coverage"]["data"]["status"] == "not_requested"
 
 
 def test_analyze_form_does_not_emit_missing_data(tmp_path: Path) -> None:
@@ -219,9 +215,9 @@ def test_format_skips_merged_non_anchors(tmp_path: Path) -> None:
     ws["A1"] = "标题"
     path = tmp_path / "merged.xlsx"
     wb.save(path)
-    listed = inspect_spreadsheet(mode="overview", file_path=str(path))
+    listed = observe_spreadsheet(mode="overview", file_path=str(path))
     version = _payload(listed)["content_version"]
-    result = format_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=version,
         operations=[
@@ -235,8 +231,8 @@ def test_format_skips_merged_non_anchors(tmp_path: Path) -> None:
     )
     assert result.success
     payload = _payload(result)
-    assert payload["applied"] == ["format:A1:B1"]
-    assert "B1" in payload.get("skipped_merged_non_anchors", [])
+    assert payload["observation"]["operations"][0]["applied"] == "format:A1:B1"
+    assert "B1" in payload["observation"]["operations"][0].get("skipped_merged_non_anchors", [])
 
 
 def test_compiler_applies_border_and_rejects_bad_merge() -> None:
@@ -245,7 +241,7 @@ def test_compiler_applies_border_and_rejects_bad_merge() -> None:
             SheetSpec(
                 name="S",
                 dimensions={"rows": 2, "cols": 2},
-                value_blocks=[{"start": "A1", "values": [["x", "y"]]}],
+                value_blocks=[{"start": "A1", "values": [["x", None]]}],
                 styles={"box": StyleClass(border=BorderSpec(style="thin", color="000000"), fill=FillSpec(color="#EEEEEE"))},
                 style_regions=[{"range": "A1:B1", "style_id": "box"}],
                 merged_ranges=[MergedRange(range="A1:B1")],
@@ -253,9 +249,9 @@ def test_compiler_applies_border_and_rejects_bad_merge() -> None:
         ],
         uncertainties=[],
     )
-    data, summary = compile_replica_to_bytes(workbook_spec_to_replica(spec))
+    data, summary = create_document_bytes(spec)
     assert data[:2] == b"PK"
-    assert summary["merges_applied"] == 1
+    assert summary["applied"].count("merge") == 1
 
     from pydantic import ValidationError
 
@@ -271,7 +267,7 @@ def test_compiler_applies_border_and_rejects_bad_merge() -> None:
             ],
             uncertainties=[],
         )
-        compile_replica_to_bytes(workbook_spec_to_replica(bad))
+        create_document_bytes(bad)
         raised = False
         message = ""
     except (ValueError, ValidationError) as exc:
@@ -313,7 +309,7 @@ def test_probe_paths_are_rejected(tmp_path: Path) -> None:
     assert not copied.success or (copied.value or {}).get("error_code") == PROBE_FILE_FORBIDDEN
     if copied.error:
         assert copied.error.code == PROBE_FILE_FORBIDDEN or PROBE_FILE_FORBIDDEN in str(copied.value)
-    created = edit_spreadsheet(
+    created = apply_spreadsheet_changes(
         file_path="outputs/_probe.xlsx",
         workbook_spec={
             "sheets": [{"name": "S", "dimensions": {"rows": 1, "cols": 1}}],
@@ -324,7 +320,7 @@ def test_probe_paths_are_rejected(tmp_path: Path) -> None:
     assert created.error is not None
     assert created.error.code == PROBE_FILE_FORBIDDEN
 
-    missing = edit_spreadsheet(
+    missing = apply_spreadsheet_changes(
         file_path="",
         workbook_spec={
             "sheets": [{"name": "S", "dimensions": {"rows": 1, "cols": 1}}],
@@ -336,11 +332,11 @@ def test_probe_paths_are_rejected(tmp_path: Path) -> None:
     assert missing.error.code == "PATH_REQUIRED"
 
 
-def test_list_sheets_include_warning_in_model_text(tmp_path: Path) -> None:
+def test_observation_rejects_unknown_facets(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = tmp_path / "a.xlsx"
     Workbook().save(path)
-    result = list_sheets(str(path), include=["nope"])
-    assert result.success
-    assert "include_warning" in (result.value or {})
-    assert "未知的 include" in result.model_text
+    result = observe_spreadsheet(file_path=str(path), facets=["nope"])
+    assert not result.success
+    assert result.error.code == "INVALID_ARGS"
+    assert "facets" in result.model_text

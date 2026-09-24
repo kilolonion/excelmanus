@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "excelmanus"
-version = "1.8.0"
+version = "1.8.1"
 description = "基于大语言模型的 Excel 智能代理框架，支持 Web UI / REST API 运行"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,7 @@ dependencies = [
     "xlsxwriter>=3.1.0",
     "Pillow>=10.0.0",
     "rich>=13.0.0",
+    "playwright>=1.56,<2",
 ]
 
 [project.optional-dependencies]
@@ -43,7 +44,6 @@ dev = [
     "pytest-asyncio>=0.24,<1",
     # [tool.pytest.ini_options] 配置了 timeout=60，必须声明该插件，否则 pytest 直接报错退出。
     "pytest-timeout>=2.0.0",
-    "pytest-qt>=4.4,<5",
     "httpx>=0.24.0",
     "hypothesis>=6.0.0",
     "pyright>=1.1.400",
@@ -92,7 +92,6 @@ dev-dependencies = [
     "pytest>=8.2,<9",
     "pytest-asyncio>=0.24,<1",
     "pytest-timeout>=2.0.0",
-    "pytest-qt>=4.4,<5",
     "httpx>=0.24.0",
     "hypothesis>=6.0.0",
     "pyright>=1.1.400",
@@ -110,6 +109,8 @@ include = ["excelmanus*"]
 excelmanus = [
     "prompts/**/*.md",
     "skillpacks/**/*",
+    "knowledge/topics/*.md",
+    "workbook/render_assets/*",
 ]
 
 [tool.setuptools.exclude-package-data]

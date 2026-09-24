@@ -1407,7 +1407,7 @@ def get_tools() -> list[ToolDef]:
             description=(
                 "写入文本文件（常用于生成 Python 脚本后交给 run_code 执行）。"
                 "适用场景：创建或覆盖 .py/.txt/.csv 文本文件。"
-                "不适用：直接写入 Excel 数据（改用 SDK：edit_spreadsheet / format_spreadsheet）。"
+                "不适用：直接写入 Excel 数据（改用 SDK：apply_spreadsheet_changes）。"
             ),
             input_schema={
                 "type": "object",

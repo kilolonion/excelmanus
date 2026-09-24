@@ -137,7 +137,7 @@ class TestFourDenialClasses:
             ),
         )
         result = await engine._execute_tool_call(
-            tc, tool_scope=["inspect_spreadsheet"], on_event=None, iteration=1,
+            tc, tool_scope=["observe_spreadsheet"], on_event=None, iteration=1,
         )
         assert result.success is False
         payload = _parse_result_payload(result)

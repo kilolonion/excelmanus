@@ -50,7 +50,7 @@ test('checks share a request, expose missing assets, and invalidate failed downl
   let calls = 0;
   let result = release();
   let status = 200;
-  const service = createUpdateService({ current: '1.8.0', platform: 'win32', arch: 'x64',
+  const service = createUpdateService({ current: '1.8.1', platform: 'win32', arch: 'x64',
     fetchImpl: async () => { calls++; return { ok: status === 200, status, json: async () => result }; },
   });
   await assert.rejects(service.download(), /先检查更新/);
@@ -84,7 +84,7 @@ test('falls back to the public release page when the REST API is rate limited', 
     headers: { get: name => headers[name.toLowerCase()] || null },
     text: async () => body,
   });
-  const service = createUpdateService({ current: '1.8.0', platform: 'win32', arch: 'x64',
+  const service = createUpdateService({ current: '1.8.1', platform: 'win32', arch: 'x64',
     fetchImpl: async url => {
       calls.push(url);
       if (url.includes('api.github.com')) return response(429);
@@ -117,7 +117,7 @@ test('keeps the fallback asset for the verified download path', async () => {
     headers: { get: name => headers[name.toLowerCase()] || null },
     text: async () => text,
   });
-  const service = createUpdateService({ current: '1.8.0', platform: 'win32', arch: 'x64',
+  const service = createUpdateService({ current: '1.8.1', platform: 'win32', arch: 'x64',
     downloadDirectory: () => directory, installImpl: async () => false,
     fetchImpl: async url => {
       if (url.includes('api.github.com')) return response(429);
@@ -152,7 +152,7 @@ for (const failure of ['network', 'timeout', 'server', 'json']) {
     // AbortSignal.timeout uses an unreferenced timer; keep this mocked network
     // test alive until its timeout has fired.
     const keepAlive = setTimeout(() => {}, 1000);
-    const service = createUpdateService({ current: '1.8.0', checkTimeoutMs: 20,
+    const service = createUpdateService({ current: '1.8.1', checkTimeoutMs: 20,
       platform: 'win32', arch: 'x64', fetchImpl: async (url, options) => {
         calls.push(url);
         if (url.includes('api.github.com')) {
@@ -183,7 +183,7 @@ test('fallback rejects prereleases and never follows an untrusted tag URL', asyn
   for (const location of ['https://evil.test/releases/tag/v1.9.0',
     'https://github.com/kilolonion/excelmanus/releases/tag/v1.9.0-beta.1']) {
     let requests = 0;
-    const service = createUpdateService({ current: '1.8.0', fetchImpl: async url => {
+    const service = createUpdateService({ current: '1.8.1', fetchImpl: async url => {
       requests++;
       if (url.includes('api.github.com')) throw new TypeError('offline');
       return new Response('', { status: 302, headers: { location } });

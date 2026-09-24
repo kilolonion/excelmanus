@@ -94,20 +94,20 @@ def read_suggestion(target: Mapping[str, Any] | None, column: Mapping[str, Any] 
     if column and not column_matches_target(target, column):
         column, strategy = None, "overview"
     args: dict[str, Any] = {"mode": "overview", "file_path": target["path"],
-                            "include": ["columns"], "max_results": 10}
+                            "facets": ["data", "geometry"], "limit": 10}
     if target.get("sheet"):
-        args["sheet_name"] = target["sheet"]
+        args["sheet"] = target["sheet"]
     cell_range = None
     if strategy == "column_sample" and column:
         letter, row = column["column"], column["header_row"]
         cell_range = bounded_range(f"{letter}{row}:{letter}{min(row + 20, 1_048_576)}")
-        args["sheet_name"] = column["sheet"]
+        args["sheet"] = column["sheet"]
     elif strategy in {"selection", "formulas"} and target.get("sheet"):
         cell_range = bounded_range(str(target.get("range") or ""))
     if cell_range:
-        args = {"mode": "range", "file_path": target["path"], "sheet_name": args["sheet_name"],
+        args = {"mode": "range", "file_path": target["path"], "sheet": args["sheet"],
                 "range": cell_range}
         if strategy == "formulas":
-            args["include"] = ["formulas"]
-    return {"tool": "inspect_spreadsheet", "arguments": args,
+            args["facets"] = ["data", "dependencies"]
+    return {"tool": "observe_spreadsheet", "arguments": args,
             "purpose": strategy if cell_range else "overview"}

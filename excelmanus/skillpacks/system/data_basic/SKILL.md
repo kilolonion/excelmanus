@@ -8,7 +8,7 @@ file_patterns:
   - "*.tsv"
 version: "1.2.0"
 ---
-只打开、看看、质检脏表时不必加载本技能。脏表先 `inspect_spreadsheet` 读相关 sheet；`profile`/`quality` 按数据框，标题行不是表头。
+只打开、看看、质检脏表时不必加载本技能。脏表先 `observe_spreadsheet` 读相关 sheet；`profile`/`quality` 按数据框，标题行不是表头。
 
 `analyze_spreadsheet` 的 `conditions` 一次可带多个条件，`logic` 为 `"and"` 或 `"or"`（默认 `"and"`）。求和/分组汇总/TopN 用 `mode="aggregate"` + `group_by`/`aggregations`；列取值分布与重复键用 `mode="distinct"`。
 

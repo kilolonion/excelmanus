@@ -11,7 +11,8 @@ from __future__ import annotations
 from excelmanus.subagent.models import SubagentConfig
 
 _EXPLORER_TOOLS: list[str] = [
-    "inspect_spreadsheet",
+    "observe_spreadsheet",
+    "preview_spreadsheet",
     "analyze_spreadsheet",
     "compare_spreadsheets",
     "trace_spreadsheet_formulas",
@@ -32,16 +33,16 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         description="通用全能力子代理，工具域与主代理一致，适用于需要独立上下文的长任务。",
         allowed_tools=[],
         permission_mode="acceptEdits",
-        max_iterations=120,
+        max_iterations=0,
         max_consecutive_failures=3,
         capability_mode="full",
         source="builtin",
         inherit_strategies=[
-            "tool:inspect",
+            "tool:observe",
             "tool:analyze",
-            "tool:edit",
-            "tool:format",
-            "spreadsheet:workbook_spec",
+            "tool:changes",
+            "tool:preview",
+            "spreadsheet:document",
             "tool:run_code",
         ],
     ),
@@ -53,12 +54,12 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         ),
         allowed_tools=_EXPLORER_TOOLS,
         permission_mode="readOnly",
-        max_iterations=30,
+        max_iterations=0,
         max_consecutive_failures=3,
         capability_mode="restricted",
         source="builtin",
         max_tokens=8192,
-        inherit_strategies=["tool:inspect", "tool:analyze", "tool:run_code"],
+        inherit_strategies=["tool:observe", "tool:analyze", "tool:run_code"],
         system_prompt=(
             "你是只读探索子代理 explorer。\n"
             "overview / range / search / 分析按需要选用。"

@@ -36,12 +36,12 @@ it("marks the current installation and removes only an old record", async () => 
   const current = "C:\\ExcelManus";
   const legacy = "D:\\ExcelManus-old";
   mocks.get.mockImplementation(async (url: string) => {
-    if (url === "/version/check") return { current: "1.8.0", latest: "1.8.0", has_update: false, check_method: "github_release_api" };
+    if (url === "/version/check") return { current: "1.8.1", latest: "1.8.1", has_update: false, check_method: "github_release_api" };
     if (url === "/version/installations") {
       return {
         current_path: current,
         installations: [
-          { path: current, version: "1.8.0", status: "current", is_current: true, exists: true },
+          { path: current, version: "1.8.1", status: "current", is_current: true, exists: true },
           { path: legacy, version: "1.7.2", status: "available", is_current: false, exists: true },
         ],
       };

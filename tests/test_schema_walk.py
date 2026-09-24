@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from excelmanus.replica_spec import workbook_spec_json_schema
-from excelmanus.tools.intent_tools import get_tools
+from excelmanus.workbook.spec import workbook_spec_json_schema
+from excelmanus.tools.workbook_tools import get_tools
 from excelmanus.tools.schema_walk import walk_schema_path
 
 
 def _edit_schema() -> dict:
-    tool = next(item for item in get_tools() if item.name == "edit_spreadsheet")
+    tool = next(item for item in get_tools() if item.name == "apply_spreadsheet_changes")
     schema = tool.input_schema
     assert isinstance(schema, dict)
     return schema
@@ -55,7 +55,8 @@ def test_join_and_format_rule_are_objects() -> None:
     join, _, err = walk_schema_path(analyze, "join")
     assert join is not None, err
     assert "on" in (join.get("properties") or {})
-    fmt = tools["format_spreadsheet"].input_schema
-    rule, available, err = walk_schema_path(fmt, "operations.rule")
+    fmt = tools["apply_spreadsheet_changes"].input_schema
+    from excelmanus.workbook.contracts import OPERATION_SCHEMAS
+    rule, available, err = walk_schema_path(OPERATION_SCHEMAS["conditional_format"], "rule")
     assert rule is not None, err
     assert "type" in (rule.get("properties") or {}) or "type" in available

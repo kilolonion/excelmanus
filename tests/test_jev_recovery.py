@@ -46,14 +46,14 @@ async def test_recovery_is_not_called_for_success_or_twice() -> None:
         await maybe_suggest_recovery(engine, success)
         mocked.assert_not_awaited()
         # 单次失败不触发评估：需要连续 ≥2 次失败（或熔断）才评估
-        single = [ToolCallResult("inspect_spreadsheet", {}, "bad", False, error="bad")]
+        single = [ToolCallResult("observe_spreadsheet", {}, "bad", False, error="bad")]
         await maybe_suggest_recovery(engine, single)
         mocked.assert_not_awaited()
         assert engine._recovery_hint is None
         # 只读工具的失败不会命中 commit_unknown 确定性分支，才会走到 evaluate
         failures = [
-            ToolCallResult("inspect_spreadsheet", {}, "bad", False, error="bad"),
-            ToolCallResult("inspect_spreadsheet", {}, "bad", False, error="bad"),
+            ToolCallResult("observe_spreadsheet", {}, "bad", False, error="bad"),
+            ToolCallResult("observe_spreadsheet", {}, "bad", False, error="bad"),
         ]
         await maybe_suggest_recovery(engine, failures)
         await maybe_suggest_recovery(engine, failures)
@@ -156,8 +156,8 @@ async def test_recovery_hint_source_deterministic_for_breaker() -> None:
         _last_iteration_count=2,
     )
     failures = [
-        ToolCallResult("inspect_spreadsheet", {}, "bad", False, error="bad"),
-        ToolCallResult("inspect_spreadsheet", {}, "bad", False, error="bad"),
+        ToolCallResult("observe_spreadsheet", {}, "bad", False, error="bad"),
+        ToolCallResult("observe_spreadsheet", {}, "bad", False, error="bad"),
     ]
     with patch(
         "excelmanus.system_one.evaluate",

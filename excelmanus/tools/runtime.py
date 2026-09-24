@@ -380,8 +380,15 @@ class ToolRuntime:
         for key in list(self._calls):
             if len(self._calls) <= 256:
                 break
-            if self._calls[key].status in {"completed", "failed", "cancelled"} and not self._calls[key].retained_by_batch:
+            row = self._calls[key]
+            if row.status in {"completed", "failed", "cancelled"} and not row.retained_by_batch and (row.task is None or row.task.done()):
                 del self._calls[key]
+
+    async def wait_settlement(self) -> None:
+        """Keep the session writer until cancelled synchronous work has exited."""
+        tasks = [row.task for row in self._calls.values() if row.task is not None and not row.task.done()]
+        if tasks:
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
     def call_states(self) -> list[dict[str, Any]]:
         return [row.snapshot() for row in self._calls.values()]

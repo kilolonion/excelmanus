@@ -56,6 +56,8 @@ test('real NSIS templates replace legacy/current installs and preserve workspace
     run(installer, ['/S', '/currentuser', `/D=${installed}`]);
     registered = true;
     assert.ok(fs.existsSync(path.join(installed, executable)));
+    const installerCache = path.join(process.env.LOCALAPPDATA, `excelmanus-fixture-${guid}-updater`, 'installer.exe');
+    assert.equal(fs.existsSync(installerCache), false, 'full updates need no duplicate electron-updater cache');
     fs.mkdirSync(path.join(installed, 'profile', 'data'), { recursive: true });
     const workspace = path.join(installed, 'profile', 'data', '预算.xlsx');
     const settings = path.join(installed, 'profile', 'excelmanus.db');

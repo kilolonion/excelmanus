@@ -92,7 +92,7 @@ class TestGetImpactAnalysis:
 
 class TestGetTools:
     def test_not_registered_on_model_surface(self) -> None:
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools.workbook_tools import get_tools
         names = {tool.name for tool in get_tools()}
         assert "get_reference_map" not in names
         assert "trace_spreadsheet_formulas" in names

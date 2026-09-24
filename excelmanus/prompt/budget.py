@@ -25,16 +25,16 @@ FIXED_VARS = {"workspace_root": FIXED_WORKSPACE, "model": FIXED_MODEL}
 # 原则 + 策略正文：identity / persona / 领域原则 / strategy 段。不含能力地图、SDK。
 _PRINCIPLE_LAYERS = frozenset({"core", "strategy"})
 _DISCOVERY_QUERIES = (
-    ("tool_detail", "edit_spreadsheet.workbook_spec"),
-    ("tool_detail", "edit_spreadsheet.workbook_spec.sheets"),
-    ("tool_detail", "edit_spreadsheet.workbook_spec.sheets.value_blocks"),
-    ("tool_detail", "edit_spreadsheet.workbook_spec.sheets.styles"),
-    ("tool_detail", "edit_spreadsheet.workbook_spec.sheets.styles.border"),
-    ("tool_detail", "edit_spreadsheet.workbook_spec.sheets.conditional_formats"),
-    ("tool_detail", "edit_spreadsheet.workbook_spec.uncertainties"),
-    ("tool_detail", "inspect_spreadsheet.range"),
+    ("tool_detail", "apply_spreadsheet_changes.workbook_spec"),
+    ("tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets"),
+    ("tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets.value_blocks"),
+    ("tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets.styles"),
+    ("tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets.styles.border"),
+    ("tool_detail", "apply_spreadsheet_changes.workbook_spec.sheets.conditional_formats"),
+    ("tool_detail", "apply_spreadsheet_changes.workbook_spec.uncertainties"),
+    ("tool_detail", "observe_spreadsheet.range"),
     ("tool_detail", "analyze_spreadsheet.join"),
-    ("tool_detail", "format_spreadsheet.operations.rule"),
+    ("tool_detail", "apply_spreadsheet_changes.operations.conditional_format.rule"),
 )
 
 

@@ -17,7 +17,7 @@ export function OAuthLoginProgress({ login }: { login: ReturnType<typeof useOAut
       </div>
     </div>
     {!exchanging && login.authorizeUrl && <div className="flex flex-wrap items-center gap-3 text-xs">
-      <a href={login.authorizeUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-8 items-center gap-1 font-medium text-primary hover:underline"><ExternalLink className="size-3" />打开登录页</a>
+      <button type="button" onClick={login.reopen} className="inline-flex min-h-8 items-center gap-1 font-medium text-primary hover:underline"><ExternalLink className="size-3" />打开登录页</button>
       <button type="button" aria-expanded={login.manual} className="min-h-8 text-muted-foreground hover:text-foreground" onClick={() => login.setManual(!login.manual)}>{login.manual ? "收起回调地址输入" : "已授权但未自动返回？"}</button>
     </div>}
     {!exchanging && login.manual && <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); void login.submit(); }}>
@@ -34,7 +34,7 @@ export function OAuthLoginProgress({ login }: { login: ReturnType<typeof useOAut
 export function PollingLoginProgress({ login, title }: { login: ReturnType<typeof usePollingLogin>; title: string }) {
   const [copyMessage, setCopyMessage] = useState("");
   return <div className="space-y-3 rounded-lg border border-border bg-muted/25 p-3">
-    <div className="flex items-center gap-2 text-xs" role="status"><Loader2 className="size-4 animate-spin text-primary" /><span>{login.session ? `请在浏览器中完成${title}` : "正在准备登录…"}</span></div>
+    <div className="flex items-center gap-2 text-xs" role="status"><Loader2 className="size-4 animate-spin text-primary" /><span>{login.phase === "completing" ? "授权已完成，正在同步账号…" : login.session ? `请在浏览器中完成${title}` : "正在准备登录…"}</span></div>
     {login.session && <>
       {login.session.code && <div className="flex flex-wrap items-center gap-2">
         <code className="select-all rounded-lg border bg-background px-3 py-2 text-lg font-semibold tracking-widest">{login.session.code}</code>
@@ -47,6 +47,6 @@ export function PollingLoginProgress({ login, title }: { login: ReturnType<typeo
       <a href={login.session.url} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-8 items-center gap-1 text-xs font-medium text-primary hover:underline"><ExternalLink className="size-3" />打开登录页{login.session.code ? "并输入验证码" : ""}</a>
       <p className="text-xs leading-relaxed text-muted-foreground">若登录页未打开或已关闭，可点击上方链接继续。完成授权后会自动更新。</p>
     </>}
-    <Button size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={login.cancel}>取消登录</Button>
+    <Button size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={login.cancel} disabled={login.phase === "completing"}>取消登录</Button>
   </div>;
 }

@@ -1,11 +1,11 @@
 ---
-name: tool:inspect
-version: "12.0.0"
+name: tool:observe
+version: "2.0.1"
 priority: 100
 order: 100
 layer: strategy
-max_tokens: 170
+max_tokens: 230
 conditions:
-  tool: inspect_spreadsheet
+  tool: observe_spreadsheet
 ---
-overview 看结构，range 读窗口，search 定位。截断/采样不是全表事实；分页检查 content_version，变化就重读。range/filter 的 selection 保留原表 `source_cols`，写回直接消费，不要按投影列重编号；大 selection 用 `spill:` 句柄传给 edit。默认读缓存值；null 且带 formula 是未计算。range 仅支持 include=formulas；多表省略 sheet 仅在证据唯一时允许。
+observe_spreadsheet 读取同版本事实：overview 定位，range 限定区域，facets 组合 data/presentation/geometry/objects/dependencies。区分未查询、空、部分和不支持；分页固定 content_version。版式看 geometry/presentation，图形可超出数据边界。写回保留 regions[].selection 坐标。公式与缓存分开，缺缓存不是空白。preview_spreadsheet 提供版本绑定图像。

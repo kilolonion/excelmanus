@@ -240,6 +240,7 @@ def sse_event_to_sse(
         EventType.MUTATION: "mutation",
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
+        EventType.COMPACTION: "compaction",
         EventType.FILE_DOWNLOAD: "file_download",
         EventType.VERIFICATION_REPORT: "verification_report",  # 仅用于读取历史，不再产生
         EventType.RETRACT_THINKING: "retract_thinking",
@@ -263,6 +264,11 @@ def sse_event_to_sse(
         EventType.STEP_START: "step_start",
         EventType.STEP_END: "step_end",
         EventType.INBOX_CLAIMED: "inbox_claimed",
+        EventType.DISPATCH_ACCEPTED: "dispatch_accepted",
+        EventType.DISPATCH_QUEUED: "dispatch_queued",
+        EventType.DISPATCH_APPLYING: "dispatch_applying",
+        EventType.DISPATCH_APPLIED: "dispatch_applied",
+        EventType.DISPATCH_FAILED: "dispatch_failed",
         EventType.UI_HINT: "ui_hint",
         EventType.JEV_TRACE: "jev_trace",
     }
@@ -330,7 +336,14 @@ def sse_event_to_sse(
         if event.step_id:
             data["step_id"] = event.step_id
     elif event.event_type == EventType.TURN_START:
-        data = {"turn_id": event.turn_id, "iteration": event.iteration}
+        data = {"turn_id": event.turn_id, "iteration": event.iteration, "dispatch": event.dispatch}
+    elif event.event_type == EventType.DISPATCH_STATE:
+        data = dict(event.dispatch)
+    elif event.event_type == EventType.TURN_REPLY:
+        data = {"turn_id": event.turn_id, "content": sanitize_streaming_text(event.result),
+                "dispatch": event.dispatch, "prompt_tokens": event.prompt_tokens,
+                "completion_tokens": event.completion_tokens, "total_tokens": event.total_tokens,
+                "iterations": event.total_iterations}
     elif event.event_type == EventType.TURN_END:
         data = {"turn_id": event.turn_id, "iteration": event.iteration}
     elif event.event_type == EventType.TURN_FAILED:
@@ -346,6 +359,23 @@ def sse_event_to_sse(
             "step_id": event.step_id,
             "claimed": event.inbox_claimed or [],
         }
+    elif event.event_type in {
+        EventType.DISPATCH_ACCEPTED,
+        EventType.DISPATCH_QUEUED,
+        EventType.DISPATCH_APPLYING,
+        EventType.DISPATCH_APPLIED,
+        EventType.DISPATCH_FAILED,
+    }:
+        data = {
+            "dispatch_id": sanitize_external_text(event.dispatch_id, max_len=128),
+            "client_message_id": sanitize_external_text(event.client_message_id, max_len=128),
+            "mode": sanitize_external_text(event.dispatch_mode, max_len=20),
+            "status": sanitize_external_text(event.dispatch_status, max_len=40),
+            "turn_id": event.turn_id,
+            "step_id": event.step_id,
+        }
+        if event.dispatch_error:
+            data["error"] = sanitize_external_text(event.dispatch_error, max_len=300)
     elif event.event_type == EventType.SUBAGENT_START:
         data = {
             "background": event.subagent_background,
@@ -623,6 +653,8 @@ def sse_event_to_sse(
             data["turn_id"] = event.turn_id
         if event.step_id:
             data["step_id"] = event.step_id
+    elif event.event_type == EventType.COMPACTION:
+        data = sanitize_external_data(event.compaction, max_len=1000)
     elif event.event_type == EventType.MEMORY_EXTRACTED:
         data = {
             "entries": (event.memory_entries or [])[:50],
@@ -720,8 +752,8 @@ def sse_event_to_sse(
     else:
         data = event.to_dict()
 
-    for field in ("trace_id", "span_id", "parent_span_id", "request_id"):
+    for field in ("turn_id", "step_id", "trace_id", "span_id", "parent_span_id", "request_id"):
         value = getattr(event, field, "")
-        if value:
+        if value and field not in data:
             data[field] = value
     return sse_format(sse_type, data)

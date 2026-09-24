@@ -102,19 +102,19 @@ describe("decodeUriEscapedPath", () => {
 });
 
 describe("collectHistoryAffectedFiles", () => {
-  const writeTools = new Set(["edit_spreadsheet", "run_code"]);
+  const writeTools = new Set(["apply_spreadsheet_changes", "run_code"]);
 
   it("uses write-tool file_path only and ignores reserved leftovers", () => {
     expect(
       collectHistoryAffectedFiles(
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         { file_path: "sales.xlsx" },
         writeTools,
       ),
     ).toEqual(["./sales.xlsx"]);
     expect(
       collectHistoryAffectedFiles(
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         { file_path: "outputs/backups/sales_20260911T091344_f525.xlsx" },
         writeTools,
       ),

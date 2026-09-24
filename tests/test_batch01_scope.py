@@ -175,8 +175,8 @@ def test_a2_plan_parent_default_child_is_plan_not_write(tmp_path: Path) -> None:
     assert cap.catalog_mode == "plan"
     child = compose_child(parent, cfg)
     assert child._current_chat_mode == "plan"
-    assert "edit_spreadsheet" not in child.registry._tools
-    assert "inspect_spreadsheet" in child.registry._tools
+    assert "apply_spreadsheet_changes" not in child.registry._tools
+    assert "observe_spreadsheet" in child.registry._tools
 
 
 def test_a3_versions_list_not_rejected_by_readonly_guard() -> None:

@@ -13,6 +13,7 @@ import { isImageFile, isVisionImageFile, isSpreadsheetFile } from "@/lib/file-ki
 import { ensureWorkbookSession, openWorkbookForConversation } from "@/lib/open-workbook";
 import { workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import type { AttachedFile } from "@/lib/types";
+import { fileAttachmentMarker } from "@/lib/upload-notice";
 
 interface FileAttachmentChipsProps {
   files: AttachedFile[];
@@ -56,6 +57,7 @@ export function FileAttachmentChips({
             /* Image thumbnail chip */
             <span
               key={af.id}
+              data-attachment-marker={af.uploadResult ? fileAttachmentMarker(af.uploadResult) : `attachment:pending:${af.file.name}`}
               className={`relative inline-flex items-end rounded-lg overflow-hidden bg-muted/40 border ${
                 af.status === "failed"
                   ? "border-2 border-destructive/60"
@@ -94,6 +96,7 @@ export function FileAttachmentChips({
             /* Document file chip */
             <span
               key={af.id}
+              data-attachment-marker={af.uploadResult ? fileAttachmentMarker(af.uploadResult) : `attachment:pending:${af.file.name}`}
               className={`inline-flex items-center gap-1 rounded-full text-xs font-medium pl-2.5 pr-1 py-0.5 max-w-[200px] ${
                 af.status === "failed"
                   ? "bg-destructive/10 text-destructive"

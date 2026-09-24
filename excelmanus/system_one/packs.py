@@ -108,13 +108,13 @@ _FILE_CODE_DOMAIN: frozenset[str] = _known(
     "copy_file",
     "rename_file",
     "delete_file",
-    "inspect_spreadsheet",
+    "observe_spreadsheet",
 )
 _WEB_DOMAIN: frozenset[str] = _cat("inspect", "analyze") | _known(
     "parallel_search",
     "read_text_file",
 )
-_MINIMAL_DOMAIN: frozenset[str] = _known("inspect_spreadsheet")
+_MINIMAL_DOMAIN: frozenset[str] = _known("observe_spreadsheet")
 
 _PROFILE_DOMAIN: dict[str, frozenset[str]] = {
     "inspect": _INSPECT_DOMAIN,

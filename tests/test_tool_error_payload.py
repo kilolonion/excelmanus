@@ -30,8 +30,8 @@ from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
 from excelmanus.tools.file_tools import init_guard as init_file_guard
 from excelmanus.tools.file_tools import read_text_file
-from excelmanus.tools.intent_tools import edit_spreadsheet, init_guard as init_intent_guard
-from excelmanus.tools.intent_tools import inspect_spreadsheet
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, init_guard as init_intent_guard
+from excelmanus.tools.workbook_tools import observe_spreadsheet
 from excelmanus.tools.registry import ToolDef, ToolRegistry
 from excelmanus.workbook.data import init_guard as init_data_guard
 from excelmanus.workbook_commit import content_version_of_file
@@ -112,15 +112,15 @@ class TestRepresentativeToolErrors:
         path = _book(tmp_path / "book.xlsx")
         rel = path.name
 
-        read = inspect_spreadsheet(
+        read = observe_spreadsheet(
             mode="range",
             file_path=rel,
-            sheet_name="Nope",
+            sheet="Nope",
             range="A1:A1",
         )
         _assert_canonical_tool_error(read, expected_code=SHEET_NOT_FOUND)
 
-        written = edit_spreadsheet(
+        written = apply_spreadsheet_changes(
             file_path=rel,
             operations=[{
                 "kind": "write",
@@ -135,7 +135,7 @@ class TestRepresentativeToolErrors:
     def test_missing_named_file_lists_candidates_not_swap(self, tmp_path: Path) -> None:
         _bind(tmp_path)
         _book(tmp_path / "sales.xlsx")
-        result = inspect_spreadsheet(mode="overview", file_path="sale.xlsx")
+        result = observe_spreadsheet(mode="overview", file_path="sale.xlsx")
         payload = _assert_canonical_tool_error(result, expected_code="PATH_INVALID")
         assert "sales.xlsx" in str(payload.get("available_excel_files") or [])
         assert "擅自" in payload["remediation"] or "替换" in payload["remediation"]
@@ -144,11 +144,11 @@ class TestRepresentativeToolErrors:
     def test_invalid_args_uses_vocab_code(self, tmp_path: Path) -> None:
         _bind(tmp_path)
         path = _book(tmp_path / "grid.xlsx")
-        result = inspect_spreadsheet(
+        result = observe_spreadsheet(
             mode="range",
             file_path=path.name,
             range="A1:A1",
-            include=["styles"],
+            facets=['unknown_facet'],
         )
         _assert_canonical_tool_error(result, expected_code="INVALID_ARGS")
 
@@ -196,7 +196,7 @@ class TestRepresentativeToolErrors:
             ),
         )
         result = await engine._execute_tool_call(
-            tc, tool_scope=["inspect_spreadsheet"], on_event=None, iteration=1,
+            tc, tool_scope=["observe_spreadsheet"], on_event=None, iteration=1,
         )
         assert result.success is False
         structured = result.structured

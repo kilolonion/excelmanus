@@ -3,14 +3,19 @@ from pathlib import Path
 import sys
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
 
 DESKTOP_ROOT = Path(SPECPATH).resolve().parent
 PROJECT_ROOT = DESKTOP_ROOT.parent
 ENTRYPOINT = PROJECT_ROOT / "desktop" / "backend_runner.py"
 
+# build-backend.mjs stages the independent browser after COLLECT, preserving
+# Chromium's native library layout instead of applying PyInstaller fixups.
 datas = []
+# Workbook observations include the adapter version in their cache identity.
+# Importing openpyxl alone does not make PyInstaller retain its dist-info.
+datas.extend(copy_metadata("openpyxl"))
 binaries = []
 hiddenimports = []
 
@@ -19,7 +24,7 @@ hiddenimports = []
 datas.append((str(PROJECT_ROOT / "pyproject.toml"), "."))
 
 # ExcelManus loads prompts and skillpacks from package data at runtime.
-for package in ("excelmanus", "fastapi", "uvicorn", "tiktoken"):
+for package in ("excelmanus", "fastapi", "uvicorn", "tiktoken", "playwright"):
     # Preserve ExcelManus sources (including executable skill scripts). Other
     # packages are already in PYZ; shipping their .py files again is redundant.
     package_datas, package_binaries, package_hiddenimports = collect_all(
@@ -55,6 +60,13 @@ analysis = Analysis(
     ],
     noarchive=False,
 )
+
+# The desktop launcher sets PLAYWRIGHT_NODEJS_PATH to resources/runtime/node.
+# Keep the driver JS and licenses, but omit the second Node executable from
+# both TOCs (PyInstaller can reclassify a data file as a native binary).
+driver_nodes = {"playwright/driver/node", "playwright/driver/node.exe"}
+analysis.binaries = [entry for entry in analysis.binaries if entry[0].replace("\\", "/") not in driver_nodes]
+analysis.datas = [entry for entry in analysis.datas if entry[0].replace("\\", "/") not in driver_nodes]
 
 pyz = PYZ(analysis.pure)
 executable = EXE(

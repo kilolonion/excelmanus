@@ -35,6 +35,10 @@ def managed(tmp_path, monkeypatch):
     monkeypatch.setattr("excelmanus.auth.access.access_enabled", lambda: False)
     monkeypatch.setattr("excelmanus.auth.access.authenticated", lambda r: False)
     monkeypatch.setattr("excelmanus.upgrade.preflight.check_upgrade_environment", lambda root: None)
+    from excelmanus.updater import VersionInfo
+    monkeypatch.setattr("excelmanus.updater.check_for_updates", lambda root, force=False: VersionInfo(
+        current="1.8.1", latest="1.8.1", has_update=True, commits_behind=1,
+    ))
     state = AppRuntime(config=SimpleNamespace(is_server=False))
     token = bind_runtime(state)
     write_runtime({"project_root": str(root), "workers": 1})
@@ -120,6 +124,23 @@ async def test_update_is_exclusive_and_always_backs_up(managed, monkeypatch):
     assert state.draining
     assert routes._schedule_helper_and_exit(root, {"action": "upgrade"}).status_code == 409
     spawn.assert_called_once_with(root)
+
+
+@pytest.mark.asyncio
+async def test_downgrade_is_rejected_before_shutdown(managed, monkeypatch):
+    from excelmanus.updater import VersionInfo
+    routes, _, state = managed
+    spawn = MagicMock()
+    monkeypatch.setattr("excelmanus.upgrade.helper.spawn_detached_helper", spawn)
+    monkeypatch.setattr("excelmanus.updater.check_for_updates", lambda root, force=False: VersionInfo(
+        current="1.8.1", latest="1.8.0", has_update=False,
+        downgrade_blocked=True, error="当前版本 v1.8.1 高于源码分支目标版本 v1.8.0，已阻止降级",
+    ))
+    response = await routes.version_upgrade(routes.UpgradeRequest(), request())
+    assert response.status_code == 409
+    assert "已阻止降级" in json.loads(response.body)["error"]
+    assert not state.draining and read_request() is None
+    spawn.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -215,6 +236,8 @@ def test_check_carries_successfully_fetched_target(tmp_path, monkeypatch):
             return 0, "main", ""
         if "--verify" in cmd:
             return 0, "a" * 40, ""
+        if "show" in cmd:
+            return 0, '[project]\nversion = "1.8.1"\n', ""
         if "rev-list" in cmd:
             return 0, "1", ""
         return 0, "", ""

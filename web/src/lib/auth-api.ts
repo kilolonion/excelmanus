@@ -1,4 +1,5 @@
 import { apiDelete, apiGet, apiPost } from "./api";
+import { commitModelChange } from "./model-config-api";
 
 export interface ProviderInfo {
   provider: string;
@@ -47,7 +48,7 @@ export async function codexOAuthExchange(code: string, state: string): Promise<{
   plan_type: string;
   expires_at: string;
 }> {
-  return apiPost("/auth/providers/openai-codex/oauth/exchange", { code, state });
+  return commitModelChange(apiPost("/auth/providers/openai-codex/oauth/exchange", { code, state }));
 }
 
 export async function codexDeviceCodeStart(): Promise<{
@@ -67,7 +68,7 @@ export async function codexDeviceCodePoll(state: string): Promise<{
   plan_type?: string;
   expires_at?: string;
 }> {
-  return apiPost("/auth/providers/openai-codex/device-code/poll", { state });
+  return pollLogin("/auth/providers/openai-codex/device-code/poll", { state });
 }
 
 export async function connectCodex(tokenData: Record<string, unknown>): Promise<{
@@ -77,11 +78,11 @@ export async function connectCodex(tokenData: Record<string, unknown>): Promise<
   plan_type: string;
   expires_at: string;
 }> {
-  return apiPost("/auth/providers/openai-codex", { token_data: tokenData });
+  return commitModelChange(apiPost("/auth/providers/openai-codex", { token_data: tokenData }));
 }
 
 export async function disconnectCodex(): Promise<{ status: string }> {
-  return apiDelete<{ status: string }>("/auth/providers/openai-codex");
+  return commitModelChange(apiDelete<{ status: string }>("/auth/providers/openai-codex"));
 }
 
 export async function fetchCodexStatus(): Promise<CodexStatus> {
@@ -92,7 +93,7 @@ export async function refreshCodexToken(): Promise<{
   status: string;
   expires_at: string;
 }> {
-  return apiPost("/auth/providers/openai-codex/refresh", {});
+  return commitModelChange(apiPost("/auth/providers/openai-codex/refresh", {}));
 }
 
 // ── 通用订阅 Provider API（WorkBuddy 等非 Codex 提供商） ──────
@@ -128,7 +129,7 @@ export async function subscriptionBrowserLoginPoll(
   plan_type?: string;
   expires_at?: string;
 }> {
-  return apiPost(`/auth/providers/${provider}/browser-login/poll`, { state });
+  return pollLogin(`/auth/providers/${provider}/browser-login/poll`, { state });
 }
 
 export async function connectSubscriptionProvider(
@@ -141,13 +142,13 @@ export async function connectSubscriptionProvider(
   plan_type: string;
   expires_at: string;
 }> {
-  return apiPost(`/auth/providers/${provider}`, { token_data: tokenData });
+  return commitModelChange(apiPost(`/auth/providers/${provider}`, { token_data: tokenData }));
 }
 
 export async function disconnectSubscriptionProvider(
   provider: string,
 ): Promise<{ status: string }> {
-  return apiDelete<{ status: string }>(`/auth/providers/${provider}`);
+  return commitModelChange(apiDelete<{ status: string }>(`/auth/providers/${provider}`));
 }
 
 export async function fetchSubscriptionStatus(
@@ -160,7 +161,7 @@ export async function refreshSubscriptionToken(provider: string): Promise<{
   status: string;
   expires_at: string;
 }> {
-  return apiPost(`/auth/providers/${provider}/refresh`, {});
+  return commitModelChange(apiPost(`/auth/providers/${provider}/refresh`, {}));
 }
 
 export async function fetchSubscriptionModels(provider: string): Promise<{
@@ -193,5 +194,11 @@ export async function subscriptionOAuthExchange(
   plan_type: string;
   expires_at: string;
 }> {
-  return apiPost(`/auth/providers/${provider}/oauth/exchange`, { code, state });
+  return commitModelChange(apiPost(`/auth/providers/${provider}/oauth/exchange`, { code, state }));
+}
+
+async function pollLogin(path: string, body: { state: string }): Promise<{ status: "pending" | "connected" }> {
+  const result = await apiPost<{ status: "pending" | "connected" }>(path, body);
+  if (result.status === "connected") await commitModelChange(Promise.resolve(result));
+  return result;
 }

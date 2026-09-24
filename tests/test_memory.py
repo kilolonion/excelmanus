@@ -69,7 +69,7 @@ class TestConversationMemory:
         assert "VERSION_CONFLICT" in _DEFAULT_SYSTEM_PROMPT
         assert "uploads/" in _DEFAULT_SYSTEM_PROMPT
         assert "问一个具体问题" in _DEFAULT_SYSTEM_PROMPT
-        assert "不擅自替换目标" in _DEFAULT_SYSTEM_PROMPT
+        assert "不擅自换文件" in _DEFAULT_SYSTEM_PROMPT
         assert "宿主有轮次上限" not in _DEFAULT_SYSTEM_PROMPT
 
     def test_initial_get_messages_has_system_only(self, memory: ConversationMemory) -> None:

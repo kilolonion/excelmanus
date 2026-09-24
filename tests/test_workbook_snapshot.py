@@ -7,18 +7,17 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.workbook.defined_name import DefinedName
 
-from excelmanus.engine_core.spill import retrieve_spill_result, verify_write
+from excelmanus.engine_core.spill import retrieve_spill_result
 from excelmanus.engine_core.tool_result import ToolResult, finalize_content
 from excelmanus.mentions.parser import Mention
 from excelmanus.mentions.resolver import MentionResolver
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import edit_spreadsheet, init_guard
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, init_guard
 from excelmanus.workbook.data import (
     filter_data,
     init_guard as init_data_guard,
     inspect_excel_files,
-    read_excel,
     search_excel_values,
 )
 from excelmanus.workbook.snapshot import open_snapshot
@@ -73,26 +72,6 @@ def _title_grid(path: Path, *, sep: str | None = None) -> Path:
     return path
 
 
-def test_header_row_roundtrip_xlsx_csv_tsv(tmp_path: Path) -> None:
-    _bind(tmp_path)
-    for name in ("title.xlsx", "title.csv", "title.tsv"):
-        path = _title_grid(tmp_path / name)
-        first = read_excel(file_path=name)
-        assert first.success, first.model_text
-        payload = first.value
-        assert isinstance(payload, dict)
-        header = payload.get("detected_header_row") or payload.get("header_row")
-        assert header == 2, name
-        again = read_excel(file_path=name, header_row=header)
-        assert again.success, again.model_text
-        cols = again.value.get("columns") or []
-        assert list(cols)[:3] == ["Name", "Amount", "Code"], name
-        forced = read_excel(file_path=name, header_row=1)
-        assert forced.success
-        forced_cols = [str(c) for c in (forced.value.get("columns") or [])]
-        assert any("Report" in c for c in forced_cols), name
-
-
 def test_filter_selection_write_and_discontiguous_delete(tmp_path: Path) -> None:
     _bind(tmp_path)
     _people_book(tmp_path / "people.xlsx")
@@ -111,7 +90,7 @@ def test_filter_selection_write_and_discontiguous_delete(tmp_path: Path) -> None
     assert payload["result_kind"] == "records"
     selection = payload["selection"]
     assert selection["content_version"]
-    records_write = edit_spreadsheet(
+    records_write = apply_spreadsheet_changes(
         file_path="people.xlsx",
         expected_version=selection["content_version"],
         operations=[{
@@ -123,10 +102,11 @@ def test_filter_selection_write_and_discontiguous_delete(tmp_path: Path) -> None
     )
     assert not records_write.success
     assert records_write.error is not None
-    assert records_write.error.code == "COORD_CONTRACT"
+    assert records_write.error.code == "INVALID_ARGS"
 
-    written = edit_spreadsheet(
+    written = apply_spreadsheet_changes(
         file_path="people.xlsx",
+        expected_version=selection["content_version"],
         operations=[{
             "kind": "write",
             "sheet": "Sheet1",
@@ -140,8 +120,9 @@ def test_filter_selection_write_and_discontiguous_delete(tmp_path: Path) -> None
     assert wb_after.active["B3"].value in (20, "20")
     wb_after.close()
 
-    deleted = edit_spreadsheet(
+    deleted = apply_spreadsheet_changes(
         file_path="people.xlsx",
+        expected_version=written.value["content_version"],
         operations=[{
             "kind": "delete_rows",
             "selection": {
@@ -181,7 +162,7 @@ def test_selection_stale_rejects_peek_seen_rebase(tmp_path: Path) -> None:
     wb.close()
     remember_content_version("people.xlsx", content_version_of_file(tmp_path / "people.xlsx"))
 
-    stale = edit_spreadsheet(
+    stale = apply_spreadsheet_changes(
         file_path="people.xlsx",
         operations=[{
             "kind": "write",
@@ -194,7 +175,7 @@ def test_selection_stale_rejects_peek_seen_rebase(tmp_path: Path) -> None:
     assert stale.error is not None
     assert stale.error.code in {"SELECTION_STALE", "VERSION_CONFLICT"}
 
-    peek_write = edit_spreadsheet(
+    peek_write = apply_spreadsheet_changes(
         file_path="people.xlsx",
         operations=[{
             "kind": "write",
@@ -205,7 +186,7 @@ def test_selection_stale_rejects_peek_seen_rebase(tmp_path: Path) -> None:
     )
     assert not peek_write.success
     assert peek_write.error is not None
-    assert peek_write.error.code == "SELECTION_STALE"
+    assert peek_write.error.code == "INVALID_ARGS"
     assert old_version
 
 
@@ -222,7 +203,7 @@ def test_named_start_cell_and_whole_axis_write(tmp_path: Path) -> None:
     wb.close()
     version = content_version_of_file(path)
     remember_content_version("named.xlsx", version)
-    ok = edit_spreadsheet(
+    ok = apply_spreadsheet_changes(
         file_path="named.xlsx",
         expected_version=version,
         operations=[{
@@ -237,7 +218,7 @@ def test_named_start_cell_and_whole_axis_write(tmp_path: Path) -> None:
     assert wb2.active["B1"].value == 42
     wb2.close()
     version2 = content_version_of_file(path)
-    bad = edit_spreadsheet(
+    bad = apply_spreadsheet_changes(
         file_path="named.xlsx",
         expected_version=version2,
         operations=[{
@@ -319,25 +300,17 @@ def test_spill_retrieve_not_retruncated() -> None:
     assert spilled
 
 
-def test_verify_write_is_sampled(tmp_path: Path) -> None:
+def test_published_mutation_observation_is_sampled(tmp_path: Path) -> None:
     _bind(tmp_path)
-    _people_book(tmp_path / "people.xlsx")
-    payload = verify_write(
-        "edit_spreadsheet",
-        {
-            "file_path": "people.xlsx",
-            "sheet": "Sheet1",
-            "operations": [{
-                "kind": "write",
-                "sheet": "Sheet1",
-                "start_cell": "B2",
-                "values": [[10]],
-            }],
-        },
-        workspace_root=str(tmp_path),
-    )
-    assert payload.get("coverage", {}).get("kind") == "sampled"
-    assert payload.get("snapshot_id")
+    path = tmp_path / "people.xlsx"
+    _people_book(path)
+    from excelmanus.tools.workbook_tools import apply_spreadsheet_changes
+    from excelmanus.workbook_commit import content_version_of_file
+    result = apply_spreadsheet_changes(file_path=path.name, expected_version=content_version_of_file(path),
+        operations=[{"kind":"write","sheet":"Sheet1","start_cell":"B2","values":[[10]]}])
+    assert result.success, result.model_text
+    assert result.value["observation"]["coverage"]["kind"] == "sampled"
+    assert result.value["content_version"] == content_version_of_file(path)
 
 
 def test_parallel_materialize_backing_same_digest(tmp_path: Path) -> None:

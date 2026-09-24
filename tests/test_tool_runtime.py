@@ -45,13 +45,13 @@ class TestUnifiedExecution:
     @pytest.mark.asyncio
     async def test_direct_edit_reaches_dispatcher(self) -> None:
         execute = AsyncMock(return_value=ToolCallResult(
-            tool_name="edit_spreadsheet", arguments={"file_path": "a.xlsx"},
+            tool_name="apply_spreadsheet_changes", arguments={"file_path": "a.xlsx"},
             result="permission denied", success=False, error="PERMISSION_DENIED",
             structured=error_result("permission denied", code="PERMISSION_DENIED"),
         ))
         runtime = _runtime(execute=execute)
         result = await runtime.execute(
-            _tc("edit_spreadsheet", {"file_path": "a.xlsx"}),
+            _tc("apply_spreadsheet_changes", {"file_path": "a.xlsx"}),
             None,
             None,
             1,
@@ -64,7 +64,7 @@ class TestUnifiedExecution:
     async def test_sdk_subcall_carries_parent(self) -> None:
         execute = AsyncMock(
             return_value=ToolCallResult(
-                tool_name="edit_spreadsheet",
+                tool_name="apply_spreadsheet_changes",
                 arguments={"file_path": "a.xlsx"},
                 result='{"status":"success"}',
                 success=True,
@@ -75,13 +75,14 @@ class TestUnifiedExecution:
                         "status": "success",
                         "file_path": "a.xlsx",
                         "content_version": "v1",
+                        "schema_version": "workbook/2", "files": [], "receipt": {}, "committed": True,
                         "applied": [],
                     },
                 ),
             )
         )
         runtime = _runtime(execute=execute)
-        tc = _tc("edit_spreadsheet", {"file_path": "a.xlsx"}, parent="run_1")
+        tc = _tc("apply_spreadsheet_changes", {"file_path": "a.xlsx"}, parent="run_1")
         result = await runtime.execute(tc, None, None, 1)
         assert result.success is True
         execute.assert_awaited_once()
@@ -128,9 +129,9 @@ class TestUnifiedExecution:
 
 class TestConcurrency:
     def test_mutations_are_exclusive_including_run_code(self) -> None:
-        assert is_concurrency_safe("inspect_spreadsheet", {"file_path": "a.xlsx"}) is True
-        assert is_concurrency_safe("edit_spreadsheet", {"file_path": "a.xlsx"}) is False
-        assert is_concurrency_safe("format_spreadsheet", {"file_path": "a.xlsx"}) is False
+        assert is_concurrency_safe("observe_spreadsheet", {"file_path": "a.xlsx"}) is True
+        assert is_concurrency_safe("apply_spreadsheet_changes", {"file_path": "a.xlsx"}) is False
+        assert is_concurrency_safe("apply_spreadsheet_changes", {"file_path": "a.xlsx"}) is False
         assert is_concurrency_safe("run_code", {"code": "print(1)"}) is False
         assert is_concurrency_safe("", {}) is False
 
@@ -145,31 +146,31 @@ class TestConcurrency:
                     raise RuntimeError("boom")
 
             policy_mod.MUTATING_ALL_TOOLS = _Boom()  # type: ignore[assignment]
-            assert is_concurrency_safe("inspect_spreadsheet") is False
+            assert is_concurrency_safe("observe_spreadsheet") is False
         finally:
             policy_mod.MUTATING_ALL_TOOLS = original
 
     def test_split_batches_keeps_mutations_serial(self) -> None:
         runtime = _runtime()
         calls = [
-            _tc("edit_spreadsheet", {"file_path": "a.xlsx"}, call_id="1"),
-            _tc("format_spreadsheet", {"file_path": "a.xlsx"}, call_id="2"),
-            _tc("inspect_spreadsheet", {"file_path": "a.xlsx"}, call_id="3"),
-            _tc("inspect_spreadsheet", {"file_path": "b.xlsx"}, call_id="4"),
+            _tc("apply_spreadsheet_changes", {"file_path": "a.xlsx"}, call_id="1"),
+            _tc("apply_spreadsheet_changes", {"file_path": "a.xlsx"}, call_id="2"),
+            _tc("observe_spreadsheet", {"file_path": "a.xlsx"}, call_id="3"),
+            _tc("observe_spreadsheet", {"file_path": "b.xlsx"}, call_id="4"),
         ]
         batches = runtime.split_batches(calls)
         assert [([c.function.name for c in b.tool_calls], b.parallel) for b in batches] == [
-            (["edit_spreadsheet"], False),
-            (["format_spreadsheet"], False),
-            (["inspect_spreadsheet", "inspect_spreadsheet"], True),
+            (["apply_spreadsheet_changes"], False),
+            (["apply_spreadsheet_changes"], False),
+            (["observe_spreadsheet", "observe_spreadsheet"], True),
         ]
 
     def test_execution_graph_honors_explicit_dependency(self) -> None:
         runtime = _runtime()
         calls = [
-            _tc("inspect_spreadsheet", {"file_path": "a.xlsx"}, call_id="read"),
+            _tc("observe_spreadsheet", {"file_path": "a.xlsx"}, call_id="read"),
             _tc("analyze_spreadsheet", {"file_path": "b.xlsx", "depends_on": ["read"]}, call_id="analyze"),
-            _tc("inspect_spreadsheet", {"file_path": "c.xlsx"}, call_id="independent"),
+            _tc("observe_spreadsheet", {"file_path": "c.xlsx"}, call_id="independent"),
         ]
 
         batches = runtime.build_execution_batches(calls)
@@ -182,9 +183,9 @@ class TestConcurrency:
     def test_execution_graph_serializes_mutation_and_overlapping_read(self) -> None:
         runtime = _runtime()
         calls = [
-            _tc("inspect_spreadsheet", {"file_path": "a.xlsx"}, call_id="read"),
-            _tc("edit_spreadsheet", {"file_path": "a.xlsx"}, call_id="write"),
-            _tc("inspect_spreadsheet", {"file_path": "b.xlsx"}, call_id="other"),
+            _tc("observe_spreadsheet", {"file_path": "a.xlsx"}, call_id="read"),
+            _tc("apply_spreadsheet_changes", {"file_path": "a.xlsx"}, call_id="write"),
+            _tc("observe_spreadsheet", {"file_path": "b.xlsx"}, call_id="other"),
         ]
 
         batches = runtime.build_execution_batches(calls)
@@ -197,8 +198,8 @@ class TestConcurrency:
     def test_reclassify_before_start_serializes_flipped_batch(self) -> None:
         runtime = _runtime()
         calls = [
-            _tc("inspect_spreadsheet", {"file_path": "a.xlsx"}, call_id="1"),
-            _tc("inspect_spreadsheet", {"file_path": "b.xlsx"}, call_id="2"),
+            _tc("observe_spreadsheet", {"file_path": "a.xlsx"}, call_id="1"),
+            _tc("observe_spreadsheet", {"file_path": "b.xlsx"}, call_id="2"),
         ]
         runtime.is_concurrency_safe = lambda name, args=None: False  # type: ignore[method-assign]
         batches = runtime.reclassify_batch(calls)
@@ -253,7 +254,7 @@ class TestFinalizeContent:
                     "message": "boom",
                     "sdk_calls": {
                         "writes": [
-                            {"tool": "edit_spreadsheet", "content_version": "sha256:committed"}
+                            {"tool": "apply_spreadsheet_changes", "content_version": "sha256:committed"}
                         ]
                     },
                 },

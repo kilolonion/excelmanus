@@ -400,6 +400,7 @@ class ConversationMemory:
         prompt_kind: str | None = None,
         workbook_action: dict[str, Any] | None = None,
         workbook_context: dict[str, Any] | None = None,
+        dispatch: dict[str, Any] | None = None,
     ) -> None:
         """添加用户消息。
 
@@ -410,6 +411,10 @@ class ConversationMemory:
             prompt_kind: 注入来源标记（如 skill_catalog），仅用于持久化与排查。
         """
         extra: dict[str, Any] = {}
+        if dispatch:
+            extra["_dispatch"] = dict(dispatch)
+            if dispatch.get("created_at"):
+                extra["created_at"] = dispatch["created_at"]
         if hidden:
             extra["_ui_hidden"] = True
         if prompt_kind:
@@ -424,7 +429,7 @@ class ConversationMemory:
         msg = {
             "role": "user",
             "content": durable,
-            "message_id": uuid4().hex,
+            "message_id": str((dispatch or {}).get("client_message_id") or uuid4().hex),
             **extra,
         }
         self._messages.append(msg)
@@ -861,6 +866,14 @@ class ConversationMemory:
         原文不再随压缩丢失。
         """
         removed = self._messages[:split_idx]
+        if synthetic:
+            from excelmanus.attachments.offload import attachment_ids_from_messages
+
+            attachment_ids = attachment_ids_from_messages(removed, event_log=self._event_log)
+            if attachment_ids:
+                # Preserve ownership without putting old image pixels back into
+                # the model request. This also survives snapshot-only resumes.
+                synthetic[0]["_compacted_attachment_ids"] = sorted(attachment_ids)
         seqs = sorted(
             m["_seq"] for m in removed if isinstance(m.get("_seq"), int)
         )

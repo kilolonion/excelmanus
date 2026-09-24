@@ -32,7 +32,7 @@ def test_write_effect_list_is_none_restore_stays_write() -> None:
         declared="workspace_write",
     ) == "workspace_write"
     assert write_effect_for_call(
-        "inspect_spreadsheet",
+        "observe_spreadsheet",
         {"mode": "range"},
         declared="none",
     ) == "none"

@@ -44,6 +44,7 @@ def admit_image_bytes(
     store = store or get_attachment_store()
     detected = detect_image(data, media_type)
     assert_admission_limits(data, detected)
+    source_digest = store.put_source(data)
     normalized = normalize_image(data, detected)
     digest = hashlib.sha256(normalized.data).hexdigest()
     orig = None
@@ -57,6 +58,7 @@ def admit_image_bytes(
         height=normalized.height,
         name=_safe_name(name),
         original_dimensions=orig,
+        source_digest=source_digest,
     )
     return store.put(normalized.data, ref)
 

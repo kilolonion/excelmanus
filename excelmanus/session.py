@@ -1734,6 +1734,44 @@ class SessionManager:
             logger.info("会话 %s 插话已入队（%d 字）", session_id[:8], len(text))
             return True
 
+    async def dispatch_message(
+        self,
+        session_id: str,
+        message: str,
+        *,
+        mode: str,
+        client_message_id: str,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """把 steer/queue 投递到已有 Driver；不创建第二个 chat task。"""
+        if not session_id or (not message.strip() and not (extra or {}).get("images")):
+            return None
+        async with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry is None:
+                return None
+            driver = entry.engine._driver
+            existing = driver.check_dispatch(client_message_id, message, mode, extra or {})
+            if existing is not None:
+                return existing
+            if not entry.in_flight or not driver.running:
+                return None
+            from excelmanus.api_app_state import get_runtime
+            owner = get_runtime().active_chat_tasks.get(session_id)
+            if owner is None or owner.done():
+                return None
+            if mode == "steer" and (extra or {}).get("chat_mode", "write") != entry.engine._current_chat_mode:
+                from excelmanus.agent.dispatch import DispatchConflict
+                raise DispatchConflict("调整方向沿用当前任务模式；改变模式请排队或直接发送")
+            result = entry.engine.dispatch_message(
+                message,
+                mode=mode,
+                client_message_id=client_message_id,
+                extra=extra,
+            )
+            logger.info("会话 %s dispatch=%s mode=%s", session_id[:8], result["dispatch_id"], mode)
+            return result
+
     async def get_engine_if_idle(
         self, session_id: str, *, user_id: str | None = None
     ) -> AgentEngine | None:
@@ -2021,6 +2059,7 @@ class SessionManager:
                 "pending_question": pending_question_data,
                 "last_route": last_route_data,
                 "turn": engine._driver.current_turn(),
+                "dispatches": engine._driver.dispatch_snapshot(),
             }
 
         if self._chat_history is not None:

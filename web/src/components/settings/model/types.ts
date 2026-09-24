@@ -1,25 +1,4 @@
-export interface ModelSection {
-  api_key?: string;
-  base_url?: string;
-  model?: string;
-  enabled?: boolean;
-  protocol?: string;
-}
-
-export interface ProfileEntry {
-  name: string;
-  model: string;
-  api_key: string;
-  base_url: string;
-  description: string;
-  protocol: string;
-  thinking_mode: string;
-  model_family: string;
-  custom_extra_body: string;
-  custom_extra_headers: string;
-  /** 智能匹配绑定的已知规范模型名（仅用于本地配置，不改写上游 Model ID） */
-  canonical_model: string;
-}
+export type { ModelConfig, ProfileEntry } from "@/lib/model-config";
 
 export interface ModelCapabilities {
   model: string;
@@ -53,13 +32,6 @@ export interface ProbeJobSnapshot {
   targets_total: number;
   targets_done: number;
   targets: ProbeJobTarget[];
-}
-
-export interface ModelConfig {
-  profiles: ProfileEntry[];
-  active?: string | null;
-  /** Jev 智能匹配开关（后端 EXCELMANUS_MODEL_CANONICAL_MATCH） */
-  canonical_match_enabled?: boolean;
 }
 
 export interface ProviderPreset {

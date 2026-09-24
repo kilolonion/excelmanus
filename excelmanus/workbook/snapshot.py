@@ -121,6 +121,7 @@ class WorkbookSnapshot:
     content_version: str
     backing: SnapshotBacking
     suffix: str
+    lineage_id: str | None = None
 
     @property
     def backing_path(self) -> Path:
@@ -533,12 +534,15 @@ def open_snapshot_at(
         )
         backing = _materialize_backing(workspace, data, suffix, content_version_of(data))
         remember_content_version(file_ref.relative, version)
+        from excelmanus.workspace.file_service import LineageIndex
+        lineage_id = LineageIndex(workspace.root).current_lineage_id(file_ref.relative)
         snapshot = WorkbookSnapshot(
             id=snap_id,
             file=file_ref,
             content_version=version,
             backing=backing,
             suffix=suffix,
+            lineage_id=lineage_id,
         )
         # Small snapshots retain their bytes; large snapshots retain only the
         # content-addressed backing path.  The cache remains bounded by the
@@ -582,6 +586,7 @@ def open_snapshot_bytes(
     workspace: WorkspaceRef,
     suffix: str | None = None,
     expected_version: str | None = None,
+    lineage_id: str | None = None,
 ) -> WorkbookSnapshot:
     """Open immutable bytes that do not have a live user path (for history preview)."""
     file_suffix = suffix or Path(relative).suffix.lower() or ".bin"
@@ -599,6 +604,7 @@ def open_snapshot_bytes(
         content_version=version,
         backing=backing,
         suffix=file_suffix,
+        lineage_id=lineage_id,
     )
 
 
@@ -825,18 +831,19 @@ def apply_read_contract(
 
 def cell_fact_from_openpyxl(sheet: str, row: int, col: int, cell: Any, cached_value: Any) -> CellFact:
     raw = getattr(cell, "value", None)
-    formula = raw if isinstance(raw, str) and raw.startswith("=") else None
+    formula = raw if isinstance(raw, str) and raw.startswith("=") else getattr(raw, "text", None)
+    is_formula = getattr(cell, "data_type", None) == "f" or formula is not None
     err = None
     if cached_value is not None and type(cached_value).__name__ == "Error":
         err = str(cached_value)
         cached_value = None
-    if formula and cached_value is None:
+    if is_formula and cached_value is None:
         cached: CachedState = "no"
         source: FactSource = "formula_text"
         t: CellType = "z"
         text = None
         v = None
-    elif formula:
+    elif is_formula:
         cached = "yes"
         source = "cached"
         t, v, text = _classify_value(cached_value)
@@ -925,105 +932,10 @@ def _decode_text_bytes(data: bytes) -> str:
     return data.decode("latin-1")
 
 
-def _window_dims(ws: Any, rect: RectRef) -> tuple[dict[str, float], dict[str, float]]:
-    from openpyxl.utils import get_column_letter
-
-    col_widths: dict[str, float] = {}
-    for col in range(rect.min_col, rect.max_col + 1):
-        letter = get_column_letter(col)
-        dim = ws.column_dimensions.get(letter)
-        if dim is not None and dim.width:
-            col_widths[letter] = float(dim.width)
-    row_heights: dict[str, float] = {}
-    for row in range(rect.min_row, rect.max_row + 1):
-        dim = ws.row_dimensions.get(row)
-        if dim is not None and dim.height:
-            row_heights[str(row)] = float(dim.height)
-    return col_widths, row_heights
 
 
-def _window_merges(ws: Any, rect: RectRef) -> list[dict[str, int]]:
-    from excelmanus.tools._style_extract import extract_merge_ranges
-
-    merges: list[dict[str, int]] = []
-    for item in extract_merge_ranges(ws):
-        if (
-            item["max_row"] < rect.min_row
-            or item["min_row"] > rect.max_row
-            or item["max_col"] < rect.min_col
-            or item["min_col"] > rect.max_col
-        ):
-            continue
-        merges.append(item)
-    return merges
 
 
-def project_csv_view(
-    snapshot: WorkbookSnapshot,
-    windows: list[RectRef],
-) -> dict[str, Any]:
-    """CSV/TSV 网格：第 1 行就是 R1，total 是全文行数。"""
-    from excelmanus.workbook.csv_index import csv_index
-
-    index = csv_index(snapshot)
-    used_rows = index.rows
-    used_cols = index.columns
-    sheet_name = "Sheet1"
-    sheets = [{"name": sheet_name, "sheet_id": sheet_name, "used": {"rows": used_rows, "cols": used_cols}}]
-    projected: list[dict[str, Any]] = []
-    loaded: list[dict[str, int]] = []
-    for rect in windows:
-        if rect.sheet and rect.sheet != sheet_name:
-            raise SnapshotError(f"工作表 '{rect.sheet}' 不存在", code="SHEET_NOT_FOUND")
-        r0 = max(1, rect.min_row)
-        c0 = max(1, rect.min_col)
-        r1 = min(rect.max_row, max(used_rows, 1))
-        c1 = min(rect.max_col, max(used_cols, 1))
-        cells: dict[str, Any] = {}
-        for row, src in enumerate(index.window(r0, r1), r0):
-            for col in range(c0, c1 + 1):
-                raw = src[col - 1] if col - 1 < len(src) else ""
-                if raw == "":
-                    continue
-                try:
-                    value: Any = int(raw)
-                    kind = "n"
-                except ValueError:
-                    try:
-                        value = float(raw)
-                        kind = "n"
-                    except ValueError:
-                        value = raw
-                        kind = "s"
-                cells[f"{row},{col}"] = {"t": kind, "v": value, "cached": "yes"}
-        window_rect = {"r0": rect.min_row, "c0": rect.min_col, "r1": rect.max_row, "c1": rect.max_col}
-        loaded.append({**window_rect, "sheet": sheet_name})
-        projected.append({
-            "sheet": sheet_name,
-            "rect": window_rect,
-            "cells": cells,
-            "merges": [],
-            "col_widths": {},
-            "row_heights": {},
-        })
-    return {
-        "file": {
-            "workspaceKey": snapshot.file.workspace.identity_key(),
-            "relative": snapshot.file.relative,
-            "observedVersion": snapshot.content_version,
-        },
-        "content_version": snapshot.content_version,
-        "snapshot_id": snapshot.id.key(),
-        "active_sheet": sheet_name,
-        "with_styles": True,
-        "sheets": sheets,
-        "windows": projected,
-        "coverage": {
-            "loaded": loaded,
-            "unloaded": _unloaded_rects(used_rows, used_cols, loaded),
-            "truncated_reason": "window" if used_rows > (loaded[0]["r1"] if loaded else 0) else None,
-        },
-    }
 
 
 def _cached_workbook_pair(
@@ -1037,129 +949,12 @@ def _cached_workbook_pair(
         # BytesIO 而非文件路径：缓存期间不占用 OS 句柄，Windows 上不会锁死源文件。
         wb_f = load_workbook(io.BytesIO(raw), data_only=False, read_only=not with_styles)
         wb_v = load_workbook(io.BytesIO(raw), data_only=True, read_only=True)
-        cost = max(len(raw), 1) * (8 if with_styles else 3)
+        from zipfile import ZipFile
+        with ZipFile(io.BytesIO(raw)) as package:
+            expanded = sum(entry.file_size for entry in package.infolist() if entry.filename.endswith(".xml"))
+        # Compressed ZIP bytes badly underestimate Cell object retention. Keep
+        # this conservative estimate, plus the existing hard entry count cap.
+        cost = max(len(raw), expanded, 1) * (8 if with_styles else 3)
         return (wb_f, wb_v, threading.Lock()), cost
 
     return _workbook_views.get_or_create((snapshot.id.key(), with_styles), build)
-
-
-def project_view(
-    snapshot: WorkbookSnapshot,
-    windows: list[RectRef],
-    *,
-    data_only: bool = False,
-    with_styles: bool = True,
-    active_sheet_default: bool = False,
-) -> dict[str, Any]:
-    """第 5 批 WorkbookViewSnapshot 的服务端投影。"""
-    if snapshot.is_csv():
-        return project_csv_view(snapshot, windows)
-    from excelmanus.tools._style_extract import extract_cell_style
-
-    wb_f, wb_v, wb_lock = _cached_workbook_pair(snapshot, with_styles)
-    wb_lock.acquire()
-    try:
-        if active_sheet_default:
-            active = wb_f.active or wb_f.worksheets[0]
-            windows = [replace_rect(rect, rect.sheet or active.title) for rect in windows]
-        sheets = []
-        used_by_sheet: dict[str, tuple[int, int]] = {}
-        for name in wb_f.sheetnames:
-            ws = wb_f[name]
-            used = (int(ws.max_row or 0), int(ws.max_column or 0))
-            used_by_sheet[name] = used
-            sheets.append({
-                "name": name,
-                "sheet_id": name,
-                "used": {"rows": used[0], "cols": used[1]},
-            })
-        projected = []
-        loaded_by_sheet: dict[str, list[dict[str, int]]] = {name: [] for name in wb_f.sheetnames}
-        for rect in windows:
-            title = require_default_sheet(list(wb_f.sheetnames), rect.sheet)
-            ws_f = wb_f[title]
-            ws_v = wb_v[title]
-            cells: dict[str, Any] = {}
-            # ReadOnlyWorksheet.cell() starts an XML scan on every call. Walk
-            # both snapshots once, and omit default blanks from the wire data.
-            from itertools import zip_longest
-
-            used_rows, used_cols = used_by_sheet[title]
-            bounds = dict(min_row=rect.min_row, max_row=min(rect.max_row, used_rows),
-                          min_col=rect.min_col, max_col=min(rect.max_col, used_cols))
-            rows_f = ws_f.iter_rows(**bounds) if bounds["max_row"] >= rect.min_row and bounds["max_col"] >= rect.min_col else ()
-            rows_v = ws_v.iter_rows(**bounds) if bounds["max_row"] >= rect.min_row and bounds["max_col"] >= rect.min_col else ()
-            for row, pair in enumerate(zip_longest(rows_f, rows_v, fillvalue=()), rect.min_row):
-                for col, (cell, cached) in enumerate(zip_longest(*pair), rect.min_col):
-                    cached_value = getattr(cached, "value", None)
-                    has_style = with_styles and getattr(cell, "has_style", False)
-                    if getattr(cell, "value", None) is None and cached_value is None and not has_style:
-                        continue
-                    fact = cell_fact_from_openpyxl(
-                        title, row, col, cell, cached_value,
-                    )
-                    payload: dict[str, Any] = {
-                        "t": fact.t,
-                        "v": fact.v,
-                        "cached": fact.cached,
-                    }
-                    if fact.f:
-                        payload["f"] = fact.f
-                    if fact.e:
-                        payload["e"] = fact.e
-                    if has_style:
-                        style = extract_cell_style(cell)
-                        if style:
-                            payload["s"] = style
-                    cells[f"{row},{col}"] = payload
-            window_rect = {
-                "r0": rect.min_row,
-                "c0": rect.min_col,
-                "r1": rect.max_row,
-                "c1": rect.max_col,
-            }
-            loaded_by_sheet[title].append(window_rect)
-            col_widths, row_heights = _window_dims(ws_f, rect) if with_styles else ({}, {})
-            projected.append({
-                "sheet": title,
-                "rect": window_rect,
-                "cells": cells,
-                "merges": _window_merges(ws_f, rect),
-                "col_widths": col_widths,
-                "row_heights": row_heights,
-            })
-        unloaded: list[dict[str, Any]] = []
-        for name, used in used_by_sheet.items():
-            for item in _unloaded_rects(used[0], used[1], loaded_by_sheet.get(name) or []):
-                unloaded.append({"sheet": name, **item})
-        used_rows = max((u[0] for u in used_by_sheet.values()), default=0)
-        loaded_max = max((w.max_row for w in windows), default=0)
-        return {
-            "file": {
-                "workspaceKey": snapshot.file.workspace.identity_key(),
-                "relative": snapshot.file.relative,
-                "observedVersion": snapshot.content_version,
-            },
-            "content_version": snapshot.content_version,
-            "snapshot_id": snapshot.id.key(),
-            "active_sheet": (wb_f.active or wb_f.worksheets[0]).title,
-            "with_styles": with_styles,
-            "sheets": sheets,
-            "windows": projected,
-            "coverage": {
-                "loaded": [
-                    {
-                        "sheet": require_default_sheet(list(wb_f.sheetnames), w.sheet),
-                        "r0": w.min_row,
-                        "c0": w.min_col,
-                        "r1": w.max_row,
-                        "c1": w.max_col,
-                    }
-                    for w in windows
-                ],
-                "unloaded": unloaded,
-                "truncated_reason": "window" if used_rows > loaded_max else None,
-            },
-        }
-    finally:
-        wb_lock.release()

@@ -75,7 +75,9 @@ export function SessionSync() {
   }, [setThinkingEffort, setThinkingEffortOptions]);
 
   useEffect(() => {
+    const configRevision = useJevStore.getState().configRevision;
     apiGet<{
+      jev_experimental_enabled?: boolean;
       jev_enabled?: string;
       jev_active_provider?: string;
       ai_gateway?: { configured?: boolean };
@@ -83,9 +85,11 @@ export function SessionSync() {
       jev_providers?: { id?: string; protocol?: string; configured?: boolean }[];
     }>("/config/runtime")
       .then((data) => {
+        if (useJevStore.getState().configRevision !== configRevision) return;
         useJevStore.getState().setChatEnabled(jevChatEnabledFromRuntime(data));
       })
       .catch(() => {
+        if (useJevStore.getState().configRevision !== configRevision) return;
         useJevStore.getState().setChatEnabled(false);
       });
   }, []);

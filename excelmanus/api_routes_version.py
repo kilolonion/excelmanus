@@ -112,6 +112,28 @@ async def version_upgrade_capability(request: Request) -> JSONResponse:
     return JSONResponse(content={"supported": denied is None, "reason": reason}, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/api/v1/version/upgrade/check")
+async def version_upgrade_check(request: Request) -> JSONResponse:
+    denied = _web_upgrade_denial(request)
+    if denied:
+        return denied
+    from excelmanus.updater import check_for_updates
+
+    root = _get_project_root()
+    info = await asyncio.get_running_loop().run_in_executor(
+        None, partial(check_for_updates, root, force=True),
+    )
+    return JSONResponse(content={
+        "current": info.current,
+        "latest": info.latest,
+        "has_update": info.has_update,
+        "commits_behind": info.commits_behind,
+        "check_failed": info.check_failed,
+        "downgrade_blocked": info.downgrade_blocked,
+        "error": info.error or None,
+    }, headers={"Cache-Control": "no-store"})
+
+
 _GIT_COMMIT_UNSET = object()
 _git_commit_cache: object = _GIT_COMMIT_UNSET
 
@@ -445,6 +467,14 @@ async def version_upgrade(body: UpgradeRequest, request: Request) -> JSONRespons
     environment_error = await asyncio.get_running_loop().run_in_executor(None, check_upgrade_environment, root)
     if environment_error:
         return _error(409, environment_error)
+    from excelmanus.updater import check_for_updates
+    info = await asyncio.get_running_loop().run_in_executor(
+        None, partial(check_for_updates, root, force=True),
+    )
+    if info.check_failed or info.downgrade_blocked:
+        return _error(409, info.error or "无法确认源码分支更新，当前服务未停止")
+    if not info.has_update:
+        return _error(409, "当前源码分支没有可更新的新提交，当前服务未停止")
     # No await from this point through reservation/draining: other chat requests
     # on this single-worker event loop cannot enter between the final checks.
     if runtime.draining or any(not task.done() for task in runtime.active_chat_tasks.values()):

@@ -1,6 +1,6 @@
 # ExcelManus 运维手册
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-21
+适用版本：1.8.1 源码 · 更新日期：2026-09-21
 
 [文档导航](README.md) · [English](ops-manual_en.md) · [配置参考](configuration.md)
 

@@ -1,0 +1,5 @@
+include setup.py
+include web/package.json web/package-lock.json web/tsconfig.json
+include web/scripts/build-workbook-preview.mjs
+include web/src/lib/workbook-preview-entry.ts web/src/lib/workbook-observation.ts
+recursive-include excelmanus/workbook/render_assets *

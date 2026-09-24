@@ -13,7 +13,7 @@ const { getPath7za } = require('app-builder-lib/out/toolsets/7zip');
 const { getMakeNsisPath, getNsisPluginsPath } = require('app-builder-lib/out/toolsets/windows');
 const desktopRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
-const installer = resolve(args.find(arg => !arg.startsWith('--')) || join(desktopRoot, 'dist', 'ExcelManus Setup 1.8.0.exe'));
+const installer = resolve(args.find(arg => !arg.startsWith('--')) || join(desktopRoot, 'dist', 'ExcelManus Setup 1.8.1.exe'));
 const fast = args.includes('--fast');
 const ownedRemoval = args.includes('--owned-removal');
 const work = join(desktopRoot, '.build', 'install-profile', `run-${Date.now()}`);

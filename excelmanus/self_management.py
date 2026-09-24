@@ -1,4 +1,4 @@
-"""Opt-in, session-local agent configuration. No process settings or secrets.
+"""Default-on, session-local agent configuration. No process settings or secrets.
 
 The settings UI owns the master switch. Tool execution rechecks it, caller
 identity, chat mode and skill activation, including calls via the Python SDK.
@@ -27,7 +27,7 @@ SETTING_SCHEMAS: dict[str, dict[str, Any]] = {
     "subagent_enabled": {"type": "boolean", "description": "本会话是否允许委派子任务。"},
     "parallel_readonly_tools": {"type": "boolean", "description": "是否并发执行独立的只读工具。"},
     "parallel_tool_max": {"type": "integer", "minimum": 1, "maximum": 32, "description": "只读工具并发上限。"},
-    "max_iterations": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "从下一轮用户请求开始使用的调用上限。"},
+    "max_iterations": {"type": "integer", "minimum": 0, "description": "从下一轮用户请求开始使用的调用上限；0 表示不限制。"},
     "max_context_tokens": {"type": "integer", "minimum": 1000, "maximum": 10000000, "description": "上下文窗口上限；需符合当前模型容量。"},
     "compaction_enabled": {"type": "boolean", "description": "是否自动压缩上下文。"},
     "tool_result_hard_cap_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "description": "工具结果字符上限。"},
@@ -108,6 +108,19 @@ def _values(engine: Any) -> dict[str, Any]:
     return values
 
 
+def settings_snapshot(engine: Any) -> dict[str, dict[str, Any]]:
+    """Public setting allowlist shared with the read-only knowledge portal."""
+    from copy import deepcopy
+
+    return {
+        name: {"value": value, "writable": name in SETTING_SCHEMAS,
+               "schema": deepcopy(SETTING_SCHEMAS.get(name)),
+               "effective": ("host_managed" if name not in SETTING_SCHEMAS
+                             else "next_turn" if name == "max_iterations" else "next_call")}
+        for name, value in _values(engine).items()
+    }
+
+
 def inspect_agent(engine: Any, section: str = "all"):
     denied = _check_access(engine)
     if denied is not None:
@@ -116,13 +129,7 @@ def inspect_agent(engine: Any, section: str = "all"):
         return error_result("section 必须为 all、capabilities 或 settings。", code="INVALID_ARGS")
     data: dict[str, Any] = {"scope": "session", "persisted": False}
     if section in {"all", "settings"}:
-        data["settings"] = {
-            name: {"value": value, "writable": name in SETTING_SCHEMAS,
-                   "schema": SETTING_SCHEMAS.get(name),
-                   "effective": ("host_managed" if name not in SETTING_SCHEMAS
-                                 else "next_turn" if name == "max_iterations" else "next_call")}
-            for name, value in _values(engine).items()
-        }
+        data["settings"] = settings_snapshot(engine)
         data["thinking_effort_options"] = list(engine._config.thinking_effort_options)
         data["omitted"] = "凭证、模型档案、连接地址、命令和文件路径不向模型披露。未列出的配置不支持此工具修改。"
     if section in {"all", "capabilities"}:

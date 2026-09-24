@@ -64,7 +64,7 @@ class TestSanitizeToolCallArguments:
                 "id": "c1",
                 "type": "function",
                 "function": {
-                    "name": "format_spreadsheet",
+                    "name": "apply_spreadsheet_changes",
                     "arguments": '{"file_path": "a.xlsx", "operations": ',
                 },
             }

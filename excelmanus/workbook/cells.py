@@ -1,6 +1,6 @@
 """单元格级内部辅助：值强制转换、合并格重定向、单元格 diff。
 
-写入走 `edit_spreadsheet`；本模块不再提交工作簿。
+写入走 `apply_spreadsheet_changes`；本模块不再提交工作簿。
 """
 
 from __future__ import annotations

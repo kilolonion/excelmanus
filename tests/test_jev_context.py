@@ -141,7 +141,7 @@ def test_column_match_selects_cached_header_and_bounded_sample():
     assert candidate["header"] == "到账金额"
     assert candidate["column"] == "C"
     suggestion = decision.extras["read_suggestion"]
-    assert suggestion["tool"] == "inspect_spreadsheet"
+    assert suggestion["tool"] == "observe_spreadsheet"
     assert suggestion["arguments"]["mode"] == "range"
     assert suggestion["arguments"]["range"] == "C1:C21"
     assert suggestion["purpose"] == "column_sample"
@@ -172,10 +172,10 @@ def test_column_is_dropped_for_other_workspace_or_no_target():
 def test_read_suggestions_map_to_bounded_tool_arguments():
     formulas = synthesize(PACK, evaluation(read="formulas"), state())
     suggestion = formulas.extras["read_suggestion"]
-    assert suggestion["tool"] == "inspect_spreadsheet"
+    assert suggestion["tool"] == "observe_spreadsheet"
     assert suggestion["arguments"] == {"mode": "range", "file_path": "./sales.xlsx",
-                                       "sheet_name": "明细", "range": "B2:B5",
-                                       "include": ["formulas"]}
+                                       "sheet": "明细", "range": "B2:B5",
+                                       "facets": ["data", "dependencies"]}
     overview = synthesize(PACK, evaluation(read="overview"), state())
     assert overview.extras["read_suggestion"]["arguments"]["mode"] == "overview"
     none = synthesize(PACK, evaluation(read="none"), state())
@@ -191,7 +191,7 @@ def test_build_context_is_scoped_bounded_and_ignores_hidden_advice(tmp_path):
         {"role": "user", "content": "请把利润列的负数标红"},
         {"role": "assistant", "content": "正在检查明细"},
         {"role": "user", "content": "OLD_ADVICE", "_ui_hidden": True, "_prompt_kind": "jev_context_advice"},
-        {"role": "assistant", "tool_calls": [{"function": {"name": "inspect_spreadsheet", "arguments":
+        {"role": "assistant", "tool_calls": [{"function": {"name": "observe_spreadsheet", "arguments":
             json.dumps({"file_path": "sales.xlsx", "sheet": "明细", "range": "B2:B5", "api_key": "SECRET"})}}]},
     ]
     e._file_registry = SimpleNamespace(list_all=Mock(return_value=[]), scan_workspace=Mock())

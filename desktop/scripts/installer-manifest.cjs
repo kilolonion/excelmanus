@@ -16,6 +16,11 @@ async function collectFiles(root, relative = '') {
 
 async function afterPack(context) {
   if (context.electronPlatformName !== 'win32') return;
+  // Pinned electron-builder 26.15.3's modern 7za chooses BCJ2 at -mx=9;
+  // its install-time Nsis7z can silently omit those PE entries (#9983).
+  // Set this in the hook so npm, release scripts and direct builder calls all
+  // use the compatible encoder before buildAppPackage runs.
+  process.env.ELECTRON_BUILDER_7Z_FILTER = 'BCJ';
   const files = await collectFiles(context.appOutDir);
   const executable = `${context.packager.appInfo.productFilename}.exe`;
   if (!files.includes(executable)) throw new Error('ExcelManus executable missing from installer manifest');

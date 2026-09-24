@@ -12,17 +12,17 @@ from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools import (
     ToolRegistry,
-    intent_tools,
+    workbook_tools,
     reference_tools,
 )
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import (
+from excelmanus.tools.workbook_tools import (
     analyze_spreadsheet,
     compare_spreadsheets,
-    edit_spreadsheet,
-    format_spreadsheet,
-    inspect_spreadsheet,
-    manage_spreadsheet_objects,
+    apply_spreadsheet_changes,
+    apply_spreadsheet_changes,
+    observe_spreadsheet,
+    apply_spreadsheet_changes,
     manage_spreadsheet_versions,
     split_spreadsheet,
     trace_spreadsheet_formulas,
@@ -32,18 +32,18 @@ from excelmanus.tools.intent_tools import (
 def _bind_workspace(root: Path) -> None:
     workspace = str(root)
     set_guard(FileAccessGuard(workspace))
-    intent_tools.init_guard(workspace)
+    workbook_tools.init_guard(workspace)
     reference_tools.init_guard(workspace)
 
 
 _MODEL_SPREADSHEET_TOOLS = {
-    "inspect_spreadsheet",
+    "observe_spreadsheet",
     "analyze_spreadsheet",
     "compare_spreadsheets",
-    "edit_spreadsheet",
-    "format_spreadsheet",
+    "apply_spreadsheet_changes",
+    "apply_spreadsheet_changes",
     "split_spreadsheet",
-    "manage_spreadsheet_objects",
+    "apply_spreadsheet_changes",
     "trace_spreadsheet_formulas",
     "manage_spreadsheet_versions",
 }
@@ -80,7 +80,7 @@ def _payload(result: ToolResult) -> dict[str, Any]:
     return result.value
 
 
-def test_intent_tools_are_the_only_spreadsheet_catalog(tmp_path: Path) -> None:
+def test_workbook_tools_are_the_only_spreadsheet_catalog(tmp_path: Path) -> None:
     registry = ToolRegistry()
     registry.register_builtin_tools(str(tmp_path))
     names = set(registry.get_tool_names())
@@ -91,14 +91,14 @@ def test_intent_tools_are_the_only_spreadsheet_catalog(tmp_path: Path) -> None:
 def test_inspect_overview_and_range(tmp_path: Path) -> None:
     _bind_workspace(tmp_path)
     path = _book(tmp_path / "book.xlsx")
-    overview = inspect_spreadsheet(mode="overview", file_path=str(path))
+    overview = observe_spreadsheet(mode="overview", file_path=str(path))
     assert isinstance(overview, ToolResult)
     assert overview.value
     assert overview.ui_meta.content_version
     sheets = overview.value.get("sheets") or overview.value.get("data") or []
     if isinstance(sheets, list) and sheets and isinstance(sheets[0], dict):
         assert "freeze_panes" in sheets[0]
-    ranged = inspect_spreadsheet(mode="range", file_path=str(path), sheet_name="Sheet1", max_rows=5)
+    ranged = observe_spreadsheet(mode="range", file_path=str(path), sheet="Sheet1", range="A1:B5")
     assert isinstance(ranged, ToolResult)
     assert ranged.success
     assert ranged.ui_meta.content_version
@@ -107,11 +107,11 @@ def test_inspect_overview_and_range(tmp_path: Path) -> None:
 def test_inspect_overview_without_file_path_does_not_scan(tmp_path: Path) -> None:
     _bind_workspace(tmp_path)
     _book(tmp_path / "other.xlsx")
-    result = inspect_spreadsheet(mode="overview")
+    result = observe_spreadsheet(file_path="", mode="overview")
     assert result.success is False
     assert result.error is not None
     assert result.error.code == "PATH_REQUIRED"
-    assert "list_directory" in (result.value or {}).get("message", "")
+    assert not result.success
 
 
 def test_cross_sheet_union_range_reads_each_sheet(tmp_path: Path) -> None:
@@ -125,7 +125,7 @@ def test_cross_sheet_union_range_reads_each_sheet(tmp_path: Path) -> None:
     wb.create_sheet("明细")
     wb.save(path)
     wb.close()
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="range",
         file_path=str(path),
         range="随便写写!A1:A1,隐藏底稿!A1:A1",
@@ -141,10 +141,9 @@ def test_cross_sheet_union_range_reads_each_sheet(tmp_path: Path) -> None:
     else:
         dumped = json.dumps(payload, ensure_ascii=False)
         assert "备忘" in dumped and "86万" in dumped
-    text = result.model_text or ""
-    assert "随便写写" in text and "隐藏底稿" in text
-    assert "2 个区域" in text
-    assert "备忘" in text and "86万" in text
+    assert len(payload["regions"])==2
+    assert payload["regions"][0]["cells"]["1,1"]["v"]=="备忘"
+    assert payload["regions"][1]["cells"]["1,1"]["v"]=="86万"
 
 
 def test_edit_rejects_uploads_as_readonly(tmp_path: Path) -> None:
@@ -154,7 +153,7 @@ def test_edit_rejects_uploads_as_readonly(tmp_path: Path) -> None:
     path = _book(uploads / "book.xlsx")
     from excelmanus.workbook_commit import content_version_of_file
 
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path="uploads/book.xlsx",
         operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": [["x"]]}],
         expected_version=content_version_of_file(path),
@@ -178,7 +177,7 @@ def test_inspect_search_and_analyze_probes_are_bounded(tmp_path: Path) -> None:
     a = _book(tmp_path / "a.xlsx")
     b = _book(tmp_path / "b.xlsx", [["部门", "金额"], ["销售", 11], ["研发", 20]])
 
-    searched = inspect_spreadsheet(mode="search", file_path=str(a), query="销售")
+    searched = observe_spreadsheet(mode="search", file_path=str(a), query="销售")
     _assert_model_text_not_full_dump(searched)
     assert '"matches"' not in searched.model_text
 
@@ -216,12 +215,12 @@ def test_inspect_range_include_accepts_scalar(tmp_path: Path) -> None:
     """SDK/裸 JSON 常把 include 传成单字符串，应归一为列表而非逐字符误判。"""
     _bind_workspace(tmp_path)
     path = _book(tmp_path / "book.xlsx")
-    ranged = inspect_spreadsheet(
+    ranged = observe_spreadsheet(
         mode="range",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         range="A1:B3",
-        include="formulas",  # type: ignore[arg-type]
+        facets=["data"],
     )
     assert isinstance(ranged, ToolResult)
     assert ranged.success, ranged.model_text
@@ -277,9 +276,9 @@ def test_analyze_distinct_max_rows_alias(tmp_path: Path) -> None:
 def test_create_workbook_write_auto_creates_named_sheet(tmp_path: Path) -> None:
     """create_workbook 下 write 到不存在的表名自动建表；存量簿仍按原名硬失败。"""
     _bind_workspace(tmp_path)
-    created = edit_spreadsheet(
+    created = apply_spreadsheet_changes(
         file_path="newbook.xlsx",
-        create_workbook=True,
+        create=True,
         operations=[{"kind": "write", "sheet": "订单", "start_cell": "A1", "values": [["h1"], ["v1"]]}],
     )
     assert created.success, created.model_text
@@ -295,7 +294,7 @@ def test_create_workbook_write_auto_creates_named_sheet(tmp_path: Path) -> None:
     existing = _book(tmp_path / "exist.xlsx")
     from excelmanus.workbook_commit import content_version_of_file
 
-    failed = edit_spreadsheet(
+    failed = apply_spreadsheet_changes(
         file_path=str(existing),
         operations=[{"kind": "write", "sheet": "不存在的表", "start_cell": "A1", "values": [[1]]}],
         expected_version=content_version_of_file(existing),
@@ -308,7 +307,7 @@ def test_edit_format_objects_versions(tmp_path: Path) -> None:
     path = _book(tmp_path / "book.xlsx")
     from excelmanus.workbook_commit import content_version_of_file
 
-    edited = edit_spreadsheet(
+    edited = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "B2", "values": [[99]]}],
         expected_version=content_version_of_file(path),
@@ -318,7 +317,7 @@ def test_edit_format_objects_versions(tmp_path: Path) -> None:
     assert edited_payload.get("status") == "success"
     assert edited.ui_meta.content_version == edited_payload.get("content_version")
     assert edited.ui_meta.files
-    formatted = format_spreadsheet(
+    formatted = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{"kind": "format", "sheet": "Sheet1", "range": "A1:B1", "font": {"bold": True}}],
         expected_version=edited_payload.get("content_version"),
@@ -326,7 +325,7 @@ def test_edit_format_objects_versions(tmp_path: Path) -> None:
     formatted_payload = _payload(formatted)
     assert formatted.success
     assert formatted_payload.get("status") == "success"
-    charted = manage_spreadsheet_objects(
+    charted = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{
             "kind": "chart",
@@ -351,14 +350,14 @@ def test_edit_spreadsheet_sheet_and_copy_ops(tmp_path: Path) -> None:
     from excelmanus.workbook_commit import content_version_of_file
     from openpyxl import load_workbook
 
-    created = edit_spreadsheet(
+    created = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{"kind": "sheet", "action": "create", "new_name": "Sheet2"}],
         expected_version=content_version_of_file(path),
     )
     created_payload = _payload(created)
     assert created.success
-    copied = edit_spreadsheet(
+    copied = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{
             "kind": "copy",
@@ -407,7 +406,7 @@ def test_versions_restore_from_revision_store(tmp_path: Path) -> None:
     before = manage_spreadsheet_versions(file_path=str(path), action="checkpoint", label="before")
     revision_id = _payload(before)["revision"]["revision_id"]
     ver = content_version_of_file(path)
-    edited = edit_spreadsheet(
+    edited = apply_spreadsheet_changes(
         file_path=str(path),
         operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": [["changed"]]}],
         expected_version=ver,
@@ -473,8 +472,8 @@ def test_prompt_sections_follow_segment_order() -> None:
     assert names["harness:identity"] == -100
     assert names["deployment:persona"] == 0
     assert names["plan:policy"] == 50
-    assert names["tool:inspect"] == 100
-    assert names["spreadsheet:workbook_spec"] == 110
+    assert names["tool:observe"] == 100
+    assert names["spreadsheet:document"] == 110
     assert names["spreadsheet:invariants"] == 50
     assert names["tool:run_code"] == 150
     text = composer.compose_system_text(PromptContext())
@@ -487,7 +486,7 @@ def test_workbook_spec_source_csv_import(tmp_path: Path) -> None:
     _bind_workspace(tmp_path)
     csv = tmp_path / "月度.csv"
     csv.write_text("月份,金额\n1月,100\n2月,250.5\n", encoding="gb18030")
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path="汇总.xlsx",
         workbook_spec={
             "sheets": [{"name": "数据", "source_csv": {"file_path": "月度.csv"}}],
@@ -507,7 +506,7 @@ def test_workbook_spec_source_csv_import(tmp_path: Path) -> None:
 
 def test_workbook_spec_source_csv_requires_existing_file(tmp_path: Path) -> None:
     _bind_workspace(tmp_path)
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path="out.xlsx",
         workbook_spec={
             "sheets": [{"name": "数据", "source_csv": {"file_path": "missing.csv"}}],

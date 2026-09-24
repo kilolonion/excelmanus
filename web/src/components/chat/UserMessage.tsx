@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
-import { Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen, ChevronDown, ChevronUp, FileSpreadsheet, FileText } from "lucide-react";
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect, useMemo } from "react";
+import { Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen, ChevronDown, ChevronUp, FileSpreadsheet, FileText, File as FileIcon, Search, Loader2 } from "lucide-react";
+import { Popover } from "radix-ui";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -18,7 +19,10 @@ import { apiFetch, downloadFile, buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { classifyWorkspaceFile } from "@/lib/file-kind";
 import { displayFilePath } from "@/lib/file-identity";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
-import type { FileAttachment } from "@/lib/types";
+import type { FileAttachment, MessageDispatchMode } from "@/lib/types";
+import { DISPATCH_LABELS, DISPATCH_STATUS } from "@/stores/dispatch-store";
+import { dedupeFileAttachments, fileAttachmentMarker } from "@/lib/upload-notice";
+import pickerStyles from "./WorkspaceFilePicker.module.css";
 
 const MAX_COLLAPSED_HEIGHT = 200; // px
 
@@ -86,6 +90,8 @@ interface UserMessageProps {
   onEditAndResend?: (newContent: string, newFiles?: File[], retainedFiles?: FileAttachment[]) => void;
   isStreaming?: boolean;
   timestamp?: number;
+  dispatchMode?: MessageDispatchMode;
+  dispatchStatus?: string;
 }
 
 function formatClock(ts?: number): string | null {
@@ -93,7 +99,8 @@ function formatClock(ts?: number): string | null {
   return new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
-export const UserMessage = React.memo(function UserMessage({ content, files, onEditAndResend, isStreaming, timestamp }: UserMessageProps) {
+export const UserMessage = React.memo(function UserMessage({ content, files, onEditAndResend, isStreaming, timestamp, dispatchMode, dispatchStatus }: UserMessageProps) {
+  const visibleFiles = useMemo(() => dedupeFileAttachments(files), [files]);
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(content);
   const [editFiles, setEditFiles] = useState<File[]>([]);
@@ -102,17 +109,24 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const [needsExpand, setNeedsExpand] = useState(false);
   const [wsPickerOpen, setWsPickerOpen] = useState(false);
   const [wsFiles, setWsFiles] = useState<string[]>([]);
+  const [wsLoading, setWsLoading] = useState(false);
+  const [wsError, setWsError] = useState(false);
   const [wsFilter, setWsFilter] = useState("");
   const [filesExpanded, setFilesExpanded] = useState(false);
-  const [editWidth, setEditWidth] = useState<number | null>(null);
+  const [editSize, setEditSize] = useState<{
+    columnWidth: number;
+    bubbleWidth: number;
+    contentHeight: number;
+  } | null>(null);
   const isMobile = useIsMobile();
   const MOBILE_FILE_LIMIT = 2;
   const contentRef = useRef<HTMLDivElement>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
   const columnRef = useRef<HTMLDivElement>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
-  const wsPickerRef = useRef<HTMLDivElement>(null);
+  const wsSearchRef = useRef<HTMLInputElement>(null);
   const editTokenMapRef = useRef<Map<string, string>>(new Map());
   const [editConfirmedTokens, setEditConfirmedTokens] = useState<Set<string>>(
     () => new Set(),
@@ -145,15 +159,26 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const next = Math.min(Math.max(el.scrollHeight, 60), 240);
+    const minHeight = editSize?.contentHeight ?? 0;
+    const maxHeight = el.value === content && minHeight > 0
+      ? minHeight
+      : Math.max(minHeight, 240);
+    const next = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
     el.style.height = `${next}px`;
-    el.style.overflowY = el.scrollHeight > 240 ? "auto" : "hidden";
-  }, []);
+    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [content, editSize]);
 
   useLayoutEffect(() => {
     if (!editing) return;
     resizeEditTextarea();
-  }, [editing, editText, editWidth, resizeEditTextarea]);
+  }, [editing, editText, resizeEditTextarea]);
+
+  useEffect(() => {
+    if (!editing || !bubbleRef.current) return;
+    const observer = new ResizeObserver(resizeEditTextarea);
+    observer.observe(bubbleRef.current);
+    return () => observer.disconnect();
+  }, [editing, resizeEditTextarea]);
 
   useEffect(() => {
     if (!editing || !textareaRef.current) return;
@@ -165,23 +190,31 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
   const startEdit = useCallback(() => {
     if (isStreaming) return;
-    const bubbleEl = columnRef.current?.querySelector(".user-bubble") as HTMLElement | null;
-    const measured = (bubbleEl ?? columnRef.current)?.getBoundingClientRect().width ?? 0;
-    // The message column already provides the available width. A fixed
-    // 260px floor overflows on compact phones (and makes the whole chat
-    // viewport shift horizontally), so keep the measured width and let the
-    // flex column constrain it naturally.
-    setEditWidth(Math.ceil(measured));
+    const bubble = bubbleRef.current;
+    const columnWidth = columnRef.current?.getBoundingClientRect().width ?? 0;
+    const style = bubble ? getComputedStyle(bubble) : null;
+    // Preserve both widths: attachment chips can be wider than a short bubble.
+    // A definite column width also prevents the editor's intrinsic size from
+    // shrinking a long message when its text is replaced by a textarea.
+    setEditSize({
+      columnWidth,
+      bubbleWidth: bubble?.getBoundingClientRect().width ?? columnWidth,
+      contentHeight: bubble && style
+        ? bubble.getBoundingClientRect().height
+          - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+          - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth)
+        : 0,
+    });
     clearEditMentionState();
     setEditText(content);
-    setRetainedFiles(files ?? []);
+    setRetainedFiles(visibleFiles);
     setFilesExpanded(false);
     setEditing(true);
-  }, [content, files, isStreaming, clearEditMentionState]);
+  }, [content, isStreaming, clearEditMentionState, visibleFiles]);
 
   const cancelEdit = useCallback(() => {
     setEditing(false);
-    setEditWidth(null);
+    setEditSize(null);
     setEditText(content);
     setEditFiles([]);
     setRetainedFiles([]);
@@ -219,6 +252,8 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   }, [editing, pendingSelection, clearPendingSelection, rememberDisplayTokens]);
 
   const fetchWorkspaceFiles = useCallback(async () => {
+    setWsLoading(true);
+    setWsError(false);
     try {
       const params = new URLSearchParams();
       if (activeSessionId) params.set("session_id", activeSessionId);
@@ -226,20 +261,23 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
       const res = await apiFetch(buildApiUrl(`/mentions${qs ? `?${qs}` : ""}`), {
         headers: { ...getAuthHeaders() },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setWsFiles((data.files as string[]) || []);
-      }
-    } catch { /* 后端不可用 */ }
+      if (!res.ok) throw new Error("Failed to load workspace files");
+      const data = await res.json();
+      setWsFiles((data.files as string[]) || []);
+    } catch {
+      setWsError(true);
+    } finally {
+      setWsLoading(false);
+    }
   }, [activeSessionId]);
 
-  const toggleWsPicker = useCallback(() => {
-    if (!wsPickerOpen) {
+  const changeWsPickerOpen = useCallback((open: boolean) => {
+    if (open) {
       fetchWorkspaceFiles();
     }
-    setWsPickerOpen((v) => !v);
+    setWsPickerOpen(open);
     setWsFilter("");
-  }, [wsPickerOpen, fetchWorkspaceFiles]);
+  }, [fetchWorkspaceFiles]);
 
   const selectWsFile = useCallback((path: string) => {
     const textarea = textareaRef.current;
@@ -258,23 +296,11 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     scheduleTextareaCursor(textarea, newCursorPos);
   }, [editText, rememberDisplayTokens]);
 
-  // 点击外部时关闭工作区选择器
-  useEffect(() => {
-    if (!wsPickerOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (wsPickerRef.current && !wsPickerRef.current.contains(e.target as Node)) {
-        setWsPickerOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [wsPickerOpen]);
-
   const confirmEdit = useCallback(() => {
     const trimmed = restoreFullMentions(editText, editTokenMapRef.current).trim();
     if (!trimmed && editFiles.length === 0 && retainedFiles.length === 0) return;
     setEditing(false);
-    setEditWidth(null);
+    setEditSize(null);
     clearEditMentionState();
     onEditAndResend?.(
       trimmed,
@@ -323,39 +349,97 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   );
 
   const clock = formatClock(timestamp);
+  const filteredWsFiles = wsFiles.filter((file) =>
+    displayFilePath(file).toLowerCase().includes(wsFilter.trim().toLowerCase()),
+  );
 
   return (
     <div className="group flex justify-end py-2.5">
-      <div
-        className={`flex gap-2 max-w-[88%] sm:max-w-[75%] min-w-0 ${
-          editing ? "items-stretch" : "items-start"
-        }`}
-      >
+      <div className="flex items-start gap-2 max-w-[88%] sm:max-w-[75%] min-w-0">
         <div
           ref={columnRef}
-          className={`min-w-0 max-w-full flex flex-col items-start ${
-            editing ? "w-full" : "w-max"
-          }`}
-          style={editing ? {
-            width: "100%",
-            maxWidth: editWidth ? `${editWidth}px` : undefined,
-            minWidth: 0,
-            flexShrink: 1,
-          } : undefined}
+          className="w-max min-w-0 max-w-full flex flex-col items-start"
+          style={editing && editSize ? { width: editSize.columnWidth } : undefined}
         >
-        {editing ? (
-          <div className="w-full min-w-0 space-y-2">
-            <textarea
-              ref={textareaRef}
-              value={editText}
-              onChange={(e) => setEditText(e.target.value)}
-              onKeyDown={handleKeyDown}
-              className="box-border block w-full min-w-0 text-[13px] leading-relaxed whitespace-pre-wrap break-words rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--em-primary-alpha-25)] focus:border-[var(--em-primary-alpha-25)] min-h-[60px] shadow-sm transition-colors"
-            />
+        {(content || editing) && (
+          <div
+            ref={bubbleRef}
+            style={editing && editSize ? { width: editSize.bubbleWidth } : undefined}
+            className={`group/bubble relative w-fit max-w-full rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 user-bubble ${
+              !editing && onEditAndResend && !isStreaming
+                ? "cursor-pointer hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-25)]"
+                : ""
+            }`}
+            onClick={!editing && onEditAndResend && !isStreaming ? startEdit : undefined}
+          >
+            {editing ? (
+              <textarea
+                ref={textareaRef}
+                aria-label="编辑消息"
+                rows={1}
+                value={editText}
+                onChange={(e) => setEditText(e.target.value)}
+                onKeyDown={handleKeyDown}
+                className="block w-full min-w-0 resize-none border-0 bg-transparent p-0 text-[13px] leading-relaxed whitespace-pre-wrap break-words focus:outline-none"
+              />
+            ) : (
+              <div
+                ref={contentRef}
+                className="overflow-hidden transition-[max-height] duration-300"
+                style={{
+                  maxHeight: needsExpand && !expanded ? `${MAX_COLLAPSED_HEIGHT}px` : undefined,
+                }}
+              >
+                <MentionHighlighter
+                  text={content}
+                  className="text-[13px] leading-relaxed whitespace-pre-wrap break-words"
+                />
+              </div>
+            )}
+            {!editing && needsExpand && !expanded && (
+              <div className="relative -mt-6 pt-6 bg-gradient-to-t from-[var(--em-primary-alpha-10)] to-transparent">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
+                  className="flex items-center gap-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+                >
+                  <ChevronDown className="h-3 w-3" />
+                  展开全部
+                </button>
+              </div>
+            )}
+            {!editing && needsExpand && expanded && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
+                className="flex items-center gap-1 mt-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
+              >
+                <ChevronUp className="h-3 w-3" />
+                收起
+              </button>
+            )}
+            {!editing && onEditAndResend && !isStreaming && (
+              <span
+                className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-background border border-border shadow-sm flex items-center justify-center opacity-0 group-hover/bubble:opacity-100 touch-show-desktop transition-opacity"
+                aria-label="编辑消息"
+              >
+                <Pencil className="h-3 w-3 text-muted-foreground" />
+              </span>
+            )}
+          </div>
+        )}
+        {dispatchMode && dispatchStatus && (
+          <div className="mt-1 inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+            <span className={`h-1.5 w-1.5 rounded-full ${["applied", "completed"].includes(dispatchStatus) ? "bg-emerald-500" : dispatchStatus === "failed" ? "bg-red-500" : ["cancelled", "interrupted"].includes(dispatchStatus) ? "bg-zinc-400" : "bg-amber-500"}`} />
+            {DISPATCH_LABELS[dispatchMode]} · {DISPATCH_STATUS[dispatchStatus as keyof typeof DISPATCH_STATUS] ?? "已接收"}
+          </div>
+        )}
+        {editing && (
+          <div className="mt-1.5 w-full min-w-0 space-y-2">
             {(retainedFiles.length > 0 || editFiles.length > 0) && (() => {
               const allEditBadges = [
-                ...retainedFiles.map((f, i) => ({ key: `retained-${i}`, filename: f.filename, isImage: classifyWorkspaceFile(f.filename) === "image", onRemove: () => setRetainedFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
-                ...editFiles.map((f, i) => ({ key: `new-${i}`, filename: f.name, isImage: classifyWorkspaceFile(f.name) === "image", onRemove: () => setEditFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
+                ...retainedFiles.map((f, i) => ({ key: `retained-${fileAttachmentMarker(f)}`, marker: fileAttachmentMarker(f), filename: f.filename, isImage: classifyWorkspaceFile(f.filename) === "image", onRemove: () => setRetainedFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
+                ...editFiles.map((f, i) => ({ key: `new-${i}`, marker: `attachment:pending:${f.name}`, filename: f.name, isImage: classifyWorkspaceFile(f.name) === "image", onRemove: () => setEditFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
               ];
               const shouldCollapse = isMobile && allEditBadges.length > MOBILE_FILE_LIMIT && !filesExpanded;
               const visible = shouldCollapse ? allEditBadges.slice(0, MOBILE_FILE_LIMIT) : allEditBadges;
@@ -363,7 +447,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               return (
                 <div className="flex w-full flex-wrap gap-1">
                   {visible.map((b) => (
-                    <Badge key={b.key} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
+                    <Badge key={b.key} data-attachment-marker={b.marker} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
                       {b.isImage && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
                       <span className="truncate">{b.filename}</span>
                       <button
@@ -412,61 +496,99 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 <Plus className="h-3 w-3" />
                 <span className="hidden sm:inline">附件</span>
               </button>
-              <button
-                onClick={toggleWsPicker}
-                className={`inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg transition-colors font-medium ${
-                  wsPickerOpen
-                    ? "bg-[var(--em-primary-alpha-15)] text-[var(--em-primary)]"
-                    : "bg-muted text-muted-foreground hover:bg-muted/80"
-                }`}
-                title="从工作区选取文件"
-              >
-                <FolderOpen className="h-3 w-3" />
-                <span className="hidden sm:inline">工作区</span>
-              </button>
+              <Popover.Root open={wsPickerOpen} onOpenChange={changeWsPickerOpen}>
+                <Popover.Trigger asChild>
+                  <button
+                    type="button"
+                    className={`inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg transition-colors font-medium ${
+                      wsPickerOpen
+                        ? "bg-[var(--em-primary-alpha-15)] text-[var(--em-primary)]"
+                        : "bg-muted text-muted-foreground hover:bg-muted/80"
+                    }`}
+                    title="从工作区选取文件"
+                    aria-label="从工作区选取文件"
+                  >
+                    <FolderOpen className="h-3 w-3" />
+                    <span className="hidden sm:inline">工作区</span>
+                  </button>
+                </Popover.Trigger>
+                <Popover.Portal>
+                  <Popover.Content
+                    side="top"
+                    align="end"
+                    sideOffset={8}
+                    collisionPadding={12}
+                    aria-label="工作区文件"
+                    className={pickerStyles.popover}
+                    onOpenAutoFocus={(event) => {
+                      event.preventDefault();
+                      wsSearchRef.current?.focus();
+                    }}
+                    onCloseAutoFocus={(event) => {
+                      event.preventDefault();
+                      textareaRef.current?.focus();
+                    }}
+                  >
+                    <div className={pickerStyles.header}>
+                      <span className={pickerStyles.headingIcon}><FolderOpen className="size-4" /></span>
+                      <span className={pickerStyles.heading}>工作区文件</span>
+                      {!wsLoading && !wsError && <span className={pickerStyles.count}>{filteredWsFiles.length} 项</span>}
+                      <Popover.Close className={pickerStyles.iconButton} aria-label="关闭工作区文件">
+                        <X className="size-3.5" />
+                      </Popover.Close>
+                    </div>
+                    <div className={pickerStyles.searchWrap}>
+                      <label className={pickerStyles.search}>
+                        <Search className="size-3.5" />
+                        <input
+                          ref={wsSearchRef}
+                          type="text"
+                          aria-label="搜索工作区文件"
+                          placeholder="搜索文件或文件夹…"
+                          value={wsFilter}
+                          onChange={(e) => setWsFilter(e.target.value)}
+                        />
+                        {wsFilter && (
+                          <button type="button" className={pickerStyles.iconButton} aria-label="清空搜索" onClick={() => setWsFilter("")}>
+                            <X className="size-3" />
+                          </button>
+                        )}
+                      </label>
+                    </div>
+                    <div className={pickerStyles.list} aria-busy={wsLoading}>
+                      {wsLoading ? (
+                        <div className={pickerStyles.empty} role="status"><Loader2 className="size-5 animate-spin" />正在加载工作区…</div>
+                      ) : wsError ? (
+                        <div className={pickerStyles.empty} role="status">
+                          <FolderOpen className="size-6" />
+                          <span>暂时无法加载文件</span>
+                          <button type="button" onClick={fetchWorkspaceFiles}>重新加载</button>
+                        </div>
+                      ) : filteredWsFiles.length === 0 ? (
+                        <div className={pickerStyles.empty} role="status">
+                          <Search className="size-6" />
+                          <span>{wsFilter ? "没有找到匹配的文件" : "工作区暂无文件"}</span>
+                        </div>
+                      ) : filteredWsFiles.map((file) => {
+                        const isFolder = file.endsWith("/");
+                        const kind = classifyWorkspaceFile(file);
+                        const Icon = isFolder ? FolderOpen : kind === "spreadsheet" ? FileSpreadsheet : kind === "image" ? ImageIcon : kind === "text" || kind === "word" ? FileText : FileIcon;
+                        return (
+                          <button key={file} type="button" title={displayFilePath(file)} onClick={() => selectWsFile(file)} className={pickerStyles.item}>
+                            <span className={pickerStyles.fileIcon} data-folder={isFolder}><Icon className="size-4" /></span>
+                            <span className={pickerStyles.filename}>{displayFilePath(file)}</span>
+                            <span className={pickerStyles.kind}>{isFolder ? "文件夹" : kind === "spreadsheet" ? "表格" : kind === "image" ? "图片" : "文件"}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </Popover.Content>
+                </Popover.Portal>
+              </Popover.Root>
               <div className="flex-1 sm:hidden" />
-              {wsPickerOpen && (
-                <div
-                  ref={wsPickerRef}
-                  className="absolute bottom-full left-0 mb-1 w-64 max-w-[calc(100vw-3rem)] max-h-48 overflow-y-auto rounded-lg border bg-popover shadow-lg z-50"
-                >
-                  <div className="sticky top-0 bg-popover border-b px-2 py-1.5">
-                    <input
-                      type="text"
-                      placeholder="搜索文件..."
-                      value={wsFilter}
-                      onChange={(e) => setWsFilter(e.target.value)}
-                      className="w-full text-xs bg-transparent outline-none placeholder:text-muted-foreground/50"
-                      autoFocus
-                    />
-                  </div>
-                  {wsFiles
-                    .filter((f) => !wsFilter || displayFilePath(f).toLowerCase().includes(wsFilter.toLowerCase()))
-                    .map((f) => (
-                      <button
-                        key={f}
-                        type="button"
-                        onClick={() => selectWsFile(f)}
-                        className="w-full flex items-center gap-2 px-2 py-1.5 text-xs text-left hover:bg-accent transition-colors"
-                      >
-                        <FileSpreadsheet className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
-                        <span className="truncate">{displayFilePath(f)}</span>
-                      </button>
-                    ))}
-                  {wsFiles.length === 0 && (
-                    <div className="px-2 py-3 text-xs text-muted-foreground text-center">
-                      加载中...
-                    </div>
-                  )}
-                  {wsFiles.length > 0 && wsFiles.filter((f) => !wsFilter || f.toLowerCase().includes(wsFilter.toLowerCase())).length === 0 && (
-                    <div className="px-2 py-3 text-xs text-muted-foreground text-center">
-                      无匹配文件
-                    </div>
-                  )}
-                </div>
-              )}
               <button
                 onClick={confirmEdit}
+                aria-label="重新发送消息"
                 className="inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg bg-[var(--em-primary)] text-white hover:bg-[var(--em-primary-dark)] transition-colors font-medium shadow-sm"
               >
                 <Check className="h-3 w-3" />
@@ -474,6 +596,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               </button>
               <button
                 onClick={cancelEdit}
+                aria-label="取消编辑"
                 className="inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
               >
                 <X className="h-3 w-3" />
@@ -481,70 +604,20 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               </button>
             </div>
           </div>
-        ) : content ? (
-          <div
-            className={`group/bubble relative w-fit max-w-full rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 user-bubble ${
-              onEditAndResend && !isStreaming
-                ? "cursor-pointer hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-25)]"
-                : ""
-            }`}
-            onClick={onEditAndResend && !isStreaming ? startEdit : undefined}
-          >
-            <div
-              ref={contentRef}
-              className="overflow-hidden transition-[max-height] duration-300"
-              style={{
-                maxHeight: needsExpand && !expanded ? `${MAX_COLLAPSED_HEIGHT}px` : undefined,
-              }}
-            >
-              <MentionHighlighter
-                text={content}
-                className="text-[13px] leading-relaxed whitespace-pre-wrap break-words"
-              />
-            </div>
-            {needsExpand && !expanded && (
-              <div className="relative -mt-6 pt-6 bg-gradient-to-t from-[var(--em-primary-alpha-10)] to-transparent">
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
-                  className="flex items-center gap-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
-                >
-                  <ChevronDown className="h-3 w-3" />
-                  展开全部
-                </button>
-              </div>
-            )}
-            {needsExpand && expanded && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
-                className="flex items-center gap-1 mt-1 text-[11px] text-[var(--em-primary)] hover:text-[var(--em-primary-dark)] transition-colors cursor-pointer"
-              >
-                <ChevronUp className="h-3 w-3" />
-                收起
-              </button>
-            )}
-            {onEditAndResend && !isStreaming && (
-              <span
-                className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-background border border-border shadow-sm flex items-center justify-center opacity-0 group-hover/bubble:opacity-100 touch-show-desktop transition-opacity"
-                aria-label="编辑消息"
-              >
-                <Pencil className="h-3 w-3 text-muted-foreground" />
-              </span>
-            )}
-          </div>
-        ) : null}
-        {!editing && files && files.length > 0 && (() => {
-          const shouldCollapseView = isMobile && files.length > MOBILE_FILE_LIMIT && !filesExpanded;
-          const visibleFiles = shouldCollapseView ? files.slice(0, MOBILE_FILE_LIMIT) : files;
-          const hiddenFileCount = files.length - visibleFiles.length;
+        )}
+        {!editing && visibleFiles.length > 0 && (() => {
+          const shouldCollapseView = isMobile && visibleFiles.length > MOBILE_FILE_LIMIT && !filesExpanded;
+          const displayedFiles = shouldCollapseView ? visibleFiles.slice(0, MOBILE_FILE_LIMIT) : visibleFiles;
+          const hiddenFileCount = visibleFiles.length - displayedFiles.length;
           return (
           <div className={`flex max-w-full flex-wrap gap-1 ${content ? "mt-1.5" : ""}`}>
-            {visibleFiles.map((f, i) => {
+            {displayedFiles.map((f) => {
               const kind = classifyWorkspaceFile(f.filename);
+              const marker = fileAttachmentMarker(f);
               return (
                 <Badge
-                  key={i}
+                  key={marker}
+                  data-attachment-marker={marker}
                   variant="secondary"
                   className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px] touch-show cursor-pointer hover:bg-secondary/70"
                   onClick={() => openWorkspaceFile(f.path)}
@@ -589,7 +662,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           );
         })()}
         </div>
-        {!editing && clock && (
+        {clock && (
           <span className="text-[11px] text-muted-foreground/70 tabular-nums pt-2 flex-shrink-0">
             {clock}
           </span>

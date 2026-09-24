@@ -204,7 +204,7 @@ async def test_exposure_retains_direct_and_programmatic_core_tools(
     registry.register_tools(
         [
             ToolDef(
-                name="inspect_spreadsheet",
+                name="observe_spreadsheet",
                 description="d",
                 input_schema={"type": "object", "properties": {}},
                 func=lambda: None,
@@ -218,7 +218,7 @@ async def test_exposure_retains_direct_and_programmatic_core_tools(
                 write_effect="dynamic",
             ),
             ToolDef(
-                name="edit_spreadsheet",
+                name="apply_spreadsheet_changes",
                 description="d",
                 input_schema={"type": "object", "properties": {}},
                 func=lambda: None,
@@ -248,7 +248,7 @@ async def test_exposure_retains_direct_and_programmatic_core_tools(
     ):
         await maybe_record_turn_exposure(engine, "对每张表循环汇总")
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert names == {"run_code", "inspect_spreadsheet", "edit_spreadsheet"}
+    assert names == {"run_code", "observe_spreadsheet", "apply_spreadsheet_changes"}
 
 
 def _big_result(*, success: bool = True, extra_ui: ToolUiMeta | None = None) -> ToolResult:
@@ -270,7 +270,7 @@ async def test_observation_gate_off_does_not_reshape() -> None:
         out = await maybe_shape_observation(
             engine,
             original,
-            tool_name="inspect_spreadsheet",
+            tool_name="observe_spreadsheet",
             arguments={"file_path": "a.xlsx", "sheet": "Sheet1"},
         )
         mocked.assert_not_called()
@@ -304,7 +304,7 @@ async def test_observation_signed_truncate_keeps_value_ui(
         out = await maybe_shape_observation(
             engine,
             original,
-            tool_name="inspect_spreadsheet",
+            tool_name="observe_spreadsheet",
             arguments={"file_path": "a.xlsx", "sheet": "Sheet1"},
         )
     assert out.model_text != original.model_text
@@ -324,18 +324,18 @@ async def test_observation_keeps_errors_and_small_and_child(
     engine = _stub(config=cfg)
     err = _big_result(success=False)
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
-        out = await maybe_shape_observation(engine, err, tool_name="inspect_spreadsheet")
+        out = await maybe_shape_observation(engine, err, tool_name="observe_spreadsheet")
         mocked.assert_not_called()
     assert out.model_text == err.model_text
 
     small = ToolResult(success=True, model_text="短", value={"ok": True})
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
-        await maybe_shape_observation(engine, small, tool_name="inspect_spreadsheet")
+        await maybe_shape_observation(engine, small, tool_name="observe_spreadsheet")
         mocked.assert_not_called()
 
     child = _stub(config=cfg, _subagent_config=object())
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
-        out = await maybe_shape_observation(child, _big_result(), tool_name="inspect_spreadsheet")
+        out = await maybe_shape_observation(child, _big_result(), tool_name="observe_spreadsheet")
         mocked.assert_not_called()
     assert out.model_text.startswith("行")
 
@@ -348,6 +348,6 @@ async def test_observation_download_keeps(monkeypatch: pytest.MonkeyPatch) -> No
     )
     original = _big_result(extra_ui=ToolUiMeta(download={"name": "a.xlsx"}))
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
-        out = await maybe_shape_observation(engine, original, tool_name="inspect_spreadsheet")
+        out = await maybe_shape_observation(engine, original, tool_name="observe_spreadsheet")
         mocked.assert_not_called()
     assert out.model_text == original.model_text

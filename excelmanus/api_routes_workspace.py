@@ -264,11 +264,14 @@ def _preview_revision(
 ) -> JSONResponse:
     """Project an immutable revision into the same bounded workbook view as the live file."""
     from excelmanus.workbook.refs import InvalidRefError, parse_rect
-    from excelmanus.workbook.snapshot import SnapshotError, open_snapshot_bytes, project_view
+    from excelmanus.workbook.snapshot import SnapshotError, open_snapshot_bytes
     from excelmanus.workspace.refs import WorkspaceRef
     from zipfile import BadZipFile
     from xml.etree.ElementTree import ParseError
-    from lxml.etree import XMLSyntaxError
+    try:
+        from lxml.etree import XMLSyntaxError
+    except ImportError:
+        XMLSyntaxError = ParseError
 
     root = _workspace_root(session_id, workspace_id)
     try:
@@ -302,8 +305,17 @@ def _preview_revision(
             relative=ident.relative,
             workspace=WorkspaceRef.from_root(root, workspace_id=workspace_id),
             suffix=Path(ident.relative).suffix.lower(),
+            lineage_id=rec.lineage_id,
         )
-        view = project_view(snapshot, [base], with_styles=True, active_sheet_default=True)
+        from excelmanus.workbook.service import WorkbookService
+        selected = sheet
+        if not selected and not snapshot.is_csv():
+            wb = snapshot.open_workbook(data_only=False, read_only=True)
+            try:
+                selected = (wb.active or wb.worksheets[0]).title
+            finally:
+                wb.close()
+        view = WorkbookService().observe_snapshot(snapshot, sheet=selected, range=base.to_a1(include_sheet=False), mode="range", facets=["data", "presentation", "geometry", "objects"])
         view["revision_id"] = rec.id
         view["revision_reason"] = rec.reason
         view["revision_label"] = rec.label or ""

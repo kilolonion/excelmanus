@@ -76,17 +76,17 @@ def _make_prompt_parent():
 
 def test_explorer_write_guard_rejects_mutating_and_nested_writes() -> None:
     cfg = SubagentConfig(name="explorer", description="x", permission_mode="readOnly")
-    assert reject_readonly_write(cfg, "edit_spreadsheet")
+    assert reject_readonly_write(cfg, "apply_spreadsheet_changes")
     assert reject_readonly_write(cfg, "copy_file")
     assert reject_readonly_write(cfg, "run_code") is None
-    assert reject_readonly_write(cfg, "inspect_spreadsheet") is None
+    assert reject_readonly_write(cfg, "observe_spreadsheet") is None
     assert reject_readonly_write(
         cfg, "manage_spreadsheet_versions", arguments={"action": "list"}
     ) is None
     assert reject_readonly_write(
         cfg, "manage_spreadsheet_versions", arguments={"action": "restore"}
     )
-    assert reject_readonly_write(cfg, "edit_spreadsheet", parent_call="run_code")
+    assert reject_readonly_write(cfg, "apply_spreadsheet_changes", parent_call="run_code")
     assert reject_readonly_write(cfg, "run_code", parent_call="run_code")
 
 
@@ -99,8 +99,8 @@ def test_compose_child_plan_parent_cannot_escalate_to_write(tmp_path: Path) -> N
     child = compose_child(parent, cfg)
     assert child._current_chat_mode == "plan"
     assert child._fixed_capability.catalog_mode == "plan"
-    assert "edit_spreadsheet" not in child.registry._tools
-    assert "inspect_spreadsheet" in child.registry._tools
+    assert "apply_spreadsheet_changes" not in child.registry._tools
+    assert "observe_spreadsheet" in child.registry._tools
 
 
 def test_compose_child_uses_child_role() -> None:
@@ -108,7 +108,7 @@ def test_compose_child_uses_child_role() -> None:
     cfg = SubagentConfig(
         name="explorer",
         description="x",
-        allowed_tools=["inspect_spreadsheet"],
+        allowed_tools=["observe_spreadsheet"],
         permission_mode="readOnly",
     )
     child = compose_child(parent, cfg)

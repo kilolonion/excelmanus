@@ -209,12 +209,14 @@ export function jevConfiguredFromRuntime(data: {
 }
 
 export function jevChatEnabledFromRuntime(data: {
+  jev_experimental_enabled?: boolean;
   jev_enabled?: string;
   jev_active_provider?: string;
   ai_gateway?: { configured?: boolean };
   typesafe?: { configured?: boolean };
   jev_providers?: { id?: string; protocol?: string; configured?: boolean }[];
 }): boolean {
+  if (data.jev_experimental_enabled !== true) return false;
   return jevChatEnabled({
     configured: jevConfiguredFromRuntime(data),
     enabled: data.jev_enabled || "off",

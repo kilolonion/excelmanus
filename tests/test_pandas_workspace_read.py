@@ -84,7 +84,7 @@ def test_run_code_pandas_to_excel_does_not_write_workspace(workspace: Path) -> N
     )
     assert packed.success is False
     text = str(packed.model_text or "") + str((_payload(packed).get("stderr_tail") or ""))
-    assert "to_excel" in text or "edit_spreadsheet" in text or "format_spreadsheet" in text
+    assert "to_excel" in text or "apply_spreadsheet_changes" in text or "apply_spreadsheet_changes" in text
     assert not target.exists()
 
 

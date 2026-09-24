@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Applies to: 1.8.0 source tree · Updated: 2026-09-21
+Applies to: 1.8.1 source tree · Updated: 2026-09-21
 
 [Documentation](README.md) · [中文](configuration.md) · [Operations](ops-manual_en.md)
 
@@ -44,7 +44,7 @@ Model-profile API keys are encrypted in the main database. The Fernet key lives 
 | `EXCELMANUS_BASE_URL` | `config_kv` fallback when no active profile | — |
 | `EXCELMANUS_MODEL` | `config_kv` fallback when no active profile; Gemini can be auto-extracted from BASE_URL | — |
 | `EXCELMANUS_PROTOCOL` | Model protocol type (`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`) | `auto` |
-| `EXCELMANUS_MAX_ITERATIONS` | Per-turn cap on LLM rounds and tool calls (each parallel tool counts as 1) | `120` |
+| `EXCELMANUS_MAX_ITERATIONS` | Per-turn cap on LLM rounds and tool calls; `0` means unlimited | `0` |
 | `EXCELMANUS_TURN_TIMEOUT_SECONDS` | Wall-clock limit for one turn (`0` disables the limit) | `0` |
 | `EXCELMANUS_RESPONSES_CONTINUATION_ENABLED` | Enable native Responses API `previous_response_id` continuation | `false` |
 | `EXCELMANUS_RESPONSES_BACKGROUND_ENABLED` | Use Responses API background responses and poll to a terminal state | `false` |
@@ -82,7 +82,7 @@ Model-profile API keys are encrypted in the main database. The Fernet key lives 
 | Setting key | Description | Default |
 |---|---|---|
 | `EXCELMANUS_SUBAGENT_ENABLED` | Enable subagent execution | `true` |
-| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | Child-loop cap on LLM rounds and tool calls | `120` |
+| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | Child-loop cap on LLM rounds and tool calls; `0` means unlimited | `0` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | Subagent consecutive failure circuit-breaker threshold | `6` |
 | `EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS` | Single subagent execution timeout (seconds) | `600` |
 | `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | Synchronous batch limit and per-session background concurrency; excess background runs queue | `3` |
@@ -120,11 +120,11 @@ the page loads.
 
 ## Agent self-management
 
-Off by default. Enable it under Settings → System → Capabilities to make the `agent_self_management` skill available: `inspect_agent` reports capabilities and settings, and `configure_agent` adjusts reasoning, context, and tool switches for the current session. Saving the switch applies to live sessions immediately. Changes stay in the in-memory session; credentials, approval permissions, and global defaults cannot be modified.
+Enabled by default; you can disable it under Settings → System → Capabilities. While enabled, the `agent_self_management` skill is available: `inspect_agent` reports capabilities and settings, and `configure_agent` adjusts reasoning, context, and tool switches for the current session. Saving the switch applies to live sessions immediately. Changes stay in the in-memory session; credentials, approval permissions, and global defaults cannot be modified.
 
 | Setting key | Description | Default |
 |---|---|---|
-| `EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED` | Enable the self-management skill and its `inspect_agent` / `configure_agent` tools | `false` |
+| `EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED` | Enable the self-management skill and its `inspect_agent` / `configure_agent` tools | `true` |
 
 ## Context Auto-Compaction
 
@@ -190,7 +190,7 @@ Connection and capability probes can be started in model settings. They call the
 
 ## Vision
 
-Images go to the active model only. If it has no vision, attachments are rejected. If it does, `read_image` or workbench attachments inject the picture; the model writes a `WorkbookSpec` and calls `edit_spreadsheet(workbook_spec=)`. There is no separate vision pipeline and no auxiliary VLM description.
+Images go to the active model only. If it has no vision, attachments are rejected. If it does, `read_image` or workbench attachments inject the picture; the model writes a `WorkbookSpec` and calls `apply_spreadsheet_changes(workbook_spec=)`. There is no separate vision pipeline and no auxiliary VLM description.
 
 | Setting key | Description | Default |
 |---|---|---|
@@ -391,6 +391,7 @@ Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Verce
 | Setting key | Description | Default |
 |---|---|---|
 | `EXCELMANUS_JEV_ENABLED` | Master gate: `off` disables all packs, `enforce` fully enables them | `enforce` |
+| `EXCELMANUS_JEV_EXPERIMENTAL_ENABLED` | Frontend experimental Jev entry gate; when off, provider settings, timeline button, inline records, and sidebar are hidden without deleting saved configuration | `false` |
 | `EXCELMANUS_JEV_EXPOSURE` | Tool exposure and workspace/spreadsheet context suggestions: `off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_OBSERVATION` | Observation policy: `off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_VERIFICATION` | Post-mutation check suggestions: `off` / `enforce` | `enforce` |

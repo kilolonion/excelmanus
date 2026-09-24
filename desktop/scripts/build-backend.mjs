@@ -2,9 +2,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { browserPayloadDirectories, stageBrowser } from './stage-browser.mjs';
+import { checkNodeRuntime } from './node-runtime.mjs';
 
 const desktopRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const projectRoot = resolve(desktopRoot, "..");
+// Validate the runtime that will actually drive Playwright, not the host Node.
+checkNodeRuntime(join(desktopRoot, '.build/runtime', process.platform === 'win32' ? 'node.exe' : 'node'));
+const previewBuild = spawnSync(process.execPath, [join(projectRoot, "web/scripts/build-workbook-preview.mjs")], { cwd: projectRoot, stdio: "inherit" });
+if (previewBuild.status !== 0) throw new Error("Workbook preview asset build failed");
 const pythonCandidates = [
   process.env.EXCELMANUS_PYTHON,
   process.platform === "win32"
@@ -26,6 +32,14 @@ if (probe.status !== 0 || architecture !== process.arch) throw new Error(`Backen
 const expected = readFileSync(join(projectRoot, "pyproject.toml"), 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1]?.trim();
 const installed = spawnSync(python, ['-I', '-B', '-X', 'utf8', '-c', 'from importlib.metadata import version; print(version("excelmanus"))'], {encoding:'utf8', cwd: projectRoot}).stdout?.trim();
 if (installed !== expected) throw new Error(`已安装的 excelmanus 元数据版本 (${installed}) 与 pyproject.toml (${expected}) 不一致，请先执行 uv sync`);
+const browserRoot = join(desktopRoot, ".build", "playwright-browsers");
+// Workbook previews use Playwright's default headless shell. Installing the
+// headed browser as well duplicates hundreds of MB without serving a feature.
+const browserBuild = spawnSync(python, ["-m", "playwright", "install", "--only-shell", "chromium"], {
+  cwd: projectRoot, stdio: "inherit", env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browserRoot },
+});
+if (browserBuild.status !== 0) throw new Error("Bundled Chromium installation failed");
+browserPayloadDirectories(browserRoot);
 const args = [
   "-m", "PyInstaller", "--noconfirm", "--clean",
   "--distpath", ".build/backend",
@@ -39,3 +53,7 @@ if (result.error) {
 if (result.status !== 0) {
   throw new Error(`PyInstaller 失败，退出码: ${result.status}`);
 }
+// Chromium is a separate executable with its own loader layout and signatures.
+// PyInstaller must not rewrite its dylibs (libEGL has no load-command padding).
+console.log('Bundled browser:', stageBrowser(browserRoot,
+  join(desktopRoot, '.build/backend/excelmanus-backend/_internal/playwright-browsers')));

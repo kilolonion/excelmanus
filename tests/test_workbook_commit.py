@@ -21,6 +21,13 @@ def _guard(tmp_path: Path) -> FileAccessGuard:
     return FileAccessGuard(str(tmp_path))
 
 
+def _patches(*cells: dict) -> list[dict]:
+    by_sheet: dict[str, list[dict]] = {}
+    for cell in cells:
+        by_sheet.setdefault(str(cell.get("sheet") or "Sheet"), []).append({k: v for k, v in cell.items() if k != "sheet"})
+    return [{"kind": "cells.patch", "sheet": sheet, "cells": values} for sheet, values in by_sheet.items()]
+
+
 def test_commit_bytes_create_and_conflict(tmp_path: Path) -> None:
     guard = _guard(tmp_path)
     data = b"hello-workbook"
@@ -238,56 +245,30 @@ def test_commit_workbook_requires_expected_version(tmp_path: Path) -> None:
     assert ei.value.code == "VERSION_CONFLICT"
 
 
-def test_create_excel_chart_goes_through_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """create_excel_chart 必须经 commit_workbook，且返回 content_version。"""
-    import excelmanus.workbook_commit as wc
-    from excelmanus.workbook.charts import create_excel_chart, init_guard
-
-    init_guard(str(tmp_path))
-    seed = Workbook()
-    ws = seed.active
-    ws.title = "数据"
-    ws["A1"] = "月份"
-    ws["B1"] = "营收"
-    ws["A2"] = "1月"
-    ws["B2"] = 100
-    ws["A3"] = "2月"
-    ws["B3"] = 150
-    seed.save(tmp_path / "chart.xlsx")
-    seed.close()
-
-    seen: list[dict] = []
-    real = wc.commit_workbook
-
-    def _wrapped(**kwargs):
-        seen.append(kwargs)
-        return real(**kwargs)
-
-    monkeypatch.setattr(wc, "commit_workbook", _wrapped)
-
-    from excelmanus.workbook_commit import content_version_of_file
-
-    charted = create_excel_chart(
-        file_path="chart.xlsx",
-        chart_type="bar",
-        data_range="B1:B3",
-        categories_range="A2:A3",
-        target_cell="D1",
-        expected_version=content_version_of_file(tmp_path / "chart.xlsx"),
-    )
-    payload = charted.value
-    assert charted.success
-    assert payload["status"] == "success"
-    assert seen, "create_excel_chart 应调用 commit_workbook"
-    assert seen[0]["file_path"] == "chart.xlsx"
-    assert str(payload.get("content_version", "")).startswith("sha256:")
+def test_chart_changes_use_the_shared_atomic_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from excelmanus.workspace.file_service import WorkspaceFileService
+    from excelmanus.tools.context import use_workspace
+    from excelmanus.tools.workbook_tools import apply_spreadsheet_changes
+    seed=Workbook(); seed.active.title="Data"; seed.active.append(["month","amount"]); seed.active.append(["Jan",100]); seed.save(tmp_path/"chart.xlsx"); seed.close()
+    seen=[]
+    real=WorkspaceFileService.apply_batch
+    def capture(self,specs,**kwargs):
+        seen.extend(specs)
+        return real(self,specs,**kwargs)
+    monkeypatch.setattr(WorkspaceFileService,"apply_batch",capture)
+    with use_workspace(tmp_path):
+        result=apply_spreadsheet_changes(file_path="chart.xlsx",expected_version=content_version_of_file(tmp_path/"chart.xlsx"),operations=[{"kind":"chart","sheet":"Data","chart_type":"bar","data_range":"B1:B2","target_cell":"D1"}])
+    assert result.success,result.model_text
+    assert len(seen)==1 and seen[0].path=="chart.xlsx"
+    assert result.value["receipt"]["state"]=="committed"
+    assert result.value["observation"]["objects"]["sheets"]["Data"][0]["kind"]=="chart"
 
 
 def test_tool_write_conflicts_after_read_then_external_edit(tmp_path: Path) -> None:
     """先读记住版本，外部改盘后再写，工具层必须 VERSION_CONFLICT。"""
     from excelmanus.security import FileAccessGuard
     from excelmanus.tools._guard_ctx import set_guard
-    from excelmanus.tools.intent_tools import edit_spreadsheet, init_guard
+    from excelmanus.tools.workbook_tools import apply_spreadsheet_changes, init_guard
     from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
     workspace = str(tmp_path)
@@ -305,7 +286,7 @@ def test_tool_write_conflicts_after_read_then_external_edit(tmp_path: Path) -> N
         outsider.save(tmp_path / "book.xlsx")
         outsider.close()
 
-        result = edit_spreadsheet(
+        result = apply_spreadsheet_changes(
             file_path="book.xlsx",
             operations=[{"kind": "write", "sheet": "Sheet", "start_cell": "A1", "values": [["from-tool"]]}],
         )
@@ -319,10 +300,10 @@ def test_tool_write_conflicts_after_read_then_external_edit(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_write_excel_cells_stale_version_returns_409(
+async def test_apply_workbook_changes_stale_version_returns_409(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """API write 在提供错误 expected_version 时返回 HTTP 409。"""
+    """V2 changes API returns HTTP 409 for an incorrect expected_version."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -338,16 +319,16 @@ async def test_write_excel_cells_stale_version_returns_409(
     cfg = SimpleNamespace(workspace_root=str(tmp_path))
     api_app_state.set_config(cfg)
     api_app_state.set_session_manager(None)
-    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
+    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None, **kwargs: str(tmp_path))
 
-    req = api_module.ExcelWriteRequest(
+    req = api_module.WorkbookChangesRequest(
         path="book.xlsx",
-        changes=[{"cell": "A1", "value": "new"}],
+        operations=_patches({"cell": "A1", "value": "new"}),
         expected_version="sha256:" + "0" * 64,
     )
     raw = MagicMock()
     raw.app.state.auth_enabled = False
-    resp = await api_module.write_excel_cells(req, raw)
+    resp = await api_module.apply_workbook_changes(req, raw)
     assert resp.status_code == 409
     body = resp.body.decode() if isinstance(resp.body, (bytes, bytearray)) else str(resp.body)
     assert "VERSION_CONFLICT" in body or "版本" in body or "conflict" in body.lower()
@@ -364,14 +345,14 @@ def _write_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cfg = SimpleNamespace(workspace_root=str(tmp_path))
     api_app_state.set_config(cfg)
     api_app_state.set_session_manager(None)
-    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
+    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None, **kwargs: str(tmp_path))
     raw = MagicMock()
     raw.app.state.auth_enabled = False
     return api_module, raw
 
 
 @pytest.mark.asyncio
-async def test_write_excel_cells_missing_version_returns_409(
+async def test_apply_workbook_changes_missing_version_returns_409(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api_module, raw = _write_harness(tmp_path, monkeypatch)
@@ -380,11 +361,11 @@ async def test_write_excel_cells_missing_version_returns_409(
     seed.save(tmp_path / "book.xlsx")
     seed.close()
 
-    req = api_module.ExcelWriteRequest(
+    req = api_module.WorkbookChangesRequest(
         path="book.xlsx",
-        changes=[{"cell": "A1", "value": "new"}],
+        operations=_patches({"cell": "A1", "value": "new"}),
     )
-    resp = await api_module.write_excel_cells(req, raw)
+    resp = await api_module.apply_workbook_changes(req, raw)
     assert resp.status_code == 409
     wb = load_workbook(tmp_path / "book.xlsx")
     assert wb.active["A1"].value == "old"
@@ -406,12 +387,13 @@ async def test_snapshot_then_external_edit_then_stale_write_409(
     snap_req = MagicMock()
     snap_req.query_params = {
         "path": "book.xlsx",
-        "all_sheets": "1",
-        "max_rows": "50",
-        "with_styles": "0",
+        "range": "A1:Z50",
+        "facets": "data,geometry",
     }
+    snap_req.headers = {}
     snap_req.app.state.auth_enabled = False
-    snap = await api_module.get_excel_snapshot(snap_req)
+    from excelmanus.api_routes_files import get_workbook_observation
+    snap = await get_workbook_observation(snap_req)
     assert snap.status_code == 200
     import json as _json
     body = _json.loads(snap.body)
@@ -423,19 +405,19 @@ async def test_snapshot_then_external_edit_then_stale_write_409(
     outsider.save(tmp_path / "book.xlsx")
     outsider.close()
 
-    req = api_module.ExcelWriteRequest(
+    req = api_module.WorkbookChangesRequest(
         path="book.xlsx",
-        changes=[{"cell": "A1", "value": "from-ui"}],
+        operations=_patches({"cell": "A1", "value": "from-ui"}),
         expected_version=seen_ver,
     )
-    resp = await api_module.write_excel_cells(req, raw)
+    resp = await api_module.apply_workbook_changes(req, raw)
     assert resp.status_code == 409
     wb = load_workbook(tmp_path / "book.xlsx")
     assert wb.active["A1"].value == "external"
 
 
 @pytest.mark.asyncio
-async def test_write_excel_cells_clears_and_writes_other_sheet(
+async def test_apply_workbook_changes_clears_and_writes_other_sheet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api_module, raw = _write_harness(tmp_path, monkeypatch)
@@ -448,15 +430,15 @@ async def test_write_excel_cells_clears_and_writes_other_sheet(
     seed.close()
     ver = content_version_of_file(tmp_path / "book.xlsx")
 
-    req = api_module.ExcelWriteRequest(
+    req = api_module.WorkbookChangesRequest(
         path="book.xlsx",
-        changes=[
+        operations=_patches(
             {"cell": "A1", "value": None, "sheet": "Sheet1"},
             {"cell": "A1", "value": "new-two", "sheet": "Sheet2"},
-        ],
+        ),
         expected_version=ver,
     )
-    resp = await api_module.write_excel_cells(req, raw)
+    resp = await api_module.apply_workbook_changes(req, raw)
     assert resp.status_code == 200
     wb = load_workbook(tmp_path / "book.xlsx")
     assert wb["Sheet1"]["A1"].value is None

@@ -110,7 +110,7 @@ export async function openWorkbookForConversation(path: string, session: Session
     if (!view.sheets.length) throw new Error("文件无工作表");
     const excel = useExcelStore.getState();
     excel.rebindSession(excel.activeWorkspaceKey, file.workspaceKey);
-    const sheet = view.active_sheet ?? view.windows[0]?.sheet;
+    const sheet = view.active_sheet ?? view.regions[0]?.sheet;
     if (opts?.showSheet === false) {
       // Changing the discussion target from chat must not switch the visible surface.
       excel.addRecentFile({ path: file.relative, filename: fileBaseName(file.relative) }, file.workspaceKey);

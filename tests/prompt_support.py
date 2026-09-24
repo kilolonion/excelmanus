@@ -15,12 +15,12 @@ WRITE_SECTION_NAMES = (
     "harness:identity",
     "deployment:persona",
     "spreadsheet:invariants",
-    "tool:inspect",
+    "tool:observe",
     "tool:analyze",
-    "tool:edit",
-    "tool:format",
+    "tool:changes",
+    "tool:preview",
     "tool:split",
-    "spreadsheet:workbook_spec",
+    "spreadsheet:document",
     "tool:run_code",
 )
 PLAN_SECTION_NAMES = (
@@ -28,15 +28,17 @@ PLAN_SECTION_NAMES = (
     "deployment:persona",
     "plan:policy",
     "spreadsheet:invariants",
-    "tool:inspect",
+    "tool:observe",
     "tool:analyze",
+    "tool:preview",
 )
 READ_SECTION_NAMES = (
     "harness:identity",
     "deployment:persona",
     "spreadsheet:invariants",
-    "tool:inspect",
+    "tool:observe",
     "tool:analyze",
+    "tool:preview",
 )
 
 

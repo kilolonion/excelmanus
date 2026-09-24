@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -56,11 +57,31 @@ def _parse_version_tuple(v: str) -> tuple[int, ...]:
         return (0,)
 
 
+def _numeric_version(v: str) -> tuple[int, ...] | None:
+    """Only compare release versions we can order without guessing."""
+    if not isinstance(v, str) or not re.fullmatch(r"v?\d+(?:\.\d+)*", v.strip()):
+        return None
+    parts = tuple(int(part) for part in v.strip().lstrip("v").split("."))
+    return parts + (0,) * (3 - len(parts))
+
+
+def source_version_guard(current: str, target: str) -> str | None:
+    """Return a reason to reject a source update that might lower the version."""
+    current_parts = _numeric_version(current)
+    target_parts = _numeric_version(target)
+    if current_parts is None or target_parts is None:
+        return f"无法确认源码版本（当前 {current}，目标 {target}），已停止自动更新"
+    if target_parts < current_parts:
+        return f"当前版本 v{current} 高于源码分支目标版本 v{target}，已阻止降级"
+    return None
+
+
 class UpgradeOutcome(str, Enum):
     """停机升级 / 恢复的显式结果。控制流只认这个枚举，不认 error 字符串。"""
 
     SUCCESS = "success"
     ALREADY_LATEST = "already_latest"
+    DOWNGRADE_BLOCKED = "downgrade_blocked"
     CHECK_FAILED = "check_failed"
     NOT_GIT_REPO = "not_git_repo"
     FF_CONFLICT = "ff_conflict"
@@ -92,6 +113,7 @@ class VersionInfo:
     release_url: str = ""
     check_method: str = ""
     check_failed: bool = False
+    downgrade_blocked: bool = False
     error: str = ""
     # The exact successfully fetched target; never infer it from existence of
     # an old origin/* ref after failing over to a different remote.
@@ -359,19 +381,34 @@ def check_for_updates(
             _version_check_cache = info
             _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
             return info
-        info.has_update = info.commits_behind > 0
-        if info.has_update:
+        has_new_commits = info.commits_behind > 0
+        if has_new_commits:
+            ancestor_rc, _, _ = _run_cmd(
+                ["git", "merge-base", "--is-ancestor", "HEAD", target_commit], cwd=project_root,
+            )
+            if ancestor_rc != 0:
+                info.check_failed = True
+                info.error = "当前源码与远程分支已分叉，无法安全地前进更新"
+                _version_check_cache = info
+                _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
+                return info
             _, log_out, _ = _run_cmd(
-                ["git", "log", f"HEAD..{git_remote}/{branch}", "--oneline", "-20"], cwd=project_root,
+                ["git", "log", f"HEAD..{target_commit}", "--oneline", "-20"], cwd=project_root,
             )
             info.release_notes = log_out
-            _, remote_toml, _ = _run_cmd(
-                ["git", "show", f"{git_remote}/{branch}:pyproject.toml"], cwd=project_root,
+            version_rc, remote_toml, _ = _run_cmd(
+                ["git", "show", f"{target_commit}:pyproject.toml"], cwd=project_root,
             )
-            for line in remote_toml.splitlines():
-                if line.strip().startswith("version") and "=" in line:
-                    info.latest = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
+            if version_rc == 0:
+                for line in remote_toml.splitlines():
+                    if line.strip().startswith("version") and "=" in line:
+                        info.latest = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+            rejection = source_version_guard(info.current, info.latest)
+            if rejection:
+                info.downgrade_blocked = True
+                info.error = rejection
+        info.has_update = has_new_commits and not info.downgrade_blocked
         if not info.latest:
             info.latest = info.current
         # 更新 TTL 缓存（git 路径）

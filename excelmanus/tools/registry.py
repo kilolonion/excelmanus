@@ -86,7 +86,6 @@ class ToolCapability:
 # 2) register_builtin_tools 与说明文档均以此为准，避免注释与实现漂移。
 _WORKBOOK_IMPL_MODULE_PATHS: tuple[str, ...] = (
     "excelmanus.workbook.data",
-    "excelmanus.workbook.sheets",
     "excelmanus.workbook.charts",
     "excelmanus.workbook.cells",
     "excelmanus.workbook.styles",
@@ -98,7 +97,7 @@ _BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
     "excelmanus.tools.file_tools",
     "excelmanus.tools.code_tools",
     "excelmanus.tools.shell_tools",
-    "excelmanus.tools.intent_tools",
+    "excelmanus.tools.workbook_tools",
     "excelmanus.tools.spreadsheet_engine_tools",
     "excelmanus.tools.spreadsheet_data_tools",
     "excelmanus.tools.image_tools",
@@ -218,6 +217,11 @@ def normalize_tool_aliases(
     仅当 schema 含规范名时才折叠，避免把只接受 ``path`` 的工具改坏。
     未传 schema 时保持无条件折叠，供单测直接断言冲突。
     """
+    if schema and schema.get("x-protocol") == "workbook/2":
+        # V2 schemas are destructive and self-contained.  Do not run the
+        # process-wide V1 reference/alias normalizer before validation; stale
+        # path/sheet/ref objects must be rejected by the V2 contract itself.
+        return dict(arguments)
     from excelmanus.tools.reference_contract import normalize_structured_references
 
     args, reference_error = normalize_structured_references(dict(arguments), schema=schema)
@@ -990,12 +994,16 @@ class ToolRegistry:
             violations,
             arguments,
         )
-        return self._format_argument_schema_validation_error(
-            tool_name=tool_name,
-            arguments=arguments,
-            schema=schema,
-            violations=violations,
+        result = self._format_argument_schema_validation_error(
+            tool_name=tool_name, arguments=arguments, schema=schema, violations=violations,
         )
+        if schema.get("x-protocol") == "workbook/2" and isinstance(arguments.get("operations"), list):
+            from excelmanus.workbook.contracts import validate_operations, OperationContractError
+            try:
+                validate_operations(arguments["operations"])
+            except OperationContractError as exc:
+                return error_result(str(exc), code="TOOL_ARGUMENT_VALIDATION_ERROR", fields={**exc.fields,"tool":tool_name,"violations":violations})
+        return result
 
     def register_tool(self, tool: ToolDef) -> None:
         """注册单个工具。"""

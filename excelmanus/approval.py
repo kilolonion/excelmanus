@@ -966,10 +966,10 @@ class ApprovalManager:
     def _resolve_target_paths(self, tool_name: str, arguments: dict[str, Any]) -> list[Path]:
         path_args: list[str] = []
 
-        # edit_spreadsheet's cross-file mode keeps target paths inside the
+        # apply_spreadsheet_changes's cross-file mode keeps target paths inside the
         # workbooks array.  Include every destination in the same approval and
         # audit record so the batch cannot hide a secondary write target.
-        if tool_name == "edit_spreadsheet":
+        if tool_name == "apply_spreadsheet_changes":
             batch = arguments.get("workbooks")
             if isinstance(batch, str):
                 try:

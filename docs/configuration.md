@@ -1,6 +1,6 @@
 # 配置参考
 
-适用版本：1.8.0 源码 · 更新日期：2026-09-21
+适用版本：1.8.1 源码 · 更新日期：2026-09-21
 
 [文档导航](README.md) · [English](configuration_en.md) · [运维手册](ops-manual.md)
 
@@ -50,7 +50,7 @@
 | `EXCELMANUS_BASE_URL` | 无激活档案时的 `config_kv` 回退 | — |
 | `EXCELMANUS_MODEL` | 无激活档案时的 `config_kv` 回退；Gemini 可从 BASE_URL 自动提取 | — |
 | `EXCELMANUS_PROTOCOL` | 模型协议类型（`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`） | `auto` |
-| `EXCELMANUS_MAX_ITERATIONS` | 本轮 LLM 回合与工具调用上限（并行工具各计 1 次） | `120` |
+| `EXCELMANUS_MAX_ITERATIONS` | 本轮 LLM 回合与工具调用上限；`0` 表示不限制 | `0` |
 | `EXCELMANUS_TURN_TIMEOUT_SECONDS` | 单个 turn 的 wall-clock 上限（`0` 表示不限制） | `0` |
 | `EXCELMANUS_RESPONSES_CONTINUATION_ENABLED` | 启用 Responses API 的 `previous_response_id` 原生续接 | `false` |
 | `EXCELMANUS_RESPONSES_BACKGROUND_ENABLED` | 使用 Responses API 后台响应并轮询到终态 | `false` |
@@ -88,7 +88,7 @@
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 subagent 执行 | `true` |
-| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | 子代理循环的 LLM 回合与工具调用上限 | `120` |
+| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | 子代理循环的 LLM 回合与工具调用上限；`0` 表示不限制 | `0` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | subagent 连续失败熔断阈值 | `6` |
 | `EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS` | 单个子代理执行超时（秒） | `600` |
 | `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | 同步并行批上限与单会话后台子代理并发数；后台超出并发数时排队 | `3` |
@@ -118,11 +118,13 @@
 
 ## Agent 自我管理
 
-默认关闭。在「设置 → 系统 → 能力」开启后，agent 可加载 `agent_self_management` 技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话的推理、上下文和工具开关。保存开关后立即同步已有会话；修改仅作用于当前内存会话，不能更改密钥、审批权限或全局默认。
+只读能力与配置认知可通过 `introspect_capability` 的[统一认知门户](knowledge-portal.md)直接查询，不受自我管理开关限制。以下开关仍控制原有自我管理技能及工具，门户不修改配置或授权。
+
+默认启用，可在「设置 → 系统 → 能力」关闭。开关开启时，agent 可加载 `agent_self_management` 技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话的推理、上下文和工具开关。保存开关后立即同步已有会话；修改仅作用于当前内存会话，不能更改密钥、审批权限或全局默认。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
-| `EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED` | 启用自我管理技能及 `inspect_agent` / `configure_agent` 工具 | `false` |
+| `EXCELMANUS_AGENT_SELF_MANAGEMENT_ENABLED` | 启用自我管理技能及 `inspect_agent` / `configure_agent` 工具 | `true` |
 
 ## 上下文自动压缩（Compaction）
 
@@ -187,7 +189,7 @@
 
 ## 视觉配置
 
-图片只交给当前激活模型阅读。无视觉时拒绝附件；有视觉时用 `read_image` 或工作台附件注入，再由模型产出 `WorkbookSpec` 并调用 `edit_spreadsheet(workbook_spec=)` 建表。没有独立视觉流水线，也没有附属 VLM 描述。
+图片只交给当前激活模型阅读。无视觉时拒绝附件；有视觉时用 `read_image` 或工作台附件注入，再由模型产出 `WorkbookSpec` 并调用 `apply_spreadsheet_changes(workbook_spec=)` 建表。没有独立视觉流水线，也没有附属 VLM 描述。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
@@ -381,6 +383,7 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_JEV_ENABLED` | 总开关：`off` 关闭全部环节，`enforce` 全面接入 | `enforce` |
+| `EXCELMANUS_JEV_EXPERIMENTAL_ENABLED` | 前端实验性 Jev 入口开关；关闭时隐藏 Jev 供应商、设置、时间线按钮、消息内记录和侧栏，不删除已有配置 | `false` |
 | `EXCELMANUS_JEV_EXPOSURE` | 工具披露与工作区/表格上下文建议：`off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_OBSERVATION` | 观察结果策略：`off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_VERIFICATION` | 修改后检查建议：`off` / `enforce` | `enforce` |

@@ -163,12 +163,12 @@ async def test_preview_is_styled_immutable_and_can_select_other_sheet(service):
     service.update("收据.xlsx", b"different live bytes", expected_version=content_version_of(raw))
     before = list(service.list_history("收据.xlsx"))
     payload = json.loads((await routes.preview_revision(path="收据.xlsx", revision_id=revision.id)).body)
-    win = payload["windows"][0]
+    win = payload["regions"][0]
     assert win["cells"]["1,1"]["s"]["bg"]["rgb"] == "#195D85"
-    assert win["merges"] == [{"min_row": 1, "max_row": 1, "min_col": 1, "max_col": 3}]
-    assert win["col_widths"]["A"] == 25 and win["row_heights"]["1"] == 40
+    assert win["merges"] == [{"min_row": 1, "max_row": 1, "min_col": 1, "max_col": 3, "anchor":"A1"}]
+    assert win["geometry"]["columns"][0]["native"] == 25 and win["geometry"]["rows"][0]["native"] == 40
     other = json.loads((await routes.preview_revision(path="收据.xlsx", revision_id=revision.id, sheet="明细")).body)
-    assert other["windows"][0]["cells"]["2,2"]["f"] == "=2*3"
+    assert other["regions"][0]["cells"]["2,2"]["f"] == "=2*3"
     assert service.list_history("收据.xlsx") == before
     assert (service.root / "收据.xlsx").read_bytes() == b"different live bytes"
 

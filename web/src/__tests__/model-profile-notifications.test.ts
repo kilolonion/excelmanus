@@ -19,13 +19,16 @@ describe("model profile notifications", () => {
       observed.push(s.modelProfileVersion);
       // 消费者收到通知时，旧缓存必须已经失效。
       expect(settingsCache.get("/config/models")).toBeUndefined();
+      expect(settingsCache.get("_capsMap")).toBeUndefined();
     });
     settingsCache.set("/thinking", { effort: "medium" });
     settingsCache.set("/config/models", { profiles: [{ name: "old" }] });
+    settingsCache.set("_capsMap", { old: { healthy: true } });
     useUIStore.getState().bumpModelProfiles();
     expect(channel.postMessage).toHaveBeenCalledTimes(1);
 
     settingsCache.set("/config/models", { profiles: [{ name: "still-old" }] });
+    settingsCache.set("_capsMap", { old: { healthy: true } });
     channel.onmessage?.();
     expect(observed).toEqual([1, 2]);
     expect(channel.postMessage).toHaveBeenCalledTimes(1);

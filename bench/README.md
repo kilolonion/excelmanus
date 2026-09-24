@@ -1,6 +1,6 @@
 # 模型评测（Bench）
 
-Bench 用于通过实际对话、工具调用和产出文件评估 ExcelManus。适用版本：1.8.0 源码；更新日期：2026-09-21。
+Bench 用于通过实际对话、工具调用和产出文件评估 ExcelManus。适用版本：1.8.1 源码；更新日期：2026-09-21。
 
 [文档导航](../docs/README.md) · [套件字段](cases/README.md) · [夹具生成](fixtures/README.md)
 

@@ -198,6 +198,18 @@ export type AssistantBlock =
       count: number;
     }
   | {
+      type: "compaction";
+      operationId: string;
+      status: "queued" | "running" | "completed" | "skipped" | "failed";
+      message: string;
+      detail?: string;
+      tokensBefore?: number;
+      tokensAfter?: number;
+      messagesBefore?: number;
+      messagesAfter?: number;
+      preservedQuotes?: number;
+    }
+  | {
       type: "file_download";
       toolCallId?: string;
       filePath: string;
@@ -263,8 +275,25 @@ export interface TaskItem {
 }
 
 export type Message =
-  | { id: string; role: "user"; content: string; files?: FileAttachment[]; timestamp?: number; workbookAction?: import("./workbook-handoff").WorkbookActionContext; workbookContext?: import("./workbook-context").WorkbookMessageContext }
+  | { id: string; role: "user"; content: string; files?: FileAttachment[]; timestamp?: number; workbookAction?: import("./workbook-handoff").WorkbookActionContext; workbookContext?: import("./workbook-context").WorkbookMessageContext; dispatchId?: string; dispatchMode?: MessageDispatchMode; dispatchStatus?: string }
   | { id: string; role: "assistant"; blocks: AssistantBlock[]; affectedFiles?: string[]; timestamp?: number };
+
+export type MessageDispatchMode = "steer" | "interrupt" | "queue";
+
+export interface DispatchReceipt {
+  dispatch_id: string;
+  client_message_id: string;
+  mode: MessageDispatchMode;
+  status: "queued" | "interrupt_pending" | "applying" | "applied" | "completed" | "failed" | "cancelled" | "interrupted";
+  content: string;
+  revision: number;
+  created_at: number;
+  turn_id?: string;
+  step_id?: string;
+  error?: string;
+  message_recorded?: boolean;
+  hidden?: boolean;
+}
 
 export interface Approval {
   id: string;

@@ -658,26 +658,26 @@ def _check_min_match_rate(
     result_dict: dict[str, Any],
     threshold: float,
 ) -> AssertionResult:
-    """规格编译入口是 edit_spreadsheet。像素评分工具已删除。"""
+    """规格编译入口是 apply_spreadsheet_changes。像素评分工具已删除。"""
     del threshold
     tool_calls = result_dict.get("artifacts", {}).get("tool_calls", [])
     edits = [
         tc for tc in tool_calls
-        if tc.get("tool_name") == "edit_spreadsheet" and tc.get("success")
+        if tc.get("tool_name") == "apply_spreadsheet_changes" and tc.get("success")
     ]
     if not edits:
         return AssertionResult(
             rule="min_match_rate",
             passed=False,
-            expected="edit_spreadsheet success",
+            expected="apply_spreadsheet_changes success",
             actual=None,
-            message="未找到成功的 edit_spreadsheet 调用",
+            message="未找到成功的 apply_spreadsheet_changes 调用",
         )
     return AssertionResult(
         rule="min_match_rate",
         passed=True,
-        expected="edit_spreadsheet success",
-        actual="edit_spreadsheet",
+        expected="apply_spreadsheet_changes success",
+        actual="apply_spreadsheet_changes",
         message="",
     )
 

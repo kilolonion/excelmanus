@@ -203,7 +203,7 @@ def compose_child(
     )
     from excelmanus.tools.introspection_tools import register_introspection_tools
 
-    register_introspection_tools(child.registry)
+    register_introspection_tools(child.registry, engine=child)
     allowed = list(child_cap.allowed_tools) if child_cap.allowed_tools is not None else None
     child.registry.restrict(allowed=allowed, disallowed=list(child_cap.disallowed_tools))
 

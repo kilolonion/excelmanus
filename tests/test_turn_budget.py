@@ -40,6 +40,20 @@ def test_wall_clock_budget_is_shared_and_fails_closed() -> None:
     assert budget.exhausted_reason == "wall_clock"
 
 
+def test_live_iteration_settings_apply_to_future_turns(tmp_path) -> None:
+    engine = AgentEngine(
+        ExcelManusConfig(
+            api_key="test-key", base_url="https://test.example/v1",
+            model="test-model", workspace_root=str(tmp_path),
+            max_iterations=50, subagent_max_iterations=120,
+        ),
+        ToolRegistry(),
+    )
+    engine.apply_execution_budget(max_iterations=0, subagent_max_iterations=0)
+    assert engine.config.max_iterations == 0
+    assert engine.config.subagent_max_iterations == 0
+
+
 @pytest.mark.asyncio
 async def test_agent_stops_before_processing_tools_when_token_budget_is_hit(tmp_path) -> None:
     engine = AgentEngine(

@@ -7,15 +7,15 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools import intent_tools, reference_tools
+from excelmanus.tools import workbook_tools, reference_tools
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import analyze_spreadsheet, inspect_spreadsheet
+from excelmanus.tools.workbook_tools import analyze_spreadsheet, observe_spreadsheet
 
 
 def _bind(root: Path) -> None:
     workspace = str(root)
     set_guard(FileAccessGuard(workspace))
-    intent_tools.init_guard(workspace)
+    workbook_tools.init_guard(workspace)
     reference_tools.init_guard(workspace)
 
 
@@ -52,7 +52,7 @@ def test_aggregate_join_and_year_month(tmp_path: Path) -> None:
     joined = analyze_spreadsheet(
         mode="aggregate",
         file_path=str(path),
-        sheet_name="订单",
+        sheet="订单",
         join={"sheet": "产品", "on": "产品ID", "columns": ["名称"]},
         group_by="名称",
         aggregations={"数量": "sum"},
@@ -65,7 +65,7 @@ def test_aggregate_join_and_year_month(tmp_path: Path) -> None:
     by_month = analyze_spreadsheet(
         mode="aggregate",
         file_path=str(path),
-        sheet_name="订单",
+        sheet="订单",
         group_by={"column": "下单日期", "transform": "year_month"},
         aggregations={"数量": "sum"},
     )
@@ -92,7 +92,7 @@ def test_aggregate_sort_by_source_column_maps_to_derived_key(tmp_path: Path) -> 
     result = analyze_spreadsheet(
         mode="aggregate",
         file_path=str(path),
-        sheet_name="订单",
+        sheet="订单",
         group_by={"column": "下单日期", "transform": "year_month"},
         aggregations={"数量": "sum"},
         sort_by="下单日期",
@@ -170,22 +170,19 @@ def test_inspect_range_max_rows_warns(tmp_path: Path) -> None:
         tmp_path / "range.xlsx",
         {"Sheet1": [["部门", "金额"], ["销售", 10], ["研发", 20]]},
     )
-    result = inspect_spreadsheet(
+    result = observe_spreadsheet(
         mode="range",
         file_path=str(path),
-        sheet_name="Sheet1",
+        sheet="Sheet1",
         range="A1:B3",
-        max_rows=1,
     )
     assert result.success, result.model_text
-    warns = result.value.get("warnings") or []
-    assert any("精确 range" in str(item) and "max_rows" in str(item) for item in warns)
-    assert "精确 range" in (result.model_text or "")
+    assert result.value["regions"][0]["rect"] == {"r0":1,"c0":1,"r1":3,"c1":2}
 import json
 
 
-def test_json_string_arguments_tolerated(tmp_path: Path) -> None:
-    """模型常把对象/数组参数序列化成 JSON 字符串，入口层应统一归一。"""
+def test_structured_arguments_compose(tmp_path: Path) -> None:
+    """V2 structured arguments compose across join, filter and pivot."""
     _bind(tmp_path)
     path = _save(
         tmp_path / "json_args.xlsx",
@@ -201,10 +198,10 @@ def test_json_string_arguments_tolerated(tmp_path: Path) -> None:
     joined = analyze_spreadsheet(
         mode="aggregate",
         file_path=str(path),
-        sheet_name="订单",
-        join=json.dumps({"sheet": "产品", "on": "产品ID", "columns": ["名称"]}),
+        sheet="订单",
+        join={"sheet": "产品", "on": "产品ID", "columns": ["名称"]},
         group_by="名称",
-        aggregations=json.dumps({"数量": "sum"}),
+        aggregations={"数量": "sum"},
     )
     assert joined.success, joined.model_text
     groups = {row["名称"]: row["数量_sum"] for row in joined.value["groups"]}
@@ -213,8 +210,8 @@ def test_json_string_arguments_tolerated(tmp_path: Path) -> None:
     filtered = analyze_spreadsheet(
         mode="filter",
         file_path=str(path),
-        sheet_name="订单",
-        conditions=json.dumps([{"column": "产品ID", "operator": "==", "value": "P1"}]),
+        sheet="订单",
+        conditions=[{"column": "产品ID", "operator": "==", "value": "P1"}],
     )
     assert filtered.success, filtered.model_text
     assert filtered.value["filtered_rows"] == 1
@@ -222,7 +219,7 @@ def test_json_string_arguments_tolerated(tmp_path: Path) -> None:
     pivoted = analyze_spreadsheet(
         mode="pivot",
         file_path=str(path),
-        sheet_name="订单",
+        sheet="订单",
         index="产品ID",
         columns=json.dumps({"column": "下单日期", "transform": "year_month"}),
         values=json.dumps(["数量"]),
@@ -267,7 +264,7 @@ def test_filter_logic_not_single_condition(tmp_path: Path) -> None:
     res = analyze_spreadsheet(
         mode="filter",
         file_path=str(path),
-        sheet_name="员工",
+        sheet="员工",
         column="部门",
         operator="eq",
         value="销售",
@@ -281,7 +278,7 @@ def test_filter_logic_not_single_condition(tmp_path: Path) -> None:
     bad = analyze_spreadsheet(
         mode="filter",
         file_path=str(path),
-        sheet_name="员工",
+        sheet="员工",
         conditions=[
             {"column": "部门", "operator": "eq", "value": "销售"},
             {"column": "姓名", "operator": "contains", "value": "三"},
@@ -323,4 +320,4 @@ def test_analyze_overview_points_to_inspect(tmp_path: Path) -> None:
     assert not result.success
     text = result.model_text or ""
     assert "overview" in text
-    assert "inspect_spreadsheet" in text
+    assert "observe_spreadsheet" in text

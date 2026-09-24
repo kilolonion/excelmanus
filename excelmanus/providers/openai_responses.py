@@ -43,9 +43,24 @@ class ResponsesAPIError(Exception):
     能像处理 openai.APIStatusError 一样识别 429 / 5xx / 401 等状态码。
     """
 
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(self, status_code: int, message: str, *, body: Any = None) -> None:
         self.status_code = status_code
+        self.body = body
         super().__init__(message)
+
+
+async def _http_response_error(response: httpx.Response) -> ResponsesAPIError:
+    """保留服务商错误结构，并解码响应正文，避免向用户显示 bytes repr。"""
+    await response.aread()
+    try:
+        body = response.json()
+    except ValueError:
+        body = response.text
+    return ResponsesAPIError(
+        response.status_code,
+        f"Responses API 错误 (HTTP {response.status_code}): {response.text[:500]}",
+        body=body,
+    )
 
 
 def _status_from_error_code(code: str) -> int:
@@ -57,7 +72,7 @@ def _status_from_error_code(code: str) -> int:
         return 429
     if any(token in normalized for token in ("server_error", "internal", "overloaded", "unavailable")):
         return 500
-    if any(token in normalized for token in ("auth", "api_key", "permission", "forbidden", "unauthorized")):
+    if any(token in normalized for token in ("auth", "api_key", "permission", "forbidden", "unauthorized", "token_revoked", "token_expired", "invalid_token")):
         return 401
     if "not_found" in normalized or "expired" in normalized:
         return 404
@@ -75,6 +90,7 @@ def _stream_failure_error(event_data: dict[str, Any]) -> ResponsesAPIError | Non
         return ResponsesAPIError(
             _status_from_error_code(code),
             f"Responses API stream error (code={code or 'unknown'}): {message[:300]}",
+            body={"error": event_data},
         )
     if event_type != "response.failed":
         return None
@@ -89,6 +105,7 @@ def _stream_failure_error(event_data: dict[str, Any]) -> ResponsesAPIError | Non
     return ResponsesAPIError(
         _status_from_error_code(code),
         f"Responses API response failed (code={code or 'unknown'}): {message[:300]}",
+        body={"error": error},
     )
 
 
@@ -344,6 +361,9 @@ def _apply_chat_kwargs_to_responses_body(body: dict[str, Any], kwargs: dict[str,
     extra_body = kwargs.get("extra_body")
     if isinstance(extra_body, dict):
         body.update(extra_body)
+    service_tier = kwargs.get("service_tier")
+    if isinstance(service_tier, str) and service_tier.strip():
+        body.setdefault("service_tier", service_tier)
 
     reasoning_effort = kwargs.get("reasoning_effort")
     if isinstance(reasoning_effort, str) and reasoning_effort.strip():
@@ -698,11 +718,7 @@ class OpenAIResponsesClient:
 
         async with self._http.stream("POST", url, json=body, headers=headers) as resp:
             if resp.status_code != 200:
-                error_text = await resp.aread()
-                raise ResponsesAPIError(
-                    resp.status_code,
-                    f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}",
-                )
+                raise await _http_response_error(resp)
 
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
@@ -775,11 +791,7 @@ class OpenAIResponsesClient:
             headers=self._request_headers(),
         )
         if response.status_code not in {200, 201, 202}:
-            text = await response.aread()
-            raise ResponsesAPIError(
-                response.status_code,
-                f"Responses background 请求错误 (HTTP {response.status_code}): {text[:500]}",
-            )
+            raise await _http_response_error(response)
         result = response.json()
         if not isinstance(result, dict):
             raise ResponsesAPIError(0, "Responses background 返回不是 JSON 对象")
@@ -791,11 +803,7 @@ class OpenAIResponsesClient:
             headers=self._request_headers(),
         )
         if response.status_code != 200:
-            text = await response.aread()
-            raise ResponsesAPIError(
-                response.status_code,
-                f"Responses background 查询错误 (HTTP {response.status_code}): {text[:500]}",
-            )
+            raise await _http_response_error(response)
         result = response.json()
         if not isinstance(result, dict):
             raise ResponsesAPIError(0, "Responses background 查询返回不是 JSON 对象")
@@ -822,11 +830,7 @@ class OpenAIResponsesClient:
             headers=self._request_headers(),
         )
         if response.status_code not in {200, 202}:
-            text = await response.aread()
-            raise ResponsesAPIError(
-                response.status_code,
-                f"Responses background 取消错误 (HTTP {response.status_code}): {text[:500]}",
-            )
+            raise await _http_response_error(response)
         result = response.json()
         if not isinstance(result, dict):
             raise ResponsesAPIError(0, "Responses background 取消返回不是 JSON 对象")
@@ -894,11 +898,7 @@ class OpenAIResponsesClient:
 
             async with self._http.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
-                    error_text = await resp.aread()
-                    raise ResponsesAPIError(
-                        resp.status_code,
-                        f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}",
-                    )
+                    raise await _http_response_error(resp)
 
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):

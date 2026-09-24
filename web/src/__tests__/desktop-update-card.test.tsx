@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { DesktopUpdateCard } from "@/components/settings/DesktopUpdateCard";
 
 const available: ExcelManusDesktopUpdate = {
-  current: "1.8.0", latest: "1.9.0", hasUpdate: true, platform: "win32",
+  current: "1.8.1", latest: "1.9.0", hasUpdate: true, platform: "win32",
   releaseNotes: "New features", releaseUrl: "https://github.com/kilolonion/excelmanus/releases/tag/v1.9.0",
   downloadUrl: "https://github.com/kilolonion/excelmanus/releases/download/v1.9.0/installer.exe", installerName: "installer.exe",
 };
@@ -18,7 +18,7 @@ describe("desktop updates", () => {
       selectFolder: vi.fn(), pickChatFiles: vi.fn(),
       checkUpdate: vi.fn().mockResolvedValue(available), downloadUpdate: download,
     };
-    render(<DesktopUpdateCard current="1.8.0" />);
+    render(<DesktopUpdateCard current="1.8.1" />);
     expect(screen.getByText(/不会删除、移动或修改工作区/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
     fireEvent.click(await screen.findByRole("button", { name: "下载 v1.9.0 安装包" }));
@@ -31,7 +31,7 @@ describe("desktop updates", () => {
       .mockResolvedValueOnce({ ...available, downloadUrl: null })
       .mockRejectedValueOnce(new Error("网络连接失败"));
     window.excelManusDesktop = { selectFolder: vi.fn(), pickChatFiles: vi.fn(), checkUpdate: check, downloadUpdate: vi.fn() };
-    render(<DesktopUpdateCard current="1.8.0" />);
+    render(<DesktopUpdateCard current="1.8.1" />);
     fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
     await screen.findByRole("button", { name: "下载 v1.9.0 安装包" });
     fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
@@ -43,13 +43,13 @@ describe("desktop updates", () => {
   });
 
   it("keeps a release-page fallback for older desktop bridges", () => {
-    render(<DesktopUpdateCard current="1.8.0" />);
+    render(<DesktopUpdateCard current="1.8.1" />);
     expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
     expect(screen.getByRole("link", { name: "查看发布页面" }).getAttribute("href")).toBe("https://github.com/kilolonion/excelmanus/releases");
   });
 
   it("can collapse and reopen the data-preservation guidance", () => {
-    render(<DesktopUpdateCard current="1.8.0" />);
+    render(<DesktopUpdateCard current="1.8.1" />);
     const toggle = screen.getByRole("button", { name: /仅处理 ExcelManus 程序/ });
     const details = document.getElementById(toggle.getAttribute("aria-controls")!);
 

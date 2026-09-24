@@ -13,6 +13,8 @@ _ff_logger = _get_logger("fire_and_forget")
 from excelmanus.engine_types import _ToolCallBatch
 from excelmanus.mentions.parser import ResolvedMention
 from excelmanus.message_serialization import to_plain as _to_plain
+from excelmanus.providers.reasoning import extract_reasoning_text, split_content_parts
+from excelmanus.providers.stream_types import extract_inline_thinking
 
 # ── 常量 ──────────────────────────────────────────────────────
 
@@ -201,16 +203,24 @@ def _coerce_completion_message(message: Any) -> Any:
     if message is None:
         return SimpleNamespace(content="", tool_calls=[])
     if isinstance(message, str):
-        return SimpleNamespace(content=message, tool_calls=[])
+        message = SimpleNamespace(content=message, tool_calls=[])
     if isinstance(message, dict):
-        return SimpleNamespace(
-            content=message.get("content"),
-            tool_calls=_normalize_tool_calls(message.get("tool_calls")),
-            thinking=message.get("thinking"),
-            reasoning=message.get("reasoning"),
-            reasoning_content=message.get("reasoning_content"),
-            replay_state=message.get("replay_state"),
-        )
+        payload = dict(message)
+        payload.setdefault("content", None)
+        payload["tool_calls"] = _normalize_tool_calls(payload.get("tool_calls"))
+        message = SimpleNamespace(**payload)
+    raw_content = getattr(message, "content", None)
+    _, content = split_content_parts(raw_content)
+    inline_thinking, clean_content = extract_inline_thinking(content)
+    thinking = extract_reasoning_text(message)
+    if inline_thinking and inline_thinking != thinking:
+        thinking = "\n".join(part for part in (thinking, inline_thinking) if part)
+    if thinking or isinstance(raw_content, (list, tuple)):
+        payload = _to_plain(message)
+        payload["content"] = clean_content
+        payload["tool_calls"] = _normalize_tool_calls(payload.get("tool_calls"))
+        payload.update(thinking=thinking or None, reasoning_content=thinking or None)
+        return SimpleNamespace(**payload)
     return message
 
 
@@ -219,7 +229,7 @@ def _extract_completion_message(response: Any) -> tuple[Any, Any]:
     usage = getattr(response, "usage", None)
 
     if isinstance(response, str):
-        return SimpleNamespace(content=response, tool_calls=[]), usage
+        return _coerce_completion_message(response), usage
 
     choices = getattr(response, "choices", None)
     if isinstance(choices, list) and choices:

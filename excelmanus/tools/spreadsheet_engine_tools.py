@@ -22,11 +22,10 @@ def init_guard(workspace_root):
 
 
 def _source(path, expected_version=None):
-    guard=require_guard(); source=guard.resolve_and_validate(path)
-    data=source.read_bytes(); version=content_version_of(data)
-    if expected_version and expected_version!=version:
-        raise CommitError("VERSION_CONFLICT","源文件版本已改变")
-    return source, data, version
+    from excelmanus.workbook.snapshot import open_snapshot
+    source = require_guard().resolve_and_validate(path)
+    snapshot = open_snapshot(path, expected_version=expected_version)
+    return source, snapshot.read_bytes(), snapshot.content_version
 
 
 def _cancelled():

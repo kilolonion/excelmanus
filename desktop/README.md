@@ -1,6 +1,6 @@
 # ExcelManus Desktop
 
-Desktop packaging for the existing FastAPI backend and Next.js frontend. Applies to the 1.8.0 source tree; updated on 2026-09-19.
+Desktop packaging for the existing FastAPI backend and Next.js frontend. Applies to the 1.8.1 source tree; updated on 2026-09-19.
 
 [Project overview](../README_EN.md) · [Documentation](../docs/README.md) · [Operations](../docs/ops-manual_en.md)
 
@@ -84,13 +84,15 @@ for faster extraction. `npm run dist:win:compact` builds a smaller, solid archiv
 in `dist-compact/` for bandwidth-constrained distribution; it takes longer to
 extract and does not produce differential update metadata. Both contain the
 same runtime features. The current update UI downloads a full installer in the
-browser; generating a blockmap alone does not enable delta downloads.
+app; generating a blockmap alone does not enable delta downloads. The installer
+does not copy itself into electron-updater's unused `installer.exe` cache. The
+app's own complete download and installation handoff remain independent of it.
 
 All `dist` commands now run runtime smoke checks before packaging. After a build,
 measure the actual payload with:
 
 ```powershell
-npm run size:report -- dist/win-unpacked --installer "dist/ExcelManus Setup 1.8.0.exe" --output .build/package-report.json
+npm run size:report -- dist/win-unpacked --installer "dist/ExcelManus Setup 1.8.1.exe" --output .build/package-report.json
 ```
 
 Use `--baseline <previous-report.json>` to compare bytes and file counts.
@@ -102,19 +104,26 @@ is in progress, then restores NSIS's completion/error display. The default bar
 mixes script progress with archive progress and can move backwards or stall
 around 70%; those values are not an overall installation percentage. The activity
 bar covers extraction, placing the bundled runtimes, removal of the previous
-version, and caching the new installer. These operations still need disk time;
+version. These operations still need disk time;
 the animation does not estimate a percentage or time remaining.
 
 Extraction stages files in a unique directory **inside the destination**, then
 renames its top-level entries into place. This avoids electron-builder's second
 full Shell copy of thousands of small files, keeps moves on one volume, and
-inherits the destination's permissions. Brief move failures are retried; an
-existing target or persistent lock falls back to the original copy operation.
+inherits the destination's permissions. Shared directories left by preserved
+user files are merged recursively, moving each new subtree as a unit. Existing
+directories skip futile rename retries; only individual colliding or persistently
+locked files fall back to copying. Junctions are rejected before merging.
 Registry, shortcuts, upgrades and signed-uninstaller generation remain handled
 by the pinned electron-builder templates. A compile-time guard and native tests
 check that the extraction override is actually selected.
 
-Keep the default 7z payload. The pinned ZIP extraction plugin does not preserve
+Keep the default 7z payload. The Windows afterPack hook forces the compatible
+BCJ filter: the pinned 26.15.3 packer can otherwise choose BCJ2 streams that its
+NSIS decoder silently skips ([upstream issue](https://github.com/electron-userland/electron-builder/issues/9983)).
+Before moving extracted files, the installer checks them against the trusted
+build-time manifest and fails if any entry is missing or is a directory.
+The pinned ZIP extraction plugin does not preserve
 UTF-8 archive filenames, including bundled Chinese filenames. The Windows
 installer regression test exercises the actual extraction plugin with Chinese
 filenames and installation paths, plus success, abort, and silent UI paths.
@@ -140,6 +149,29 @@ path, in addition to checking the interpreter's standalone features.
 ExcelManus source files and executable skill scripts remain available; redundant
 source copies of FastAPI, Uvicorn and tiktoken are omitted from the backend.
 
+The interpreter preserves standard-library source paths by default so arbitrary
+`run_code` scripts can open `module.__file__` normally. Acceptance runs resource
+reads, real spawn multiprocessing, Chinese codecs, SQLite, SSL, compression,
+`python -m`, source inspection and the full XLSX/DOCX/plotting smoke.
+
+For an explicitly constrained distribution, setting
+`EXCELMANUS_COMPACT_PYTHON_STDLIB=1` during preparation/release packaging opts into
+`python312.zip`. Only source-only packages are consolidated; packages with data
+or native files remain intact, and `os.py` stays as the prefix landmark. This
+option reduces small-file writes but gives zipped modules virtual `__file__`
+paths; arbitrary third-party scripts are not guaranteed compatible. Changing the
+flag invalidates the release runtime cache. It is not enabled by default.
+
+Workbook previews bundle only Playwright's Chromium headless shell, FFmpeg and
+the Windows dependency helper where needed. The headed browser and cache metadata
+are excluded even if left over from an older build. Browser binaries are staged
+after PyInstaller freezes the API, preserving their own library paths and signatures.
+The driver shares the app's bundled Node through `PLAYWRIGHT_NODEJS_PATH`, so a
+second Node executable is not installed. The frozen smoke must render an actual
+spreadsheet with this bundled browser and shared runtime.
+Preparation and packaged smoke check Node's exact version, OS and architecture;
+missing bundled browsers fail explicitly instead of falling back to a host cache.
+
 Next.js `output: "standalone"` supplies the traced JS runtime dependencies.
 Staging additionally excludes its build cache and dependency test suites, type
 declarations and source maps. Application routes, public files, native modules
@@ -149,15 +181,17 @@ list of top-level JS packages.
 To profile the real Windows extraction operations without registering an app:
 
 ```powershell
-node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe'
-node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe' --fast
-node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.0.exe' --fast --owned-removal
+node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.1.exe'
+node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.1.exe' --fast
+node scripts/profile-installer.mjs 'dist/ExcelManus Setup 1.8.1.exe' --fast --owned-removal
 ```
 
-The first measures the upstream copy path; `--fast` measures the destination-local
-move path against the same payload. Results go to unique `.build/install-profile`
+The first measures the upstream copy path and installer cache; `--fast` measures
+the destination-local move path and skips that unused cache copy. Results go to unique `.build/install-profile`
 directories. Run them sequentially without other builds for comparable timings.
 They measure file operations, not upgrade removal, registry writes or shortcuts.
+The fixture also omits the production manifest completeness pass; only the
+installed-app timings cover the entire current installation path.
 `--owned-removal` additionally measures the real manifest-based program removal
 used by upgrades, including path validation, without registering an application.
 The last-file removal prunes empty parent directories; a nonempty parent stops
@@ -211,7 +245,7 @@ The default durable profile is `profile/` inside Electron's user-data directory.
 
 The app selects available ports at launch and reuses the frontend port when possible to preserve browser-local preferences. Configuration restarts drain the API and ask Electron to relaunch the backend on the same port.
 
-Source-tree Git update, backup-restore, and deployment controls are disabled in desktop mode. Settings → Version and Help → Check for updates check official GitHub Releases and open a matching installer download in the browser. Save work and exit before running it; downloads are not executed automatically.
+Source-tree Git update, backup-restore, and deployment controls are disabled in desktop mode. Settings → Version and Help → Check for updates check official GitHub Releases. The app downloads and verifies a matching complete installer, respects unsaved-change guards, stops its services, and hands off to the installer. Its download directory is independent of electron-updater's unused installer cache.
 
 On Windows, an existing registered installation is replaced at the same location and scope. The installer asks whether to migrate data (default: reuse the existing profile and shortcuts) or uninstall then reinstall (reuse the profile and recreate shortcuts). Both preserve settings, conversations, workspaces and user files. Migration reuses data in place rather than moving workspace files. macOS users replace the existing app with the new DMG's application.
 
@@ -243,7 +277,19 @@ and permissions are applied before key bytes are written.
 3. Installs NSIS into a directory containing Chinese text and spaces.
 4. Runs the installed Electron app, changes a setting, checks same-port restart
    and persisted settings, and requests normal exit through its inherited pipe.
-5. Reinstalls, repeats the checks, uninstalls, and checks the profile survives.
+5. Reinstalls with a user file preserved inside `resources`, repeats the checks,
+   uninstalls, and checks the profile survives.
+
+Before launching the installed app, acceptance compares every packaged file's
+size and SHA-256 against `win-unpacked`, including native libraries, the browser,
+interpreter and frontend. This expensive byte comparison runs only in acceptance,
+outside the installer timing. It permits extra user files. The app check includes
+actual spreadsheet screenshots and stdlib multiprocessing at the installed path.
+
+The real install/upgrade/uninstall durations and exit codes are written to
+`dist/install-timings.json` and uploaded even when a later acceptance step fails.
+Compare reports on the same Windows machine and disk; macOS compile checks and
+payload measurements are not Windows installation timing evidence.
 
 For local installed-app acceptance:
 

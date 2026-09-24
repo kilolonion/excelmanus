@@ -9,9 +9,10 @@ import pytest
 from openpyxl import Workbook, load_workbook
 from pydantic import ValidationError
 
-from excelmanus.replica_spec import compile_workbook_spec_to_bytes, validate_workbook_spec
+from excelmanus.workbook.spec import validate_workbook_spec
+from tests.workbook_support import create_document_bytes
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools import intent_tools, reference_tools
+from excelmanus.tools import workbook_tools, reference_tools
 from excelmanus.tools._guard_ctx import set_guard
 from excelmanus.workbook.layout import PrintLayout, apply_print_layout
 from excelmanus.workbook_commit import content_version_of_file
@@ -19,7 +20,7 @@ from excelmanus.workbook_commit import content_version_of_file
 
 def _bind_workspace(root: Path) -> None:
     set_guard(FileAccessGuard(str(root)))
-    intent_tools.init_guard(str(root))
+    workbook_tools.init_guard(str(root))
     reference_tools.init_guard(str(root))
 
 
@@ -65,7 +66,7 @@ def test_compile_print_layout_survives_reopen(paper_size: str, expected: str) ->
         "fit_to_width": 1,
         "fit_to_height": 1,
     }))
-    data, _stats = compile_workbook_spec_to_bytes(spec)
+    data, _stats = create_document_bytes(spec)
     wb = load_workbook(io.BytesIO(data))
     try:
         ws = wb["收款单"]
@@ -136,7 +137,7 @@ def test_fit_defaults_are_explicit_in_persisted_workbook(layout: dict, expected_
 def test_format_print_layout_switches_scaling_modes_without_changing_content(tmp_path: Path) -> None:
     _bind_workspace(tmp_path)
     path = _book(tmp_path / "receipt.xlsx")
-    fitted = intent_tools.format_spreadsheet(
+    fitted = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=content_version_of_file(path),
         operations=[{"kind": "print_layout", "sheet": "收款单", "print_layout": {
             "orientation": "landscape", "paper_size": "A4", "fit_to_width": 1, "fit_to_height": 0,
@@ -155,7 +156,7 @@ def test_format_print_layout_switches_scaling_modes_without_changing_content(tmp
         assert wb["说明"].page_setup.orientation is None
     finally:
         wb.close()
-    scaled = intent_tools.format_spreadsheet(
+    scaled = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=fitted.ui_meta.content_version,
         operations=[{"kind": "print_layout", "sheet": "收款单", "print_layout": {"scale": 125, "print_area": ""}}],
     )
@@ -177,7 +178,7 @@ def test_invalid_print_edit_does_not_save_earlier_operations(tmp_path: Path, lay
     _bind_workspace(tmp_path)
     path = _book(tmp_path / "receipt.xlsx")
     before = path.read_bytes()
-    result = intent_tools.format_spreadsheet(
+    result = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=content_version_of_file(path),
         operations=[
             {"kind": "format", "sheet": "收款单", "range": "A1", "font": {"bold": True}},
@@ -193,7 +194,7 @@ def test_invalid_print_edit_does_not_save_earlier_operations(tmp_path: Path, lay
 def test_invalid_creation_print_layout_leaves_no_output(tmp_path: Path) -> None:
     _bind_workspace(tmp_path)
     path = tmp_path / "receipt.xlsx"
-    result = intent_tools.edit_spreadsheet(
+    result = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), workbook_spec=_spec({"fit_to_width": 1, "scale": 50}),
     )
     assert not result.success
@@ -204,13 +205,15 @@ def test_invalid_creation_print_layout_leaves_no_output(tmp_path: Path) -> None:
 def test_inspection_reports_persisted_dimensions_and_print_mode(tmp_path: Path) -> None:
     _bind_workspace(tmp_path)
     path = _book(tmp_path / "receipt.xlsx")
-    result = intent_tools.inspect_spreadsheet(
-        file_path=str(path), mode="overview", include=["print_settings", "row_heights", "column_widths"],
+    result = workbook_tools.observe_spreadsheet(
+        file_path=str(path), mode="range", sheet="收款单", range="A1:C4", facets=['presentation', 'geometry'],
     )
     assert result.success, result.model_text
-    sheet = next(sheet for sheet in result.value["sheets"] if sheet["name"] == "收款单")
-    assert sheet["row_heights"] == {"1": 27}
-    assert sheet["column_widths"] == {"A": 19, "B": 19, "C": 19}
+    sheet = next(region for region in result.value["regions"] if region["sheet"] == "收款单")
+    assert sheet["geometry"]["rows"][0]["native"] == 27
+    assert [c["native"] for c in sheet["geometry"]["columns"]][:3] == [19, 19, 19]
+    assert sheet["geometry"]["defaults"]["column_width"]["source"] == "estimated"
+    assert sheet["geometry"]["defaults"]["row_height"]["native"] == 15.0
     assert sheet["print_settings"]["scaling_mode"] == "scale"
     assert sheet["print_settings"]["fit_to_page"] is False
     assert sheet["print_settings"]["scale"] == 75
@@ -229,7 +232,7 @@ def test_partial_print_edit_preserves_other_layout_settings(tmp_path: Path) -> N
     ws.page_setup.fitToHeight = 3
     wb.save(path)
     wb.close()
-    result = intent_tools.format_spreadsheet(
+    result = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=content_version_of_file(path),
         operations=[{"kind": "print_layout", "sheet": "收款单", "print_layout": {"orientation": "landscape"}}],
     )
@@ -255,7 +258,7 @@ def test_print_edit_requires_sheet_only_when_ambiguous(tmp_path: Path) -> None:
     path = _book(tmp_path / "receipt.xlsx")
     before = path.read_bytes()
     operation = {"kind": "print_layout", "print_layout": {"orientation": "landscape"}}
-    rejected = intent_tools.format_spreadsheet(
+    rejected = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=content_version_of_file(path), operations=[operation],
     )
     assert not rejected.success
@@ -265,7 +268,7 @@ def test_print_edit_requires_sheet_only_when_ambiguous(tmp_path: Path) -> None:
     del wb["说明"]
     wb.save(path)
     wb.close()
-    accepted = intent_tools.format_spreadsheet(
+    accepted = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=content_version_of_file(path), operations=[operation],
     )
     assert accepted.success, accepted.model_text
@@ -283,14 +286,14 @@ def test_print_edit_requires_sheet_only_when_ambiguous(tmp_path: Path) -> None:
 def test_print_settings_can_be_used_directly_to_format_another_sheet(tmp_path: Path, scaling: dict) -> None:
     _bind_workspace(tmp_path)
     path = _book(tmp_path / "receipt.xlsx")
-    result = intent_tools.format_spreadsheet(
+    result = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=content_version_of_file(path),
         operations=[{"kind": "print_layout", "sheet": "收款单", "print_layout": {
             "print_area": "A1:C4", "paper_size": "A4", "orientation": "landscape", **scaling,
         }}],
     )
     assert result.success, result.model_text
-    settings = result.value["appearance"]["sheets"][0]["print_settings"]
+    settings = result.value["observation"]["sheets"][0]["print_settings"]
     layout = settings["print_layout"]
     assert PrintLayout.model_validate(layout).print_area == "A1:C4"
     assert layout["paper_size"] == "A4"
@@ -303,13 +306,13 @@ def test_print_settings_can_be_used_directly_to_format_another_sheet(tmp_path: P
         assert layout["fit_to_width"] == 1
         assert layout["fit_to_height"] == 0
         assert "scale" not in layout
-    readback = intent_tools.inspect_spreadsheet(
-        file_path=str(path), mode="overview", include=["print_settings"],
+    readback = workbook_tools.observe_spreadsheet(
+        file_path=str(path), mode="overview", facets=['presentation'],
     )
     assert readback.success, readback.model_text
-    source = next(sheet for sheet in readback.value["sheets"] if sheet["name"] == "收款单")
+    source = next(region for region in readback.value["regions"] if region["sheet"] == "收款单")
     assert source["print_settings"]["print_layout"] == layout
-    copied = intent_tools.format_spreadsheet(
+    copied = workbook_tools.apply_spreadsheet_changes(
         file_path=str(path), expected_version=readback.ui_meta.content_version,
         operations=[{"kind": "print_layout", "sheet": "说明", "print_layout": layout}],
     )
@@ -340,11 +343,11 @@ def test_print_inspection_preserves_unsupported_multiple_areas_and_paper(tmp_pat
     ws.page_setup.paperSize = "12"
     wb.save(path)
     wb.close()
-    result = intent_tools.inspect_spreadsheet(
-        file_path=str(path), mode="overview", include=["print_settings"],
+    result = workbook_tools.observe_spreadsheet(
+        file_path=str(path), mode="overview", facets=['presentation'],
     )
     assert result.success, result.model_text
-    source = next(sheet for sheet in result.value["sheets"] if sheet["name"] == "收款单")
+    source = next(region for region in result.value["regions"] if region["sheet"] == "收款单")
     settings = source["print_settings"]
     assert "$A$1:$B$4" in str(settings["print_area"])
     assert "$D$1:$F$4" in str(settings["print_area"])

@@ -317,7 +317,7 @@ def test_stats_split_model_visible_and_internal_failures() -> None:
     result = _make_result("split")
     result.tool_calls = [
         bench.ToolCallLog(
-            tool_name="inspect_spreadsheet", arguments={}, success=True,
+            tool_name="observe_spreadsheet", arguments={}, success=True,
             result="ok", error=None, iteration=1,
         ),
         bench.ToolCallLog(
@@ -354,7 +354,7 @@ def test_stats_distinct_tool_errors_collapses_inner_and_outer() -> None:
             result=tb, error=tb, iteration=1,
         ),
         bench.ToolCallLog(
-            tool_name="format_spreadsheet", arguments={}, success=False,
+            tool_name="apply_spreadsheet_changes", arguments={}, success=False,
             result="", error="缺 sheet", iteration=1,
             parent_call_id="run1",
         ),
@@ -363,7 +363,7 @@ def test_stats_distinct_tool_errors_collapses_inner_and_outer() -> None:
             result=tb, error=tb, iteration=2,
         ),
         bench.ToolCallLog(
-            tool_name="format_spreadsheet", arguments={}, success=False,
+            tool_name="apply_spreadsheet_changes", arguments={}, success=False,
             result="", error="缺 sheet", iteration=2,
             parent_call_id="run2",
         ),

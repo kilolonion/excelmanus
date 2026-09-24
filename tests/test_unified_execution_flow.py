@@ -47,20 +47,20 @@ async def test_direct_inspect_programmatic_write_direct_inspect_in_one_turn(tmp_
     engine._full_access_enabled = True
     code = (
         "import em\n"
-        "before = em.inspect_spreadsheet(file_path='book.xlsx', mode='range', range='A1:B2')\n"
-        "result = em.edit_spreadsheet(file_path='book.xlsx', "
+        "before = em.observe_spreadsheet(file_path='book.xlsx', mode='range', range='A1:B2')\n"
+        "result = em.apply_spreadsheet_changes(file_path='book.xlsx', "
         "expected_version=before['content_version'], operations=["
         "{'kind': 'write', 'sheet': 'Sheet1', 'start_cell': 'B2', 'values': [[42]]}])\n"
         "print(result['content_version'])\n"
     )
     inspect_args = {"file_path": "book.xlsx", "mode": "range", "range": "A1:B2"}
     responses = iter([
-        _response("inspect_spreadsheet", inspect_args, "direct-before"),
+        _response("observe_spreadsheet", inspect_args, "direct-before"),
         _response("run_code", {
             "code": code, "python_command": sys.executable,
             "timeout_seconds": 30, "require_excel_deps": False,
         }, "program"),
-        _response("inspect_spreadsheet", inspect_args, "direct-after"),
+        _response("observe_spreadsheet", inspect_args, "direct-after"),
         _response(),
     ])
     wire_tool_sets = []
@@ -80,7 +80,7 @@ async def test_direct_inspect_programmatic_write_direct_inspect_in_one_turn(tmp_
     assert result.tool_calls and all(t.success for t in result.tool_calls), [
         (t.tool_name, t.result) for t in result.tool_calls
     ]
-    assert all({"inspect_spreadsheet", "edit_spreadsheet", "run_code"} <= names
+    assert all({"observe_spreadsheet", "apply_spreadsheet_changes", "run_code"} <= names
                for names in wire_tool_sets)
     actual = load_workbook(tmp_path / "book.xlsx")
     try:

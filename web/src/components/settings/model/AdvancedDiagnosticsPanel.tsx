@@ -1,10 +1,12 @@
 "use client";
 
-import { ArrowRight, Brain, Check, Clock, Eye, Gauge, Loader2, RotateCcw, Save, CheckCircle2, Zap } from "lucide-react";
+import { ArrowRight, Brain, Check, Clock, Eye, FlaskConical, Gauge, Loader2, RotateCcw, Save, CheckCircle2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { THINKING_EFFORT_LEVELS, type ThinkingEffort } from "@/lib/thinking";
 import { useUIStore } from "@/stores/ui-store";
+import { useJevStore } from "@/stores/jev-store";
+import { jevChatEnabledFromRuntime } from "@/lib/jev-settings";
 import { useAdminModel } from "./admin-model-context";
 import { ConfigTransferPanel } from "./ConfigTransferPanel";
 import { ModelCapabilitiesPanel } from "./ModelCapabilitiesPanel";
@@ -196,15 +198,15 @@ export function AdvancedDiagnosticsPanel() {
   };
 
   return (
-    <div className="space-y-6">
-      <div>
+    <div className="em-diagnostics-stack space-y-5">
+      <div className="em-diagnostics-card">
         <h3 className="font-semibold text-sm flex items-center gap-1.5 mb-2">
           <Zap className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
           模型能力
         </h3>
         <ModelCapabilitiesPanel />
       </div>
-      <div>
+      <div className="em-diagnostics-card">
         <h3 className="font-semibold text-sm flex items-center gap-1.5 mb-2">
           <Brain className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
           推理深度
@@ -218,7 +220,7 @@ export function AdvancedDiagnosticsPanel() {
                   <span>可调等级（多选）</span>
                   <span>当前：{currentEffortLabel}</span>
                 </div>
-                <div className="grid grid-cols-3 sm:grid-cols-7 gap-1.5 sm:gap-1">
+                <div className="em-thinking-options" aria-label="可调推理等级">
                   {THINKING_EFFORT_LEVELS.map(({ key, label }) => {
                     const isActive = thinkingEffortOptions.includes(key);
                     return (
@@ -226,7 +228,7 @@ export function AdvancedDiagnosticsPanel() {
                         key={key}
                         type="button"
                         aria-pressed={isActive}
-                        className={`inline-flex items-center justify-center gap-1 px-2.5 py-2 sm:py-1 rounded-md text-xs font-medium transition-colors border disabled:cursor-not-allowed disabled:opacity-60 ${
+                        className={`inline-flex items-center justify-center gap-1 whitespace-nowrap px-2.5 py-2 rounded-md text-xs font-medium transition-colors border disabled:cursor-not-allowed disabled:opacity-60 ${
                           isActive
                             ? "text-white border-transparent"
                             : "border-border text-muted-foreground hover:bg-muted/60"
@@ -235,7 +237,7 @@ export function AdvancedDiagnosticsPanel() {
                         onClick={() => toggleEffortOption(key)}
                         disabled={thinkingSaving || (isActive && thinkingEffortOptions.length === 1)}
                       >
-                        {isActive && <Check className="h-3 w-3" aria-hidden />}
+                        {isActive && <Check className="h-3 w-3 shrink-0" aria-hidden />}
                         {label}
                       </button>
                     );
@@ -280,7 +282,7 @@ export function AdvancedDiagnosticsPanel() {
             </div>
 
       </div>
-      <div>
+      <div className="em-diagnostics-card">
         <ConfigTransferPanel
           onImported={() => {
             useUIStore.getState().bumpModelProfiles();
@@ -288,6 +290,20 @@ export function AdvancedDiagnosticsPanel() {
         />
       </div>
       <RuntimeSettingsPanel groups={MODEL_RUNTIME_SETTING_GROUPS} />
+      <RuntimeSettingsPanel onSaved={(settings) => {
+        useJevStore.getState().setChatEnabled(jevChatEnabledFromRuntime(settings as Parameters<typeof jevChatEnabledFromRuntime>[0]));
+      }} groups={[{
+        title: "实验性功能",
+        description: "默认隐藏仍在验证中的能力；开启后会在模型供应商和模型配置中显示 Jev。",
+        icon: <FlaskConical className="h-4 w-4" />,
+        items: [{
+          key: "jev_experimental_enabled",
+          label: "启用实验性 Jev",
+          desc: "显示 Jev 决策提供商、模型选择和时间线等组件。关闭后隐藏相关界面，不删除已有配置。",
+          icon: <FlaskConical className="h-4 w-4" />,
+          type: "bool",
+        }],
+      }]} />
     </div>
   );
 }

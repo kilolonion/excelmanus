@@ -14,7 +14,6 @@ import {
   ArrowUpCircle,
   Sparkles,
   RotateCcw,
-  Download,
   Eraser,
   DatabaseBackup,
   Rocket,
@@ -35,15 +34,14 @@ import {
   fetchDeployStatus,
   buildFrontendArtifact,
   executeRemoteDeploy,
-  startVersionUpgrade,
 } from "@/lib/api";
-import type { DeployStatusInfo, DeployResult, VersionManifest, WebUpgradeCapability } from "@/lib/api";
+import type { DeployStatusInfo, DeployResult, VersionManifest } from "@/lib/api";
 import { fetchVersionManifest } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { RollbackPanel } from "@/components/settings/RollbackPanel";
 import { ProjectLinks } from "@/components/settings/ProjectLinks";
 import { DesktopUpdateCard } from "@/components/settings/DesktopUpdateCard";
-import { appRefreshBlocker } from "@/lib/app-refresh";
+import { SettingsPageLayout, SettingsPagePanel } from "./SettingsPageLayout";
 
 interface VersionInfo {
   current: string;
@@ -111,8 +109,6 @@ export function VersionTab() {
   const [deletingBackup, setDeletingBackup] = useState<string | null>(null);
   const [deletingInstall, setDeletingInstall] = useState<string | null>(null);
   const [cleaningInstallations, setCleaningInstallations] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [upgradeCapability, setUpgradeCapability] = useState<WebUpgradeCapability | null>(null);
   const [cleaningUp, setCleaningUp] = useState(false);
   const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
   const [migrating, setMigrating] = useState(false);
@@ -140,7 +136,7 @@ export function VersionTab() {
     setLoading(true);
     setChecking(true);
     setActionMsg(null);
-    // Remote checks must not block local capability, backups and settings.
+    // Release checks must not block local backups and settings.
     const versionRequest = apiGet<VersionInfo>("/version/check")
       .then(setVersion)
       .catch(() => setActionMsg({ type: "err", text: "版本信息加载失败，请重试。" }))
@@ -149,21 +145,18 @@ export function VersionTab() {
       // A packaged app has no source checkout, deployment tools or source
       // installation registry. Do not invoke those endpoints from Desktop.
       if (window.excelManusDesktop) return;
-      const [b, i, ds, manifest, capability] = await Promise.all([
-        // Servers may allow upgrades but intentionally deny local backup and
-        // installation-management endpoints. Those must not hide capability.
+      const [b, i, ds, manifest] = await Promise.all([
+        // Local management permissions do not affect release checks.
         apiGet<{ backups: BackupEntry[] }>("/version/backups").catch(() => ({ backups: [] })),
         apiGet<InstallationListResponse>("/version/installations").catch(() => ({ installations: [] })),
         fetchDeployStatus().catch(() => null),
         fetchVersionManifest().catch(() => null),
-        apiGet<WebUpgradeCapability>("/version/upgrade/capability", { cache: "no-store" }).catch(() => null),
       ]);
       setBackups(b.backups ?? []);
       setInstallations(i.installations ?? []);
       if (ds) setDeployStatus(ds);
       if (manifest?.git_commit) setCurrentGitCommit(manifest.git_commit);
       setLastUpgrade(manifest?.last_upgrade ?? null);
-      setUpgradeCapability(capability);
     } catch {
       setActionMsg({ type: "err", text: "版本信息加载失败，请重试。" });
     } finally {
@@ -265,20 +258,6 @@ export function VersionTab() {
     }
   };
 
-  const handleApplyUpdate = async () => {
-    const blocked = appRefreshBlocker();
-    if (blocked) { showMsg("err", blocked); return; }
-    if (!confirm("更新当前源码分支的前后端？这会获取当前分支的最新提交，可能包含尚未正式发布的改动。会先备份应用数据，再更新程序并重建网页。期间短暂断开连接，完成后自动恢复。不会删除、移动或清空工作区和用户文件；设置和会话会保留。源码存在未提交修改时会停止更新。")) return;
-    setUpdating(true);
-    try {
-      const result = await startVersionUpgrade({ useMirror: false });
-      if (!result.accepted || !result.request_id) throw new Error(result.error || "服务器未返回更新编号，请检查服务端版本");
-      await triggerRestart("网页更新：仅更新 ExcelManus，工作区和用户文件保留原位", { requireVersionChange: true, upgradeRequestId: result.request_id });
-    } catch (err) {
-      showMsg("err", `更新失败: ${err instanceof Error ? err.message : "未知错误"}`);
-    } finally { setUpdating(false); }
-  };
-
   const handleCleanupBackups = async () => {
     if (!confirm("清理旧备份，仅保留最近 2 个，确定继续？")) return;
     setCleaningUp(true);
@@ -369,31 +348,31 @@ export function VersionTab() {
 
   if (loading) {
     return (
-      <div className="space-y-4">
+      <SettingsPageLayout className="space-y-4">
         <div className="flex items-center justify-center py-12 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin mr-2" />
           加载版本信息…
         </div>
         <ProjectLinks />
-      </div>
+      </SettingsPageLayout>
     );
   }
 
   if (isDesktopApp) {
-    return <div className="space-y-4">
+    return <SettingsPageLayout className="space-y-4">
       <DesktopUpdateCard current={version?.current || process.env.NEXT_PUBLIC_APP_VERSION || "unknown"} />
       <p className="text-xs leading-relaxed text-muted-foreground">备份应用数据时，可从应用菜单「文件 → 打开数据目录」找到数据位置，退出应用后复制该目录。添加在其他位置的工作区文件夹需要单独备份。日志位于「帮助 → 打开日志目录」。</p>
       <ProjectLinks />
       {actionMsg?.type === "err" && <div role="status" className="text-sm text-destructive">
         {actionMsg.text} <button type="button" className="underline" onClick={() => void fetchAll()}>重试</button>
       </div>}
-    </div>;
+    </SettingsPageLayout>;
   }
 
   const totalBackupMB = backups.reduce((s, b) => s + b.size_mb, 0);
 
   return (
-    <div className="space-y-5">
+    <SettingsPageLayout className="space-y-5">
       {/* ── 操作反馈 ── */}
       {actionMsg && (
         <div
@@ -421,9 +400,9 @@ export function VersionTab() {
           </div>
         </div>
       )}
-      <div className="rounded-lg border border-border p-4">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div className="flex items-center gap-2.5">
+      <SettingsPagePanel>
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div className="flex min-w-0 items-center gap-2.5">
             <span style={{ color: "var(--em-primary)" }}>
               <Sparkles className="h-5 w-5" />
             </span>
@@ -463,28 +442,7 @@ export function VersionTab() {
               </div>
             </div>
           </div>
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-2 shrink-0 mt-2 sm:mt-0">
-            {upgradeCapability?.supported && (
-              <Button
-                variant="default"
-                size="sm"
-                disabled={updating}
-                onClick={handleApplyUpdate}
-                className="gap-1.5 h-8"
-              >
-                {updating ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Download className="h-3.5 w-3.5" />
-                )}
-                更新当前源码分支
-              </Button>
-            )}
-            {version?.has_update && !upgradeCapability?.supported && (
-              <Badge variant="outline" className="text-[10px] h-6 px-2 text-amber-600 dark:text-amber-400">
-                此实例暂不能从网页更新
-              </Badge>
-            )}
+          <div className="flex max-w-full flex-wrap items-center justify-start gap-1.5 md:justify-end md:gap-2">
             <Button
               variant="outline"
               size="sm"
@@ -502,12 +460,10 @@ export function VersionTab() {
           </div>
         </div>
         <div className="mt-3 space-y-1 text-xs leading-relaxed text-muted-foreground">
-          <p>检查更新查询 GitHub 正式发布。更新当前源码分支会获取该分支的最新提交、更新前后端并自动恢复连接，可能包含尚未正式发布的改动。设置和会话继续沿用，工作区和用户文件会保留。</p>
+          <p>检查 GitHub 正式发布版本，发现新版后可查看发布说明并下载。</p>
           {version?.release_url && <p><a href={version.release_url} target="_blank" rel="noopener noreferrer" className="underline">查看 GitHub Release 与下载</a></p>}
-          <p>服务器发布新版后，当前页面也会提示刷新；未保存的表格修改和运行中的任务会阻止刷新。</p>
-          {!upgradeCapability?.supported && <p className="text-amber-700 dark:text-amber-400">{upgradeCapability?.reason || "当前服务尚未提供网页更新能力，请先升级服务端。"}</p>}
         </div>
-        {version?.has_update && version.release_notes && !updating && (
+        {version?.has_update && version.release_notes && (
           <div className="mt-3 pt-3 border-t border-border">
             <p className="text-[11px] font-medium text-muted-foreground mb-1">更新日志</p>
             <pre className="text-[11px] text-muted-foreground whitespace-pre-wrap max-h-32 overflow-y-auto font-mono bg-muted/30 rounded-md p-2">
@@ -515,7 +471,7 @@ export function VersionTab() {
             </pre>
           </div>
         )}
-      </div>
+      </SettingsPagePanel>
 
       <Separator />
 
@@ -648,16 +604,19 @@ export function VersionTab() {
             {installations.map((inst) => (
               <div
                 key={inst.path}
-                className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 group ${
+                className={`em-installation-row grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border px-3 py-3 group ${
                   inst.status === "missing" || inst.exists === false
                     ? "border-dashed border-amber-300/70 dark:border-amber-700/70"
                     : "border-border"
                 }`}
               >
-                <MapPin className={`h-4 w-4 shrink-0 ${inst.status === "missing" || inst.exists === false ? "text-amber-600" : "text-muted-foreground"}`} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium font-mono break-all">{inst.path}</div>
-                  <div className="text-[11px] text-muted-foreground flex items-center gap-2">
+                  <div className="flex items-center gap-2 text-sm font-medium">
+                    <MapPin className={`h-4 w-4 shrink-0 ${inst.status === "missing" || inst.exists === false ? "text-amber-600" : "text-muted-foreground"}`} />
+                    <span className="truncate">{inst.path.split(/[\\/]/).filter(Boolean).pop() || inst.path}</span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed font-mono wrap-anywhere text-muted-foreground">{inst.path}</p>
+                  <div className="mt-2 text-[11px] text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-1">
                     <Badge variant="outline" className="text-[10px] h-4 px-1">
                       v{inst.version}
                     </Badge>
@@ -671,10 +630,8 @@ export function VersionTab() {
                     )}
                     {!inst.is_current && inst.status === "available" && <span>可用</span>}
                     {inst.platform && <span>{inst.platform}</span>}
-                    {inst.last_seen && (
-                      <span>最后活跃: {formatTimestamp(inst.last_seen)}</span>
-                    )}
                   </div>
+                  {inst.last_seen && <p className="mt-1 text-[11px] text-muted-foreground">最后活跃：{formatTimestamp(inst.last_seen)}</p>}
                 </div>
                 <Button
                   variant="ghost"
@@ -946,6 +903,6 @@ export function VersionTab() {
           </p>
         )}
       </div>
-    </div>
+    </SettingsPageLayout>
   );
 }

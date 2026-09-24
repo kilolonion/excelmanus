@@ -63,31 +63,32 @@ class TestWorkbookViewContract:
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 sid = await _session_id(client)
                 base = {"path": "book.xlsx", "session_id": sid}
-                first = (await client.get("/api/v1/files/excel/view", params={**base, "with_styles": "0"})).json()
-                styled = (await client.get("/api/v1/files/excel/view", params={**base, "expected_version": first["content_version"]})).json()
-                page = (await client.get("/api/v1/files/excel/view", params={**base, "sheet": "Sheet1", "rect": "A201:AX400"})).json()
+                first_response = await client.get("/api/v1/workbooks/observe", params={**base, "facets": "data,geometry"})
+                first = first_response.json()
+                styled = (await client.get("/api/v1/workbooks/observe", params={**base, "expected_version": first["content_version"], "range": "A1:AX80", "facets": "data,presentation,geometry"})).json()
+                page = (await client.get("/api/v1/workbooks/observe", params={**base, "sheet": "Sheet1", "range": "A201:AX400", "facets": "data,geometry"})).json()
         assert len(first["sheets"]) == 2
-        assert len(first["windows"]) == 1
-        assert first["windows"][0]["sheet"] == "Actual active"
-        assert set(first["windows"][0]["cells"]) == {"1,1", "2,3"}
-        assert first["windows"][0]["cells"]["2,3"]["f"] == "=1+2"
-        assert first["windows"][0]["cells"]["2,3"]["cached"] == "no"
-        win = styled["windows"][0]
+        assert len(first["regions"]) == 1
+        assert first["regions"][0]["sheet"] == "Actual active"
+        assert set(first["regions"][0]["cells"]) == {"1,1", "2,3", "5,6"}
+        assert first["regions"][0]["cells"]["2,3"]["f"] == "=1+2"
+        assert first["regions"][0]["cells"]["2,3"]["cached"] == "no"
+        win = styled["regions"][0]
         assert "s" in win["cells"]["5,6"]
-        assert win["merges"] == [{"min_row": 1, "min_col": 1, "max_row": 1, "max_col": 2}]
-        assert win["col_widths"]["A"] == 22
-        assert win["row_heights"]["1"] == 32
-        assert page["windows"][0]["cells"] == {}
+        assert win["merges"] == [{"min_row": 1, "min_col": 1, "max_row": 1, "max_col": 2, "anchor": "A1"}]
+        assert win["geometry"]["columns"][0]["native"] == 22
+        assert win["geometry"]["rows"][0]["native"] == 32
+        assert page["regions"][0]["cells"] == {}
         assert page["coverage"]["loaded"][0]["r1"] == 400
 
     @pytest.mark.parametrize("operation", ["view", "write"])
     async def test_workbook_work_does_not_block_event_loop(self, tmp_path: Path, monkeypatch, operation: str) -> None:
-        import excelmanus.workbook.snapshot as snapshots
+        import excelmanus.workbook.observation as snapshots
         from excelmanus.workspace.file_service import WorkspaceFileService
 
         path = _xlsx(tmp_path / "book.xlsx")
         entered, release = threading.Event(), threading.Event()
-        owner, attr = (snapshots, "project_view") if operation == "view" else (WorkspaceFileService, "update_with_builder")
+        owner, attr = (snapshots, "observe_snapshot") if operation == "view" else (WorkspaceFileService, "apply_batch")
         original = getattr(owner, attr)
 
         def held(*args, **kwargs):
@@ -100,10 +101,10 @@ class TestWorkbookViewContract:
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 sid = await _session_id(client)
                 if operation == "view":
-                    request = client.get("/api/v1/files/excel/view", params={"path": "book.xlsx", "session_id": sid})
+                    request = client.get("/api/v1/workbooks/observe", params={"path": "book.xlsx", "session_id": sid})
                 else:
-                    request = client.post("/api/v1/files/excel/write", json={"path": "book.xlsx", "session_id": sid,
-                        "expected_version": content_version_of_file(path), "changes": [{"sheet": "Sheet1", "cell": "A1", "value": 9}]})
+                    request = client.post("/api/v1/workbooks/changes", json={"path": "book.xlsx", "session_id": sid,
+                        "expected_version": content_version_of_file(path), "operations": [{"kind": "cells.patch", "sheet": "Sheet1", "cells": [{"cell": "A1", "value": 9}]}]})
                 pending = asyncio.create_task(request)
                 try:
                     assert await asyncio.to_thread(entered.wait, 1)
@@ -119,10 +120,9 @@ class TestWorkbookViewContract:
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 sid = await _session_id(client)
                 base = {"path": "book.xlsx", "session_id": sid}
-                too_large = await client.get("/api/v1/files/excel/view", params={**base, "rect": "A1:AX1000"})
-                stale = await client.get("/api/v1/files/excel/view", params={**base, "expected_version": "sha256:old"})
+                too_large = await client.get("/api/v1/workbooks/observe", params={**base, "range": "A1:AX1000"})
+                stale = await client.get("/api/v1/workbooks/observe", params={**base, "expected_version": "sha256:old"})
         assert too_large.status_code == 400
-        assert too_large.json()["code"] == "VIEW_TOO_LARGE"
         assert stale.status_code == 409
         assert stale.json()["code"] == "STALE_VIEW"
 
@@ -131,7 +131,7 @@ class TestWorkbookViewContract:
         config = _test_config(workspace_root=str(tmp_path))
         with _setup_api_globals(config=config):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
-                response = await client.get("/api/v1/files/excel/view", params={"path": "book.xlsx"})
+                response = await client.get("/api/v1/workbooks/observe", params={"path": "book.xlsx"})
         assert response.status_code == 400
         assert response.json().get("code") == "FILE_SCOPE_REQUIRED"
 
@@ -142,20 +142,20 @@ class TestWorkbookViewContract:
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 sid = await _session_id(client)
                 response = await client.get(
-                    "/api/v1/files/excel/view",
-                    params={"path": "book.xlsx", "session_id": sid, "rect": "A1:B200"},
+                    "/api/v1/workbooks/observe",
+                    params={"path": "book.xlsx", "session_id": sid, "range": "A1:B200"},
                 )
         assert response.status_code == 200
         data = response.json()
         assert data["file"]["relative"].endswith("book.xlsx")
         assert data["file"]["workspaceKey"]
         assert data["sheets"][0]["used"]["rows"] == 400
-        first = data["windows"][0]["cells"]["1,1"]
+        first = data["regions"][0]["cells"]["1,1"]
         assert first["t"] == "n"
         assert first["v"] == 2024
-        formula = data["windows"][0]["cells"]["1,2"]
+        formula = data["regions"][0]["cells"]["1,2"]
         assert formula["f"] == "=1+1"
-        assert any(item["r0"] == 201 for item in data["coverage"]["unloaded"])
+        assert data["coverage"]["loaded"][0]["r1"] == 200
 
     async def test_csv_view_counts_all_rows(self, tmp_path: Path) -> None:
         lines = ["h1,h2"] + [f"{i},x" for i in range(400)]
@@ -165,13 +165,13 @@ class TestWorkbookViewContract:
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 sid = await _session_id(client)
                 response = await client.get(
-                    "/api/v1/files/excel/view",
-                    params={"path": "rows.csv", "session_id": sid, "rect": "A1:B50"},
+                    "/api/v1/workbooks/observe",
+                    params={"path": "rows.csv", "session_id": sid, "range": "A1:B50"},
                 )
         data = response.json()
         assert response.status_code == 200
         assert data["sheets"][0]["used"]["rows"] == 401
-        assert data["windows"][0]["cells"]["1,1"]["v"] == "h1"
+        assert data["regions"][0]["cells"]["1,1"]["v"] == "h1"
 
     async def test_write_operations_one_commit(self, tmp_path: Path) -> None:
         path = _xlsx(tmp_path / "book.xlsx")
@@ -181,21 +181,17 @@ class TestWorkbookViewContract:
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 sid = await _session_id(client)
                 response = await client.post(
-                    "/api/v1/files/excel/write",
+                    "/api/v1/workbooks/changes",
                     json={
                         "path": "book.xlsx",
                         "session_id": sid,
                         "expected_version": version,
                         "operations": [
-                            {
-                                "op": "set_values",
-                                "sheet": "Sheet1",
-                                "cells": [
-                                    {"cell": "A1", "value": 9},
-                                    {"cell": "C1", "value": "styled", "style": {"bl": 1}},
-                                ],
-                            },
-                            {"op": "set_dims", "sheet": "Sheet1", "columns": {"A": 20}},
+                            {"kind": "cells.patch", "sheet": "Sheet1", "cells": [
+                                {"cell": "A1", "value": 9},
+                                {"cell": "C1", "value": "styled", "style": {"font": {"bold": True}}},
+                            ]},
+                            {"kind": "size", "sheet": "Sheet1", "column_widths": {"A": 20}},
                         ],
                     },
                 )

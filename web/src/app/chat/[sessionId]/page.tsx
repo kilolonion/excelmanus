@@ -9,8 +9,9 @@ import { WorkspaceViewHost } from "@/components/workspace/WorkspaceViewHost";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
+import { useUIStore } from "@/stores/ui-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
-import type { AttachedFile, FileAttachment } from "@/lib/types";
+import type { AttachedFile, FileAttachment, MessageDispatchMode } from "@/lib/types";
 import { ChatHistoryStatus } from "@/components/chat/ChatHistoryStatus";
 import { WelcomePage } from "@/components/welcome/WelcomePage";
 
@@ -21,6 +22,7 @@ function ChatPage() {
   // use the same source of truth as SessionSync and the home page.
   const sessionId = useSessionStore((s) => s.activeSessionId) ?? routeSessionId;
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const dispatchDefault = useUIStore((s) => s.messageDispatchDefault);
   const messageOrder = useChatStore((s) => s.messageOrder);
   const messageLoadError = useChatStore((s) => s.messageLoadError);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
@@ -34,9 +36,9 @@ function ChatPage() {
     setActiveSession(routeSessionId);
   }, [routeSessionId, setActiveSession]);
 
-  const handleSend = (text: string, files?: AttachedFile[], capturedSessionId?: string | null) => {
+  const handleSend = (text: string, files?: AttachedFile[], capturedSessionId?: string | null, mode?: MessageDispatchMode) => {
     if (capturedSessionId && capturedSessionId !== sessionId) return false;
-    return sendMessage(text, files, sessionId);
+    return sendMessage(text, files, sessionId, undefined, undefined, mode ?? dispatchDefault);
   };
 
   return (

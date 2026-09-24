@@ -64,8 +64,15 @@ class ChatHistoryStore:
     def _durable_payload(msg: dict) -> dict:
         """Persist refs only: drop request-only keys and migrate leftover data URIs."""
         payload = {k: v for k, v in msg.items() if not str(k).startswith("_")}
+        if isinstance(msg.get("_dispatch"), dict):
+            payload["_dispatch"] = dict(msg["_dispatch"])
+            for key in ("_ui_hidden", "_prompt_kind"):
+                if key in msg:
+                    payload[key] = msg[key]
         if msg.get("role") == "tool" and isinstance(msg.get("_tool_result_context"), dict):
             payload["_tool_result_context"] = dict(msg["_tool_result_context"])
+        if isinstance(msg.get("_compacted_attachment_ids"), list):
+            payload["_compacted_attachment_ids"] = list(msg["_compacted_attachment_ids"])
         # Compaction metadata describes durable history, not a request projection.
         # Preserve it in messages-table restores when session_events is disabled.
         if msg.get("_prompt_kind") in {"compaction", "jev_delivery_draft"}:

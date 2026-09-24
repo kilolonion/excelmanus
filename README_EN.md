@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.8.0-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.8.1-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -25,7 +25,7 @@
 
 The project provides a Web UI, a REST API, and packaging for Windows and macOS desktop apps. Your deployment manages models, credentials, and conversation data. Connect an OpenAI-compatible endpoint, Anthropic, Gemini, or a local model service; available features depend on the model and endpoint.
 
-> This guide describes the current **1.8.0 source tree**. Desktop availability, signing status, and supported architectures depend on the published assets. See the [Desktop README](desktop/README.md) for build details.
+> This guide describes the current **1.8.1 source tree**. Desktop availability, signing status, and supported architectures depend on the published assets. See the [Desktop README](desktop/README.md) for build details.
 
 ## Features
 
@@ -194,9 +194,10 @@ The backend defaults to [http://localhost:8000](http://localhost:8000). Its [int
 | `GET /api/v1/sessions/{session_id}/turn` | Inspect main-task state and recovery conditions |
 | `GET /api/v1/sessions/{session_id}/subagents` | List background subagents |
 | `POST /api/v1/sessions/{session_id}/subagents/{run_id}` | Steer, pause, cancel, or continue a background task |
-| `GET /api/v1/files/excel/view` | Read a workbook view |
-| `POST /api/v1/files/excel/write` | Save spreadsheet edits |
-| `POST /api/v1/files/excel/merge` | Preview or merge a conflicting workbook draft with per-cell choices |
+| `GET /api/v1/workbooks/observe` | Read a version-bound V2 workbook observation |
+| `POST /api/v1/workbooks/changes` | Apply a version-bound V2 ChangeSet |
+| `GET /api/v1/workbooks/compare` | Compare two V2 workbook observations |
+| `POST /api/v1/workbooks/merge-review` | Preview or merge a conflicting V2 ChangeSet with per-cell choices |
 | `GET /api/v1/files/word/snapshot` | Read a Word snapshot |
 | `POST /api/v1/files/word/write` | Save Word edits |
 | `GET /api/v1/revisions` | List file revisions |
@@ -237,7 +238,7 @@ A directory with a `SKILL.md` containing `name` and `description` defines a skil
 
 See the [Skillpack protocol](docs/skillpack_protocol_en.md) for discovery, overrides, resources, and hooks.
 
-Enable **Agent self-management** under Settings → System → Capabilities to make the skill and its `inspect_agent` / `configure_agent` tools available. The switch applies to live sessions immediately. Agent changes affect the current session only; credentials, approval permissions, and global defaults cannot be changed through these tools.
+**Agent self-management** is enabled by default, making the skill and its `inspect_agent` / `configure_agent` tools available. You can disable it under Settings → System → Capabilities. The switch applies to live sessions immediately. Agent changes affect the current session only; credentials, approval permissions, and global defaults cannot be changed through these tools.
 
 ## Updates and deployment
 

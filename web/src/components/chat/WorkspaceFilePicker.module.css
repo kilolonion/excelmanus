@@ -1,0 +1,56 @@
+.popover {
+  --picker-accent: var(--em-primary);
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  max-height: min(360px, var(--radix-popover-content-available-height, 70dvh));
+  overflow: hidden;
+  border: 1px solid var(--em-line);
+  border-radius: var(--em-radius-md);
+  background: var(--em-panel);
+  color: var(--em-ink);
+  box-shadow: var(--em-shadow-lift);
+  outline: none;
+  transform-origin: var(--radix-popover-content-transform-origin);
+  animation: appear 140ms ease-out;
+}
+
+.header { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 12px 12px 10px; }
+.headingIcon { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 9px; color: var(--picker-accent); background: var(--em-primary-alpha-08); }
+.heading { font-size: 13px; font-weight: 650; }
+.count { margin-left: auto; color: var(--em-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.iconButton { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 26px; height: 26px; border-radius: 8px; color: var(--em-muted); cursor: pointer; }
+.header > .iconButton { margin-left: auto; }
+.count + .iconButton { margin-left: 0; }
+.iconButton:hover { background: var(--em-primary-alpha-08); color: var(--picker-accent); }
+.searchWrap { flex-shrink: 0; padding: 0 12px 10px; border-bottom: 1px solid var(--em-line); }
+.search { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 9px; border: 1px solid var(--em-line); border-radius: 10px; background: var(--em-panel-soft); color: var(--em-muted); transition: border-color 150ms, box-shadow 150ms; }
+.search:focus-within { border-color: var(--em-primary-light); box-shadow: 0 0 0 2px var(--em-primary-alpha-08); }
+.search > svg { flex-shrink: 0; }
+.search input { width: 0; min-width: 0; height: 100%; flex: 1; border: 0; outline: none; background: transparent; color: var(--em-ink); font-size: 12px; }
+.search input::placeholder { color: var(--em-muted); }
+.search .iconButton { width: 22px; height: 22px; }
+.list { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px; scrollbar-width: thin; scrollbar-color: var(--em-line-strong) transparent; }
+.item { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 42px; padding: 6px 8px; border-radius: 10px; text-align: left; cursor: pointer; transition: background 140ms; }
+.item:hover, .item:focus-visible { background: var(--em-panel-soft); }
+.fileIcon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 28px; height: 28px; border: 1px solid var(--em-line); border-radius: 8px; color: var(--em-muted); background: var(--em-panel); }
+.fileIcon[data-folder="true"] { border-color: transparent; color: var(--picker-accent); background: var(--em-primary-alpha-08); }
+.filename { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.kind { flex-shrink: 0; color: var(--em-muted); font-size: 10px; }
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 112px; padding: 20px 12px; color: var(--em-muted); font-size: 12px; text-align: center; }
+.empty > svg { color: var(--em-primary-light); }
+.empty button { padding: 5px 10px; border-radius: 7px; background: var(--em-primary-alpha-08); color: var(--picker-accent); cursor: pointer; }
+.popover button:focus-visible { outline: 2px solid var(--em-primary-light); outline-offset: -2px; }
+
+:global(.dark) .popover { --picker-accent: #83c9a4; }
+
+@keyframes appear { from { opacity: 0; transform: translateY(3px) scale(0.985); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .popover { animation: none; } .item, .search { transition: none; } }
+@media (max-width: 640px) {
+  .search { height: 42px; }
+  .search input { font-size: 16px; }
+  .item { min-height: 46px; }
+  .iconButton { width: 32px; height: 32px; }
+}

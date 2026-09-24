@@ -156,7 +156,7 @@ def _setup_api_globals(config=None, *, chat_history=None):
     # 保存所有工具模块的 _guard 状态，避免污染其他测试
     _tool_modules = [
         "excelmanus.tools.file_tools",
-        "excelmanus.workbook.sheets",
+        "excelmanus.tools.workbook_tools",
         "excelmanus.workbook.charts",
         "excelmanus.tools.code_tools",
         "excelmanus.tools.shell_tools",

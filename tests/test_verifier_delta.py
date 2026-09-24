@@ -112,20 +112,20 @@ class TestExtractWriteSummary:
 
     def test_edit_spreadsheet_with_operations(self):
         args = {"operations": [{"op": "write_cells"}, {"op": "create_sheet"}]}
-        result = self._call("edit_spreadsheet", args)
-        assert result == "edit_spreadsheet 2 项操作"
+        result = self._call("apply_spreadsheet_changes", args)
+        assert result == "apply_spreadsheet_changes 2 项操作"
 
     def test_edit_spreadsheet_without_operations(self):
-        result = self._call("edit_spreadsheet", {})
-        assert result == "edit_spreadsheet"
+        result = self._call("apply_spreadsheet_changes", {})
+        assert result == "apply_spreadsheet_changes"
 
     def test_format_spreadsheet(self):
-        result = self._call("format_spreadsheet", {"operations": [{"op": "bold"}]})
-        assert result == "format_spreadsheet 1 项操作"
+        result = self._call("apply_spreadsheet_changes", {"operations": [{"op": "bold"}]})
+        assert result == "apply_spreadsheet_changes 1 项操作"
 
     def test_manage_objects_and_versions(self):
-        result = self._call("manage_spreadsheet_objects", {"operations": [1, 2]})
-        assert result == "manage_spreadsheet_objects 2 项操作"
+        result = self._call("apply_spreadsheet_changes", {"operations": [1, 2]})
+        assert result == "apply_spreadsheet_changes 2 项操作"
         result = self._call("manage_spreadsheet_versions", {"action": "delete"})
         assert result == "manage_spreadsheet_versions delete"
 

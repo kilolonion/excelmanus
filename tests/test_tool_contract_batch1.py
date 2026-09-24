@@ -9,11 +9,11 @@ from openpyxl import Workbook, load_workbook
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import (
+from excelmanus.tools.workbook_tools import (
     compare_spreadsheets,
-    edit_spreadsheet,
+    apply_spreadsheet_changes,
     init_guard,
-    manage_spreadsheet_objects,
+    apply_spreadsheet_changes,
 )
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
@@ -42,7 +42,7 @@ def test_null_clears_existing_cell(tmp_path: Path) -> None:
     ws["A1"] = "id"
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": [[None]]}],
@@ -60,7 +60,7 @@ def test_write_preserves_explicit_strings(tmp_path: Path) -> None:
     wb.active.title = "Sheet1"
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -88,7 +88,7 @@ def test_merged_values_collide(tmp_path: Path) -> None:
     ws["A1"] = "keep"
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -115,7 +115,7 @@ def test_overlapping_copy_uses_snapshot(tmp_path: Path) -> None:
         ws.cell(row=1, column=col, value=value)
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -142,7 +142,7 @@ def test_copy_whole_column_rejected(tmp_path: Path) -> None:
     wb.active["A2"] = 2
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -170,7 +170,7 @@ def test_copy_sheet_conflict_rejected(tmp_path: Path) -> None:
     wb.create_sheet("Second")
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{
@@ -195,7 +195,7 @@ def test_insert_rewrites_formulas_when_formula_dependencies_exist(tmp_path: Path
     ws["B1"] = "=A1"
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{"kind": "insert", "sheet": "Sheet1", "axis": "row", "at": 1, "count": 1}],
@@ -215,7 +215,7 @@ def test_rename_preserves_formula_workbooks(tmp_path: Path) -> None:
     ws["A1"] = "=1+1"
     wb.save(path)
     wb.close()
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=content_version_of_file(path),
         operations=[{"kind": "sheet", "action": "rename", "sheet": "First", "new_name": "Renamed"}],
@@ -240,7 +240,7 @@ def test_object_batch_failure_does_not_commit_first_chart(tmp_path: Path) -> Non
     wb.save(path)
     wb.close()
     before = content_version_of_file(path)
-    result = manage_spreadsheet_objects(
+    result = apply_spreadsheet_changes(
         file_path=str(path),
         expected_version=before,
         operations=[

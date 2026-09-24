@@ -21,7 +21,7 @@ def test_project_for_request_does_not_mask_old_tool_results() -> None:
     )
     long_result = "FULL-" + ("Z" * 400)
     mem.add_user_message("one")
-    mem.add_tool_call("c1", "inspect_spreadsheet", "{}")
+    mem.add_tool_call("c1", "observe_spreadsheet", "{}")
     mem.add_tool_result("c1", long_result)
     for i in range(5):
         mem.add_user_message(f"u{i}")

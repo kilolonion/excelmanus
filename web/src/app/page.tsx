@@ -8,9 +8,10 @@ import { CommandResultDialog, useCommandResult } from "@/components/modals/Comma
 import { WorkspaceViewHost } from "@/components/workspace/WorkspaceViewHost";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
+import { useUIStore } from "@/stores/ui-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { ensureLandingSession } from "@/lib/session-actions";
-import type { AttachedFile, FileAttachment } from "@/lib/types";
+import type { AttachedFile, FileAttachment, MessageDispatchMode } from "@/lib/types";
 import { OpenWorkbookDialog } from "@/components/excel/OpenWorkbookDialog";
 import { WorkbookConversationWelcome, useWorkbookConversation } from "@/components/excel/WorkbookConversation";
 import { ChatHistoryStatus } from "@/components/chat/ChatHistoryStatus";
@@ -18,6 +19,7 @@ import { ChatHistoryStatus } from "@/components/chat/ChatHistoryStatus";
 export default function Home() {
   const messageOrder = useChatStore((s) => s.messageOrder);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const dispatchDefault = useUIStore((s) => s.messageDispatchDefault);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
   const messageLoadError = useChatStore((s) => s.messageLoadError);
   const loadedSessionId = useChatStore((s) => s.loadedSessionId);
@@ -26,7 +28,7 @@ export default function Home() {
   const cmdResult = useCommandResult();
   const [composerDraft, setComposerDraft] = useState<{ seq: number; text: string; files: File[] } | null>(null);
 
-  const handleSend = async (text: string, files?: AttachedFile[], capturedSessionId?: string | null) => {
+  const handleSend = async (text: string, files?: AttachedFile[], capturedSessionId?: string | null, mode?: MessageDispatchMode) => {
     if (capturedSessionId && capturedSessionId !== useSessionStore.getState().activeSessionId) return false;
     setComposerDraft(null);
     let sid = useSessionStore.getState().activeSessionId;
@@ -40,7 +42,7 @@ export default function Home() {
         return false;
       }
     }
-    return sendMessage(text, files, sid);
+    return sendMessage(text, files, sid, undefined, undefined, mode ?? dispatchDefault);
   };
 
   const handleSuggestionClick = useCallback((text: string, files?: File[]) => {

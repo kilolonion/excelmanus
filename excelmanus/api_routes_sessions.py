@@ -875,9 +875,18 @@ async def compact_session_context(session_id: str, request: Request) -> JSONResp
     if not result:
         result = "压缩命令已执行，但未返回可展示结果。"
 
+    operation = None
+    try:
+        status = engine.get_compaction_status()
+        rows = status.get("operations") or []
+        operation = rows[-1] if rows else None
+    except Exception:
+        pass
+
     return JSONResponse(content={
         "session_id": session_id,
         "result": result,
+        "operation": operation,
     })
 
 

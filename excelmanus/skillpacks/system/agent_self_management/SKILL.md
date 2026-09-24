@@ -1,12 +1,12 @@
 ---
 name: agent_self_management
-description: 查询当前 agent 的实际能力、工具、技能和配置，并按用户任务调整当前会话的推理、上下文、并发及工具开关。用户需先在系统设置启用 Agent 自我管理。
+description: 查询当前 agent 的实际能力、工具、技能和配置，并按用户任务调整当前会话的推理、上下文、并发及工具开关。Agent 自我管理默认启用，用户可在系统设置关闭。
 version: "1.0.0"
 ---
 
 # Agent 自我管理
 
-本技能和 `inspect_agent` / `configure_agent` 工具默认关闭，由用户在设置 → 系统 → 能力 → Agent 自我管理中启用。加载本技能后才可使用这两个工具。
+本技能和 `inspect_agent` / `configure_agent` 工具默认启用，用户可在设置 → 系统 → 能力 → Agent 自我管理中关闭。加载本技能后才可使用这两个工具。
 
 1. 先调用 `inspect_agent(section="all")`，以返回的当前状态为准，不根据过往对话猜测能力。
 2. 向用户说明与任务相关的配置，按需求作最小修改。只修改返回值中 `writable=true` 的字段，遵守其 schema 和 `thinking_effort_options`。

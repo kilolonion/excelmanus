@@ -36,7 +36,7 @@ def sample_messages():
                 {
                     "id": "tc_001",
                     "function": {
-                        "name": "read_excel",
+                        "name": "observe_spreadsheet",
                         "arguments": '{"file_path": "test.xlsx"}',
                     },
                 }
@@ -45,7 +45,7 @@ def sample_messages():
         {
             "role": "tool",
             "tool_call_id": "tc_001",
-            "name": "read_excel",
+                        "name": "observe_spreadsheet",
             "content": "| A | B |\n| 1 | 2 |",
         },
         {"role": "assistant", "content": "表格包含 2 列数据。"},
@@ -128,11 +128,11 @@ class TestExportMarkdown:
 
     def test_tool_calls_rendered(self, session_meta, sample_messages):
         md = export_markdown(session_meta, sample_messages)
-        assert "`read_excel(" in md
+        assert "`observe_spreadsheet(" in md
 
     def test_tool_result_details(self, session_meta, sample_messages):
         md = export_markdown(session_meta, sample_messages)
-        assert "📎 read_excel 结果" in md
+        assert "📎 observe_spreadsheet 结果" in md
 
     def test_with_excel_diffs(self, session_meta, sample_messages, sample_excel_diffs):
         md = export_markdown(session_meta, sample_messages, excel_diffs=sample_excel_diffs)

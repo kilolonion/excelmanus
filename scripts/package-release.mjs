@@ -10,21 +10,23 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { bundledNodeVersion, checkNodeRuntime } from '../desktop/scripts/node-runtime.mjs';
+import { publishRelease } from './release-output.mjs';
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(scriptDirectory, "..");
 const desktopRoot = join(projectRoot, "desktop");
 const androidRoot = join(projectRoot, "android");
-const runtimeNodeVersion = "v22.23.2";
+const runtimeNodeVersion = bundledNodeVersion;
 const gradleVersion = "8.11.1";
 const requiredPythonModules = ["pandas", "openpyxl", "docx", "matplotlib", "PIL", "oletools"];
 const forbiddenPythonModules = ["scipy", "sklearn", "seaborn", "plotly"];
@@ -218,7 +220,7 @@ function ensureNodeRuntime() {
   if (existsSync(target)) {
     try {
       if (process.platform === "darwin") chmodSync(target, 0o755);
-      version = capture(target, ["--version"], desktopRoot);
+      version = checkNodeRuntime(target).version;
     } catch {
       version = null;
     }
@@ -233,7 +235,7 @@ function ensureNodeRuntime() {
     if (existsSync(target)) {
       try {
         if (process.platform === "darwin") chmodSync(target, 0o755);
-        version = capture(target, ["--version"], desktopRoot);
+        version = checkNodeRuntime(target).version;
       } catch {
         version = null;
       }
@@ -260,8 +262,11 @@ function pythonRuntimeFingerprint() {
   return sha256Text([
     readFileSync(join(projectRoot, "pyproject.toml"), "utf8"),
     readFileSync(join(projectRoot, "uv.lock"), "utf8"),
+    ...["prepare-python.mjs", "runtime-files.mjs", "compact-python-stdlib.py", "check-python-runtime.py", "check-python-stdlib.py"]
+      .map(name => readFileSync(join(desktopRoot, "scripts", name), "utf8")),
     process.platform,
     process.arch,
+    process.env.EXCELMANUS_COMPACT_PYTHON_STDLIB || "0",
   ].join("\0"));
 }
 
@@ -297,6 +302,7 @@ function writePythonRuntimeMarker(markerPath, fingerprint, probe) {
     platform: process.platform,
     arch: process.arch,
     python: probe.python,
+    compactStdlib: process.env.EXCELMANUS_COMPACT_PYTHON_STDLIB === "1",
     required: requiredPythonModules,
     excluded: [...forbiddenPythonModules, "tkinter", "__pycache__", "*.pyc"],
     generatedAt: new Date().toISOString(),
@@ -330,15 +336,6 @@ function ensurePythonRuntime() {
     && markerData?.fingerprint === fingerprint
   ) {
     console.log(`复用已验证的精简 Python 运行时 ${probe.python}`);
-    cleanupMetadata();
-    return;
-  }
-  // A runtime created by the previous manual release flow has no marker. If
-  // its required modules are present and forbidden optional modules are absent,
-  // trust it once and create the marker; later builds become incremental.
-  if (probe && !probe.missing.length && !probe.forbidden.length && existsSync(requirements) && !markerData) {
-    console.log(`检测到已精简的 Python 运行时 ${probe.python}，写入可复用标记`);
-    writePythonRuntimeMarker(marker, fingerprint, probe);
     cleanupMetadata();
     return;
   }
@@ -524,7 +521,8 @@ function buildAndroid(version, artifacts) {
 function writeManifest(version, artifacts, options) {
   const finalized = artifacts.map(artifact => {
     const bytes = statSync(artifact.name).size;
-    return { ...artifact, name: relative(projectRoot, artifact.name).replaceAll("\\", "/"), bytes, sha256: sha256File(artifact.name) };
+    const published = join(options.finalOutput, artifact.name.split(sep).at(-1));
+    return { ...artifact, name: relative(projectRoot, published).replaceAll("\\", "/"), bytes, sha256: sha256File(artifact.name) };
   });
   const manifest = {
     schema: 1,
@@ -534,6 +532,7 @@ function writeManifest(version, artifacts, options) {
     desktopRuntime: {
       source: "dependency-groups.desktop-runtime",
       bundledNode: runtimeNodeVersion,
+      compactStdlib: process.env.EXCELMANUS_COMPACT_PYTHON_STDLIB === "1",
       excluded: [...forbiddenPythonModules, "tkinter", "__pycache__", "*.pyc", "*.map", "*.d.ts"],
     },
     artifacts: finalized,
@@ -543,19 +542,18 @@ function writeManifest(version, artifacts, options) {
     join(options.output, "SHA256SUMS.txt"),
     `${finalized.map(artifact => `${artifact.sha256}  ${artifact.name.split("/").at(-1)}`).join("\n")}\n`,
   );
-  console.log(`\n交付目录: ${options.output}`);
-  for (const artifact of finalized) console.log(`  ${artifact.name} (${artifact.bytes} bytes, ${artifact.sha256})`);
+  return finalized;
 }
 
 const options = parseArguments(process.argv.slice(2));
 const version = readVersion();
 const finalOutput = options.output;
+mkdirSync(dirname(finalOutput), { recursive: true });
 const stagingOutput = options.cleanOutput
-  ? join(dirname(finalOutput), `.release-staging-${process.pid}`)
+  ? mkdtempSync(join(dirname(finalOutput), '.release-staging-'))
   : finalOutput;
 options.finalOutput = finalOutput;
 options.output = stagingOutput;
-if (options.cleanOutput && existsSync(stagingOutput)) rmSync(stagingOutput, { recursive: true, force: true });
 mkdirSync(stagingOutput, { recursive: true });
 console.log(`ExcelManus ${version} release packaging`);
 console.log(`desktop=${options.desktop || "skip"}, android=${options.android}, staging=${stagingOutput}`);
@@ -564,16 +562,17 @@ const artifacts = [];
 try {
   if (options.desktop) buildDesktop(options.desktop, version, artifacts);
   if (options.android) buildAndroid(version, artifacts);
+  // Hash and write metadata before touching the previous complete delivery.
+  const finalized = writeManifest(version, artifacts, options);
   if (options.cleanOutput) {
-    if (existsSync(finalOutput)) rmSync(finalOutput, { recursive: true, force: true });
-    renameSync(stagingOutput, finalOutput);
-    for (const artifact of artifacts) artifact.name = join(finalOutput, artifact.name.split(sep).at(-1));
-    options.output = finalOutput;
+    const { retainedBackup } = publishRelease(stagingOutput, finalOutput);
+    if (retainedBackup) console.warn(`新版已交付；旧版因文件占用保留在: ${retainedBackup}`);
   }
-  writeManifest(version, artifacts, options);
+  console.log(`\n交付目录: ${finalOutput}`);
+  for (const artifact of finalized) console.log(`  ${artifact.name} (${artifact.bytes} bytes, ${artifact.sha256})`);
 } catch (error) {
   if (options.cleanOutput) {
-    console.error(`\n打包失败，旧交付目录未修改。临时目录保留在: ${stagingOutput}`);
+    console.error(`\n打包/交付失败。临时产物位于: ${stagingOutput}；如目录回滚失败，旧版保留路径见错误详情。`);
   }
   throw error;
 }

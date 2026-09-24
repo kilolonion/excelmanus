@@ -1,12 +1,11 @@
 ---
-name: tool:format
-version: "10.1.0"
+name: tool:preview
+version: "2.0.0"
 priority: 106
 order: 106
 layer: strategy
-max_tokens: 125
+max_tokens: 140
 conditions:
-  catalog_mode: write
-  tool: format_spreadsheet
+  tool: preview_spreadsheet
 ---
-随数据变化用条件格式：rule.type=formula，formula/formula1 同义。一次性指定某格外观用直接 format，下拉验证用 data_validation。多表带 sheet 或 表!A1，合并区写锚点。结果看 appearance/skipped_merged_non_anchors；不自动逐属性回读。
+preview_spreadsheet 同次返回图像、区域坐标和版本，read/plan 也可用。workbench 为工作台图，print 为打印页，按任务选取；limitations 中的缺失对象、未求值规则和字体替换不能当成已验证。大表分范围查看，放大细节用裁剪。旧版本图像不能作为新改动的证据；模型不支持视觉时只报告结构观察范围。

@@ -12,7 +12,7 @@ from __future__ import annotations
 # 常驻 schema 是面向表格任务的明确产品默认，不是调用频率统计或授权名单。
 # 其余内置/MCP 能力通过 introspect_capability 按需披露；执行目录不裁剪。
 DEFAULT_DISCLOSURE_CORE_TOOLS: frozenset[str] = frozenset({
-    "inspect_spreadsheet", "analyze_spreadsheet", "edit_spreadsheet", "format_spreadsheet",
+    "observe_spreadsheet", "preview_spreadsheet", "analyze_spreadsheet", "apply_spreadsheet_changes",
     "calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet",
     "validate_spreadsheet", "query_spreadsheet",
     "list_directory", "read_text_file", "read_image", "run_code", "introspect_capability",
@@ -26,7 +26,8 @@ DEFAULT_DISCLOSURE_CORE_TOOLS: frozenset[str] = frozenset({
 # 默认模式下的确认/审计行为由写入分层（Tier A/Tier B）决定。
 READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
     {
-        "inspect_spreadsheet",
+        "observe_spreadsheet",
+        "preview_spreadsheet",
         "analyze_spreadsheet",
         "validate_spreadsheet",
         "compare_spreadsheets",
@@ -52,7 +53,8 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
 # 同一轮次中依赖已满足的只读调用按执行波次和配置的并发上限执行。
 PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
     {
-        "inspect_spreadsheet",
+        "observe_spreadsheet",
+        "preview_spreadsheet",
         "analyze_spreadsheet",
         "validate_spreadsheet",
         "compare_spreadsheets",
@@ -95,11 +97,9 @@ MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
         "rename_file",
         "copy_file",
         "write_word",
-        "edit_spreadsheet",
+        "apply_spreadsheet_changes",
         "calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet", "query_spreadsheet",
-        "format_spreadsheet",
         "split_spreadsheet",
-        "manage_spreadsheet_objects",
         "manage_spreadsheet_versions",
     }
 )
@@ -196,10 +196,8 @@ AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "rename_file": ("source", "destination"),
     "write_word": ("file_path",),
     "delete_file": ("file_path",),
-    "edit_spreadsheet": ("file_path",),
-    "format_spreadsheet": ("file_path",),
     "split_spreadsheet": ("file_path", "output_dir"),
-    "manage_spreadsheet_objects": ("file_path",),
+    "apply_spreadsheet_changes": ("file_path",),
     "manage_spreadsheet_versions": ("file_path",),
     "calculate_spreadsheet": ("file_path", "output_path"),
     "render_spreadsheet": ("output_path",),
@@ -277,13 +275,13 @@ WORKSPACE_SCAN_EXCLUDE_PREFIXES: tuple[str, ...] = (
 # ── 工具分类映射（用于工具索引） ────
 
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
-    "inspect": ("inspect_spreadsheet",),
+    "inspect": ("observe_spreadsheet", "preview_spreadsheet"),
     "analyze": ("analyze_spreadsheet",),
     "compare": ("compare_spreadsheets",),
-    "edit": ("edit_spreadsheet",),
-    "format": ("format_spreadsheet",),
+    "edit": ("apply_spreadsheet_changes",),
+    "format": ("apply_spreadsheet_changes",),
     "split": ("split_spreadsheet",),
-    "objects": ("manage_spreadsheet_objects",),
+    "objects": ("apply_spreadsheet_changes",),
     "spreadsheet_engine": ("calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet", "query_spreadsheet", "validate_spreadsheet"),
     "formula_trace": ("trace_spreadsheet_formulas",),
     "versions": ("manage_spreadsheet_versions",),
@@ -309,15 +307,15 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
 # introspect_capability 共用这张表，避免每个入口维护一套“模型应该用谁”。
 TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
     "diff/差异/对比/比较": ("compare_spreadsheets",),
-    "结构/工作表/区域/选区": ("inspect_spreadsheet",),
+    "结构/工作表/区域/选区": ("observe_spreadsheet",),
     "分析/统计/筛选/透视": ("analyze_spreadsheet",),
-    "编辑/写入/改值/公式/去重/清洗": ("edit_spreadsheet",),
+    "编辑/写入/改值/公式/去重/清洗": ("apply_spreadsheet_changes",),
     "拆分文件/分文件/按列拆成多个文件": ("split_spreadsheet",),
-    "格式/样式/合并": ("format_spreadsheet",),
-    "打印/打印区域/分页/页面设置/page_setup": ("format_spreadsheet",),
-    "冻结/冻结窗格/首行/freeze": ("format_spreadsheet",),
-    "下拉框/数据验证/下拉/validation": ("format_spreadsheet",),
-    "图表": ("manage_spreadsheet_objects",),
+    "格式/样式/合并": ("apply_spreadsheet_changes",),
+    "打印/打印区域/分页/页面设置/page_setup": ("apply_spreadsheet_changes",),
+    "冻结/冻结窗格/首行/freeze": ("apply_spreadsheet_changes",),
+    "下拉框/数据验证/下拉/validation": ("apply_spreadsheet_changes",),
+    "图表": ("apply_spreadsheet_changes",),
     "计算/重算/公式错误": ("calculate_spreadsheet",),
     "预览/渲染/PDF/PNG": ("render_spreadsheet",),
     "转换/xls/xlsb": ("convert_spreadsheet",),
@@ -329,6 +327,7 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
     "文本文件/日志": ("read_text_file",),
     "Word文档/文档表格": ("read_word", "inspect_word", "write_word"),
     "图片/看图": ("read_image",),
+    "尺寸/比例/胖/瘦/扁/横向/纵向/行高/列宽/复刻/版式": ("observe_spreadsheet", "preview_spreadsheet", "apply_spreadsheet_changes"),
     "批量计算/代码": ("run_code",),
     "能力/参数/工具详情": ("introspect_capability",),
     "自身配置/自我管理/推理设置/工具开关": ("inspect_agent", "configure_agent"),
@@ -338,13 +337,12 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
 # ── 工具简短描述（用于未激活工具索引，帮助 LLM 判断是否需要激活） ──
 
 TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
-    "inspect_spreadsheet": "只读探查 Excel 数据：overview 看结构，range 读取区域，search 搜值，capabilities 查能力",
+    "observe_spreadsheet": "版本绑定的结构、数据、版式、几何、对象和公式观察",
+    "preview_spreadsheet": "只读工作台/打印图像观察，直接注入当前视觉上下文",
     "analyze_spreadsheet": "只读分析：profile/quality 全貌，filter 筛选，aggregate 汇总，pivot 透视，relationships 跨文件关联，files 扫目录",
     "compare_spreadsheets": "只读表格数据对比（diff）；两个工作簿或两个工作表；未指定 sheet 时只比较第一张表；position 按坐标，key 按关键列",
-    "edit_spreadsheet": "原子编辑：写值/公式、selection 写回、插删行列、改表结构、透视写入、清洗变换，或编译 WorkbookSpec",
-    "format_spreadsheet": "改外观：字体/填充/边框/对齐/数字格式、合并、列宽(auto_fit)、冻结窗格、打印布局(print_layout)、条件格式、数据验证(下拉框)",
     "split_spreadsheet": "按某列取值把一个表拆成每组一个新 xlsx（by_column 必填，如按省拆分）；只新建不覆盖",
-    "manage_spreadsheet_objects": "富对象：图表、Table、名称、批注、超链接、图片和原生透视表",
+    "apply_spreadsheet_changes": "富对象：图表、Table、名称、批注、超链接、图片和原生透视表",
     "calculate_spreadsheet": "显式调用计算引擎重算公式，检查错误后原子发布",
     "render_spreadsheet": "将工作表或打印区域渲染为 PDF/分页 PNG，返回页数和引擎状态",
     "convert_spreadsheet": "将 xls/xlsb 等转换为 xlsx，并返回转换前后对象损失报告",

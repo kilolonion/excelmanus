@@ -42,7 +42,7 @@ def _engine(*, session_id: str = "sess-1") -> MagicMock:
     engine._prompt_tool_snapshot = [
         {
             "type": "function",
-            "function": {"name": "inspect_spreadsheet", "description": "d", "parameters": {}},
+            "function": {"name": "observe_spreadsheet", "description": "d", "parameters": {}},
         },
         {
             "type": "function",
@@ -69,7 +69,7 @@ def _engine(*, session_id: str = "sess-1") -> MagicMock:
         prompt_injection_snapshots=[],
         injected_context_fingerprint=None,
     )
-    engine._registry.get_tool_names.return_value = ["inspect_spreadsheet", "run_code"]
+    engine._registry.get_tool_names.return_value = ["observe_spreadsheet", "run_code"]
     engine.registry = engine._registry
     engine._child_system_prompt = None
     engine._meta_tool_builder.build_v5_tools.return_value = list(engine._prompt_tool_snapshot)
@@ -138,10 +138,10 @@ def test_nine_tool_batches_keep_early_tool_result_bytes() -> None:
     engine = _engine()
     engine.memory.add_user_message("go")
     early = "EARLY_TOOL_RESULT " + ("Z" * 400)
-    engine.memory.add_tool_call("c0", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("c0", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("c0", early)
     for i in range(1, 9):
-        engine.memory.add_tool_call(f"c{i}", "inspect_spreadsheet", "{}")
+        engine.memory.add_tool_call(f"c{i}", "observe_spreadsheet", "{}")
         engine.memory.add_tool_result(f"c{i}", f"later-{i}-" + ("Y" * 400))
     env, err = assemble_envelope(engine)
     assert err is None and env is not None
@@ -409,7 +409,7 @@ def test_assemble_persist_false_does_not_write_envelope_state() -> None:
 def test_replace_tool_result_before_send_does_not_bump_projection() -> None:
     engine = _engine()
     engine.memory.add_user_message("go")
-    engine.memory.add_tool_call("c1", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("c1", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("c1", "pending")
     engine.memory.replace_tool_result("c1", "real-result")
     assert engine.memory._projection_dirty is False
@@ -423,7 +423,7 @@ def test_replace_tool_result_before_send_does_not_bump_projection() -> None:
 def test_replace_tool_result_after_envelope_bumps_projection() -> None:
     engine = _engine()
     engine.memory.add_user_message("go")
-    engine.memory.add_tool_call("c1", "inspect_spreadsheet", "{}")
+    engine.memory.add_tool_call("c1", "observe_spreadsheet", "{}")
     engine.memory.add_tool_result("c1", "pending-approval")
     first, err1 = assemble_envelope(engine)
     assert err1 is None and first is not None
@@ -447,7 +447,7 @@ def test_stale_tool_snapshot_rebuilds_when_catalog_digest_changes() -> None:
             "function": {"name": "stale_only", "description": "old", "parameters": {}},
         }
     ]
-    engine._registry.get_tool_names.return_value = ["inspect_spreadsheet", "run_code", "new_mcp"]
+    engine._registry.get_tool_names.return_value = ["observe_spreadsheet", "run_code", "new_mcp"]
     rebuilt, err2 = assemble_envelope(engine)
     assert err2 is None and rebuilt is not None
     names = [t["function"]["name"] for t in rebuilt.tools]

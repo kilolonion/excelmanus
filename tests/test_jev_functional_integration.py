@@ -55,7 +55,7 @@ def no_remote_evaluations():
 def test_shape_has_immutable_retrieval_and_preserves_native_value(tmp_path, shape):
     original = ToolResult(success=True, model_text="旧结果" * 5000, value={"rows": [1, 2]})
     shaped = _apply_observation_shape(
-        original, shape, tool_name="inspect_spreadsheet",
+        original, shape, tool_name="observe_spreadsheet",
         arguments={"file_path": "a.xlsx"}, engine=engine(tmp_path),
     )
     assert shaped.value is original.value
@@ -72,7 +72,7 @@ async def test_semantic_keep_survives_mechanical_pruning(tmp_path):
     for index in range(6):
         messages += [
             {"role": "assistant", "tool_calls": [{
-                "id": str(index), "function": {"name": "inspect_spreadsheet", "arguments": json.dumps({"file_path": "a.xlsx"})},
+                "id": str(index), "function": {"name": "observe_spreadsheet", "arguments": json.dumps({"file_path": "a.xlsx"})},
             }]},
             {"role": "tool", "tool_call_id": str(index), "content": "data" * 3000},
         ]
@@ -96,7 +96,7 @@ def test_discovery_does_not_consume_loop_decision(tmp_path):
     e = engine(tmp_path)
     e._exposure_last_tools = ["previous_turn_tool"]
     assert loop_state(e, [NS(tool_name="introspect_capability", success=True)], iteration=1) is None
-    state = loop_state(e, [NS(tool_name="inspect_spreadsheet", success=True, result="当前结果")], iteration=3)
+    state = loop_state(e, [NS(tool_name="observe_spreadsheet", success=True, result="当前结果")], iteration=3)
     assert state["iteration"] == 3
     assert state["observations"][0]["result_head"] == "当前结果"
     assert "previous_turn_tool" not in state["last_tools"]
@@ -123,7 +123,7 @@ def test_column_from_other_file_cannot_be_combined():
         "column_sample",
     )
     assert suggestion["arguments"]["file_path"] == "./a.xlsx"
-    assert suggestion["arguments"]["sheet_name"] == "销售"
+    assert suggestion["arguments"]["sheet"] == "销售"
     assert suggestion["purpose"] == "overview"
     assert "range" not in suggestion["arguments"]
 
@@ -133,14 +133,14 @@ def test_column_from_other_file_cannot_be_combined():
 async def test_delivery_review_stays_disabled_with_any_provider_settings(tmp_path, changes):
     e = engine(tmp_path)
     e._state.affected_files = ["a.xlsx"]
-    e._state.write_operations_log = [{"tool": "edit_spreadsheet"}]
+    e._state.write_operations_log = [{"tool": "apply_spreadsheet_changes"}]
     with patch("excelmanus.system_one.host.live_jev_settings", return_value=settings(**changes)):
         assert not should_check_delivery(e)
         advice = await maybe_verify_mutation(e, NS(tool_calls=[], truncated=False), on_event=None)
         assert advice == ""
         assert not hasattr(e, "_mutation_verification")
         assert not should_check_delivery(e)
-        e._state.write_operations_log.append({"tool": "edit_spreadsheet"})
+        e._state.write_operations_log.append({"tool": "apply_spreadsheet_changes"})
         assert not should_check_delivery(e)
         assert await maybe_verify_mutation(e, NS(tool_calls=[], truncated=False)) == ""
 
@@ -157,9 +157,9 @@ def test_ui_candidates_include_reads_and_reject_foreign_view(tmp_path):
     e = engine(tmp_path)
     e._jev_context_input = {"sheet_context": {"workspace_id": "workspace-b", "path": "foreign.xlsx"}}
     result = NS(tool_calls=[
-        NS(tool_name="inspect_spreadsheet", success=True, arguments={"file_path": "a.xlsx"}),
-        NS(tool_name="inspect_spreadsheet", success=False, arguments={"file_path": "bad.xlsx"}),
-        NS(tool_name="inspect_spreadsheet", success=True, arguments={"file_path": "../outside.xlsx"}),
+        NS(tool_name="observe_spreadsheet", success=True, arguments={"file_path": "a.xlsx"}),
+        NS(tool_name="observe_spreadsheet", success=False, arguments={"file_path": "bad.xlsx"}),
+        NS(tool_name="observe_spreadsheet", success=True, arguments={"file_path": "../outside.xlsx"}),
     ])
     state = ui_surface_state_from_engine(e, result)
     assert state["candidate_files"] == ["./a.xlsx"]

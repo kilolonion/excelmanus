@@ -17,7 +17,7 @@ from excelmanus.workbook import cells as cell_tools
 from excelmanus.workbook import charts as chart_tools
 from excelmanus.workbook import data as data_tools
 from excelmanus.workbook import styles as format_tools
-from excelmanus.workbook import sheets as sheet_tools
+from excelmanus.tools import workbook_tools as sheet_tools
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
@@ -102,79 +102,54 @@ def simple_xlsx(tmp_path: Path) -> Path:
 # ════════════════════════════════════════════════════════════
 
 
-class TestListSheetsInclude:
-    """list_sheets include 参数测试。"""
+class TestObservationFacets:
+    def test_manifest_has_all_sheets(self,rich_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),facets=[])
+        assert result.success and len(result.value["sheets"])==2
+        assert all(not r["cells"] for r in result.value["regions"])
 
-    def test_no_include_regression(self, rich_xlsx: Path) -> None:
-        result = _payload(sheet_tools.list_sheets(str(rich_xlsx)))
-        assert result["sheet_count"] == 2
-        assert "column_names" not in result["sheets"][0]
-        assert "freeze_panes" not in result["sheets"][0]
+    def test_headers_preserve_actual_coordinates(self,rich_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),sheet="销售明细",mode="range",range="A1:E1",facets=["data"])
+        assert result.value["regions"][0]["cells"]["1,1"]["v"]=="订单号"
+        assert result.value["regions"][0]["cells"]["1,5"]["v"]=="金额"
 
-    def test_include_columns(self, rich_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(str(rich_xlsx), include=["columns"])
-        )
-        s1 = result["sheets"][0]
-        assert "column_names" in s1
-        assert "订单号" in s1["column_names"]
-        assert "金额" in s1["column_names"]
+    def test_freeze_is_manifest_fact(self,rich_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),facets=[])
+        assert [s["freeze_panes"] for s in result.value["sheets"]]==["A2","A2"]
 
-    def test_include_freeze_panes(self, rich_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(str(rich_xlsx), include=["freeze_panes"])
-        )
-        assert result["sheets"][0]["freeze_panes"] == "A2"
-        assert result["sheets"][1]["freeze_panes"] == "A2"
+    def test_range_bounds_are_explicit(self,rich_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),sheet="销售明细",mode="range",range="A1:E3")
+        assert result.value["regions"][0]["rect"]=={"r0":1,"c0":1,"r1":3,"c1":5}
+        assert result.value["coverage"]["unloaded"]
 
-    def test_include_preview(self, rich_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(str(rich_xlsx), include=["preview"], max_preview_rows=3)
-        )
-        s1 = result["sheets"][0]
-        assert "preview" in s1
-        assert len(s1["preview"]) == 3
+    def test_chart_objects_and_confirmed_empty(self,rich_xlsx):
+        first=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),sheet="销售明细",mode="objects",facets=["objects"])
+        second=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),sheet="员工表",mode="objects",facets=["objects"])
+        assert len([o for o in first.value["regions"][0]["objects"] if o["kind"]=="chart"])==1
+        assert second.value["regions"][0]["objects"]==[]
+        assert second.value["regions"][0]["coverage"]["objects"]["status"]=="complete"
 
-    def test_include_charts(self, rich_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(str(rich_xlsx), include=["charts"])
-        )
-        assert len(result["sheets"][0]["charts"]) == 1
-        assert result["sheets"][1]["charts"] == []
+    def test_conditional_rules_remain_unevaluated(self,rich_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),facets=["presentation"])
+        rules=result.value["regions"][0]["conditional_formatting"]
+        assert rules["status"]=="rules_only" and rules["rules"]
+        assert not rules["rules"][0]["evaluated"]
 
-    def test_include_conditional_formatting(self, rich_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(str(rich_xlsx), include=["conditional_formatting"])
-        )
-        assert len(result["sheets"][0]["conditional_formatting"]) >= 1
-        assert result["sheets"][1]["conditional_formatting"] == []
+    def test_dimensions_use_native_units(self,rich_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),sheet="销售明细",mode="range",range="A1:E3",facets=["geometry"])
+        cols=result.value["regions"][0]["geometry"]["columns"]
+        assert cols[0]["native"]==15 and cols[4]["native"]==12
+        assert cols[0]["unit"]=="excel_char"
 
-    def test_include_column_widths(self, rich_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(str(rich_xlsx), include=["column_widths"])
-        )
-        widths = result["sheets"][0]["column_widths"]
-        assert widths["A"] == 15.0
-        assert widths["E"] == 12.0
+    def test_facets_combine(self,rich_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(rich_xlsx),facets=["data","presentation","geometry","objects"])
+        region=result.value["regions"][0]
+        assert region["cells"] and region["objects"] and region["geometry"]
+        assert region["cells"]["1,1"]["s"]["bl"]==1
 
-    def test_multi_include(self, rich_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(
-                str(rich_xlsx),
-                include=["columns", "freeze_panes", "charts", "column_widths"],
-            )
-        )
-        s1 = result["sheets"][0]
-        assert "column_names" in s1
-        assert "freeze_panes" in s1
-        assert "charts" in s1
-        assert "column_widths" in s1
-
-    def test_invalid_dimension_warning(self, simple_xlsx: Path) -> None:
-        result = _payload(
-            sheet_tools.list_sheets(str(simple_xlsx), include=["nonexistent"])
-        )
-        assert "include_warning" in result
+    def test_unknown_facets_rejected(self,simple_xlsx):
+        result=sheet_tools.observe_spreadsheet(file_path=str(simple_xlsx),facets=["nonexistent"])
+        assert not result.success
 
 
 
@@ -220,43 +195,18 @@ class TestInspectExcelFilesInclude:
 # ════════════════════════════════════════════════════════════
 
 
-class TestCreateExcelChartInfo:
-    """create_excel_chart 返回增强元信息测试。"""
+class TestChartObservationInfo:
+    def test_chart_info_returned(self, simple_xlsx):
+        result=sheet_tools.apply_spreadsheet_changes(file_path=str(simple_xlsx),expected_version=content_version_of_file(simple_xlsx),operations=[{"kind":"chart","sheet":"Sheet","chart_type":"bar","data_range":"B1:B3","categories_range":"A2:A3","target_cell":"D1"}])
+        assert result.success,result.model_text
+        info=result.value["observation"]["operations"][0]["object"]
+        assert info["total_charts"]==1 and info["chart_info"]["type"]=="bar"
+        assert result.value["observation"]["objects"]["status"]=="observed"
 
-    def test_chart_info_returned(self, simple_xlsx: Path) -> None:
-        result = _payload(
-            chart_tools.create_excel_chart(
-                file_path=str(simple_xlsx),
-                chart_type="bar",
-                data_range="B1:B3",
-                categories_range="A2:A3",
-                target_cell="D1",
-                expected_version=content_version_of_file(simple_xlsx),
-            )
-        )
-        assert result["status"] == "success"
-        assert "chart_info" in result
-        assert "total_charts_on_sheet" in result
-        assert result["total_charts_on_sheet"] >= 1
-        info = result["chart_info"]
-        assert info.get("type") == "bar"
-
-    def test_multiple_charts_count(self, simple_xlsx: Path) -> None:
-        first = chart_tools.create_excel_chart(
-            file_path=str(simple_xlsx),
-            chart_type="bar",
-            data_range="B1:B3",
-            target_cell="D1",
-            expected_version=content_version_of_file(simple_xlsx),
-        )
-        assert first.success
-        result = _payload(
-            chart_tools.create_excel_chart(
-                file_path=str(simple_xlsx),
-                chart_type="line",
-                data_range="B1:B3",
-                target_cell="D15",
-                expected_version=first.ui_meta.content_version or first.value.get("content_version"),
-            )
-        )
-        assert result["total_charts_on_sheet"] == 2
+    def test_multiple_charts_count(self, simple_xlsx):
+        result=sheet_tools.apply_spreadsheet_changes(file_path=str(simple_xlsx),expected_version=content_version_of_file(simple_xlsx),operations=[
+            {"kind":"chart","sheet":"Sheet","chart_type":"bar","data_range":"B1:B3","target_cell":"D1"},
+            {"kind":"chart","sheet":"Sheet","chart_type":"line","data_range":"B1:B3","target_cell":"D15"}])
+        assert result.success,result.model_text
+        assert result.value["observation"]["operations"][1]["object"]["total_charts"]==2
+        assert len(result.value["observation"]["objects"]["sheets"]["Sheet"])==2

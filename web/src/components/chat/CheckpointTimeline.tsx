@@ -454,7 +454,7 @@ function RevisionTimelineContent({ filePath, workspaceId, active = true, activeS
           onClose={() => { previewAbort.current?.abort(); setPreview(null); }}
         />
         <div className="max-h-[50vh] overflow-auto px-4 pb-3">
-          {preview?.data.windows?.length ? <RevisionWorkbookPreview data={preview.data} loading={previewLoading} onSheet={(sheet) => void showPreview(preview.revision, sheet)} />
+          {preview?.data.regions?.length ? <RevisionWorkbookPreview data={preview.data} loading={previewLoading} onSheet={(sheet) => void showPreview(preview.revision, sheet)} />
             : preview?.data.paragraphs?.length ? <div className="space-y-2 text-sm">{preview.data.paragraphs.map((p, i) => <p key={i}>{p.text}</p>)}</div>
             : <p className="text-xs text-muted-foreground">该窗口没有内容。</p>}
         </div>

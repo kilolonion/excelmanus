@@ -22,7 +22,7 @@
       "assertions": {
         "max_llm_calls": 4,
         "max_tool_calls": 4,
-        "forbidden_tools": ["edit_spreadsheet", "format_spreadsheet", "split_spreadsheet", "manage_spreadsheet_objects"],
+        "forbidden_tools": ["apply_spreadsheet_changes", "apply_spreadsheet_changes", "split_spreadsheet", "apply_spreadsheet_changes"],
         "output_checks": [
           {
             "type": "reply_regex",
@@ -92,7 +92,7 @@
       "expected": {
         "lens": "字段靠 schema/introspection 发现后一次编译 WorkbookSpec",
         "review_focus": [
-          "是否经 edit_spreadsheet 的 workbook_spec 一次建出，而不是空表后反复 operations",
+          "是否经 apply_spreadsheet_changes 的 workbook_spec 一次建出，而不是空表后反复 operations",
           "合并标题、表头边框、list 数据验证、列宽是否真的落了",
           "不确定的字段是否查了 introspect_capability 而不是编造"
         ]

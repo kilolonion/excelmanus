@@ -200,6 +200,7 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             updated_at           TEXT NOT NULL,
             protocol             TEXT DEFAULT 'auto',
             thinking_mode        TEXT DEFAULT 'auto',
+            service_tier         TEXT DEFAULT '',
             model_family         TEXT DEFAULT '',
             custom_extra_body    TEXT DEFAULT '',
             custom_extra_headers TEXT DEFAULT '',
@@ -541,6 +542,9 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
     10: [
         # Jev 智能匹配：档案绑定到的已知规范模型名（不改写上游 Model ID）。
         "ALTER TABLE model_profiles ADD COLUMN canonical_model TEXT DEFAULT ''",
+    ],
+    11: [
+        "ALTER TABLE model_profiles ADD COLUMN service_tier TEXT DEFAULT ''",
     ],
 }
 

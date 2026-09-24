@@ -36,7 +36,7 @@ export async function reviewWorkbookMerge(scope: WorkbookWorkflowScope, draft: s
   if (workbookEditDraft(scope.file) !== draft) throw new Error("草稿已改变，请重新核对");
   const payload = JSON.parse(draft);
   if (!payload.batches?.length) throw new Error("没有可合并的草稿");
-  const response = await apiFetch(buildApiUrl("/files/excel/merge"), {
+  const response = await apiFetch(buildApiUrl("/workbooks/merge-review"), {
     signal: AbortSignal.timeout(60_000),
     method: "POST", headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ path: scope.file.relative, session_id: scope.sessionId, workspace_id: scope.file.workspaceId,

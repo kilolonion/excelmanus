@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, Suspense } from "react";
+import { useEffect, useState, useSyncExternalStore, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 
@@ -11,30 +11,27 @@ import { CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
  * 通过 window.opener.postMessage 将参数传回主窗口（popup 模式）。
  */
 
+const subscribe = () => () => {};
+
 function CallbackContent() {
   const searchParams = useSearchParams();
   const code = searchParams.get("code");
   const state = searchParams.get("state");
   const error = searchParams.get("error") || searchParams.get("error_description");
+  const hasOpener = useSyncExternalStore(subscribe, () => Boolean(window.opener), () => false);
+  const [copyNotice, setCopyNotice] = useState("");
 
   useEffect(() => {
-    if (!window.opener) return;
-
-    if (error) {
+    if (!window.opener || !state || (!error && !code)) return;
+    try {
       window.opener.postMessage(
-        { type: "codex-oauth-callback", error, state },
+        { type: "codex-oauth-callback", ...(error ? { error } : { code }), state },
         window.location.origin,
       );
-      setTimeout(() => window.close(), 2000);
-      return;
-    }
-
-    if (code && state) {
-      window.opener.postMessage(
-        { type: "codex-oauth-callback", code, state },
-        window.location.origin,
-      );
-      setTimeout(() => window.close(), 1500);
+      const timer = setTimeout(() => window.close(), 2000);
+      return () => clearTimeout(timer);
+    } catch {
+      // The settings window may have closed; manual recovery remains available.
     }
   }, [code, state, error]);
 
@@ -45,7 +42,7 @@ function CallbackContent() {
           <AlertCircle className="h-10 w-10 mx-auto text-destructive" />
           <h2 className="text-lg font-semibold">授权失败</h2>
           <p className="text-sm text-muted-foreground max-w-xs">{error}</p>
-          <p className="text-xs text-muted-foreground">此窗口将自动关闭...</p>
+          <p className="text-xs text-muted-foreground">请返回设置页重新发起登录。</p>
         </div>
       </div>
     );
@@ -56,8 +53,13 @@ function CallbackContent() {
       <div className="em-auth-gate min-h-screen flex items-center justify-center px-4">
         <div className="em-auth-card w-full max-w-sm rounded-2xl border p-7 text-center shadow-xl space-y-3">
           <CheckCircle2 className="h-10 w-10 mx-auto text-green-500" />
-          <h2 className="text-lg font-semibold">授权成功</h2>
-          <p className="text-sm text-muted-foreground">正在完成连接，此窗口将自动关闭...</p>
+          <h2 className="text-lg font-semibold">已收到授权信息</h2>
+          <p className="text-sm text-muted-foreground">{hasOpener ? "正在交回授权信息，请返回设置页查看连接结果。" : "请复制完整回调地址，返回设置页粘贴以完成连接。"}</p>
+          <button type="button" className="text-sm text-primary underline" onClick={async () => {
+            try { await navigator.clipboard.writeText(window.location.href); setCopyNotice("已复制，请返回设置页粘贴。"); }
+            catch { setCopyNotice("请手动复制地址栏中的完整地址。"); }
+          }}>复制回调地址</button>
+          {copyNotice && <p role="status" className="text-xs text-muted-foreground">{copyNotice}</p>}
         </div>
       </div>
     );

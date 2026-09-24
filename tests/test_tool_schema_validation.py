@@ -530,15 +530,11 @@ class TestRunCodeSandboxTierStrip:
         assert result.value["error_code"] == "TOOL_ARGUMENT_VALIDATION_ERROR"
 
 
-class TestIntentSchemaCompat:
-    """intent 工具 schema 必须覆盖处理器已接受的兼容输入（_maybe_json/_op_get/别名）。
-
-    处理器在 enforce 之前就支持 JSON 字符串、spill 句柄与别名键；
-    schema 若更窄，合法调用会被 enforce 拦死，属契约回归。
-    """
+class TestV2OperationSchema:
+    """V2 schemas reject legacy coercions and aliases at the contract boundary."""
 
     def _violations(self, tool_name: str, arguments: dict) -> list[str]:
-        from excelmanus.tools.intent_tools import get_tools
+        from excelmanus.tools.workbook_tools import get_tools
 
         tools = {t.name: t for t in get_tools()}
         registry = _make_registry(mode="enforce")
@@ -551,10 +547,10 @@ class TestIntentSchemaCompat:
         )
         return out
 
-    # ── format_spreadsheet.rule：条件格式 ∪ 数据验证 ──
+    # ── apply_spreadsheet_changes.rule：条件格式 ∪ 数据验证 ──
 
     def test_dv_list_rule_accepted(self) -> None:
-        bad = self._violations("format_spreadsheet", {
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "data_validation", "sheet": "S", "range": "D2:D10",
                             "rule": {"type": "list", "values": ["A", "B"], "allow_blank": True}}],
@@ -562,13 +558,13 @@ class TestIntentSchemaCompat:
         assert not bad, bad
 
     def test_dv_numeric_and_alias_fields_accepted(self) -> None:
-        bad = self._violations("format_spreadsheet", {
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "data_validation", "sheet": "S", "range": "D2:D10",
                             "rule": {"type": "whole", "operator": "between", "value": 1, "value2": 10}}],
         })
         assert not bad, bad
-        bad = self._violations("format_spreadsheet", {
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "data_validation", "sheet": "S", "range": "D2:D10",
                             "rule": {"type": "list", "source": "Sheet2!A1:A5"}}],
@@ -576,7 +572,7 @@ class TestIntentSchemaCompat:
         assert not bad, bad
 
     def test_cf_rule_still_accepted(self) -> None:
-        bad = self._violations("format_spreadsheet", {
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "conditional_format", "sheet": "S", "range": "B2:B10",
                             "rule": {"type": "cell_value", "operator": "greater_than", "value": 100,
@@ -585,15 +581,15 @@ class TestIntentSchemaCompat:
         assert not bad, bad
 
     def test_dv_bogus_type_still_rejected(self) -> None:
-        bad = self._violations("format_spreadsheet", {
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "data_validation", "range": "A1",
                             "rule": {"type": "bogus"}}],
         })
-        assert any("rule.type" in m for m in bad)
+        assert bad
 
-    def test_format_alias_fields_accepted(self) -> None:
-        bad = self._violations("format_spreadsheet", {
+    def test_format_alias_fields_rejected(self) -> None:
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "format", "sheet": "S", "cell_range": "A1",
                             "numberFormat": "0.00"},
@@ -602,58 +598,64 @@ class TestIntentSchemaCompat:
                            {"kind": "data_validation", "sheet": "S", "range": "A2",
                             "validation": {"type": "list", "values": ["x"]}, "delete": True}],
         })
-        assert not bad, bad
+        assert len(bad) == 4
 
-    # ── edit_spreadsheet：JSON 字符串 / spill / 别名 ──
+    # ── apply_spreadsheet_changes：JSON 字符串 / spill / 别名 ──
 
-    def test_edit_values_matrix_json_and_spill(self) -> None:
+    def test_edit_values_accepts_matrix_only(self) -> None:
         base = {"kind": "write", "sheet": "S", "start_cell": "A1"}
-        for values in ([[1, 2]], "[[1,2]]", "spill:abc"):
-            bad = self._violations("edit_spreadsheet", {
+        for values in ([[1, 2]],):
+            bad = self._violations("apply_spreadsheet_changes", {
                 "file_path": "a.xlsx", "operations": [dict(base, values=values)],
             })
             assert not bad, f"values={values!r}: {bad}"
 
+        for values in ("[[1,2]]", "spill:abc"):
+            bad = self._violations("apply_spreadsheet_changes", {
+                "file_path": "a.xlsx", "operations": [dict(base, values=values)],
+            })
+            assert bad
+
     def test_edit_values_dict_still_rejected(self) -> None:
-        bad = self._violations("edit_spreadsheet", {
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "write", "start_cell": "A1", "values": {"r": 1}}],
         })
-        assert any("values" in m for m in bad)
+        assert bad
 
     def test_edit_pivot_values_are_column_names(self) -> None:
-        bad = self._violations("edit_spreadsheet", {
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "pivot", "sheet": "S", "values": ["金额"],
                             "index": ["区域"], "target_sheet": "T"}],
         })
         assert not bad, bad
 
-    def test_edit_operations_json_string(self) -> None:
-        bad = self._violations("edit_spreadsheet", {
+    def test_edit_operations_json_string_rejected(self) -> None:
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": '[{"kind":"write","sheet":"S","start_cell":"A1","values":[[1]]}]',
         })
-        assert not bad, bad
+        assert bad
 
-    def test_edit_selection_json_string(self) -> None:
-        bad = self._violations("edit_spreadsheet", {
+    def test_edit_selection_json_string_rejected(self) -> None:
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "delete_rows", "sheet": "S",
                             "selection": '{"rows":[2],"file":"a.xlsx"}',
                             "content_version": "sha256:x"}],
         })
-        assert not bad, bad
+        assert bad
 
-    def test_edit_workbook_spec_json_string(self) -> None:
-        bad = self._violations("edit_spreadsheet", {
+    def test_edit_workbook_spec_json_string_rejected(self) -> None:
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "n.xlsx",
             "workbook_spec": '{"sheets":[{"name":"S","dimensions":{"rows":3,"cols":2}}],"uncertainties":[]}',
         })
-        assert not bad, bad
+        assert bad
 
-    def test_edit_alias_fields_accepted(self) -> None:
-        bad = self._violations("edit_spreadsheet", {
+    def test_edit_alias_fields_rejected(self) -> None:
+        bad = self._violations("apply_spreadsheet_changes", {
             "file_path": "a.xlsx",
             "operations": [{"kind": "write", "sheet": "S", "cell": "A1", "values": [[1]]},
                            {"kind": "transform", "sheet": "S", "transform": "trim", "column": "c"},
@@ -661,7 +663,7 @@ class TestIntentSchemaCompat:
                            {"kind": "transform", "sheet": "S", "transform": "split",
                             "column": "c", "sep": ","}],
         })
-        assert not bad, bad
+        assert bad
 
     # ── analyze_spreadsheet：join 单/多键 + JSON 兼容 ──
 
@@ -694,34 +696,40 @@ class TestIntentSchemaCompat:
         })
         assert any("join.on" in message for message in bad)
 
-    def test_join_json_string(self) -> None:
+    def test_join_json_string_rejected(self) -> None:
         bad = self._violations("analyze_spreadsheet", {
             "file_path": "a.xlsx", "mode": "aggregate", "aggregations": {"x": "sum"},
             "join": '{"sheet":"R","on":"键"}',
         })
-        assert not bad, bad
+        assert bad
 
-    def test_analyze_aggregations_shapes(self) -> None:
-        for aggs in ({"金额": "sum"}, [{"column": "金额", "func": "sum"}], '{"金额":"sum"}'):
+    def test_analyze_aggregations_accept_structured_objects_and_arrays(self) -> None:
+        for aggs in ({"金额": "sum"}, [{"column": "金额", "func": "sum"}]):
             bad = self._violations("analyze_spreadsheet", {
                 "file_path": "a.xlsx", "mode": "aggregate",
                 "group_by": ["区域"], "aggregations": aggs,
             })
             assert not bad, f"aggregations={aggs!r}: {bad}"
+        for aggs in ('{"金额":"sum"}', '[{"column":"金额","func":"sum"}]'):
+            bad = self._violations("analyze_spreadsheet", {
+                "file_path": "a.xlsx", "mode": "aggregate",
+                "group_by": ["区域"], "aggregations": aggs,
+            })
+            assert bad
 
-    def test_analyze_conditions_and_paths_json_string(self) -> None:
+    def test_analyze_conditions_and_paths_json_string_rejected(self) -> None:
         bad = self._violations("analyze_spreadsheet", {
             "file_path": "a.xlsx", "mode": "filter",
             "conditions": '[{"column":"c","operator":"eq","value":1}]',
         })
-        assert not bad, bad
+        assert bad
         bad = self._violations("analyze_spreadsheet", {
             "mode": "files", "file_paths": '["a.xlsx","b.xlsx"]',
         })
-        assert not bad, bad
+        assert bad
 
-    def test_inspect_include_json_string(self) -> None:
-        bad = self._violations("inspect_spreadsheet", {
+    def test_inspect_include_legacy_field_rejected(self) -> None:
+        bad = self._violations("observe_spreadsheet", {
             "file_path": "a.xlsx", "mode": "overview", "include": '["columns"]',
         })
-        assert not bad, bad
+        assert bad

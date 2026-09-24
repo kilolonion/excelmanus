@@ -23,7 +23,10 @@ from excelmanus.providers import (
     ClaudeClient,
     GeminiClient,
     OpenAIResponsesClient,
+    is_workbuddy_base_url,
 )
+from excelmanus.providers.reasoning import extract_reasoning_text, split_content_parts
+from excelmanus.providers.stream_types import InlineThinkingStateMachine
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +56,7 @@ class ModelCapabilities:
     supports_tool_calling: bool | None = None
     supports_vision: bool | None = None
     supports_thinking: bool | None = None
-    thinking_type: str = ""  # "claude"|"gemini"|"gemini_level"|"openai_reasoning"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
+    thinking_type: str = ""  # claude|claude_compat|gemini|gemini_level|openai_reasoning|deepseek|enable_thinking|glm_thinking|openrouter|chat_template
     detected_at: str = ""
     probe_errors: dict[str, str] = field(default_factory=dict)
     manual_override: bool = False
@@ -313,11 +316,11 @@ async def probe_thinking(
     strategy_timeout: float = 8.0,
     thinking_mode: str = "auto",
     strategy_model: str = "",
-) -> tuple[bool, str, str]:
+) -> tuple[bool | None, str, str]:
     """探测模型是否支持输出思考过程。
 
     返回 (supported, error_msg, thinking_type)。
-    thinking_type: "claude"|"claude_compat"|"gemini"|"gemini_level"|"openai_reasoning"|"deepseek"|"enable_thinking"|"glm_thinking"|"openrouter"|""
+    thinking_type 包含原生协议、兼容代理和 chat_template 等启用参数方言。
 
     thinking_mode 参数：
       - "auto"（默认）：自动探测
@@ -357,36 +360,17 @@ async def _probe_claude_thinking(
     model: str,
     messages: list[dict],
     timeout: float,
-) -> tuple[bool, str, str]:
+) -> tuple[bool | None, str, str]:
     """Claude extended thinking 探测。"""
-    from excelmanus.providers.claude import StreamDelta
-
-    try:
-        stream = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True,
-                _thinking_enabled=True,
-                _thinking_budget=2048,
-            ),
-            timeout=timeout,
-        )
-        found_thinking = False
-        async for chunk in stream:
-            if isinstance(chunk, StreamDelta) and chunk.thinking_delta:
-                found_thinking = True
-                break
-            content = getattr(chunk, "content_delta", "") if isinstance(chunk, StreamDelta) else ""
-            if content:
-                break
-        return found_thinking, "", "claude" if found_thinking else ""
-    except Exception as exc:
-        err = _err_text(exc)
-        logger.debug("Claude thinking 探测异常: %s", err)
-        if _is_fatal_probe_error(err):
-            return None, err, ""
-        return False, err, ""
+    ok, err = await _try_thinking_stream(
+        client, model, messages, timeout,
+        {"_thinking_enabled": True, "_thinking_budget": 2048},
+    )
+    if ok:
+        return True, "", "claude"
+    if err and (_is_fatal_probe_error(err) or not _is_param_unsupported_error(err)):
+        return None, err, ""
+    return False, err, ""
 
 
 async def _probe_gemini_thinking(
@@ -394,32 +378,16 @@ async def _probe_gemini_thinking(
     model: str,
     messages: list[dict],
     timeout: float,
-) -> tuple[bool, str, str]:
+) -> tuple[bool | None, str, str]:
     """Gemini thinking 探测。"""
-    from excelmanus.providers.stream_types import StreamDelta
-
-    try:
-        stream = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                messages=messages,
-                stream=True,
-                _thinking_budget=2048,
-            ),
-            timeout=timeout,
-        )
-        found_thinking = False
-        async for chunk in stream:
-            if isinstance(chunk, StreamDelta) and chunk.thinking_delta:
-                found_thinking = True
-                break
-        return found_thinking, "", "gemini" if found_thinking else ""
-    except Exception as exc:
-        err = _err_text(exc)
-        logger.debug("Gemini thinking 探测异常: %s", err)
-        if _is_fatal_probe_error(err):
-            return None, err, ""
-        return False, err, ""
+    ok, err = await _try_thinking_stream(
+        client, model, messages, timeout, {"_thinking_budget": 2048},
+    )
+    if ok:
+        return True, "", "gemini"
+    if err and (_is_fatal_probe_error(err) or not _is_param_unsupported_error(err)):
+        return None, err, ""
+    return False, err, ""
 
 
 async def _probe_openai_thinking(
@@ -430,7 +398,7 @@ async def _probe_openai_thinking(
     strategy_timeout: float,
     base_url: str = "",
     strategy_model: str = "",
-) -> tuple[bool, str, str]:
+) -> tuple[bool | None, str, str]:
     """OpenAI 兼容 API 多策略思考探测。
 
     按 provider 特征依次尝试不同的 thinking 启用参数，
@@ -449,6 +417,8 @@ async def _probe_openai_thinking(
         remaining = timeout - elapsed
         if remaining <= 0:
             logger.debug("思考探测总预算耗尽 (%.1fs elapsed), 停止尝试", elapsed)
+            inconclusive = True
+            last_err = "thinking probe budget exhausted before all strategies completed"
             break
         per_strategy = min(strategy_timeout, remaining)
         logger.debug("思考探测策略: %s (provider=%s, model=%s, budget=%.1fs)", strategy_name, provider, model, per_strategy)
@@ -799,6 +769,8 @@ _PROVIDER_URL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 def _detect_openai_provider(base_url: str) -> str:
     """从 base_url 推断 OpenAI 兼容 provider 类型。"""
+    if is_workbuddy_base_url(base_url):
+        return "workbuddy"
     for name, pattern in _PROVIDER_URL_PATTERNS:
         if pattern.search(base_url):
             return name
@@ -813,20 +785,42 @@ def _get_thinking_strategies(
     按优先级排序：最可能的策略在前。
     thinking_type 会存入 ModelCapabilities，engine 据此注入请求参数。
     """
+    generic_gateway = provider == "generic"
+    if generic_gateway:
+        # 代理域名不暴露底层厂商时，以规范模型名优先选择参数方言。
+        for prefixes, hinted_provider in (
+            (("deepseek",), "deepseek"),
+            (("glm", "kimi", "mimo"), "glm"),
+            (("qwen", "qwq"), "dashscope"),
+            (("o1", "o3", "o4", "gpt-5", "gpt-6"), "openai"),
+            (("grok",), "xai"),
+        ):
+            if has_token_prefix(model, prefixes):
+                provider = hinted_provider
+                break
     strategies: list[tuple[str, dict[str, Any], str]] = []
 
     # ── Claude 模型经 OpenAI 兼容代理（按模型名检测） ────────
     # 当 Claude 模型通过第三方 OpenAI 兼容代理访问时，客户端是 AsyncOpenAI 而非 ClaudeClient，
     # 但仍需要 Anthropic 风格的 thinking 参数。大多数代理会透传 extra_body 到上游。
-    if has_token_prefix(model, "claude"):
+    if provider != "workbuddy" and has_token_prefix(model, "claude"):
         strategies.append((
             "claude_compat_thinking",
             {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 2048}}},
-            "claude",
+            "claude_compat",
         ))
 
     # ── 按 provider 添加专属策略 ────────────────────────────
-    if provider == "dashscope":
+    if provider == "workbuddy":
+        # WorkBuddy/CodeBuddy 用网关级 reasoning_effort 开启思考；
+        # 即使底层是 DeepSeek，thinking.type / enable_thinking 也不会生效。
+        # 成功后复用 openai_reasoning，让聊天请求沿用同一参数。
+        strategies.append((
+            "workbuddy_reasoning",
+            {"reasoning_effort": "high"},
+            "openai_reasoning",
+        ))
+    elif provider == "dashscope":
         # 阿里百炼 / Qwen: extra_body.enable_thinking
         strategies.append((
             "dashscope_enable",
@@ -893,6 +887,13 @@ def _get_thinking_strategies(
             "glm_thinking",
         ))
 
+    if generic_gateway and has_token_prefix(model, ("qwen", "qwq")):
+        strategies.append((
+            "qwen_chat_template",
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+            "chat_template",
+        ))
+
     # ── 通用兜底策略 ──────────────────────────────────────
     # 1) 纯流式检查（捕获自动输出推理的模型，如 DeepSeek-R1、QwQ）
     if not any(s[0] == "plain" for s in strategies):
@@ -906,6 +907,17 @@ def _get_thinking_strategies(
             "enable_thinking",
         ))
 
+    if generic_gateway:
+        # 未知网关 / 自定义模型别名：补齐常见参数方言，成功后保存对应类型。
+        for strategy in (
+            ("thinking_fallback", {"extra_body": {"thinking": {"type": "enabled"}}}, "glm_thinking"),
+            ("effort_fallback", {"reasoning_effort": "high"}, "openai_reasoning"),
+            ("template_fallback", {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}, "chat_template"),
+            ("reasoning_fallback", {"extra_body": {"reasoning": {"max_tokens": 2048}}}, "openrouter"),
+        ):
+            if not any(existing[1] == strategy[1] for existing in strategies):
+                strategies.append(strategy)
+
     return strategies
 
 
@@ -917,6 +929,7 @@ async def _try_thinking_stream(
     extra_kwargs: dict[str, Any],
 ) -> tuple[bool, str]:
     """尝试一种 thinking 策略：发起流式请求，检查 delta 是否含推理字段。"""
+    deadline = time.monotonic() + timeout
     try:
         request_kwargs = {
             "model": model,
@@ -924,14 +937,20 @@ async def _try_thinking_stream(
             "stream": True,
             **extra_kwargs,
         }
-        if not isinstance(client, OpenAIResponsesClient):
+        if not isinstance(client, (OpenAIResponsesClient, ClaudeClient, GeminiClient)):
             request_kwargs["max_tokens"] = 300
+            # Claude 兼容代理要求输出上限大于显式 thinking budget。
+            thinking = (extra_kwargs.get("extra_body") or {}).get("thinking")
+            budget = thinking.get("budget_tokens", 0) if isinstance(thinking, dict) else 0
+            if isinstance(budget, int) and budget > 0:
+                request_kwargs["max_tokens"] = budget + 300
         stream = await asyncio.wait_for(
             client.chat.completions.create(**request_kwargs),
             timeout=timeout,
         )
 
         async def _consume() -> bool:
+            inline = InlineThinkingStateMachine()
             async for chunk in stream:
                 # ── 路径 A：StreamDelta（OpenAIResponsesClient / 自定义适配器）──
                 _thinking_d = getattr(chunk, "thinking_delta", None)
@@ -939,7 +958,8 @@ async def _try_thinking_stream(
                     return True
                 _content_d = getattr(chunk, "content_delta", None)
                 if _content_d:
-                    return False  # 有内容输出但无思考 → 不支持 thinking
+                    if any(delta.thinking_delta.strip() for delta in inline.feed(_content_d)):
+                        return True
 
                 # ── 路径 B：标准 OpenAI SDK chunk ──
                 choices = getattr(chunk, "choices", None)
@@ -949,27 +969,27 @@ async def _try_thinking_stream(
                 if delta is None:
                     continue
 
-                for key in ("reasoning_content", "reasoning", "thinking"):
-                    val = getattr(delta, key, None)
-                    if val:
-                        return True
-
-                if getattr(delta, "content", None):
-                    return False
-            return False
+                if extract_reasoning_text(delta).strip():
+                    return True
+                _, content = split_content_parts(getattr(delta, "content", None))
+                if content and any(part.thinking_delta.strip() for part in inline.feed(content)):
+                    return True
+            return any(part.thinking_delta.strip() for part in inline.flush())
 
         try:
             try:
-                found = await asyncio.wait_for(_consume(), timeout=timeout)
+                found = await asyncio.wait_for(_consume(), timeout=max(0.0, deadline - time.monotonic()))
             except asyncio.TimeoutError:
                 return False, f"thinking probe timeout after {timeout:.1f}s"
             return found, ""
         finally:
             # 探测提前返回（找到结果或超时）时释放底层流，避免连接悬挂。
-            aclose = getattr(stream, "aclose", None)
+            aclose = getattr(stream, "aclose", None) or getattr(stream, "close", None)
             if callable(aclose):
                 try:
-                    await aclose()
+                    closed = aclose()
+                    if inspect.isawaitable(closed):
+                        await closed
                 except Exception:
                     pass
     except Exception as exc:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 def workbook_creation_example() -> dict:
     return {
+        "version": "2",
         "sheets": [{
             "name": "明细", "dimensions": {"rows": 4, "cols": 4},
             "value_blocks": [{"start": "A1", "values": [
@@ -11,7 +12,7 @@ def workbook_creation_example() -> dict:
                 ["示例", 2, 10, None], ["合计", None, None, None],
             ]}],
             "formula_blocks": [{"start": "D3", "formulas": [["=B3*C3"], ["=SUM(D3:D3)"]]}],
-            "merged_ranges": ["A1:D1"],
+            "merged_ranges": [{"range": "A1:D1"}],
             "styles": {"header": {"font": {"bold": True}, "alignment": {"horizontal": "center"}}},
             "style_regions": [{"range": "A1:D2", "style_id": "header"}],
             "column_widths": [24, 10, 12, 14], "row_heights": {"1": 26},

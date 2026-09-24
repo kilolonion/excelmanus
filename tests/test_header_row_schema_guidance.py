@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from excelmanus.tools import intent_tools
+from excelmanus.tools import workbook_tools
 
 
 def _get_prop_desc(tool_defs, tool_name: str, prop_name: str) -> str:
@@ -15,7 +15,7 @@ def _get_prop_desc(tool_defs, tool_name: str, prop_name: str) -> str:
 
 
 def test_header_row_schema_guidance_is_consistent() -> None:
-    tools = intent_tools.get_tools()
-    for tool_name in ("inspect_spreadsheet", "analyze_spreadsheet"):
+    tools = workbook_tools.get_tools()
+    for tool_name in ("split_spreadsheet", "analyze_spreadsheet"):
         desc = _get_prop_desc(tools, tool_name, "header_row")
         assert "自动检测" in desc

@@ -129,12 +129,12 @@ export function injectMockStreaming() {
     startedAt: ts,
   });
 
-  // Phase 2: inspect_spreadsheet
+  // Phase 2: observe_spreadsheet
   schedule(() => {
     store.appendBlock(assistantMsgId, {
       type: "tool_call" as const,
       toolCallId: readToolCallId,
-      name: "inspect_spreadsheet",
+      name: "observe_spreadsheet",
       args: { mode: "range", file_path: "销售数据.xlsx", sheet: "Sheet1", range: "A1:D7" },
       status: "success" as const,
       result: "成功读取 6 行 × 4 列数据",

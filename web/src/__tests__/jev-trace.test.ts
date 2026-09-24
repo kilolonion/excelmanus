@@ -282,7 +282,9 @@ describe("jev-trace", () => {
   });
 
   it("ignores traces and hides chrome when chat is not enabled", () => {
+    const before = useJevStore.getState().configRevision;
     useJevStore.getState().setChatEnabled(false);
+    expect(useJevStore.getState().configRevision).toBe(before + 1);
     useJevStore.getState().appendFromEvent({
       pack: "exposure.turn",
       gate: "shadow",

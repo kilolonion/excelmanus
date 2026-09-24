@@ -68,7 +68,7 @@ async def test_first_schema_example_executes_without_discovery(
     engine: AgentEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     initial = _schemas(engine)
-    spec_schema = initial["edit_spreadsheet"]["parameters"]["properties"]["workbook_spec"]
+    spec_schema = initial["apply_spreadsheet_changes"]["parameters"]["properties"]["workbook_spec"]
     examples = spec_schema.get("examples")
     assert isinstance(examples, list) and examples
     example = copy.deepcopy(examples[0])
@@ -83,7 +83,7 @@ async def test_first_schema_example_executes_without_discovery(
     monkeypatch.setattr(engine.registry.get_tool("introspect_capability"), "func", no_extra_discovery)
     arguments = {"file_path": "receipt.xlsx", "workbook_spec": example}
     tool_call = SimpleNamespace(id="create", function=SimpleNamespace(
-        name="edit_spreadsheet", arguments=json.dumps(arguments, ensure_ascii=False),
+        name="apply_spreadsheet_changes", arguments=json.dumps(arguments, ensure_ascii=False),
     ))
     result = await engine._tool_runtime.execute(tool_call, None, None, 1)
     assert result.success, result.result
@@ -116,13 +116,13 @@ def test_default_file_readers_are_visible_without_widening_modes(
     assert {"read_image", "read_text_file"} <= visible.keys()
     assert "run_shell" not in visible
     if mode != "write" or access == "read_only":
-        assert not {"edit_spreadsheet", "format_spreadsheet", "write_text_file",
-                    "delete_file", "manage_spreadsheet_objects"}.intersection(visible)
-        denied = _detail(engine, "edit_spreadsheet.workbook_spec") if mode != "write" else None
+        assert not {"apply_spreadsheet_changes", "apply_spreadsheet_changes", "write_text_file",
+                    "delete_file", "apply_spreadsheet_changes"}.intersection(visible)
+        denied = _detail(engine, "apply_spreadsheet_changes.workbook_spec") if mode != "write" else None
         if denied is not None:
             assert "不可用" in denied
     else:
-        assert {"edit_spreadsheet", "format_spreadsheet"} <= visible.keys()
+        assert {"apply_spreadsheet_changes", "apply_spreadsheet_changes"} <= visible.keys()
 
 
 @pytest.mark.parametrize("allowed_readers", [frozenset(), frozenset({"read_text_file"}),
@@ -158,11 +158,11 @@ def test_explicit_denial_wins_over_default_file_reader_disclosure(engine: AgentE
 def test_definition_navigation_uses_the_live_registered_schema(
     engine: AgentEngine, path: str, required_keys: set[str],
 ) -> None:
-    schema = engine.registry.get_tool("edit_spreadsheet").input_schema
+    schema = engine.registry.get_tool("apply_spreadsheet_changes").input_schema
     node, available, error = walk_schema_path(schema, path)
     assert node is not None, error
     assert required_keys <= set(available)
-    text = _detail(engine, "edit_spreadsheet." + path)
+    text = _detail(engine, "apply_spreadsheet_changes." + path)
     assert "字段不存在" not in text
     assert len(text) < 1800
     for key in required_keys:
@@ -170,18 +170,18 @@ def test_definition_navigation_uses_the_live_registered_schema(
 
 
 def test_unknown_definition_reports_valid_names(engine: AgentEngine) -> None:
-    text = _detail(engine, "edit_spreadsheet.$defs.MissingStyle")
+    text = _detail(engine, "apply_spreadsheet_changes.$defs.MissingStyle")
     assert "字段不存在" in text
     assert "StyleClass" in text and "FontSpec" in text
     assert len(text) < 1500
 
 
 def test_creation_field_query_keeps_required_inputs_and_executable_example(engine: AgentEngine) -> None:
-    text = _detail(engine, "edit_spreadsheet.workbook_spec")
+    text = _detail(engine, "apply_spreadsheet_changes.workbook_spec")
     node = _detail_node(text)
     assert {"sheets", "uncertainties"} <= set(node["required"])
-    assert {"object", "string"} <= set(node["type"])
-    assert node["examples"][0] == _schemas(engine)["edit_spreadsheet"]["parameters"]["properties"]["workbook_spec"]["examples"][0]
+    assert node["type"] == "object"
+    assert node["examples"][0] == _schemas(engine)["apply_spreadsheet_changes"]["parameters"]["properties"]["workbook_spec"]["examples"][0]
     assert "location" in text and "reason" in text
     assert len(text) < 5500
     assert "Python SDK" not in text and "常见错误" not in text
@@ -195,9 +195,9 @@ def test_creation_field_query_keeps_required_inputs_and_executable_example(engin
 def test_compact_leaf_details_preserve_nullable_raw_schema(
     engine: AgentEngine, path: str, type_name: str, field: str,
 ) -> None:
-    text = _detail(engine, "edit_spreadsheet." + path)
+    text = _detail(engine, "apply_spreadsheet_changes." + path)
     node = _detail_node(text)
-    original = engine.registry.get_tool("edit_spreadsheet").input_schema["$defs"][type_name]["properties"][field]
+    original = engine.registry.get_tool("apply_spreadsheet_changes").input_schema["$defs"][type_name]["properties"][field]
     assert node["anyOf"] == original["anyOf"]
     assert node["default"] is None
     assert len(text) < 2000
@@ -209,9 +209,9 @@ def test_compact_leaf_details_preserve_nullable_raw_schema(
 def test_compact_object_details_preserve_required_fields(
     engine: AgentEngine, path: str, type_name: str,
 ) -> None:
-    text = _detail(engine, "edit_spreadsheet." + path)
+    text = _detail(engine, "apply_spreadsheet_changes." + path)
     node = _detail_node(text)
-    original = engine.registry.get_tool("edit_spreadsheet").input_schema["$defs"][type_name]
+    original = engine.registry.get_tool("apply_spreadsheet_changes").input_schema["$defs"][type_name]
     assert node["required"] == original["required"]
     assert set(node["required"]) <= node["properties"].keys()
     assert len(text) < 3000

@@ -5,6 +5,24 @@
 ; The upstream function deliberately remains uncalled after replacing its
 ; public macro. NSIS strips it; suppress only the unreferenced-function warning.
 !pragma warning disable 6010
+; The desktop updater downloads complete installers itself; it does not use
+; electron-updater's cached installer for delta downloads. Skip only that
+; redundant whole-EXE copy, retaining every other upstream copy operation.
+!define EXCELMANUS_NO_INSTALLER_CACHE_ACTIVE
+!macroundef copyFile
+!macro copyFile FROM TO
+  !if "${FROM}" == "$EXEPATH"
+    !if "${TO}" != "$LOCALAPPDATA\${APP_INSTALLER_STORE_FILE}"
+      !error "Unexpected installer self-copy destination; review pinned NSIS templates"
+    !endif
+    ClearErrors
+  !else
+    ${StdUtils.GetParentPath} $R5 `${TO}`
+    CreateDirectory `$R5`
+    ClearErrors
+    CopyFiles /SILENT `${FROM}` `${TO}`
+  !endif
+!macroend
 !define EXCELMANUS_SAFE_UPGRADE_ACTIVE
 !macroundef setIsTryToKeepShortcuts
 !macro setIsTryToKeepShortcuts

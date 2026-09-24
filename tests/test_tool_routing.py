@@ -28,8 +28,8 @@ class TestBuildV5ToolsReadOnly:
 
         registry = ToolRegistry()
         for name, effect in (
-            ("inspect_spreadsheet", "none"),
-            ("edit_spreadsheet", "workspace_write"),
+            ("observe_spreadsheet", "none"),
+            ("apply_spreadsheet_changes", "workspace_write"),
             ("run_code", "dynamic"),
             ("write_text_file", "workspace_write"),
             ("introspect_capability", "none"),
@@ -64,8 +64,8 @@ class TestBuildV5ToolsReadOnly:
     def test_write_mode_exposes_core_tools_and_defers_file_tools(self):
         self.engine._current_chat_mode = "write"
         names = _extract_tool_names(self.builder.build_v5_tools_impl())
-        assert "inspect_spreadsheet" in names
-        assert "edit_spreadsheet" in names
+        assert "observe_spreadsheet" in names
+        assert "apply_spreadsheet_changes" in names
         assert "run_code" in names
         assert "write_text_file" not in names
         self.engine._loaded_tool_names.add("write_text_file")
@@ -77,44 +77,44 @@ class TestBuildV5ToolsReadOnly:
         names = _extract_tool_names(
             self.builder.build_v5_tools_impl(tool_access="read_only"),
         )
-        assert "inspect_spreadsheet" in names
+        assert "observe_spreadsheet" in names
         assert "run_code" not in names
-        assert "edit_spreadsheet" not in names
+        assert "apply_spreadsheet_changes" not in names
         assert "write_text_file" not in names
-        assert "inspect_spreadsheet" in READ_ONLY_SAFE_TOOLS
+        assert "observe_spreadsheet" in READ_ONLY_SAFE_TOOLS
 
     def test_read_mode_catalog_hides_write_tools(self):
         """推翻旧语义：read 不再把写工具 schema 交给模型。"""
         self.engine._current_chat_mode = "read"
         names = _extract_tool_names(self.builder.build_v5_tools_impl())
-        assert "inspect_spreadsheet" in names
-        assert "edit_spreadsheet" not in names
+        assert "observe_spreadsheet" in names
+        assert "apply_spreadsheet_changes" not in names
         assert "write_text_file" not in names
         assert "run_code" not in names
 
     def test_direct_and_programmatic_tools_coexist(self):
         names = _extract_tool_names(self.builder.build_v5_tools_impl())
-        assert {"run_code", "inspect_spreadsheet", "edit_spreadsheet"} <= names
+        assert {"run_code", "observe_spreadsheet", "apply_spreadsheet_changes"} <= names
 
     def test_fixed_child_scope_intersects_loaded_tools(self):
         from excelmanus.tools.context import CallerCapability
 
         self.engine._fixed_capability = CallerCapability(
             catalog_mode="write",
-            allowed_tools=frozenset({"inspect_spreadsheet", "edit_spreadsheet", "run_code"}),
-            disallowed_tools=frozenset({"edit_spreadsheet"}),
+            allowed_tools=frozenset({"observe_spreadsheet", "apply_spreadsheet_changes", "run_code"}),
+            disallowed_tools=frozenset({"apply_spreadsheet_changes"}),
         )
-        self.engine._loaded_tool_names = {"edit_spreadsheet", "write_text_file"}
+        self.engine._loaded_tool_names = {"apply_spreadsheet_changes", "write_text_file"}
         names = _extract_tool_names(self.builder.build_v5_tools_impl())
-        assert names == {"inspect_spreadsheet", "run_code"}
+        assert names == {"observe_spreadsheet", "run_code"}
 
     def test_fixed_readonly_scope_hides_writes(self):
         from excelmanus.tools.context import CallerCapability
 
         self.engine._fixed_capability = CallerCapability(tool_access="read_only")
         names = _extract_tool_names(self.builder.build_v5_tools_impl())
-        assert "inspect_spreadsheet" in names
-        assert "edit_spreadsheet" not in names
+        assert "observe_spreadsheet" in names
+        assert "apply_spreadsheet_changes" not in names
         assert "run_code" not in names
 
     def test_plan_mode_hides_write_tools_and_does_not_reuse_write_cache(self):
@@ -122,12 +122,12 @@ class TestBuildV5ToolsReadOnly:
         write = self.builder.build_v5_tools()
         key_write = self.engine._tools_cache_key
         write_names = _extract_tool_names(write)
-        assert "edit_spreadsheet" in write_names
+        assert "apply_spreadsheet_changes" in write_names
         self.engine._current_chat_mode = "plan"
         plan = self.builder.build_v5_tools()
         plan_names = _extract_tool_names(plan)
-        assert "inspect_spreadsheet" in plan_names
-        assert "edit_spreadsheet" not in plan_names
+        assert "observe_spreadsheet" in plan_names
+        assert "apply_spreadsheet_changes" not in plan_names
         assert "write_text_file" not in plan_names
         assert plan != write
         assert self.engine._tools_cache_key != key_write

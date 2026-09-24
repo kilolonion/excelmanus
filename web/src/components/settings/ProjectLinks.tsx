@@ -1,5 +1,6 @@
 import { ArrowUpRight, Github, Globe, Smartphone } from "lucide-react";
 import { ANDROID_DOWNLOAD_PAGE_URL } from "@/lib/product-links";
+import { SettingsCardGrid } from "./SettingsPageLayout";
 
 const links = [
   {
@@ -27,14 +28,14 @@ const links = [
 
 export function ProjectLinks() {
   return (
-    <section aria-label="项目与下载" className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+    <SettingsCardGrid label="项目与下载" minCardWidth={240}>
       {links.map(({ title, description, url, domain, icon: Icon }) => (
         <a
           key={url}
           href={url}
           target="_blank"
           rel="noopener noreferrer"
-          className="group flex min-w-0 items-start gap-3 rounded-lg border border-border bg-muted/20 p-4 transition-colors hover:border-[var(--em-primary)] hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="group flex min-w-0 self-stretch items-start gap-3 rounded-lg border border-border bg-muted/20 p-4 transition-colors hover:border-[var(--em-primary)] hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]">
             <Icon className="size-4" aria-hidden="true" />
@@ -45,11 +46,11 @@ export function ProjectLinks() {
               <ArrowUpRight className="size-4 shrink-0 text-muted-foreground transition-colors group-hover:text-[var(--em-primary)]" aria-hidden="true" />
             </span>
             <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">{description}</span>
-            <span className="mt-2 block break-all text-[11px] text-muted-foreground">{domain}</span>
+            <span className="mt-2 block break-words text-[11px] text-muted-foreground">{domain}</span>
             <span className="sr-only">（在新窗口打开）</span>
           </span>
         </a>
       ))}
-    </section>
+    </SettingsCardGrid>
   );
 }

@@ -46,7 +46,7 @@ def _identity(**overrides: object):
         "call_config": {"temperature": 0.2, "max_tokens": 1024},
         "tools": [{
             "type": "function",
-            "function": {"name": "inspect_spreadsheet", "description": "d", "parameters": {}},
+            "function": {"name": "observe_spreadsheet", "description": "d", "parameters": {}},
         }],
         "system": "SYS",
         "catalog_digest": "cat-1",

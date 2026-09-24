@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
+import { checkNodeRuntime } from './node-runtime.mjs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { stopProcess } = require('../src/process-lifecycle.js');
@@ -22,6 +23,7 @@ const python = join(resources, 'runtime/python', win ? 'python.exe' : 'bin/pytho
 const backend = join(resources, 'backend/excelmanus-backend', win ? 'excelmanus-backend.exe' : 'excelmanus-backend');
 const node = join(resources, 'runtime', win ? 'node.exe' : 'node');
 const frontend = join(resources, 'frontend');
+checkNodeRuntime(node);
 const env = { ...process.env, EXCELMANUS_HOME: home, EXCELMANUS_DESKTOP: '1', EXCELMANUS_DESKTOP_CONTROL_STDIN: '1', EXCELMANUS_DEPLOY_MODE: 'standalone', EXCELMANUS_RUN_PYTHON: python, PYTHONPATH: '', PYTHONHOME: '' };
 // No developer Python, npm, uv or Node on PATH. The product must supply its own.
 for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];

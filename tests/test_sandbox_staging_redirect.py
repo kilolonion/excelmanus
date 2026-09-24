@@ -86,7 +86,7 @@ def test_staging_map_does_not_redirect_openpyxl_save(tmp_path: Path) -> None:
         staging_map={str(original): str(staged)},
     )
     assert result.returncode != 0
-    assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+    assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
     wb_orig = load_workbook(original)
     assert wb_orig.active["A1"].value == "original_data"
     wb_orig.close()

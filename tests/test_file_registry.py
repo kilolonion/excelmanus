@@ -958,12 +958,12 @@ class TestToolDispatcherWriteEvent:
 
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
         dispatcher = ToolDispatcher(engine)
-        dispatcher._EXCEL_WRITE_TOOLS = {"edit_spreadsheet"}
+        dispatcher._EXCEL_WRITE_TOOLS = {"apply_spreadsheet_changes"}
 
         # 模拟后处理中的写后事件记录逻辑
         with patch.object(reg, "record_event") as mock_record:
             # 直接调用写后事件记录段的逻辑
-            tool_name = "edit_spreadsheet"
+            tool_name = "apply_spreadsheet_changes"
             arguments = {"file_path": "target.xlsx"}
             _write_paths = []
             if tool_name in dispatcher._EXCEL_WRITE_TOOLS:
@@ -980,7 +980,7 @@ class TestToolDispatcherWriteEvent:
                         turn=engine.state.session_turn,
                     )
             mock_record.assert_called_once_with(
-                entry.id, "tool_write", tool_name="edit_spreadsheet", turn=1,
+                entry.id, "tool_write", tool_name="apply_spreadsheet_changes", turn=1,
             )
 
 

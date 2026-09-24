@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.8.0-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.8.1-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -25,7 +25,7 @@
 
 项目提供 Web UI、REST API，以及 Windows / macOS 桌面打包入口。模型、凭证和会话数据由你的部署管理；可连接 OpenAI 兼容接口、Anthropic、Gemini，或配置本地模型服务。实际可用功能取决于模型及接口支持。
 
-> 本文对应当前 **1.8.0 源码**。桌面安装包的提供情况、签名状态和支持架构，以具体发布资产为准。完整构建说明见 [Desktop README](desktop/README.md)。
+> 本文对应当前 **1.8.1 源码**。桌面安装包的提供情况、签名状态和支持架构，以具体发布资产为准。完整构建说明见 [Desktop README](desktop/README.md)。
 
 ## 核心能力
 
@@ -194,9 +194,10 @@ ExcelManus 是单用户软件。多个工作区和会话共用进程级模型凭
 | `GET /api/v1/sessions/{session_id}/turn` | 查看主任务状态及恢复条件 |
 | `GET /api/v1/sessions/{session_id}/subagents` | 查看后台子代理 |
 | `POST /api/v1/sessions/{session_id}/subagents/{run_id}` | 补充指令、暂停、取消或继续后台任务 |
-| `GET /api/v1/files/excel/view` | 获取工作簿视图 |
-| `POST /api/v1/files/excel/write` | 保存表格编辑 |
-| `POST /api/v1/files/excel/merge` | 预览或按单元格选择合并冲突中的表格草稿 |
+| `GET /api/v1/workbooks/observe` | 获取版本绑定的 V2 工作簿观察 |
+| `POST /api/v1/workbooks/changes` | 提交版本绑定的 V2 ChangeSet |
+| `GET /api/v1/workbooks/compare` | 比较两个 V2 工作簿观察 |
+| `POST /api/v1/workbooks/merge-review` | 预览或按单元格选择合并冲突中的 V2 ChangeSet |
 | `GET /api/v1/files/word/snapshot` | 获取 Word 文档快照 |
 | `POST /api/v1/files/word/write` | 保存 Word 编辑 |
 | `GET /api/v1/revisions` | 查询文件修订 |
@@ -237,7 +238,7 @@ ExcelManus 是单用户软件。多个工作区和会话共用进程级模型凭
 
 加载顺序、目录发现、覆盖规则和 Hook 协议见 [Skillpack 文档](docs/skillpack_protocol.md)。
 
-在设置 → 系统 → 能力中开启「Agent 自我管理」后，agent 可加载对应技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话。开关立即生效；配置修改不会保存为全局默认，也不能更改密钥或审批权限。
+「Agent 自我管理」默认启用，可在设置 → 系统 → 能力中关闭。开关开启时，agent 可加载对应技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话。开关立即生效；配置修改不会保存为全局默认，也不能更改密钥或审批权限。
 
 ## 升级与部署
 

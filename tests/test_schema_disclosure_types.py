@@ -164,7 +164,7 @@ def test_catalog_wire_projection_preserves_array_and_nullable_types(schema_mode:
 
 
 def test_real_first_disclosure_keeps_workbook_object_or_json_string(tmp_path: Path) -> None:
-    from excelmanus.replica_spec import validate_workbook_spec
+    from excelmanus.workbook.spec import validate_workbook_spec
 
     registry = ToolRegistry()
     registry.register_builtin_tools(str(tmp_path))
@@ -172,17 +172,17 @@ def test_real_first_disclosure_keeps_workbook_object_or_json_string(tmp_path: Pa
         api_key="test", base_url="https://test.invalid/v1", model="test",
         workspace_root=str(tmp_path), jev_enabled="off",
     ), registry)
-    tool = registry.get_tool("edit_spreadsheet")
+    tool = registry.get_tool("apply_spreadsheet_changes")
     original = tool.input_schema
     before = copy.deepcopy(original)
     wire = next(row["function"] for row in MetaToolBuilder(engine).build_v5_tools()
-                if row["function"]["name"] == "edit_spreadsheet")
+                if row["function"]["name"] == "apply_spreadsheet_changes")
     parameters = wire["parameters"]
     spec = parameters["properties"]["workbook_spec"]
-    assert spec["type"] == ["object", "string"]
+    assert spec["type"] == "object"
     assert spec["examples"] == original["properties"]["workbook_spec"]["examples"]
     assert "$defs" not in parameters
-    for value in (spec["examples"][0], json.dumps(spec["examples"][0])):
+    for value in (spec["examples"][0],):
         arguments = {"file_path": "receipt.xlsx", "workbook_spec": value}
         # The host also normalizes documented shorthand such as merged range
         # strings before validating WorkbookSpec's nested Pydantic model.

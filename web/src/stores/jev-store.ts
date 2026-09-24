@@ -10,6 +10,7 @@ interface JevState {
   pinned: boolean;
   railCollapsed: boolean;
   chatEnabled: boolean;
+  configRevision: number;
   seq: number;
   beginTurn: (sessionId?: string | null) => void;
   appendFromEvent: (data: Record<string, unknown>) => JevTrace | null;
@@ -31,6 +32,7 @@ export const useJevStore = create<JevState>()(
       pinned: false,
       railCollapsed: true,
       chatEnabled: false,
+      configRevision: 0,
       seq: 0,
       beginTurn: (sessionId) => {
         if (!get().chatEnabled) {
@@ -65,18 +67,19 @@ export const useJevStore = create<JevState>()(
         }),
       setRailCollapsed: (collapsed) => set({ railCollapsed: collapsed }),
       setChatEnabled: (enabled) =>
-        set(
+        set((state) => (
           enabled
-            ? { chatEnabled: true }
+            ? { chatEnabled: true, configRevision: state.configRevision + 1 }
             : {
                 chatEnabled: false,
+                configRevision: state.configRevision + 1,
                 drawerOpen: false,
                 pinned: false,
                 traces: [],
                 pending: false,
                 sessionId: null,
-              },
-        ),
+              }
+        )),
     }),
     {
       name: "excelmanus-jev-ui",

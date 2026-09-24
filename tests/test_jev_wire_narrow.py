@@ -48,10 +48,10 @@ def _registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register_tools(
         [
-            _tool("inspect_spreadsheet"),
+            _tool("observe_spreadsheet"),
             _tool("analyze_spreadsheet"),
             _tool("ask_user"),
-            _tool("edit_spreadsheet", effect="workspace_write"),
+            _tool("apply_spreadsheet_changes", effect="workspace_write"),
             _tool("write_text_file", effect="workspace_write"),
             _tool("run_code", effect="dynamic"),
             _tool("run_shell", effect="dynamic"),
@@ -162,7 +162,7 @@ def test_gate_off_keeps_core_wire_even_if_profile_inspect(tmp_path: Path) -> Non
     digest = catalog.digest()
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
     assert turn_wire_profile(engine) == "full"
-    assert "edit_spreadsheet" in names
+    assert "apply_spreadsheet_changes" in names
     assert "run_code" in names
     assert catalog_from_engine(engine) is not None
     assert catalog_from_engine(engine).digest() == digest
@@ -181,8 +181,8 @@ def test_signed_profiles_change_schema_not_digest_or_epoch(
     assert catalog is not None
     digest = catalog.digest()
     full = _schema_names(MetaToolBuilder(full_engine).build_v5_tools_impl())
-    assert "edit_spreadsheet" in full
-    assert "inspect_spreadsheet" in full
+    assert "apply_spreadsheet_changes" in full
+    assert "observe_spreadsheet" in full
 
     inspect_engine = _engine(
         tmp_path,
@@ -194,10 +194,10 @@ def test_signed_profiles_change_schema_not_digest_or_epoch(
     assert inspect_catalog.digest() == digest
     inspect_wire = MetaToolBuilder(inspect_engine).build_v5_tools_impl()
     inspect_names = _schema_names(inspect_wire)
-    assert "inspect_spreadsheet" in inspect_names
+    assert "observe_spreadsheet" in inspect_names
     assert "analyze_spreadsheet" in inspect_names
     assert "ask_user" in inspect_names
-    assert "edit_spreadsheet" in inspect_names
+    assert "apply_spreadsheet_changes" in inspect_names
     assert "run_shell" not in inspect_names
     assert "run_code" in inspect_names
     assert "write_plan" not in inspect_names
@@ -213,8 +213,8 @@ def test_signed_profiles_change_schema_not_digest_or_epoch(
         },
     )
     edit_names = _schema_names(MetaToolBuilder(edit_engine).build_v5_tools_impl())
-    assert "edit_spreadsheet" in edit_names
-    assert "inspect_spreadsheet" in edit_names
+    assert "apply_spreadsheet_changes" in edit_names
+    assert "observe_spreadsheet" in edit_names
     assert "run_shell" not in edit_names
     assert catalog_from_engine(edit_engine).digest() == digest
 
@@ -251,11 +251,11 @@ def test_profile_keeps_core_direct_and_programmatic_tools(
         exposure=_inspect_record(applied=True, sticky="inspect"),
     )
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert {"run_code", "inspect_spreadsheet", "ask_user"} <= names
-    assert "edit_spreadsheet" in names  # 常驻核心不受 profile 收窄。
+    assert {"run_code", "observe_spreadsheet", "ask_user"} <= names
+    assert "apply_spreadsheet_changes" in names  # 常驻核心不受 profile 收窄。
     catalog = catalog_from_engine(engine)
     assert catalog is not None
-    assert "inspect_spreadsheet" in catalog.name_set()
+    assert "observe_spreadsheet" in catalog.name_set()
 
 
 def test_loaded_tools_survive_profile_narrowing_without_expanding_permissions(
@@ -267,21 +267,21 @@ def test_loaded_tools_survive_profile_narrowing_without_expanding_permissions(
         config=_config(jev_enabled="enforce", jev_exposure="enforce", jev_calibrated=True),
         exposure=_inspect_record(applied=True, sticky="inspect"),
     )
-    engine._loaded_tool_names = {"edit_spreadsheet", "not_registered"}
+    engine._loaded_tool_names = {"apply_spreadsheet_changes", "not_registered"}
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert "edit_spreadsheet" in names
+    assert "apply_spreadsheet_changes" in names
     assert "not_registered" not in names
 
     engine._current_chat_mode = "read"
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert "edit_spreadsheet" not in names
+    assert "apply_spreadsheet_changes" not in names
     assert "run_code" not in names
 
 
 @pytest.mark.asyncio
 async def test_new_turn_preserves_loaded_tools_even_when_jev_is_off(tmp_path: Path) -> None:
     engine = _engine(tmp_path, config=_config())
-    old_loaded = {"edit_spreadsheet"}
+    old_loaded = {"apply_spreadsheet_changes"}
     engine._loaded_tool_names = old_loaded
     engine._tools_cache = [{"function": {"name": "old"}}]
     await maybe_record_turn_exposure(engine, "next request")
@@ -299,7 +299,7 @@ def test_master_off_child_enforce_does_not_narrow(tmp_path: Path) -> None:
     )
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
     assert turn_wire_profile(engine) == "full"
-    assert "edit_spreadsheet" in names
+    assert "apply_spreadsheet_changes" in names
 
 
 # 原 test_calibrated_without_signed_packs_does_not_narrow 已删除：
@@ -319,7 +319,7 @@ def test_child_session_does_not_narrow(
     )
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
     assert turn_wire_profile(engine) == "full"
-    assert "edit_spreadsheet" in names
+    assert "apply_spreadsheet_changes" in names
 
 
 @pytest.mark.asyncio
@@ -338,7 +338,7 @@ async def test_sticky_two_turns_then_narrow(
     assert engine._turn_exposure["wire_narrow"] is False
     assert engine._turn_exposure["applied"] is True
     assert turn_wire_profile(engine) == "full"
-    assert "edit_spreadsheet" in _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
+    assert "apply_spreadsheet_changes" in _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
 
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=inspect)):
         await maybe_record_turn_exposure(engine, "再看一眼结构")
@@ -346,8 +346,8 @@ async def test_sticky_two_turns_then_narrow(
     assert engine._turn_exposure["wire_narrow"] is True
     assert turn_wire_profile(engine) == "inspect"
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert "inspect_spreadsheet" in names
-    assert "edit_spreadsheet" in names
+    assert "observe_spreadsheet" in names
+    assert "apply_spreadsheet_changes" in names
     assert "run_shell" not in names
 
     edit = _applied_decision("edit")
@@ -357,7 +357,7 @@ async def test_sticky_two_turns_then_narrow(
     assert engine._turn_exposure["sticky_profile"] == "full"
     assert engine._turn_exposure["wire_narrow"] is False
     assert turn_wire_profile(engine) == "full"
-    assert "edit_spreadsheet" in _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
+    assert "apply_spreadsheet_changes" in _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
 
 
 @pytest.mark.asyncio

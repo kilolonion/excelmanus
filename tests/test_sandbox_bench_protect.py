@@ -261,7 +261,7 @@ class TestOpenpyxlSandboxSave:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         assert not target.exists()
 
     def test_openpyxl_save_existing_file_in_sandbox(self, workspace: Path) -> None:
@@ -286,7 +286,7 @@ class TestOpenpyxlSandboxSave:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
 
     def test_openpyxl_save_bench_protected_blocked(self, workspace: Path) -> None:
         """openpyxl wb.save() 写入 bench/external 触发 Auto-CoW。"""
@@ -370,6 +370,6 @@ class TestWrapperTemplateContent:
         )
         result = _run_in_sandbox(workspace, code, "RED")
         assert result.returncode != 0
-        assert "工作区表格禁止直接保存" in result.stderr or "em.format_spreadsheet" in result.stderr
+        assert "工作区表格禁止直接保存" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
         assert "EXCELMANUS_PENDING_WRITE\t" not in result.stderr
         assert not target.exists()

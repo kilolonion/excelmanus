@@ -40,7 +40,7 @@ def test_installation_list_marks_current_available_and_missing(monkeypatch, tmp_
     other = tmp_path / "other"
     current.mkdir()
     other.mkdir()
-    register_installation(current, "1.8.0")
+    register_installation(current, "1.8.1")
     register_installation(other, "1.7.2")
     missing = tmp_path / "removed"
     payload = json.loads(get_installations_path().read_text(encoding="utf-8"))
@@ -112,7 +112,7 @@ def test_prune_missing_installations_preserves_current(monkeypatch, tmp_path: Pa
     current = tmp_path / "current"
     current.mkdir()
     missing = tmp_path / "missing"
-    register_installation(current, "1.8.0")
+    register_installation(current, "1.8.1")
     register_installation(missing, "1.7.2")
 
     removed = prune_missing_installations(current)
@@ -130,7 +130,7 @@ async def test_installation_routes_protect_current_and_cleanup_records(monkeypat
     legacy = tmp_path / "legacy"
     current.mkdir()
     legacy.mkdir()
-    register_installation(current, "1.8.0")
+    register_installation(current, "1.8.1")
     register_installation(legacy, "1.7.2")
 
     from excelmanus import api_routes_version as routes

@@ -25,6 +25,24 @@ Var packageArch
 LangString appCannotBeClosed ${LANG_ENGLISH} "Test extraction failed"
 LangString appCannotBeClosed ${LANG_SIMPCHINESE} "Test extraction failed"
 LangString appCannotBeClosed ${LANG_TRADCHINESE} "Test extraction failed"
+Var TestCopiedFiles
+!ifdef TEST_MANIFEST
+  !include "${PROJECT_DIR}\installer\safe-remove.nsh"
+  !insertmacro ExcelManusRemovalFunctions ""
+  !insertmacro ExcelManusVerificationFunctions
+  ; This fixture never uninstalls. The shared removal helper is stripped.
+  !pragma warning disable 6010
+  !macro ExcelManusVerifyExtractedPayload
+    Push $INSTDIR
+    StrCpy $INSTDIR $ExcelManusStage
+    StrCpy $R9 "${TEST_MANIFEST}"
+    Call ExcelManusVerifyOwnedFiles
+    Pop $INSTDIR
+  !macroend
+!endif
+!macro ExcelManusRecordFileCopy
+  IntOp $TestCopiedFiles $TestCopiedFiles + 1
+!macroend
 !insertmacro customHeader
 !include installer.nsh
 !insertmacro customInstall
@@ -50,6 +68,7 @@ Function TestProgressShow
 FunctionEnd
 
 Section
+  StrCpy $TestCopiedFiles 0
   InitPluginsDir
   File /oname=$PLUGINSDIR\app-64.7z "${TEST_PAYLOAD}"
   StrCpy $packageArch "64"
@@ -57,6 +76,9 @@ Section
   SetOutPath $INSTDIR
   ; Exercise the builder integration and the destination-local extraction path.
   !insertmacro decompress
+  FileOpen $0 "${TEST_RESULT}.copies" w
+  FileWrite $0 "$TestCopiedFiles"
+  FileClose $0
   ${If} ${Silent}
     !insertmacro AssertEqual $ExcelManusProgress "" 10
     !insertmacro AssertEqual $ExcelManusStatus "" 11

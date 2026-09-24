@@ -1,6 +1,6 @@
 "use client";
 
-import { RotateCcw, XCircle } from "lucide-react";
+import { Play, XCircle } from "lucide-react";
 import { RetryModelPicker } from "@/components/chat/RetryModelPicker";
 
 const HINT_MAX_LEN = 10;
@@ -10,7 +10,7 @@ const ACTION =
 
 interface ComposerRecoveryBarProps {
   hint: string;
-  onRetry: () => void;
+  onContinue: () => void;
   onRetryWithModel?: (modelName: string) => void;
 }
 
@@ -21,7 +21,7 @@ function clipHint(text: string): string {
 
 export function ComposerRecoveryBar({
   hint,
-  onRetry,
+  onContinue,
   onRetryWithModel,
 }: ComposerRecoveryBarProps) {
   const fullHint = hint.replace(/\s+/g, " ").trim() || "回复未完成";
@@ -38,12 +38,13 @@ export function ComposerRecoveryBar({
       </span>
       <button
         type="button"
-        onClick={onRetry}
-        aria-label="立即重试"
+        onClick={onContinue}
+        aria-label="继续执行"
+        title="继续执行"
         className={`${ACTION} text-white bg-[var(--em-primary)] hover:opacity-90`}
       >
-        <RotateCcw className="h-3 w-3" />
-        <span className="hidden sm:inline">立即重试</span>
+        <Play className="h-3 w-3 fill-current" />
+        <span className="hidden sm:inline">继续</span>
       </button>
       {onRetryWithModel && (
         <RetryModelPicker

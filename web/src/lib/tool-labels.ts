@@ -3,16 +3,14 @@
 import { displayFileName } from "@/lib/file-identity";
 
 const WRITE_TOOLS = new Set([
-  "edit_spreadsheet",
-  "format_spreadsheet",
-  "manage_spreadsheet_objects",
+  "apply_spreadsheet_changes",
   "manage_spreadsheet_versions",
   "write_text_file",
   "edit_text_file",
 ]);
 
 const READ_TOOLS = new Set([
-  "inspect_spreadsheet",
+  "observe_spreadsheet",
   "analyze_spreadsheet",
   "compare_spreadsheets",
   "trace_spreadsheet_formulas",
@@ -178,8 +176,7 @@ function editTitle(args?: Record<string, unknown>): string {
 const STATIC_TITLES: Record<string, string> = {
   analyze_spreadsheet: "分析表格",
   compare_spreadsheets: "对比表格",
-  format_spreadsheet: "设置格式",
-  manage_spreadsheet_objects: "管理工作表对象",
+  apply_spreadsheet_changes: "管理工作表对象",
   manage_spreadsheet_versions: "管理工作表版本",
   trace_spreadsheet_formulas: "追踪公式",
   run_code: "运行代码",
@@ -216,8 +213,8 @@ const STATIC_TITLES: Record<string, string> = {
 };
 
 export function toolActionTitle(name: string, args?: Record<string, unknown>): string {
-  if (name === "inspect_spreadsheet") return inspectTitle(args);
-  if (name === "edit_spreadsheet") return editTitle(args);
+  if (name === "observe_spreadsheet") return inspectTitle(args);
+  if (name === "apply_spreadsheet_changes") return editTitle(args);
   if (STATIC_TITLES[name]) return STATIC_TITLES[name];
   if (name.startsWith("mcp_")) {
     const rest = name.slice(4).replace(/_/g, " ");

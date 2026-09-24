@@ -132,6 +132,7 @@ class SessionState:
         # 压缩代数；与 engine._compaction_generation 同一语义，随快照恢复
         self.compaction_generation: int = 0
         self.compaction_handoff: dict[str, Any] = {}
+        self.compaction_operations: list[dict[str, Any]] = []
         # 上次出网 epoch（key + 各 digest）。恢复后直接使用，不重算。
         self.wire_epoch: dict[str, str] | None = None
         # RequestSeries 快照。无 header 时恢复为 restore/migrate，不作空前缀通行证。
@@ -274,6 +275,7 @@ class SessionState:
             "injected_context_fingerprint": self.injected_context_fingerprint,
             "compaction_generation": int(self.compaction_generation or 0),
             "compaction_handoff": deepcopy(self.compaction_handoff),
+            "compaction_operations": deepcopy(self.compaction_operations[-20:]),
             "file_content_versions": dict(self.file_content_versions),
             "write_operations_log": deepcopy(self.write_operations_log),
             "wire_epoch": (
@@ -320,6 +322,12 @@ class SessionState:
         state.runtime_state = dict(raw_runtime) if isinstance(raw_runtime, dict) else {}
         handoff = data.get("compaction_handoff")
         state.compaction_handoff = deepcopy(handoff) if isinstance(handoff, dict) else {}
+        rows = data.get("compaction_operations")
+        state.compaction_operations = [deepcopy(row) for row in rows[-20:]
+            if isinstance(row, dict) and row.get("operation_id")] if isinstance(rows, list) else []
+        for row in state.compaction_operations:
+            if row.get("status") in {"queued", "running"}:
+                row.update(status="failed", message="会话恢复时压缩已中断，可重新触发。")
         versions = data.get("file_content_versions")
         state.file_content_versions = dict(versions) if isinstance(versions, dict) else {}
         writes = data.get("write_operations_log")

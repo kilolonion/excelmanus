@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from excelmanus.engine_core.llm_caller import LLMCaller, reset_degraded_params
+from excelmanus.config import ModelProfile
 from excelmanus.providers.claude import ClaudeClient
 from excelmanus.request.compiler import compile_request
 from tests.test_request_envelope import _engine
@@ -20,6 +21,44 @@ def engine_for(protocol="openai"):
     engine._model_capabilities = None
     engine.memory.add_user_message("first")
     return engine
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["openai", "openai_responses"])
+async def test_fast_model_profile_sets_service_tier_on_wire(protocol):
+    engine = engine_for(protocol)
+    engine._active_profile = ModelProfile(
+        name="fast", model="offline-model", api_key="offline-only",
+        base_url="https://offline.invalid/v1", service_tier="fast",
+    )
+    prepared, error = await compile_request(engine)
+    assert error is None
+    # Fast is a UI/config value; compatible gateways may only accept priority.
+    assert prepared.provider_body["service_tier"] == "priority"
+
+    engine._active_profile = ModelProfile(
+        name="standard", model="offline-model", api_key="offline-only",
+        base_url="https://offline.invalid/v1",
+    )
+    standard, error = await compile_request(engine)
+    assert error is None
+    assert "service_tier" not in standard.provider_body
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_does_not_reach_non_openai_or_codex_routes():
+    for protocol, model in [
+        ("anthropic", "offline-model"),
+        ("openai_responses", "openai-codex/offline-model"),
+    ]:
+        engine = engine_for(protocol)
+        engine._active_profile = ModelProfile(
+            name="fast", model=model, api_key="offline-only",
+            base_url="https://offline.invalid/v1", service_tier="fast",
+        )
+        prepared, error = await compile_request(engine)
+        assert error is None
+        assert "service_tier" not in prepared.provider_body
 
 
 @pytest.mark.asyncio
@@ -42,7 +81,7 @@ async def test_signed_stream_survives_durable_history_and_native_compile():
         {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason"}},
         {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-offline"}},
         {"type":"content_block_stop","index":0},
-        {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call1","name":"inspect_spreadsheet"}},
+        {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call1","name":"observe_spreadsheet"}},
         {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}},
         {"type":"content_block_stop","index":1},
     ]

@@ -86,9 +86,6 @@ if TYPE_CHECKING:
 
 logger = get_logger("tool_dispatcher")
 
-# 单次 run_code 内的嵌套 SDK 调用上限；与回合步数无关。
-_CODE_MODE_NESTED_CALL_BUDGET = 128
-
 # 子调用审批等待终态哨兵（区别于正常 decision 值）。
 _WAIT_TIMEOUT = object()
 _WAIT_PARENT_CANCELLED = object()
@@ -116,6 +113,15 @@ def _image_content_hash_b64(b64_str: str) -> str:
         # 容错：无法解码时直接 hash 原始字符串
         raw = b64_str.encode("utf-8") if isinstance(b64_str, str) else b64_str
     return _image_content_hash(raw)
+
+
+def _image_injection_key(injection: dict[str, Any]) -> tuple[str, str]:
+    attachment = injection.get("attachment")
+    if isinstance(attachment, dict) and attachment.get("attachmentId"):
+        digest = str(attachment["attachmentId"])
+    else:
+        digest = _image_content_hash_b64(str(injection.get("base64") or ""))
+    return digest, str(injection.get("detail", "auto"))
 
 
 _REPEAT_REMINDER_THRESHOLDS = (3, 5, 8)
@@ -168,8 +174,6 @@ class ToolDispatcher:
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
         self._deferred_image_injections: list[dict[str, Any]] = []
-        # 已注入图片的 hash 集合（用于去重）
-        self._injected_image_hashes: set[str] = set()
         # 每会话 sleep 取消事件（abort 时中断正在执行的 sleep 工具）
         self._sleep_cancel_event = threading.Event()
         # 任务级取消：abort 后拒绝新的 execute / 子调用
@@ -335,12 +339,12 @@ class ToolDispatcher:
             return
 
         if e.is_vision_capable:
-            if isinstance(attachment, dict) and attachment.get("attachmentId"):
-                _img_hash = str(attachment["attachmentId"])
-            else:
-                _img_hash = _image_content_hash_b64(str(base64_data or ""))
-            if _img_hash in self._injected_image_hashes:
-                logger.info("图片已在上下文中 (hash=%s)，跳过重复注入", _img_hash)
+            key = _image_injection_key(injection)
+            # Deduplicate only pending observations at the same detail. A prior
+            # observation may have been compacted or offloaded; explicit recall
+            # must append fresh pixels after the current tool-result batch.
+            if any(_image_injection_key(item) == key for item in self._deferred_image_injections):
+                logger.info("图片已在待注入批次中 (hash=%s)，跳过重复注入", key[0])
             else:
                 self._deferred_image_injections.append({
                     "attachment": attachment,
@@ -348,10 +352,9 @@ class ToolDispatcher:
                     "mime_type": injection.get("mime_type", "image/png"),
                     "detail": injection.get("detail", "auto"),
                 })
-                self._injected_image_hashes.add(_img_hash)
                 logger.info(
                     "图片已缓存待注入 (hash=%s, mime=%s)",
-                    _img_hash,
+                    key[0],
                     injection.get("mime_type"),
                 )
         else:
@@ -388,7 +391,7 @@ class ToolDispatcher:
                 except Exception:
                     logger.warning("延迟图片准入失败，写入占位文本", exc_info=True)
             if attachment:
-                parts.append({"type": "image", "attachment": attachment})
+                parts.append({"type": "image", "attachment": attachment, "detail": inj.get("detail", "auto")})
             else:
                 parts.append({"type": "text", "text": "[image omitted: unreadable attachment]"})
             count += 1
@@ -495,15 +498,10 @@ class ToolDispatcher:
             expiry.clear()
 
     def begin_nested_call_budget(self) -> tuple[int | None, int, str]:
-        """run_code 内层预算：重置计数但不丢弃父消耗。"""
+        """run_code 内层沿用父级剩余预算；默认无上限。"""
         snapshot = (self._call_budget, self._call_count, self._call_budget_reason)
-        self.begin_call_budget(
-            _CODE_MODE_NESTED_CALL_BUDGET,
-            reason=(
-                f"本次 run_code 内嵌套调用达上限（{_CODE_MODE_NESTED_CALL_BUDGET} 次）；"
-                "批量任务请拆成多次 run_code，或改用工具直接调用分批执行"
-            ),
-        )
+        remaining = None if self._call_budget is None else max(0, self._call_budget - self._call_count)
+        self.begin_call_budget(remaining, reason=self._call_budget_reason)
         return snapshot
 
     def restore_parent_call_budget(self, snapshot: tuple[int | None, int, str]) -> None:
@@ -2085,7 +2083,7 @@ class ToolDispatcher:
             )
         if structured is not None:
             self._remember_tool_versions(structured)
-        if structured is not None and success and not output_pending:
+        if structured is not None and success and not output_pending and not (isinstance(structured.value, dict) and structured.value.get("schema_version") == "workbook/2"):
             from excelmanus.tools.output_contracts import enforce_output_contract
 
             structured = enforce_output_contract(
@@ -2109,12 +2107,12 @@ class ToolDispatcher:
             result_str = result_str + "\n" + "\n".join(cow_reminders)
 
         # ── 写后语义校验（替代 max_row 维度假象）──
-        from excelmanus.engine_core.spill import (
+        from excelmanus.engine_core.word_observation import (
             attach_write_verification,
             compact_write_verification,
-            spill_result_text,
-            verify_write,
+            observe_word_write,
         )
+        from excelmanus.engine_core.spill import spill_result_text
 
         write_verification: dict[str, Any] | None = None
         skip_hard_cap = bool(
@@ -2122,10 +2120,7 @@ class ToolDispatcher:
             and structured.coverage
             and structured.coverage.get("spill_retrieve")
         )
-        if success and (
-            self._is_excel_mutating_call(tool_name, arguments)
-            or tool_name in self._WORD_WRITE_TOOLS
-        ):
+        if success and tool_name in self._WORD_WRITE_TOOLS:
             verify_args = arguments
             if structured is not None and isinstance(getattr(structured, "value", None), dict):
                 post_version = (
@@ -2134,7 +2129,7 @@ class ToolDispatcher:
                 )
                 if post_version:
                     verify_args = {**arguments, "after_version": str(post_version)}
-            write_verification = verify_write(
+            write_verification = observe_word_write(
                 tool_name, verify_args, workspace_root=self._workspace_root(),
             )
             structured, result_str = attach_write_verification(
@@ -2154,7 +2149,7 @@ class ToolDispatcher:
         unshaped_text = result_str
         # Semantic shaping sees the full result before deterministic spilling.
         # The subsequent spill/hard cap remains authoritative on failure/keep.
-        if structured is not None and success and not output_pending:
+        if structured is not None and success and not output_pending and not (isinstance(structured.value, dict) and structured.value.get("schema_version") == "workbook/2"):
             from excelmanus.system_one.host import maybe_shape_observation
 
             try:
@@ -2544,7 +2539,7 @@ class ToolDispatcher:
         """
         from pathlib import Path as _P
 
-        from excelmanus.engine_core.spill import format_write_verification_line, verify_write
+        from excelmanus.engine_core.word_observation import format_write_verification_line, observe_word_write
 
         file_path = (arguments.get("file_path") or "").strip()
         if not file_path:
@@ -2561,12 +2556,12 @@ class ToolDispatcher:
             return ""
 
         try:
-            payload = verify_write(tool_name, arguments, workspace_root=workspace_root)
+            payload = observe_word_write(tool_name, arguments, workspace_root=workspace_root)
             if payload.get("skipped"):
                 if payload.get("verification_kind") == "style":
                     payload.setdefault(
                         "sheet",
-                        arguments.get("sheet") or arguments.get("sheet_name") or "",
+                        arguments.get("sheet") or "",
                     )
                 return format_write_verification_line(payload)
             return format_write_verification_line(payload)
@@ -2578,15 +2573,9 @@ class ToolDispatcher:
     @staticmethod
     def _extract_write_summary(tool_name: str, arguments: dict, result_str: str) -> str:
         """从写入工具的参数/结果中提取简洁摘要。"""
-        if tool_name == "edit_spreadsheet":
+        if tool_name == "apply_spreadsheet_changes":
             ops = arguments.get("operations") or []
-            return f"edit_spreadsheet {len(ops)} 项操作" if ops else "edit_spreadsheet"
-        if tool_name == "format_spreadsheet":
-            ops = arguments.get("operations") or []
-            return f"format_spreadsheet {len(ops)} 项操作"
-        if tool_name == "manage_spreadsheet_objects":
-            ops = arguments.get("operations") or []
-            return f"manage_spreadsheet_objects {len(ops)} 项操作"
+            return f"apply_spreadsheet_changes {len(ops)} 项操作" if ops else "apply_spreadsheet_changes"
         if tool_name == "manage_spreadsheet_versions":
             return f"manage_spreadsheet_versions {arguments.get('action') or ''}".strip()
         if tool_name == "write_word":
@@ -2608,7 +2597,8 @@ class ToolDispatcher:
     # ── Excel 预览/Diff 事件辅助 ────────────────────────────
 
     _EXCEL_READ_TOOLS = {
-        "inspect_spreadsheet",
+        "observe_spreadsheet",
+        "preview_spreadsheet",
         "analyze_spreadsheet",
         "compare_spreadsheets",
         "trace_spreadsheet_formulas",
@@ -2617,9 +2607,7 @@ class ToolDispatcher:
         "read_text_file",
     }
     _EXCEL_WRITE_TOOLS = {
-        "edit_spreadsheet",
-        "format_spreadsheet",
-        "manage_spreadsheet_objects",
+        "apply_spreadsheet_changes",
         "manage_spreadsheet_versions",
     }
     _WORD_WRITE_TOOLS = {"write_word"}
@@ -2738,7 +2726,7 @@ class ToolDispatcher:
                     else arguments.get("file_path", ""),
                     _ws_root,
                 )
-                sheet_name = preview_data.get("sheet") or arguments.get("sheet_name", "")
+                sheet_name = preview_data.get("sheet") or arguments.get("sheet", "")
                 cell_styles: list[list] = []
                 merge_ranges: list[dict[str, int]] = []
                 metadata_hints: list[str] = []

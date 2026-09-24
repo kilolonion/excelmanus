@@ -17,9 +17,9 @@ def test_write_principle_tokens_meet_target() -> None:
     write = next(item for item in report.scenarios if item.name == "write_new")
     assert write.principle_tokens <= 1200
     assert "spreadsheet:invariants" in write.section_names
-    assert "edit_spreadsheet" in write.visible_tools
+    assert "apply_spreadsheet_changes" in write.visible_tools
     existing = next(item for item in report.scenarios if item.name == "write_existing")
-    assert "edit_spreadsheet" in existing.visible_tools
+    assert "apply_spreadsheet_changes" in existing.visible_tools
     assert "run_code" in existing.visible_tools
 
 
@@ -27,11 +27,11 @@ def test_unified_wire_keeps_tools_and_sdk_details_are_discovered_on_demand() -> 
     """直接工具与完整 SDK 共存，常驻 system 不注入全部签名。"""
     report = collect_report()
     write = next(item for item in report.scenarios if item.name == "write_existing")
-    assert "edit_spreadsheet" in write.visible_tools
+    assert "apply_spreadsheet_changes" in write.visible_tools
     assert "run_code" in write.wire_tools
-    assert "edit_spreadsheet" in write.sdk_tools
-    assert "inspect_spreadsheet" in write.sdk_tools
-    assert "def edit_spreadsheet(" not in write.system_text
+    assert "apply_spreadsheet_changes" in write.sdk_tools
+    assert "observe_spreadsheet" in write.sdk_tools
+    assert "def apply_spreadsheet_changes(" not in write.system_text
     assert "工具不存在于当前目录" not in write.discovery_text
     assert "workbook_spec" in write.discovery_text or "sheets" in write.discovery_text
     # 真实发现成本应显著大于十条“不可用”回复

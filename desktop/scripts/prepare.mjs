@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { frontendRuntimeFilter } from './runtime-files.mjs';
+import { bundledNodeVersion, checkNodeRuntime } from './node-runtime.mjs';
 
 const desktopRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const projectRoot = resolve(desktopRoot, "..");
@@ -59,7 +60,7 @@ async function stageRuntime() {
   const destination = join(buildRoot, "runtime");
   mkdirSync(destination, { recursive: true });
   // Do not copy process.execPath: Homebrew Node depends on /opt/homebrew dylibs.
-  const version = "22.23.2";
+  const version = bundledNodeVersion.slice(1);
   const platform = process.platform;
   if (!["darwin", "win32"].includes(platform)) throw new Error("Build on macOS or Windows");
   const base = `https://nodejs.org/dist/v${version}`;
@@ -85,7 +86,7 @@ async function stageRuntime() {
     copyFileSync(join(unpack, `node-v${version}-darwin-${process.arch}`, "bin", "node"), target);
     chmodSync(target, 0o755);
   }
-  execFileSync(target, ["--version"], { stdio: "inherit" });
+  console.log('Bundled Node:', checkNodeRuntime(target));
 }
 
 const mode = process.argv[2] || "all";

@@ -213,7 +213,7 @@ async def test_g_enforce_advice_does_not_take_over_loop() -> None:
         applied=True,
     )
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
-        await maybe_suggest_loop_wrap(engine, tool_results=[SimpleNamespace(tool_name="inspect_spreadsheet", success=True, result="ok")], iteration=1)
+        await maybe_suggest_loop_wrap(engine, tool_results=[SimpleNamespace(tool_name="observe_spreadsheet", success=True, result="ok")], iteration=1)
     assert engine._loop_wrap["applied"] is True
     assert engine.memory.messages == [{"role": "user", "content": "你好"}]
 
@@ -236,7 +236,7 @@ async def test_g_signed_stop_does_not_take_over_loop(monkeypatch: pytest.MonkeyP
         applied=True,
     )
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=decision)):
-        await maybe_suggest_loop_wrap(engine, tool_results=[SimpleNamespace(tool_name="inspect_spreadsheet", success=True, result="ok")], iteration=1)
+        await maybe_suggest_loop_wrap(engine, tool_results=[SimpleNamespace(tool_name="observe_spreadsheet", success=True, result="ok")], iteration=1)
     assert engine._loop_wrap["next"] == "stop"
     assert engine._loop_wrap["applied"] is True
     assert engine.memory.messages == [{"role": "user", "content": "你好"}]
@@ -335,7 +335,7 @@ def _fat_tool_memory(n: int = 6) -> SimpleNamespace:
                     {
                         "id": call_id,
                         "function": {
-                            "name": "inspect_spreadsheet",
+                            "name": "observe_spreadsheet",
                             "arguments": '{"file_path": "a.xlsx", "sheet": "S"}',
                         },
                     }
@@ -419,7 +419,7 @@ async def test_p_skips_errors_pending_and_child(monkeypatch: pytest.MonkeyPatch,
                     {
                         "id": "e0",
                         "function": {
-                            "name": "inspect_spreadsheet",
+                            "name": "observe_spreadsheet",
                             "arguments": '{"file_path": "a.xlsx", "sheet": "S"}',
                         },
                     }

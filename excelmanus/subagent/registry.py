@@ -153,6 +153,7 @@ class SubagentRegistry:
         max_iterations = SubagentRegistry._as_int(
             frontmatter.get("max_iterations"),
             default=self._config.subagent_max_iterations,
+            allow_zero=True,
         )
         max_failures = SubagentRegistry._as_int(
             frontmatter.get("max_consecutive_failures"),
@@ -237,22 +238,22 @@ class SubagentRegistry:
         return values[0][1]
 
     @staticmethod
-    def _as_int(value: Any, *, default: int) -> int:
+    def _as_int(value: Any, *, default: int, allow_zero: bool = False) -> int:
         if value is None:
             return default
         # YAML 可能将 120.0 解析为 float，若是整数值则直接转换
         if isinstance(value, float) and value.is_integer():
             value = int(value)
         if isinstance(value, int) and not isinstance(value, bool):
-            if value <= 0:
-                raise SkillpackValidationError("整数配置必须大于 0")
+            if value < 0 or (value == 0 and not allow_zero):
+                raise SkillpackValidationError("整数配置必须大于或等于 0" if allow_zero else "整数配置必须大于 0")
             return value
         text = str(value).strip()
         if not text or (not text.lstrip("-").isdigit()):
             raise SkillpackValidationError(f"无效整数配置: {value!r}")
         result = int(text)
-        if result <= 0:
-            raise SkillpackValidationError("整数配置必须大于 0")
+        if result < 0 or (result == 0 and not allow_zero):
+            raise SkillpackValidationError("整数配置必须大于或等于 0" if allow_zero else "整数配置必须大于 0")
         return result
 
     @staticmethod

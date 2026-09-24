@@ -44,6 +44,20 @@ def _init_repo(path: Path) -> None:
 
 
 class TestApplyFfOnly:
+    def test_apply_rechecks_target_version_before_merge(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        _init_repo(repo)
+        (repo / "pyproject.toml").write_text('[project]\nversion = "1.8.1"\n', encoding="utf-8")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "current version")
+        before = _git(repo, "rev-parse", "HEAD")
+        fake = VersionInfo(current="1.8.1", latest="1.8.0", has_update=True,
+                           commits_behind=1, check_method="git")
+        with patch("excelmanus.upgrade.apply.check_for_updates", return_value=fake):
+            result = apply_on_stopped_tree(repo, skip_deps=True)
+        assert result.outcome is UpgradeOutcome.DOWNGRADE_BLOCKED
+        assert _git(repo, "rev-parse", "HEAD") == before
+
     def test_uses_fetched_mirror_commit_instead_of_stale_origin(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         _init_repo(repo)
@@ -308,6 +322,37 @@ class TestDeployMode:
 
 
 class TestCheckForUpdates:
+    def test_new_commit_with_lower_version_is_blocked(self, tmp_path: Path) -> None:
+        from excelmanus.updater import check_for_updates
+
+        repo = tmp_path / "repo"
+        origin = tmp_path / "origin.git"
+        other = tmp_path / "other"
+        _init_repo(repo)
+        (repo / "pyproject.toml").write_text('[project]\nversion = "1.8.1"\n', encoding="utf-8")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "current version")
+        local_head = _git(repo, "rev-parse", "HEAD")
+        subprocess.check_call(["git", "clone", "--bare", str(repo), str(origin)])
+        _git(repo, "remote", "add", "origin", str(origin))
+        subprocess.check_call(["git", "clone", str(origin), str(other)])
+        (other / "pyproject.toml").write_text('[project]\nversion = "1.8.0"\n', encoding="utf-8")
+        _git(other, "add", ".")
+        _git(other, "commit", "-m", "lower version")
+        subprocess.check_call(["git", "push", "origin", "HEAD:main"], cwd=other)
+
+        info = check_for_updates(repo, force=True)
+        assert info.commits_behind == 1
+        assert info.latest == "1.8.0"
+        assert info.downgrade_blocked and not info.has_update
+        assert "已阻止降级" in info.error
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+        with patch("excelmanus.upgrade.apply.check_for_updates", return_value=info):
+            result = apply_on_stopped_tree(repo, skip_deps=True)
+        assert result.outcome is UpgradeOutcome.DOWNGRADE_BLOCKED
+        assert not result.success
+        assert _git(repo, "rev-parse", "HEAD") == local_head
+
     def test_commits_behind_same_semver_is_update(self, tmp_path: Path) -> None:
         from excelmanus.updater import check_for_updates
 
@@ -347,13 +392,13 @@ class TestCheckForUpdates:
         (other / "README").write_text("remote\n", encoding="utf-8")
         _git(other, "add", ".")
         _git(other, "commit", "-m", "remote")
-        _git(other, "tag", "v1.8.0")
-        subprocess.check_call(["git", "push", "origin", "HEAD:main", "v1.8.0"], cwd=other)
+        _git(other, "tag", "v1.8.1")
+        subprocess.check_call(["git", "push", "origin", "HEAD:main", "v1.8.1"], cwd=other)
 
         # The same tag name exists locally but points at the old commit.  A
         # tag-aware fetch rejects this as "would clobber existing tag" even
         # though the branch is perfectly fetchable.
-        _git(repo, "tag", "v1.8.0")
+        _git(repo, "tag", "v1.8.1")
 
         info = check_for_updates(repo, force=True)
         assert not info.check_failed

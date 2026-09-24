@@ -49,7 +49,7 @@ Android 需要在 `android/local.properties` 写入本机 SDK 路径，或设置
 .\scripts\package-release.ps1 -Target android
 ```
 
-脚本默认先在临时交付目录完成全部构建，所有目标通过后才替换 `outputs/release/`；中途失败不会删除上一版有效产物。需要保留该目录中其他文件时：
+脚本默认先在独立临时交付目录完成全部构建、哈希和清单写入，再将旧 `outputs/release/` 移入临时备份并切换新目录。替换失败会恢复旧目录；如果恢复也被文件锁阻止，会保留备份并输出明确路径。只有新目录切换成功才清理旧备份。需要保留该目录中其他文件时：
 
 ```powershell
 .\scripts\package-release.ps1 -KeepOutput
@@ -80,8 +80,8 @@ bash scripts/package-release-macos.sh all keep
 1. 从 `pyproject.toml` 读取版本；检查 Node、uv、`.venv`、PyInstaller 和本地 npm 依赖。
 2. 运行 Desktop JavaScript 语法检查和 Next.js production build，然后只暂存 standalone 前端需要的文件。
 3. 检查 `.build/runtime` 中的 Node 22.23.2。已有版本正确时直接复用；没有时调用项目的官方校验下载流程。网络不可用而本地运行时有效时不会重复下载。
-4. 检查精简 Python 运行时。运行时只来自 `dependency-groups.desktop-runtime`，删除缓存/测试/GUI 内容，并拒绝 SciPy、sklearn、Seaborn、Plotly 等可选科学库。脚本把复用标记写在 `.build/.python-runtime.json`，不会把构建元数据放进安装包；后续依赖没有变化时直接复用。
-5. 用 PyInstaller 冻结后端，执行桌面 runtime smoke（XLSX、DOCX、PNG、绘图、VBA、API 启停和前端 origin）。
+4. 检查精简 Python 运行时。运行时只来自 `dependency-groups.desktop-runtime`，删除缓存/测试/GUI 内容，并拒绝 SciPy、sklearn、Seaborn、Plotly 等可选科学库。默认保留标准库源码的真实路径，兼容用户脚本直接读取 `module.__file__`。验收覆盖资源读取、真实 spawn 多进程、中文编码、SSL、SQLite 和 `python -m`。脚本把复用标记写在 `.build/.python-runtime.json`；锁文件及准备、裁剪、验收脚本任一变化都会使缓存失效。
+5. 用 PyInstaller 冻结后端，仅准备 Chromium headless shell，随后复制到冻结目录，避免 PyInstaller 改写独立浏览器的动态库。Playwright 驱动复用应用自带的 Node，不再携带第二份 Node。执行桌面 runtime smoke（XLSX、DOCX、PNG、绘图、VBA、真实工作簿截图、API 启停和前端 origin）。
 6. 调用 electron-builder：Windows 生成 NSIS，macOS 生成 DMG。Windows 还运行真实 Electron supervisor smoke；macOS 对 `.app/Contents/Resources` 运行资源 smoke 和签名检查。
 
 Android 流程会先运行桥接、局域网网关和配对的 Node 测试，然后执行：
@@ -104,6 +104,11 @@ testDebugUnitTest lintDebug assembleDebug
 Android 产物是 `com.excelmanus.android.debug` 的 debug/preview 包，适合本地安装验收；正式发布需要发布者配置固定签名并提高 `versionCode`。Windows 默认安装程序没有正式代码签名，公开分发前需要配置签名证书。macOS 使用仓库当前 electron-builder 签名配置，正式分发仍需 Developer ID 和 notarization。
 
 ## 常见问题
+
+- **Windows 安装/升级速度**：默认保留非 solid 7z；同盘解压后重命名落位，共享目录递归合并，只有冲突文件才复制。安装器不再额外缓存一份完整 EXE；应用内完整下载安装不依赖这个 electron-updater 缓存。不会关闭安全软件或放宽文件保护。
+- **验证实际提速**：Windows CI 的 `desktop/scripts/smoke-installed-win.ps1` 记录全新安装、含用户文件的升级、卸载三阶段耗时，输出 `desktop/dist/install-timings.json`。需在同一台 Windows 机器上比较；文件数量下降不等同于固定比例的安装时间下降。
+- **防止解压静默漏文件**：Windows `afterPack` 固定 `BCJ`，规避锁定版本 electron-builder 的 BCJ2 解码兼容问题。安装器按可信清单检查所有文件存在；CI 在安装和升级后另做全量大小/SHA-256 比对，再运行实际截图与应用验收。全量哈希不在用户安装过程执行。
+- **标准库 ZIP 是可选项**：默认不启用。只有明确接受虚拟 `__file__` 路径的发行场景，才在准备/打包时设置 `EXCELMANUS_COMPACT_PYTHON_STDLIB=1`。此时仅合并纯源码包，带资源或原生文件的包完整保留；改变开关会使运行时缓存失效。默认流程优先兼容任意用户脚本。
 
 - **Node 下载超时**：脚本先检查 `.build/runtime/node(.exe)`；保留版本为 22.23.2 即可离线复用。首次构建且没有缓存时，需要允许访问 `nodejs.org` 后重试。
 - **Python 运行时变大**：删除 `.build/.python-runtime.json` 后重跑脚本，会按当前锁文件重建并重新裁剪 Python 运行时。

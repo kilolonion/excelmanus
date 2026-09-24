@@ -30,9 +30,26 @@ from excelmanus.auth.providers.base import (
 logger = logging.getLogger(__name__)
 
 # ── Google OAuth2 客户端（Antigravity IDE 公开客户端） ──
-# 凭据不入库，运行时从环境变量读取。
-_CLIENT_ID = os.environ.get("EXCELMANUS_ANTIGRAVITY_CLIENT_ID", "").strip()
-_CLIENT_SECRET = os.environ.get("EXCELMANUS_ANTIGRAVITY_CLIENT_SECRET", "").strip()
+# 与 Antigravity 官方 IDE 内置的桌面端 OAuth 客户端相同（社区公开值，
+# CLIProxyAPI/opencode 等项目同款），属"已安装应用"类公共凭据；
+# 部署方可用环境变量覆盖为自有 OAuth 客户端。
+_BUILTIN_CLIENT_ID = (
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep"
+    ".apps.googleusercontent.com"
+)
+_BUILTIN_CLIENT_SECRET = "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"
+
+
+def _client_id() -> str:
+    """运行时读取：环境变量优先，缺省回退到内置公开凭据。"""
+    env = os.environ.get("EXCELMANUS_ANTIGRAVITY_CLIENT_ID", "").strip()
+    return env or _BUILTIN_CLIENT_ID
+
+
+def _client_secret() -> str:
+    env = os.environ.get("EXCELMANUS_ANTIGRAVITY_CLIENT_SECRET", "").strip()
+    return env or _BUILTIN_CLIENT_SECRET
+
 _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo?alt=json"
@@ -63,15 +80,6 @@ _ONBOARD_MAX_ATTEMPTS = 5
 _ONBOARD_POLL_SECONDS = 2.0
 
 
-def _require_oauth_client() -> None:
-    """凭据由环境变量注入，缺失时给出可操作的报错。"""
-    if not _CLIENT_ID or not _CLIENT_SECRET:
-        raise RuntimeError(
-            "Antigravity 登录需要 OAuth 客户端凭据。请设置环境变量 "
-            "EXCELMANUS_ANTIGRAVITY_CLIENT_ID 与 "
-            "EXCELMANUS_ANTIGRAVITY_CLIENT_SECRET 后重试。"
-        )
-
 def _http_client() -> httpx.AsyncClient:
     import os
 
@@ -99,6 +107,22 @@ def _extract_project_id(data: dict[str, Any] | None) -> str:
             inner = value.get("id")
             if isinstance(inner, str) and inner.strip():
                 return inner.strip()
+    return ""
+
+
+def _record_project_id(record: Any) -> str:
+    """从档案 extra_data 提取 GCP project_id（兼容 dict 与 JSON 字符串）。"""
+    raw = getattr(record, "extra_data", None)
+    data: Any = None
+    if isinstance(raw, str) and raw:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+    elif isinstance(raw, dict):
+        data = raw
+    if isinstance(data, dict):
+        return str(data.get("project_id") or "").strip()
     return ""
 
 
@@ -158,7 +182,7 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
     callback_port = 51121
     oauth_ttl_seconds = 900
 
-    # 静态模型目录（内置静态 registry；上游无稳定公开目录接口）。
+    # 静态兜底目录：动态拉取（fetchAvailableModels）失败或未连接时使用。
     _SUPPORTED_MODELS: tuple[tuple[str, str], ...] = (
         ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
         ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
@@ -173,10 +197,9 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
     # ── LoopbackOAuthCapable ──────────────────────────────────
 
     def build_authorize_url(self, state: str, redirect_uri: str) -> str:
-        _require_oauth_client()
         params = {
             "access_type": "offline",
-            "client_id": _CLIENT_ID,
+            "client_id": _client_id(),
             "prompt": "consent",
             "redirect_uri": redirect_uri,
             "response_type": "code",
@@ -189,14 +212,13 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
         self, code: str, redirect_uri: str,
     ) -> ValidatedCredential:
         """授权码 → token → userinfo(email) → loadCodeAssist(project_id)。"""
-        _require_oauth_client()
         async with _http_client() as client:
             resp = await client.post(
                 _TOKEN_ENDPOINT,
                 data={
                     "code": code,
-                    "client_id": _CLIENT_ID,
-                    "client_secret": _CLIENT_SECRET,
+                    "client_id": _client_id(),
+                    "client_secret": _client_secret(),
                     "redirect_uri": redirect_uri,
                     "grant_type": "authorization_code",
                 },
@@ -369,15 +391,14 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
     async def refresh_token(self, refresh_token: str) -> RefreshedCredential:
         if not refresh_token:
             raise RuntimeError("无 refresh token，无法刷新。请重新登录 Antigravity。")
-        _require_oauth_client()
         async with _http_client() as client:
             resp = await client.post(
                 _TOKEN_ENDPOINT,
                 data={
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token,
-                    "client_id": _CLIENT_ID,
-                    "client_secret": _CLIENT_SECRET,
+                    "client_id": _client_id(),
+                    "client_secret": _client_secret(),
                 },
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
@@ -442,6 +463,78 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
             }
             for model_id, display in cls._SUPPORTED_MODELS
         ]
+
+    async def list_model_entries(
+        self, record: Any,
+    ) -> list[dict[str, Any]]:
+        """动态目录：已连接时拉取 fetchAvailableModels，失败回退静态目录。"""
+        token = str(getattr(record, "access_token", "") or "").strip()
+        if token:
+            try:
+                entries = await self._fetch_remote_models(
+                    token, _record_project_id(record),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Antigravity 动态模型目录拉取失败，回退静态目录: %s", e,
+                )
+            else:
+                if entries:
+                    return entries
+        return self.list_supported_model_entries()
+
+    async def _fetch_remote_models(
+        self, access_token: str, project_id: str,
+    ) -> list[dict[str, Any]]:
+        """``POST {base}/v1internal:fetchAvailableModels`` → 目录条目。"""
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": _REQUEST_USER_AGENT,
+        }
+        body = {"project": project_id} if project_id else {}
+        last_error = "无可用端点"
+        async with _http_client() as client:
+            for base in (_API_BASE_DAILY, _API_BASE_PROD):
+                try:
+                    resp = await client.post(
+                        f"{base}/{_API_VERSION}:fetchAvailableModels",
+                        json=body,
+                        headers=headers,
+                    )
+                except httpx.HTTPError as e:
+                    last_error = str(e)
+                    continue
+                if resp.status_code != 200:
+                    last_error = (
+                        f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    )
+                    continue
+                models = resp.json().get("models")
+                if not isinstance(models, dict) or not models:
+                    last_error = "响应缺少 models"
+                    continue
+                entries: list[dict[str, Any]] = []
+                for model_id, info in models.items():
+                    mid = str(model_id).strip()
+                    if not mid:
+                        continue
+                    if isinstance(info, dict) and info.get("isInternal") is True:
+                        continue
+                    display = (
+                        str(info.get("displayName") or "").strip()
+                        if isinstance(info, dict) else ""
+                    )
+                    entries.append({
+                        "model": mid,
+                        "display_name": display or mid,
+                        "profile_name": self.profile_name_for_model(mid),
+                        "public_model_id": self.profile_name_for_model(mid),
+                    })
+                if entries:
+                    return entries
+                last_error = "models 为空"
+        raise RuntimeError(f"fetchAvailableModels 失败: {last_error}")
 
     _DEFAULT_PROFILE_NAME = "antigravity/claude-sonnet-4-6"
     _DEFAULT_MODEL_ID = "claude-sonnet-4-6"

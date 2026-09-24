@@ -19,6 +19,7 @@ import {
 } from "@/lib/jev-settings";
 
 export type JevRuntime = {
+  jev_experimental_enabled: boolean;
   jev_enabled: string;
   jev_exposure: string;
   jev_mode_hint: boolean;

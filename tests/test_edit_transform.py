@@ -8,16 +8,16 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
 
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools import intent_tools, reference_tools
+from excelmanus.tools import workbook_tools, reference_tools
 from excelmanus.tools._guard_ctx import set_guard
-from excelmanus.tools.intent_tools import edit_spreadsheet
+from excelmanus.tools.workbook_tools import apply_spreadsheet_changes
 from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
 def _bind(root: Path) -> None:
     workspace = str(root)
     set_guard(FileAccessGuard(workspace))
-    intent_tools.init_guard(workspace)
+    workbook_tools.init_guard(workspace)
     reference_tools.init_guard(workspace)
     seed_seen_versions({})
 
@@ -35,7 +35,7 @@ def _book(path: Path, rows: list[list[object]], title: str = "Sheet1") -> Path:
 
 
 def _edit(path: Path, operations: list[dict]) -> object:
-    return edit_spreadsheet(
+    return apply_spreadsheet_changes(
         file_path=str(path),
         operations=operations,
         expected_version=content_version_of_file(path),
@@ -56,7 +56,7 @@ def test_edit_pivot_writes_target_sheet(tmp_path: Path) -> None:
             "target_sheet": "透视",
             "index": "部门",
             "columns": "月",
-            "pivot_values": "金额",
+            "values": "金额",
             "aggfunc": "sum",
         }],
     )
@@ -154,8 +154,8 @@ def test_transform_dedupe_normalized_phone_keeps_earliest_date(tmp_path: Path) -
         }],
     )
     assert result.success, result.model_text
-    assert "rows=4→2 removed=2" in result.model_text
-    assert "output_range=A1:C3" in result.model_text
+    assert "rows=4→2 removed=2" in str(result.value["observation"]["operations"])
+    assert "output_range=A1:C3" in str(result.value["observation"]["operations"])
     wb = load_workbook(path)
     assert wb.active.max_row == 3
     rows = [[cell.value for cell in row] for row in wb.active.iter_rows()]
@@ -190,8 +190,9 @@ def test_transform_dedupe_earliest_requires_parseable_order_column(tmp_path: Pat
 
 
 def test_transform_dedupe_schema_exposes_normalized_ordered_keep() -> None:
-    tool = next(item for item in intent_tools.get_tools() if item.name == "edit_spreadsheet")
-    props = tool.input_schema["properties"]["operations"]["items"]["properties"]
+    tool = next(item for item in workbook_tools.get_tools() if item.name == "apply_spreadsheet_changes")
+    from excelmanus.workbook.contracts import OPERATION_SCHEMAS
+    props = OPERATION_SCHEMAS["transform"]["properties"]
     assert props["keep"]["enum"] == ["first", "last", "earliest", "latest"]
     assert props["key_normalizers"]["additionalProperties"]["enum"] == ["phone"]
     assert "order_by" in props
@@ -228,9 +229,9 @@ def test_create_workbook_drops_untouched_default_sheet(tmp_path: Path) -> None:
     """R24 复现：create_workbook 建簿后只建命名表，默认 Sheet 不应残留。"""
     _bind(tmp_path)
     target = tmp_path / "new_book.xlsx"
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(target),
-        create_workbook=True,
+        create=True,
         operations=[
             {"kind": "sheet", "action": "create", "new_name": "订单"},
             {"kind": "write", "sheet": "订单", "start_cell": "A1", "values": [["a", "b"], [1, 2]]},
@@ -245,9 +246,9 @@ def test_create_workbook_drops_untouched_default_sheet(tmp_path: Path) -> None:
 def test_create_workbook_keeps_default_sheet_when_written(tmp_path: Path) -> None:
     _bind(tmp_path)
     target = tmp_path / "direct.xlsx"
-    result = edit_spreadsheet(
+    result = apply_spreadsheet_changes(
         file_path=str(target),
-        create_workbook=True,
+        create=True,
         operations=[
             {"kind": "write", "sheet": "Sheet", "start_cell": "A1", "values": [["x"], [9]]},
             {"kind": "sheet", "action": "create", "new_name": "其它"},

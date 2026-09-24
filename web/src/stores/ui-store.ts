@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { getIsMobile, getIsDesktop } from "@/hooks/use-mobile";
 import { settingsCache } from "@/lib/settings-cache";
+import type { MessageDispatchMode } from "@/lib/types";
 import {
   DEFAULT_THINKING_EFFORT_OPTIONS,
   type ThinkingEffort,
@@ -14,6 +15,7 @@ interface UIState {
   autoApproveEnabled: boolean;
   visionCapable: boolean | null;
   chatMode: "write" | "read" | "plan";
+  messageDispatchDefault: MessageDispatchMode;
   chatModeOwned: boolean;
   thinkingEffort: string;
   thinkingEffortOptions: ThinkingEffort[];
@@ -32,6 +34,7 @@ interface UIState {
   setAutoApproveEnabled: (enabled: boolean) => void;
   setVisionCapable: (capable: boolean | null) => void;
   setChatMode: (mode: "write" | "read" | "plan") => void;
+  setMessageDispatchDefault: (mode: MessageDispatchMode) => void;
   hydrateChatMode: (mode: "write" | "read" | "plan") => void;
   releaseChatModeOwnership: () => void;
   setThinkingEffort: (effort: string) => void;
@@ -65,6 +68,7 @@ export const useUIStore = create<UIState>()(
   autoApproveEnabled: false,
   visionCapable: null,
   chatMode: "write" as const,
+  messageDispatchDefault: "steer" as const,
   chatModeOwned: false,
   thinkingEffort: "medium",
   thinkingEffortOptions: [...DEFAULT_THINKING_EFFORT_OPTIONS],
@@ -83,6 +87,7 @@ export const useUIStore = create<UIState>()(
   setAutoApproveEnabled: (enabled) => set({ autoApproveEnabled: enabled }),
   setVisionCapable: (capable) => set({ visionCapable: capable }),
   setChatMode: (mode) => set({ chatMode: mode, chatModeOwned: true }),
+  setMessageDispatchDefault: (mode) => set({ messageDispatchDefault: mode }),
   hydrateChatMode: (mode) =>
     set((s) => (s.chatModeOwned ? s : { chatMode: mode })),
   releaseChatModeOwnership: () => set({ chatModeOwned: false }),
@@ -98,6 +103,7 @@ export const useUIStore = create<UIState>()(
   setConfigPlaceholderItems: (items) => set({ configPlaceholderItems: items }),
   bumpModelProfiles: () => {
       settingsCache.delete("/config/models");
+      settingsCache.delete("_capsMap");
       set((s) => ({ modelProfileVersion: s.modelProfileVersion + 1 }));
       // 跨标签页同步：通知其他标签页刷新模型列表
       try { _modelProfileChannel?.postMessage("bump"); } catch { /* 静默 */ }
@@ -130,6 +136,7 @@ export const useUIStore = create<UIState>()(
 if (_modelProfileChannel) {
   _modelProfileChannel.onmessage = () => {
     settingsCache.delete("/config/models");
+    settingsCache.delete("_capsMap");
     useUIStore.setState((s) => ({ modelProfileVersion: s.modelProfileVersion + 1 }));
   };
 }

@@ -18,7 +18,8 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { apiPost, apiPut, testModelConnection } from "@/lib/api";
+import { testModelConnection } from "@/lib/api";
+import { activateModelProfile, createModelProfile, updateModelProfile } from "@/lib/model-config-api";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
 import { PROVIDER_LOGO_SLUG } from "../../settings/model/constants";
@@ -116,13 +117,12 @@ export function ProviderGuideStep({ provider, onBack, onComplete, onSkip }: Prov
         description: provider.description || "",
       };
       try {
-        await apiPost("/config/models/profiles", payload, { direct: true });
-      } catch {
-        await apiPut(`/config/models/profiles/${encodeURIComponent(profileName)}`, payload, { direct: true });
+        await createModelProfile(payload);
+      } catch (error) {
+        if (!(error instanceof Error) || !("status" in error) || error.status !== 409) throw error;
+        await updateModelProfile(profileName, payload);
       }
-      await apiPut("/models/active", { name: profileName }, { direct: true });
-      // 配置写入并激活成功后，通知已挂载的会话模型选择器刷新列表。
-      useUIStore.getState().bumpModelProfiles();
+      await activateModelProfile(profileName);
       useOnboardingStore.getState().setBackendConfigured(true);
       onComplete();
     } catch (e) {

@@ -126,7 +126,7 @@ def context_state(engine: Any, user_text: str, context_input: Mapping[str, Any] 
                 except (ValueError, TypeError):
                     continue
                 if isinstance(args, Mapping):
-                    add_target(args.get("file_path") or args.get("path"), args.get("sheet") or args.get("sheet_name"),
+                    add_target(args.get("file_path") or args.get("path"), args.get("sheet"),
                                args.get("range") or args.get("cell_range"), source="recent_tool")
 
     registry = getattr(engine, "_file_registry", None)

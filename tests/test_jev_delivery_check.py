@@ -39,7 +39,7 @@ async def test_delivery_is_final_without_forced_review(emit_events: bool, eviden
     initial = []
     if evidence != "read_only":
         engine._state.affected_files = ["a.xlsx"]
-        initial = [ToolCallResult("edit_spreadsheet", {"file_path": "a.xlsx"}, "ok", True)]
+        initial = [ToolCallResult("apply_spreadsheet_changes", {"file_path": "a.xlsx"}, "ok", True)]
         if evidence != "missing":
             initial[0].structured = ToolResult(success=True, model_text="ok", value={
                 "meta": {"write_verification": {

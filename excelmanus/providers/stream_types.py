@@ -27,7 +27,7 @@ _THINK_TAG_PAIRS: list[tuple[str, str]] = [
 
 _THINKING_TAG_RE = re.compile(
     r"<(think(?:ing)?)>(.*?)</\1>",
-    re.DOTALL,
+    re.DOTALL | re.IGNORECASE,
 )
 
 
@@ -80,7 +80,7 @@ class InlineThinkingStateMachine:
 
         while buf:
             if self._in_thinking:
-                end_idx = buf.find(self._close_tag)
+                end_idx = buf.lower().find(self._close_tag)
                 if end_idx != -1:
                     think_text = buf[:end_idx]
                     if think_text:
@@ -105,7 +105,7 @@ class InlineThinkingStateMachine:
                 best_open = ""
                 best_close = ""
                 for open_tag, close_tag in _THINK_TAG_PAIRS:
-                    idx = buf.find(open_tag)
+                    idx = buf.lower().find(open_tag)
                     if idx != -1 and (best_idx == -1 or idx < best_idx):
                         best_idx = idx
                         best_open = open_tag
@@ -148,7 +148,7 @@ class InlineThinkingStateMachine:
         """检查 buf 尾部是否是 tag 的前缀，返回匹配长度（0 表示无匹配）。"""
         max_check = min(len(tag) - 1, len(buf))
         for length in range(max_check, 0, -1):
-            if tag.startswith(buf[-length:]):
+            if tag.startswith(buf[-length:].lower()):
                 return length
         return 0
 
@@ -159,7 +159,7 @@ class InlineThinkingStateMachine:
         for open_tag, _ in _THINK_TAG_PAIRS:
             max_check = min(len(open_tag) - 1, len(buf))
             for length in range(max_check, 0, -1):
-                if open_tag.startswith(buf[-length:]):
+                if open_tag.startswith(buf[-length:].lower()):
                     best = max(best, length)
                     break
         return best
