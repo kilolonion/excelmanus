@@ -218,6 +218,15 @@ class TestInjectSeq:
         result = inject_seq_into_sse(sse, 1, "sid")
         assert result.startswith("event: tool_call_start\n")
 
+    def test_replayed_marker_is_only_added_for_resume_packets(self):
+        sse = sse_format("thinking_delta", {"content": "x"})
+        live = json.loads(inject_seq_into_sse(sse, 1, "sid").split("data:", 1)[1])
+        replay = json.loads(
+            inject_seq_into_sse(sse, 1, "sid", replayed=True).split("data:", 1)[1]
+        )
+        assert "replayed" not in live
+        assert replay["replayed"] is True
+
 
 # ── Subscribe endpoint tests ──
 

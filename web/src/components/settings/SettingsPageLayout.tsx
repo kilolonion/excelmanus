@@ -12,34 +12,6 @@ export function SettingsPageLayout({
   return <div className={`em-settings-page ${className}`.trim()}>{children}</div>;
 }
 
-export function SettingsPageHeader({
-  icon,
-  eyebrow,
-  title,
-  description,
-  aside,
-}: {
-  icon: ReactNode;
-  eyebrow: string;
-  title: string;
-  description: string;
-  aside?: ReactNode;
-}) {
-  return (
-    <header className="em-settings-page-header">
-      <div className="em-settings-page-heading">
-        <div className="em-settings-page-icon">{icon}</div>
-        <div className="min-w-0">
-          <p className="em-settings-page-eyebrow">{eyebrow}</p>
-          <h2 className="em-settings-page-title">{title}</h2>
-          <p className="em-settings-page-description">{description}</p>
-        </div>
-      </div>
-      {aside ? <div className="em-settings-page-aside">{aside}</div> : null}
-    </header>
-  );
-}
-
 export function SettingsPagePanel({
   children,
   className = "",

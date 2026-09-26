@@ -43,6 +43,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
             "tool:changes",
             "tool:preview",
             "spreadsheet:document",
+            "spreadsheet:bootstrap",
             "tool:run_code",
         ],
     ),

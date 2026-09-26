@@ -6,6 +6,13 @@ import {
   buildDefaultSessionTitle,
   isFallbackSessionTitle,
 } from "@/lib/session-title";
+
+// DELETE /sessions is optimistic in the sidebar. A session-list poll can
+// overlap that request and briefly return the old row; keep a small in-memory
+// tombstone so the stale response cannot resurrect a conversation. The
+// tombstone is intentionally not persisted: after a full page reload the
+// server is authoritative again.
+const pendingDeletedSessionIds = new Set<string>();
 interface SessionState {
   sessions: Session[];
   sidebarSessionOrder: Record<string, string[]>;
@@ -57,6 +64,7 @@ export const useSessionStore = create<SessionState>()(
         }),
       addSession: (session) =>
         set((state) => {
+          pendingDeletedSessionIds.delete(session.id);
           const withTs = {
             ...session,
             updatedAt: session.updatedAt ?? new Date().toISOString(),
@@ -68,11 +76,14 @@ export const useSessionStore = create<SessionState>()(
           return { sessions: next };
         }),
       removeSession: (id) =>
-        set((state) => ({
-          sessions: state.sessions.filter((s) => s.id !== id),
-          activeSessionId:
-            state.activeSessionId === id ? null : state.activeSessionId,
-        })),
+        set((state) => {
+          pendingDeletedSessionIds.add(id);
+          return {
+            sessions: state.sessions.filter((s) => s.id !== id),
+            activeSessionId:
+              state.activeSessionId === id ? null : state.activeSessionId,
+          };
+        }),
       updateSessionTitle: (id, title) =>
         set((state) => ({
           sessions: state.sessions.map((s) =>
@@ -91,6 +102,10 @@ export const useSessionStore = create<SessionState>()(
           const state = get();
           const localMap = new Map(state.sessions.map((s) => [s.id, s]));
           for (const rs of remote) {
+            // Ignore a response that was already in flight when the user
+            // deleted this session. The next poll will observe its absence
+            // and clear the tombstone below.
+            if (pendingDeletedSessionIds.has(rs.id)) continue;
             const local = localMap.get(rs.id);
             const keepLocalTitle =
               !!local
@@ -111,6 +126,11 @@ export const useSessionStore = create<SessionState>()(
           // 到达后端前过早裁剪乐观创建。
           // F7：当后端返回空列表时跳过裁剪（可能是瞬时错误），避免会话列表闪烁。
           const remoteIds = new Set(remote.map((s) => s.id));
+          if (remote.length > 0) {
+            for (const id of pendingDeletedSessionIds) {
+              if (!remoteIds.has(id)) pendingDeletedSessionIds.delete(id);
+            }
+          }
           const GRACE_PERIOD_MS = 30_000;
           const now = Date.now();
           if (remote.length > 0) {

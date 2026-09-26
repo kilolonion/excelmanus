@@ -115,6 +115,21 @@ def _sanitize_messages_for_api(messages: list[dict]) -> list[dict]:
                 fallback = clean.get("thinking_text") or clean.get("thinking") or clean.get("reasoning")
                 if fallback:
                     clean["reasoning_content"] = fallback
+            # Old sessions may already contain all compatibility aliases.
+            # Collapse exact duplicates at the wire boundary so a replay does
+            # not resend the same reasoning three times.  Distinct provider
+            # payloads are left untouched for their protocol adapter.
+            reasoning_values = [
+                clean.get(key)
+                for key in ("reasoning_content", "thinking", "reasoning")
+                if clean.get(key) not in (None, "", [])
+            ]
+            if len(reasoning_values) >= 2 and all(
+                value == reasoning_values[0] for value in reasoning_values[1:]
+            ):
+                clean["reasoning_content"] = reasoning_values[0]
+                clean.pop("thinking", None)
+                clean.pop("reasoning", None)
             result.append(clean)
         elif role == "tool":
             result.append({k: v for k, v in msg.items() if k in _TOOL_ALLOWED_KEYS})
@@ -209,8 +224,13 @@ class TokenCounter:
                         elif item.get("type") == "image":
                             att = item.get("attachment")
                             if isinstance(att, dict):
-                                width = int(att.get("width") or 0)
-                                height = int(att.get("height") or 0)
+                                source_dims = att.get("sourceDimensions") or att.get("originalDimensions")
+                                if isinstance(source_dims, dict):
+                                    width = int(source_dims.get("width") or 0)
+                                    height = int(source_dims.get("height") or 0)
+                                else:
+                                    width = int(att.get("width") or 0)
+                                    height = int(att.get("height") or 0)
                                 if policy is not None and width > 0 and height > 0:
                                     width, height = request_image_dimensions(
                                         width, height, policy.max_pixels,
@@ -734,14 +754,20 @@ class ConversationMemory:
         assistant 消息包含 N 个 tool_calls 但只有 0..N-1 个 tool results。
         LLM API 要求每个 tool_call 都有对应 tool result，否则下次调用会报错。
 
+        占位内容按工具效果给确切状态（``aborted_calls`` 是唯一事实源）：
+        写入 = 结果未确认（按失败给，不要假定已生效）、命令 = 可能仍在后台运行
+        （不要重复发起）、读取 = 未执行。
+
         Returns:
             补充的占位 tool result 数量。
         """
         if not self._messages:
             return 0
 
-        # 收集尾部 assistant tool_call 消息中所有 call id
-        expected_ids: list[str] = []
+        from excelmanus.engine_core.aborted_calls import dangling_call_placeholder
+
+        # 收集尾部 assistant tool_call 消息中所有 (call id, 工具名)
+        expected_calls: list[tuple[str, str]] = []
         for msg in reversed(self._messages):
             role = msg.get("role")
             if role == "tool":
@@ -749,13 +775,20 @@ class ConversationMemory:
             if role == "assistant" and msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
                     tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-                    if tc_id:
-                        expected_ids.append(tc_id)
+                    if not tc_id:
+                        continue
+                    function = tc.get("function") if isinstance(tc, dict) else getattr(tc, "function", None)
+                    name = ""
+                    if isinstance(function, dict):
+                        name = str(function.get("name") or "")
+                    elif function is not None:
+                        name = str(getattr(function, "name", "") or "")
+                    expected_calls.append((tc_id, name))
                 break  # 只修复最近一组
             else:
                 break  # 遇到非 tool/非 tool_call assistant 消息即停止
 
-        if not expected_ids:
+        if not expected_calls:
             return 0
 
         # 收集已有的 tool result id
@@ -766,12 +799,12 @@ class ConversationMemory:
 
         # 为缺失的 tool_call 补占位 result
         repaired = 0
-        for tc_id in expected_ids:
+        for tc_id, tool_name in expected_calls:
             if tc_id not in existing_ids:
                 msg = {
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": "[任务已中断，该工具的结果未完整记录；继续前需核对实际执行结果]",
+                    "content": dangling_call_placeholder(tool_name),
                 }
                 self._messages.append(msg)
                 self._emit("tool/result", msg)

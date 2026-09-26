@@ -14,7 +14,7 @@ from excelmanus.knowledge.reading import Document, find_literal
 from excelmanus.knowledge.examples import EXAMPLES, EXAMPLE_BY_ID, example_detail
 
 QUERY_TYPES = ("knowledge_index", "knowledge_search", "knowledge_read", "knowledge_toc",
-               "knowledge_find", "knowledge_related", "knowledge_spec", "knowledge_examples")
+               "knowledge_find", "knowledge_related", "knowledge_spec", "knowledge_examples", "knowledge_workflow")
 SCOPES = ("all", "docs", "tools", "settings", "skills", "errors", "examples")
 PAGE_ITEMS = 8
 PAGE_CHARS = 3200
@@ -25,6 +25,7 @@ _ROOTS = {
     "skills": ("当前技能目录", "可发现技能及其加载入口；阅读不激活技能。"),
     "errors": ("错误与恢复目录", "执行层共用的错误分类及恢复建议。"),
     "examples": ("调用示例", "当前 schema 校验过的 JSON 与 Python 示例；查询不执行。"),
+    "workflows": ("任务工作流", "按任务组合的工具调用、版本依赖、完整示例与验证路线。"),
 }
 
 
@@ -134,6 +135,10 @@ def _runtime(engine: Any, catalog: Any) -> dict:
 
 def _read(ref: str, source: dict, engine: Any, catalog: Any, *, disclose: bool = True,
           language: str = "all") -> dict:
+    if ref == "workflows" or ref.startswith("workflow:"):
+        from excelmanus.knowledge.workflows import workflow_detail
+        data = workflow_detail("" if ref == "workflows" else ref.partition(":")[2], source, language)
+        return data if "items" in data or data.get("status") == "unavailable" else {"content": json.dumps(data, ensure_ascii=False, indent=2), "format": "json"}
     if ref.startswith("spec:"):
         return _specification(ref[5:], source, language)
     if ref.startswith("doc:"):
@@ -305,7 +310,16 @@ def _specification(name: str, source: dict, language: str = "all", examples_only
     from excelmanus.tools.output_contracts import output_schema_for
     from excelmanus.tools.reference_contract import augment_reference_schema
 
-    name = name.removeprefix("tool:").removeprefix("spec:")
+    from copy import deepcopy
+    from excelmanus.tools.introspection_tools import split_tool_query
+    from excelmanus.tools.schema_walk import walk_schema_path
+
+    requested = name.removeprefix("tool:").removeprefix("spec:")
+    name, field = split_tool_query(requested, source)
+    if name not in source:
+        owners = [key for key, tool in source.items() if requested in tool.input_schema.get("properties", {})]
+        if len(owners) == 1:
+            name, field = owners[0], requested
     tool = source.get(name)
     if tool is None:
         return {"status": "unavailable", "reason": "工具不在当前授权目录。", "links": [link("tools")]}
@@ -313,9 +327,45 @@ def _specification(name: str, source: dict, language: str = "all", examples_only
     data: dict[str, Any] = {"tool": name, "languages": ["python", "json"] if language == "all" else [language],
                             "examples": examples, "examples_notice": "未列出示例表示尚未收录，不表示能力不可用。"}
     if not examples_only:
-        data.update(description=tool.description, input_schema=augment_reference_schema(tool.input_schema),
+        schema = augment_reference_schema(tool.input_schema)
+        if field:
+            parent_path, _, leaf = field.rpartition(".")
+            parent, _, _ = walk_schema_path(schema, parent_path)
+            node = (parent or {}).get("properties", {}).get(leaf)
+            if node is None:
+                node, _, _ = walk_schema_path(schema, field)
+            if node is None:
+                return {"status": "not_found", "reason": "字段不存在", "links": [link("fields:" + name)]}
+            node = deepcopy(node)
+            # Close only the local definitions reachable from the selected
+            # field. No dangling $refs and no unrelated operation inventory.
+            definitions = {}
+            def visit(item):
+                if isinstance(item, dict):
+                    ref = item.get("$ref", "")
+                    if ref.startswith("#/$defs/"):
+                        key = ref[len("#/$defs/"):]
+                        if key not in definitions and key in schema.get("$defs", {}):
+                            definitions[key] = deepcopy(schema["$defs"][key])
+                            visit(definitions[key])
+                    for child in item.values():
+                        visit(child)
+                elif isinstance(item, list):
+                    for child in item:
+                        visit(child)
+            visit(node)
+            if definitions:
+                node["$defs"] = definitions
+            schema = node
+            data["field"] = field
+            data["examples"] = [{"id": item.id, "title": item.title,
+                                  "next_call": next_call("knowledge_read", "example:" + item.id, language=language)}
+                                 for item in EXAMPLES if name in item.tools]
+        data.update(description=tool.description, input_schema=schema,
                     output_schema=output_schema_for(name, tool_def=tool), write_effect=tool.write_effect)
-    return {"title": name + (" 调用示例" if examples_only else " 工具规范"), "format": "json",
+    from excelmanus.tools.introspection_tools import _record_loaded_tool
+    _record_loaded_tool(tool)
+    return {"title": name + ("." + field if field else "") + (" 调用示例" if examples_only else " 工具规范"), "format": "json",
             "content": json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
             "notice": "函数工具规范来自当前执行合同；不是 HTTP OpenAPI。读取不会执行示例。",
             "links": [link("tool:" + name), link("fields:" + name), link("examples")]}
@@ -325,7 +375,7 @@ def _kind(ref: str) -> str:
     prefix = ref.partition(":")[0]
     return {"doc": "docs", "tool": "tools", "schema": "tools", "schema-output": "tools", "spec": "tools",
             "setting": "settings", "error": "errors", "skill": "skills", "skill-text": "skills",
-            "resources": "skills", "resource": "skills", "example": "examples"}.get(prefix, prefix)
+            "resources": "skills", "resource": "skills", "example": "examples", "workflow": "examples"}.get(prefix, prefix)
 
 
 def _materialize(ref: str, source: dict, engine: Any, catalog: Any, *, disclose: bool = False,
@@ -528,6 +578,12 @@ def query_knowledge(query_type: str, query: str, *, catalog: Any, engine: Any = 
             if payload.get("status", "ok") == "ok":
                 document = Document("spec:" + query.removeprefix("tool:").removeprefix("spec:"),
                                     payload["title"], payload["content"], "tools", "runtime_contract")
+        elif query_type == "knowledge_workflow":
+            from excelmanus.knowledge.workflows import workflow_detail
+            data = workflow_detail(query, source, language)
+            payload = data if "items" in data or data.get("status") == "unavailable" else {
+                "title": query, "format": "json", "content": json.dumps(data, ensure_ascii=False, indent=2),
+                "notice": "此工作流来自当前工具合同；按 next_call 读取后续页，不授予额外权限。"}
         elif query_type == "knowledge_examples":
             target = query.removeprefix("tool:")
             selected = [example for example in EXAMPLES if not target or target in example.tools or target == example.id]

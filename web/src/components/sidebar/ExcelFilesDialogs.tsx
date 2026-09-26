@@ -188,7 +188,7 @@ export function RemoveConfirmDialog({
       <OverlayCardHeader
         icon={<Trash2 className="h-5 w-5" />}
         title={title}
-        description={description}
+        description={<span className="block sm:whitespace-nowrap">{description}</span>}
         onClose={onCancel}
       />
       <OverlayCardFooter>

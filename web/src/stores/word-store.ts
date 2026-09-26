@@ -95,6 +95,8 @@ interface WordState {
   addRecentFile: (path: string) => void;
   removeRecentFile: (path: string) => void;
   handleFilesChanged: (paths: string[]) => void;
+  /** 文件（或文件夹）被删除：从最近列表剔除；正打开的文档面板/全视图一并关闭。 */
+  handleFilesDeleted: (paths: string[]) => void;
   rebindWorkspace: (nextWorkspaceKey: string | null) => void;
 }
 
@@ -194,6 +196,33 @@ export const useWordStore = create<WordState>((set) => ({
         recentFiles: mergeRecentWordFiles(s.recentFiles, changedWordFiles),
         refreshCounter: shouldRefresh ? s.refreshCounter + 1 : s.refreshCounter,
         docSnapshot: shouldInvalidateSnapshot ? null : s.docSnapshot,
+      };
+    }),
+
+  handleFilesDeleted: (paths) =>
+    set((s) => {
+      const targets = paths
+        .map((path) => getWordPathKey(path).replace(/^\.\//, ""))
+        .filter(Boolean);
+      if (targets.length === 0) return s;
+      // 删除目标可能是文件夹：其全部后代一并视为已删除。
+      const isDeleted = (candidate: string | null | undefined): boolean => {
+        if (!candidate) return false;
+        const bare = getWordPathKey(candidate).replace(/^\.\//, "");
+        return targets.some((target) => bare === target || bare.startsWith(`${target}/`));
+      };
+      const recentFiles = s.recentFiles.filter((path) => !isDeleted(path));
+      const activeDeleted = isDeleted(s.activeDocPath);
+      const fullViewDeleted = isDeleted(s.fullViewPath);
+      const snapshotDeleted = isDeleted(s.docSnapshot?.file ?? null);
+      if (!activeDeleted && !fullViewDeleted && !snapshotDeleted
+        && recentFiles.length === s.recentFiles.length) return s;
+      return {
+        recentFiles,
+        activeDocPath: activeDeleted ? null : s.activeDocPath,
+        fullViewPath: fullViewDeleted ? null : s.fullViewPath,
+        docSnapshot: snapshotDeleted || activeDeleted ? null : s.docSnapshot,
+        panelOpen: activeDeleted ? false : s.panelOpen,
       };
     }),
 

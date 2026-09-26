@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta
 
 
 def _make_registry(tool_result: str = "ok") -> MagicMock:
@@ -124,3 +124,44 @@ class TestCallRegistryTool:
         )
         assert isinstance(result, ToolResult)
         assert result.model_text == "truncated"
+
+    async def test_read_image_replay_does_not_inject_duplicate_pixels(self):
+        engine = _make_engine()
+        engine.is_vision_capable = True
+        engine._background_parent = None
+        engine._subagent_runtime = None
+        tool_def = MagicMock()
+        tool_def.write_effect = "none"
+        tool_def.cache_ttl_seconds = 600
+        tool_def.input_schema = {"type": "object", "properties": {}}
+        tool_def.truncate_result.side_effect = lambda value: value
+        attachment = {
+            "attachmentId": "sha256:" + "ab" * 32,
+            "mediaType": "image/png",
+            "width": 8,
+            "height": 8,
+        }
+        engine._registry.get_tool = MagicMock(return_value=tool_def)
+        engine._registry.call_tool = MagicMock(return_value=ToolResult(
+            success=True,
+            model_text="图片已加载",
+            value={
+                "status": "ok", "mime_type": "image/png",
+                "attachment_id": attachment["attachmentId"],
+            },
+            ui_meta=ToolUiMeta(image={"attachment": attachment, "detail": "auto"}),
+        ))
+        dispatcher = ToolDispatcher(engine)
+        dispatcher.begin_call_budget(10)
+
+        first = await dispatcher.call_registry_tool(
+            tool_name="read_image", arguments={"attachment_id": attachment["attachmentId"]}, tool_scope=None,
+        )
+        second = await dispatcher.call_registry_tool(
+            tool_name="read_image", arguments={"attachment_id": attachment["attachmentId"]}, tool_scope=None,
+        )
+
+        assert first.model_text == "图片已加载"
+        assert "未重复注入像素" in second.model_text
+        assert engine._registry.call_tool.call_count == 1
+        assert len(dispatcher._deferred_image_injections) == 1

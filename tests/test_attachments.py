@@ -110,6 +110,65 @@ class TestNormalize:
         assert width >= 1 and height >= 1
         assert abs(width / height - 2.0) < 0.02
 
+    def test_admission_keeps_source_and_request_projection_is_derived(self, tmp_path) -> None:
+        """Admission must not replace the user's pixels with a lossy canonical image."""
+        raw = _png_bytes(4000, 3000)
+        store = AttachmentStore(tmp_path / "attachments")
+        ref = admit_image_bytes(raw, store=store)
+
+        assert store.get_bytes(ref) == raw
+        assert ref.bytes == len(raw)
+        assert ref.width == 4000 and ref.height == 3000
+        assert ref.source_dimensions is not None
+        assert ref.source_dimensions.width == 4000
+        assert ref.source_media_type == "image/png"
+
+        projected = assemble_model_request(
+            [_ref_message(ref)],
+            vision_capable=True,
+            store=store,
+            policy=ImageRequestPolicy(max_pixels=640_000, max_bytes=1_048_576),
+        )
+        handle = next(p["text"] for p in projected[0]["content"] if p.get("type") == "text" and "request preview" in p.get("text", ""))
+        assert "source=4000x3000px" in handle
+        assert "request preview 923x692px" in handle
+        image_part = next(p for p in projected[0]["content"] if p.get("type") == "image_url")
+        assert image_part["_attachment_id"] == ref.attachment_id
+
+    def test_exif_orientation_is_applied_before_request_resize(self, tmp_path) -> None:
+        image = Image.new("RGB", (400, 200), "red")
+        exif = image.getexif()
+        exif[274] = 6
+        out = BytesIO()
+        image.save(out, format="JPEG", exif=exif.tobytes())
+        store = AttachmentStore(tmp_path / "attachments")
+        ref = admit_image_bytes(out.getvalue(), store=store)
+        projected = assemble_model_request(
+            [_ref_message(ref)],
+            vision_capable=True,
+            store=store,
+            policy=ImageRequestPolicy(max_pixels=10_000, max_bytes=1_000_000),
+        )
+        image_part = next(p for p in projected[0]["content"] if p.get("type") == "image_url")
+        encoded = image_part["image_url"]["url"].split(",", 1)[1]
+        with Image.open(BytesIO(base64.b64decode(encoded))) as decoded:
+            assert decoded.size == (70, 141)
+
+    def test_animated_input_reports_first_frame_projection(self, tmp_path) -> None:
+        frames = [Image.new("RGB", (10, 10), "red"), Image.new("RGB", (10, 10), "blue")]
+        out = BytesIO()
+        frames[0].save(out, format="GIF", save_all=True, append_images=[frames[1]], duration=100, loop=0)
+        store = AttachmentStore(tmp_path / "attachments")
+        ref = admit_image_bytes(out.getvalue(), store=store)
+        assert ref.animated is True
+        assert ref.frame_count == 2
+        projected = assemble_model_request(
+            [_ref_message(ref)], vision_capable=True, store=store,
+            policy=ImageRequestPolicy(max_pixels=10_000, max_bytes=1_000_000),
+        )
+        handle = next(p["text"] for p in projected[0]["content"] if p.get("type") == "text" and "request preview" in p.get("text", ""))
+        assert "animated=2frames(first-frame request)" in handle
+
 
 class TestOffloadQuantum:
     def test_129x1mib_drops_65(self) -> None:

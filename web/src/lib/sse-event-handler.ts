@@ -17,13 +17,17 @@ import type { DispatchReceipt } from "@/lib/types";
 import { dedupeFileAttachments, prepareUserMessageDisplay } from "@/lib/upload-notice";
 import { classifyWorkspaceFile } from "@/lib/file-kind";
 import { displayFileName } from "@/lib/file-identity";
+import { handleWorkspaceFilesDeleted } from "@/lib/file-deletion";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import { getIsMobile } from "@/hooks/use-mobile";
-import type { AssistantBlock, Session, TaskItem } from "@/lib/types";
+import type { AssistantBlock, Session } from "@/lib/types";
 import { instantSessionTitle } from "@/lib/session-title";
 import { normalizeRelativePath, workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { parseWorkbookTarget, parseWorkbookPresentation, showWorkbookPresentation } from "@/lib/workbook-interaction";
 import { isFailureGuidanceBlock, isSameFailure } from "@/lib/failure-recovery";
+import { tokenStatsFromUsage } from "@/lib/token-stats";
+import { normalizeTaskItems, applyTaskStatusPatch } from "@/lib/history-blocks";
+export { normalizeTaskItems } from "@/lib/history-blocks";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,6 +49,8 @@ export interface SSEHandlerContext {
   effectiveSessionId: string;
   /** 是否属于 sendMessage 的首次发送流程（vs continuation / subscribe）。 */
   isFirstSend: boolean;
+  /** Whether dispatch receipts should create an in-flight intervention badge. */
+  showDispatch?: boolean;
   /** 用户原始消息文本（仅 sendMessage 流程需要，用于 session_init 标题推断）。 */
   userText?: string;
 
@@ -120,50 +126,6 @@ export function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
       styleOnly: Boolean(c.style_only ?? c.styleOnly),
     };
   });
-}
-
-export function normalizeTaskItems(taskListPayload: unknown): TaskItem[] {
-  let rawItems: unknown[] = [];
-  if (Array.isArray(taskListPayload)) {
-    rawItems = taskListPayload;
-  } else if (
-    taskListPayload
-    && typeof taskListPayload === "object"
-    && "items" in taskListPayload
-    && Array.isArray((taskListPayload as { items?: unknown[] }).items)
-  ) {
-    rawItems = (taskListPayload as { items: unknown[] }).items;
-  }
-  return rawItems.map((rawItem, i) => {
-    const item = rawItem as Record<string, unknown>;
-    const rawVerification = item.verification;
-    const verification = typeof rawVerification === "string"
-      ? rawVerification || undefined
-      : typeof (rawVerification as { expected?: unknown } | null)?.expected === "string"
-        ? (rawVerification as { expected: string }).expected || undefined
-        : undefined;
-    return {
-      content:
-        (item.content as string)
-        || (item.title as string)
-        || (item.description as string)
-        || `任务 ${i + 1}`,
-      status: (item.status as string) || "pending",
-      index: typeof item.index === "number" ? item.index : i,
-      verification,
-    };
-  });
-}
-
-function applyTaskStatusPatch(
-  items: TaskItem[],
-  taskIndex: number | null,
-  taskStatus: string,
-): TaskItem[] {
-  if (taskIndex === null || !taskStatus) return items;
-  return items.map((item) =>
-    item.index === taskIndex ? { ...item, status: taskStatus } : item
-  );
 }
 
 /** 获取指定 assistant 消息。 */
@@ -249,7 +211,7 @@ function applyChangedFiles(
   ctx: SSEHandlerContext,
   msgId: string,
   changedFiles: string[],
-  mutations: { identity?: string; content_version?: string }[] = [],
+  mutations: { identity?: string; content_version?: string; deleted?: boolean }[] = [],
 ): void {
   if (changedFiles.length === 0) return;
   ctx.hadPersistedToolWork = true;
@@ -257,14 +219,29 @@ function applyChangedFiles(
   const wordStore = useWordStore.getState();
   // 文件事件属于产生它的会话工作区，按事件会话键入桶，避免会话切换期间错挂到当前工作区。
   const sourceWorkspaceKey = workspaceKeyForSessionId(ctx.effectiveSessionId);
+  // 删除与写入分流：deleted 身份走统一清理（最近打开/已打开标签/面板一并剔除），
+  // 绝不能再进入 recentFiles，否则各入口会重新列出已删文件、口径混乱。
+  const deletedIdentities = new Set(
+    mutations.filter((item) => item.deleted && item.identity)
+      .map((item) => (item.identity as string).replace(/^\.\//, "")),
+  );
+  const deletedFiles: string[] = [];
+  const liveFiles: string[] = [];
   for (const filePath of changedFiles) {
     if (!filePath) continue;
+    if (deletedIdentities.has(filePath.replace(/^\.\//, ""))) deletedFiles.push(filePath);
+    else liveFiles.push(filePath);
+  }
+  if (deletedFiles.length > 0) {
+    handleWorkspaceFilesDeleted(deletedFiles, sourceWorkspaceKey);
+  }
+  for (const filePath of liveFiles) {
     const filename = filePath.split("/").pop() || filePath;
     excelStore.addRecentFileIfNotDismissed({ path: filePath, filename }, sourceWorkspaceKey);
     const version = mutations.find((item) => item.identity?.replace(/^\.\//, "") === filePath.replace(/^\.\//, ""))?.content_version;
     excelStore.notifyWorkbookChanged(filePath, sourceWorkspaceKey, version || undefined);
   }
-  wordStore.handleFilesChanged(changedFiles);
+  wordStore.handleFilesChanged(liveFiles);
   S().addAffectedFiles(msgId, changedFiles);
   excelStore.bumpWorkspaceFilesVersion();
 }
@@ -278,9 +255,51 @@ function _getLastBlockOfType(msgId: string, type: string) {
   return null;
 }
 
+/**
+ * Provider adapters can expose one reasoning pass as a streamed ``thinking``
+ * block and a compatibility ``reasoning_notice``.  Compare the visible text
+ * across the whole assistant message instead of only looking at the last
+ * block: a replay may insert a tool/status block between the two events.
+ */
+function _sameReasoningText(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  // A thinking event is capped on the wire.  Accept the capped prefix so a
+  // long reasoning summary does not render as a second card on reconnect.
+  return (left.length >= 2000 && right.startsWith(left))
+    || (right.length >= 2000 && left.startsWith(right));
+}
+
+function _hasReasoningBlock(
+  msgId: string,
+  content: string,
+  iteration?: number,
+  type: "thinking" | "reasoning_notice" = "thinking",
+): boolean {
+  const message = getLastAssistantMessage(S().messages, msgId);
+  if (!message) return false;
+  return message.blocks.some((block) => {
+    if (block.type !== type || !block.content) return false;
+    if (iteration !== undefined && block.iteration !== undefined && block.iteration !== iteration) return false;
+    return _sameReasoningText(block.content, content);
+  });
+}
+
 /** 流式增量按字符串原样保留，包括空格和换行。 */
 function _streamDeltaContent(data: Record<string, unknown>): string {
   return typeof data.content === "string" ? data.content : "";
+}
+
+/** 本轮失败收尾时，给"从未进入执行器"的调用一句确切状态。 */
+function turnFailureNote(stopReason: string): string {
+  const reason =
+    stopReason === "llm_unavailable" ? "模型服务中断"
+    : stopReason === "timeout" ? "本轮超时"
+    : stopReason === "interrupt" ? "本轮已中断"
+    : stopReason === "cancelled" ? "本轮已取消"
+    : stopReason === "wall_clock" || stopReason === "budget" ? "本轮预算耗尽"
+    : "本轮失败收尾";
+  return `${reason}，本次调用未执行，没有产生任何副作用。`;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +322,25 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     ? data.stream_id
     : null;
 
+  // A reconnect can overlap the old fetch for a short time.  Once a new
+  // stream has been announced, events carrying the old stream id must not
+  // mutate either the cursor or the visible message.  Without this guard a
+  // late old event could move ``activeStreamId`` backwards and be replayed a
+  // second time on the next subscribe.
+  if (eventStreamId && event.event !== "stream_init") {
+    const active = S().activeStreamId;
+    // A live first event can be the first packet observed after a proxy
+    // dropped ``stream_init``; accept it and bind the new stream.  Replayed
+    // packets carry an explicit marker, so an old stream cannot roll the UI
+    // back during an overlapping reconnect.
+    if (active && active !== eventStreamId && data.replayed === true) return;
+    // Replayed events are explicitly marked by /chat/subscribe.  A client
+    // that already rendered that sequence can safely discard it, which also
+    // protects streamed reasoning deltas whose individual chunks cannot be
+    // compared by text alone.
+    if (data.replayed === true && eventSeq !== null && eventSeq <= S().latestSeq) return;
+  }
+
   // stream_init carries a historical metadata seq for wire compatibility;
   // only replayable events advance the resume cursor.
   if (eventSeq !== null && event.event !== "stream_init") {
@@ -324,10 +362,42 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     case "turn_start": {
       const receipt = receiveDispatch(data.dispatch, ctx);
       const turnId = typeof data.turn_id === "string" ? data.turn_id : "";
-      if (receipt && turnId !== ctx.turnId) activateDispatch(receipt, ctx);
+      // A direct idle send still carries a dispatch receipt for idempotency,
+      // but it is a new task rather than an intervention in an existing one.
+      const isInitialDirectTurn = ctx.showDispatch === false && !ctx.turnId;
+      if (receipt && turnId !== ctx.turnId && !isInitialDirectTurn) activateDispatch(receipt, ctx);
       ctx.turnId = turnId;
       ctx.completedTurnId = undefined;
       ctx.thinkingInProgress = false;
+      break;
+    }
+    // 本轮失败收尾：从未进入执行器的调用定案为"未执行"（不留"进行中"）。
+    // 已派发的执行（有 executionId，含后台任务/子代理）不动，由执行器自己的
+    // 终态事件收口——后台命令继续跑，只是状态要确切。
+    case "turn_failed": {
+      const stopReason = (data.stop_reason as string) || "error";
+      const tfNote = turnFailureNote(stopReason);
+      const tfMsg = getLastAssistantMessage(S().messages, msgId);
+      const stragglers = (tfMsg?.blocks ?? []).filter((b) =>
+        b.type === "tool_call" && !b.executionId && !!b.toolCallId
+        && (b.status === "streaming" || b.status === "running" || b.status === "pending"));
+      for (const block of stragglers) {
+        if (block.type !== "tool_call" || !block.toolCallId) continue;
+        useExcelStore.getState().clearStreamingArgs(block.toolCallId);
+        S().clearToolProgress(block.toolCallId);
+        S().updateToolCallBlock(msgId, block.toolCallId, (b) => {
+          if (b.type !== "tool_call" || b.executionId) return b;
+          if (b.status === "success" || (b.status === "error" && b.executionState !== "aborted")) return b;
+          return {
+            ...b,
+            status: "error",
+            executionState: "aborted",
+            error: tfNote,
+            result: tfNote,
+            abortReason: stopReason,
+          } as AssistantBlock;
+        });
+      }
       break;
     }
     case "dispatch_state": {
@@ -487,8 +557,11 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     case "thinking_delta": {
       S().setPipelineStatus(null);
       const thinkingDelta = _streamDeltaContent(data);
+      const thinkingIteration = typeof data.iteration === "number" ? data.iteration : undefined;
       const lastThinking = _getLastBlockOfType(msgId, "thinking");
-      if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
+      if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null
+        && (thinkingIteration === undefined || lastThinking.iteration === undefined
+          || lastThinking.iteration === thinkingIteration)) {
         ctx.batcher.pushThinking(thinkingDelta);
       } else {
         ctx.batcher.flush();
@@ -496,6 +569,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           type: "thinking",
           content: thinkingDelta,
           startedAt: Date.now(),
+          ...(thinkingIteration !== undefined ? { iteration: thinkingIteration } : {}),
         });
       }
       ctx.thinkingInProgress = true;
@@ -503,11 +577,25 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "thinking": {
+      const thinkingContent = (data.content as string) || "";
+      const thinkingIteration = typeof data.iteration === "number" ? data.iteration : undefined;
+      // A non-streaming provider sends a complete THINKING event.  A replay
+      // or compatibility adapter may send the same event after deltas; keep
+      // one visible block for that pass.
+      const existingThinking = getLastAssistantMessage(S().messages, msgId)?.blocks.some((block) =>
+        block.type === "thinking"
+        && (thinkingIteration === undefined || block.iteration === undefined || block.iteration === thinkingIteration)
+        && (block.content === thinkingContent
+          || (Boolean(block.content) && block.content.startsWith(thinkingContent))
+          || (Boolean(block.content) && thinkingContent.startsWith(block.content))),
+      );
+      if (!thinkingContent || existingThinking || _hasReasoningBlock(msgId, thinkingContent, thinkingIteration, "thinking")) break;
       S().appendBlock(msgId, {
         type: "thinking",
-        content: (data.content as string) || "",
+        content: thinkingContent,
         duration: (data.duration as number) || undefined,
         startedAt: Date.now(),
+        ...(thinkingIteration !== undefined ? { iteration: thinkingIteration } : {}),
       });
       break;
     }
@@ -548,12 +636,18 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const adToolName = (data.tool_name as string) || "";
       const adDelta = (data.args_delta as string) || "";
       if (adToolCallId && adDelta) {
-        useExcelStore.getState().appendStreamingArgs(adToolCallId, adDelta);
         const adMsg = getLastAssistantMessage(S().messages, msgId);
-        const hasBlock = adMsg?.blocks.some(
+        const adBlock = adMsg?.blocks.find(
           (b) => b.type === "tool_call" && b.toolCallId === adToolCallId,
         );
-        if (!hasBlock && adToolName) {
+        if (adBlock && adBlock.type === "tool_call" && adBlock.executionState === "aborted") {
+          // 同一个 call id 被下一次尝试复用：先把"未执行"的定案翻回流式，
+          // 并丢掉上一轮的半截参数，避免旧状态粘在新尝试上。
+          useExcelStore.getState().clearStreamingArgs(adToolCallId);
+          S().updateToolCallBlock(msgId, adToolCallId, (b) => b.type === "tool_call"
+            ? { ...b, status: "streaming", executionState: undefined, error: undefined, result: undefined } as AssistantBlock
+            : b);
+        } else if (!adBlock && adToolName) {
           S().setPipelineStatus(null);
           S().appendBlock(msgId, {
             type: "tool_call",
@@ -564,6 +658,52 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
             iteration: undefined,
           });
         }
+        useExcelStore.getState().appendStreamingArgs(adToolCallId, adDelta);
+      }
+      break;
+    }
+
+    // --- 未执行即被放弃的调用：定案为失败，不留"进行中" ---
+    case "tool_call_aborted": {
+      const abId = (data.tool_call_id as string) || "";
+      if (!abId) break;
+      const abMessage = ((data.message as string) || "").trim();
+      const abCode = (data.error as string) || "TOOL_CALL_NOT_EXECUTED";
+      // 折叠行显示的是 error 字段：这里给"人话"，机器码留在 block.abortReason。
+      const abDetail = abMessage || abCode;
+      const abReason = (data.reason as string) || undefined;
+      useExcelStore.getState().clearStreamingArgs(abId);
+      S().clearToolProgress(abId);
+      const abMsg = getLastAssistantMessage(S().messages, msgId);
+      const abExists = abMsg?.blocks.some(
+        (b) => b.type === "tool_call" && b.toolCallId === abId,
+      );
+      if (abExists) {
+        S().updateToolCallBlock(msgId, abId, (b) => {
+          if (b.type !== "tool_call") return b;
+          // 已经落定终态的块（真的执行过）不改写：执行器的终态优先。
+          if (b.status === "success" || (b.status === "error" && b.executionState !== "aborted")) return b;
+          return {
+            ...b,
+            status: "error",
+            executionState: "aborted",
+            error: abDetail,
+            result: abMessage || b.result,
+            abortReason: abReason,
+          } as AssistantBlock;
+        });
+      } else {
+        S().appendBlock(msgId, {
+          type: "tool_call",
+          toolCallId: abId,
+          name: (data.tool_name as string) || "",
+          args: {},
+          status: "error",
+          executionState: "aborted",
+          error: abDetail,
+          result: abMessage || undefined,
+          abortReason: abReason,
+        });
       }
       break;
     }
@@ -606,7 +746,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const msgForStart = getLastAssistantMessage(S().messages, msgId);
       const streamingExists = toolCallId && msgForStart?.blocks.some(
         (b) => b.type === "tool_call" && b.toolCallId === toolCallId
-          && (b.status === "streaming" || b.executionState === "queued" || b.executionState === "cancelling"
+          && (b.status === "running" || b.status === "streaming" || b.executionState === "queued" || b.executionState === "cancelling"
             || (!!data.execution_id && b.executionId === data.execution_id)),
       );
       if (streamingExists) {
@@ -643,7 +783,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "tool_call_end": {
-      if (data.tool_name === "show_workbook" && data.success !== false && !autoNavigationBlocked(ctx)) {
+      if (data.tool_name === "show_workbook" && data.success !== false && data.replayed !== true && !autoNavigationBlocked(ctx)) {
         const presentation = parseWorkbookPresentation(data.result as string);
         if (presentation && !pathIsDismissed(presentation.target.file_path)) showWorkbookPresentation(presentation, ctx.effectiveSessionId);
       }
@@ -917,6 +1057,16 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const payloadItems = normalizeTaskItems(data.task_list);
       const taskIndex = typeof data.task_index === "number" ? data.task_index : null;
       const taskStatus = typeof data.task_status === "string" ? data.task_status : "";
+      const taskCall = getLastAssistantMessage(S().messages, msgId)?.blocks.findLast((block) =>
+        block.type === "tool_call" && (typeof data.tool_call_id === "string" && data.tool_call_id
+          ? block.toolCallId === data.tool_call_id
+          : ["task_create", "task_update", "write_plan"].includes(block.name)),
+      );
+      if (taskCall?.type === "tool_call" && taskCall.toolCallId && payloadItems.length) {
+        S().updateToolCallBlock(msgId, taskCall.toolCallId, (block) => block.type === "tool_call"
+          ? { ...block, taskList: applyTaskStatusPatch(payloadItems, taskIndex, taskStatus) } : block);
+        break;
+      }
       const existingTaskList = _getLastBlockOfType(msgId, "task_list");
       if (existingTaskList && existingTaskList.type === "task_list") {
         S().updateBlockByType(msgId, "task_list", (b) => {
@@ -1040,7 +1190,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "mutation": {
-      const mutations = (data.mutations as { identity?: string; content_version?: string }[]) || [];
+      const mutations = (data.mutations as { identity?: string; content_version?: string; deleted?: boolean }[]) || [];
       const files = [...new Set([...(data.files as string[] || []), ...mutations.flatMap((m) => m.identity ? [m.identity] : [])])];
       applyChangedFiles(ctx, msgId, files, mutations);
       break;
@@ -1171,11 +1321,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           S().setPendingQuestion(null);
           S().setPendingApproval(null);
         }
-        if (Number(data.total_tokens) > 0) S().upsertBlockByType(msgId, "token_stats", {
-          type: "token_stats", promptTokens: Number(data.prompt_tokens) || 0,
-          completionTokens: Number(data.completion_tokens) || 0, totalTokens: Number(data.total_tokens) || 0,
-          iterations: Number(data.iterations) || 0,
-        });
+        if (Number(data.total_tokens) > 0) {
+          S().upsertBlockByType(msgId, "token_stats", tokenStatsFromUsage(data));
+        }
       }
       const content = (data.content as string) || "";
       const hasPendingInteraction =
@@ -1445,12 +1593,28 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     // ── 推理过程通知：（reasoning 开启时）────────────────────────────
     case "reasoning_notice": {
       const rnContent = (data.content as string) || "";
-      const rnIteration = (data.iteration as number) || 0;
+      const rnIteration = typeof data.iteration === "number" ? data.iteration : undefined;
       if (rnContent) {
+        // ``reasoning_notice`` is a compatibility event for clients that do
+        // not render the normal thinking stream.  When the same turn already
+        // has a thinking block, drawing the notice as a second block makes a
+        // single provider summary look like repeated reasoning.  The server
+        // caps the legacy thinking event at 2000 chars, so accept a matching
+        // prefix for long summaries as well.
+        const last = getLastAssistantMessage(S().messages, msgId);
+        if (_hasReasoningBlock(msgId, rnContent, rnIteration, "thinking")) {
+          break;
+        }
+        const duplicateNotice = last?.blocks.some((block) =>
+          block.type === "reasoning_notice" &&
+          (rnIteration === undefined || block.iteration === undefined || block.iteration === rnIteration) &&
+          _sameReasoningText(block.content, rnContent),
+        );
+        if (duplicateNotice) break;
         S().appendBlock(msgId, {
           type: "reasoning_notice",
           content: rnContent,
-          iteration: rnIteration,
+          ...(rnIteration !== undefined ? { iteration: rnIteration } : {}),
         });
       }
       break;
@@ -1481,6 +1645,12 @@ export function finalizeThinking(ctx: SSEHandlerContext): void {
 /** 标准的事件前处理：调用方在 consumeSSE 回调顶部使用。*/
 export function preDispatch(event: SSEEvent, ctx: SSEHandlerContext): void {
   if (event.event === "heartbeat") return;
+  // Keep replay dedupe side-effect free: callers invoke preDispatch before
+  // dispatchSSEEvent, so a duplicate packet must not finalize the current
+  // thinking block or flush text deltas on its way to being discarded.
+  if (event.data.replayed === true
+    && typeof event.data.seq === "number"
+    && event.data.seq <= S().latestSeq) return;
   if (event.event !== "thinking_delta" && event.event !== "thinking") {
     finalizeThinking(ctx);
   }

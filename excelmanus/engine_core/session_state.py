@@ -112,12 +112,17 @@ class SessionState:
 
         # 自动追踪写入工具涉及的文件路径（替代 finish_task 的 affected_files）
         self.affected_files: list[str] = []
+        # affected_files 中操作后已不存在的身份（unlink / rename 源）。
+        # MUTATION 事件据此携带 deleted 标记，前端各入口同步剔除。
+        self.affected_file_deletions: set[str] = set()
         # 本会话最近读到/写到的内容版本（path → sha256:...）
         self.file_content_versions: dict[str, str] = {}
 
         # 写入操作日志
         # 每条: {tool_name, file_path, sheet, range, summary}
         self.write_operations_log: list[dict[str, str]] = []
+        from excelmanus.engine_core.delivery import DeliveryLedger
+        self.delivery = DeliveryLedger()
 
         # FileRegistry 引用（由 engine 注入，唯一接口）
         self._file_registry: Any = None
@@ -154,7 +159,9 @@ class SessionState:
         self.has_write_tool_call = False
         self.turn_diagnostics = []
         self.affected_files = []
+        self.affected_file_deletions = set()
         self.write_operations_log = []
+        self.delivery.begin_turn()
 
     def reset_session(self) -> None:
         """重置全部会话级状态（跨对话边界调用）。"""
@@ -176,20 +183,37 @@ class SessionState:
         self.compaction_handoff = {}
         self.compaction_generation = 0
         self.affected_files = []
+        self.affected_file_deletions = set()
         self.file_content_versions = {}
         self.write_operations_log = []
+        from excelmanus.engine_core.delivery import DeliveryLedger
+        self.delivery = DeliveryLedger()
 
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""
         self.has_write_tool_call = True
 
-    def record_affected_file(self, path: str) -> None:
-        """记录被写入工具修改的文件路径（canonical public identity）。"""
+    def record_affected_file(self, path: str, *, deleted: bool | None = None) -> None:
+        """记录被写入工具修改的文件路径（canonical public identity）。
+
+        ``deleted=True`` 标记该身份在操作后已不存在（unlink / rename 源），
+        ``deleted=False`` 表示确认仍然存活（同轮先删后建时清掉旧标记），
+        ``None`` 表示调用方不携带存活信息、不改动既有标记。
+        回合结束的 MUTATION 事件据此携带删除标记，前端各入口才能同步剔除。
+        """
         from excelmanus.workspace.identity import public_identity, workspace_root_of
 
         public = public_identity(path, workspace_root_of(self))
-        if public and public not in self.affected_files:
+        if not public:
+            return
+        if public not in self.affected_files:
             self.affected_files.append(public)
+        if deleted is True:
+            self.affected_file_deletions.add(public)
+        elif deleted is False:
+            # A later write can recreate the path (e.g. delete + rewrite in the
+            # same turn); the live version wins over the stale deletion mark.
+            self.affected_file_deletions.discard(public)
 
     def remember_file_version(self, path: str, version: str) -> None:
         key = path.replace("\\", "/").lstrip("./").strip()
@@ -270,6 +294,7 @@ class SessionState:
             "last_failure_count": self.last_failure_count,
             "has_write_tool_call": self.has_write_tool_call,
             "affected_files": list(self.affected_files),
+            "affected_file_deletions": sorted(self.affected_file_deletions),
             "session_diagnostics": list(self.session_diagnostics),
             "image_wire_pin_seq": list(self.image_wire_pin_seq or ()),
             "injected_context_fingerprint": self.injected_context_fingerprint,
@@ -278,6 +303,7 @@ class SessionState:
             "compaction_operations": deepcopy(self.compaction_operations[-20:]),
             "file_content_versions": dict(self.file_content_versions),
             "write_operations_log": deepcopy(self.write_operations_log),
+            "delivery": self.delivery.to_dict(),
             "wire_epoch": (
                 dict(self.wire_epoch) if isinstance(self.wire_epoch, dict) else None
             ),
@@ -300,6 +326,12 @@ class SessionState:
         # 旧会话可能仍带 current_write_hint，P1 已删除该状态机，忽略即可。
         state.has_write_tool_call = data.get("has_write_tool_call", False)
         state.affected_files = data.get("affected_files", [])
+        raw_deletions = data.get("affected_file_deletions", [])
+        state.affected_file_deletions = (
+            {str(item) for item in raw_deletions}
+            if isinstance(raw_deletions, (list, tuple, set))
+            else set()
+        )
         state.session_diagnostics = data.get("session_diagnostics", [])
         raw_fp = data.get("injected_context_fingerprint", None)
         state.injected_context_fingerprint = raw_fp if isinstance(raw_fp, str) else None
@@ -332,4 +364,6 @@ class SessionState:
         state.file_content_versions = dict(versions) if isinstance(versions, dict) else {}
         writes = data.get("write_operations_log")
         state.write_operations_log = deepcopy(writes) if isinstance(writes, list) else []
+        from excelmanus.engine_core.delivery import DeliveryLedger
+        state.delivery = DeliveryLedger.from_dict(data.get("delivery"))
         return state

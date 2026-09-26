@@ -163,3 +163,90 @@ def test_json_string_is_rejected_without_compatibility_coercion() -> None:
         validate_workbook_spec(truncated)
     message = str(excinfo.value)
     assert "必须是对象" in message
+
+
+class TestSpecShorthandAliases:
+    """任务复盘回归：收款收据还原任务中模型用同义键/简写被 SPEC_VALIDATION_FAILED 拒绝。"""
+
+    def test_fill_accepts_changeset_style_aliases(self) -> None:
+        data = _minimal_workbook_spec()
+        data["sheets"][0]["styles"]["header"] = {
+            "fill": {"color": "1F4E79", "fill_type": "solid"},
+            "font": {"bold": True, "strikethrough": True},
+        }
+        spec = validate_workbook_spec(data)
+        style = spec.sheets[0].styles["header"]
+        assert style.fill is not None
+        assert (style.fill.type, style.fill.color) == ("solid", "1F4E79")
+        assert style.font is not None and style.font.strike is True
+
+    def test_fill_accepts_pattern_type_and_fg_color(self) -> None:
+        data = _minimal_workbook_spec()
+        data["sheets"][0]["styles"]["header"] = {"fill": {"fgColor": "DCE6F1", "patternType": "solid"}}
+        spec = validate_workbook_spec(data)
+        fill = spec.sheets[0].styles["header"].fill
+        assert fill is not None
+        assert (fill.type, fill.color) == ("solid", "DCE6F1")
+
+    def test_uncertainty_accepts_field_note_and_candidates(self) -> None:
+        data = _minimal_workbook_spec()
+        data["uncertainties"] = [{
+            "field": "A1:F2 标题及表头填充色",
+            "note": "图片深蓝为近似取色 #1F4E79，非精确像素取色",
+            "candidates": ["#1F4E79", "#2F5F8F"],
+        }]
+        spec = validate_workbook_spec(data)
+        item = spec.uncertainties[0]
+        assert item.location == "A1:F2 标题及表头填充色"
+        assert item.reason == "图片深蓝为近似取色 #1F4E79，非精确像素取色"
+        assert item.candidate_values == ["#1F4E79", "#2F5F8F"]
+
+    def test_merge_string_and_size_shorthand_match_documented_hints(self) -> None:
+        data = _minimal_workbook_spec()
+        sheet = data["sheets"][0]
+        sheet["merged_ranges"] = ["A1:B1"]
+        sheet["column_widths"] = {"A": 18, "B": 9}
+        sheet["row_heights"] = [22, 15]
+        spec = validate_workbook_spec(data)
+        parsed = spec.sheets[0]
+        assert parsed.merged_ranges[0].range == "A1:B1"
+        assert parsed.column_widths == [18, 9]
+        assert parsed.row_heights == {"1": 22, "2": 15}
+
+    def test_default_font_accepts_font_name_string(self) -> None:
+        data = _minimal_workbook_spec()
+        data["default_font"] = "微软雅黑"
+        spec = validate_workbook_spec(data)
+        assert spec.default_font is not None
+        assert spec.default_font.name == "微软雅黑"
+
+    def test_extra_fill_field_error_names_legal_shape(self) -> None:
+        data = _minimal_workbook_spec()
+        data["sheets"][0]["styles"]["header"] = {"fill": {"color": "FF0000", "patternFillType": "solid"}}
+        with pytest.raises(SpecValidationError) as excinfo:
+            validate_workbook_spec(data)
+        err = next(e for e in excinfo.value.errors if e["path"].endswith("patternFillType"))
+        assert "fill 只接受" in err["message"]
+        assert "patternFillType" in err["message"]
+
+    def test_uncertainty_missing_required_fields_is_friendly(self) -> None:
+        data = _minimal_workbook_spec()
+        data["uncertainties"] = [{"candidate_values": ["1200"]}]
+        with pytest.raises(SpecValidationError) as excinfo:
+            validate_workbook_spec(data)
+        paths = {e["path"]: e["message"] for e in excinfo.value.errors}
+        assert "uncertainties.0.location" in paths
+        assert "location" in paths["uncertainties.0.location"]
+        assert "reason" in paths["uncertainties.0.location"]
+
+    def test_remediation_preview_reports_total_error_count(self) -> None:
+        data = _minimal_workbook_spec()
+        data["sheets"][0]["styles"].update({
+            name: {"fill": {"color": "1F4E79", "patternFillType": "solid"}}
+            for name in ("title", "subtitle", "total_left", "total_amount")
+        })
+        with pytest.raises(SpecValidationError) as excinfo:
+            validate_workbook_spec(data)
+        payload = excinfo.value.to_payload()
+        assert len(payload["errors"]) > 3
+        assert "完整列表见 errors" in payload["remediation"]

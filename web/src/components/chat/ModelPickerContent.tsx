@@ -1,13 +1,14 @@
 "use client";
 
-import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { AlertCircle, ArrowRight, Check, ChevronRight, Crown, Loader2, Search, Settings2, Sparkles, X } from "lucide-react";
 import { ProviderAvatar } from "@/components/settings/model/ProviderLogo";
 import { requestModelSubTab, type ModelSubTab } from "@/components/settings/model/model-subtab";
-import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
+import { cleanModelDescription, displayModelLabel, formatModelIdForDisplay, isSameModelReference } from "@/lib/model-display";
 import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
 import type { ModelInfo } from "@/lib/types";
 import { useUIStore } from "@/stores/ui-store";
+import { modelProviderId, modelProviderLabels } from "./model-provider";
 import styles from "./ModelPickerContent.module.css";
 
 export interface ModelPickerContentProps {
@@ -39,23 +40,35 @@ export function ModelPickerContent({
   const [search, setSearch] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const positionedOnActiveRef = useRef(false);
   const listId = useId();
   const query = search.trim().toLocaleLowerCase();
-  const activeModel = models.find((model) => model.name === currentModel);
+  const providerLabels = useMemo(() => modelProviderLabels(models), [models]);
   const filtered = useMemo(() => models.filter((model) => {
-    const provider = inferModelBrand(model);
+    const provider = modelProviderId(model);
     return [model.name, model.model, model.display_name, model.resolved_model, model.description,
-      provider, getProviderDisplayName(provider)].some((value) => value?.toLocaleLowerCase().includes(query));
-  }), [models, query]);
-  const pinned = query ? undefined : activeModel;
+      provider, providerLabels.get(provider), inferModelBrand(model)].some((value) => value?.toLocaleLowerCase().includes(query));
+  }), [models, providerLabels, query]);
   const groups = new Map<string, ModelInfo[]>();
   for (const model of filtered) {
-    if (model === pinned) continue;
-    const provider = inferModelBrand(model);
+    const provider = modelProviderId(model);
     const group = groups.get(provider) || [];
     group.push(model);
     groups.set(provider, group);
   }
+
+  // Position the list when the picker opens (or its models finish loading).
+  // Later selection changes must leave the user's current scroll position alone.
+  useLayoutEffect(() => {
+    if (positionedOnActiveRef.current || query || !currentModel) return;
+    const list = listRef.current;
+    const selected = list?.querySelector<HTMLButtonElement>('[data-model-row][data-selected="true"]');
+    if (!list || !selected) return;
+    const listRect = list.getBoundingClientRect();
+    const selectedRect = selected.getBoundingClientRect();
+    list.scrollTop += selectedRect.top - listRect.top - (list.clientHeight - selectedRect.height) / 2;
+    positionedOnActiveRef.current = true;
+  }, [currentModel, filtered, query]);
 
   const navigate = (tab: ModelSubTab) => {
     onClose();
@@ -80,16 +93,17 @@ export function ModelPickerContent({
 
   const renderModel = (model: ModelInfo) => {
     const selected = model.name === currentModel;
-    const provider = inferModelBrand(model);
+    const brand = inferModelBrand(model);
     const label = displayModelLabel(model);
     const modelId = formatModelIdForDisplay(model.resolved_model || model.model);
-    const detail = [modelId !== label ? modelId : "", model.description].filter(Boolean).join(" · ");
+    const description = cleanModelDescription(model.description, [label, model.name, modelId]);
+    const detail = [isSameModelReference(modelId, label) ? "" : modelId, description].filter(Boolean).join(" · ");
     const unhealthy = capsMap[model.name]?.healthy === false;
     return (
       <button key={model.name} type="button" data-model-row="" aria-pressed={selected}
         disabled={switching} onClick={() => onSelect(model.name)}
         className={styles.model} data-selected={selected} title={[label, detail].filter(Boolean).join("\n")}>
-        <ProviderAvatar id={provider} label={getProviderDisplayName(provider)} color={getProviderColor(provider)}
+        <ProviderAvatar id={brand} label={getProviderDisplayName(brand)} color={getProviderColor(brand)}
           className={styles.avatar} iconClassName="h-4 w-4" />
         <span className={styles.modelInfo}>
           <span className={styles.modelName}>{label}</span>
@@ -123,12 +137,8 @@ export function ModelPickerContent({
       </div>
 
       <div ref={listRef} id={listId} className={styles.list} onKeyDown={handleArrowKey} aria-busy={loading || switching}>
-        {pinned && <div className={styles.current}>
-          <div className={styles.sectionLabel}>当前使用</div>
-          {renderModel(pinned)}
-        </div>}
-        {Array.from(groups, ([provider, entries]) => <section key={provider} className={styles.group} aria-label={getProviderDisplayName(provider)}>
-          <div className={styles.sectionLabel}><span>{getProviderDisplayName(provider)}</span><span className={styles.groupCount}>{entries.length}</span></div>
+        {Array.from(groups, ([provider, entries]) => <section key={provider} className={styles.group} aria-label={providerLabels.get(provider) || provider}>
+          <div className={styles.sectionLabel}><span>{providerLabels.get(provider) || provider}</span><span className={styles.groupCount}>{entries.length}</span></div>
           {entries.map(renderModel)}
         </section>)}
         {models.length === 0 && <div className={styles.empty} role="status">

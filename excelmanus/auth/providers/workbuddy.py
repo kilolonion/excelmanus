@@ -578,10 +578,6 @@ class WorkBuddyProvider(AuthProvider, BrowserPollCapable):
         default_id = "auto" if any(m["model"] == "auto" for m in models) else (
             models[0]["model"] if models else "auto"
         )
-        display = next(
-            (m.get("display_name") for m in models if m["model"] == default_id),
-            None,
-        ) or default_id
         profile_name = self.profile_name_for_model(default_id)
         if profile_name in existing_names or profile_name in existing_models:
             return []
@@ -592,7 +588,7 @@ class WorkBuddyProvider(AuthProvider, BrowserPollCapable):
             "model": profile_name,
             "api_key": "",
             "base_url": self._base + "/v2",
-            "description": f"{display} — WorkBuddy 订阅登录（无需 API Key）",
+            "description": "WorkBuddy 订阅登录（无需 API Key）",
             "protocol": self.PROTOCOL,
             "thinking_mode": "auto",
             "model_family": "",

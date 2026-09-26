@@ -434,7 +434,7 @@ def test_uses_adaptive_thinking_for_claude_5_family():
     assert uses_adaptive_thinking("claude-opus-5")
     assert uses_adaptive_thinking("claude-fable-5-1")
     assert uses_adaptive_thinking("claude-opus-4.8")
-    assert not uses_adaptive_thinking("claude-sonnet-4-6")
+    assert uses_adaptive_thinking("claude-sonnet-4-6")
     assert not uses_adaptive_thinking("claude-haiku-4-5")
 
 

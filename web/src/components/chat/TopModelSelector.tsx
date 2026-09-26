@@ -8,7 +8,7 @@ import { Popover } from "radix-ui";
 import { useUIStore } from "@/stores/ui-store";
 import { apiGet } from "@/lib/api";
 import { displayModelLabel } from "@/lib/model-display";
-import { getProviderColor, inferModelBrand } from "@/lib/provider-brand";
+import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
 import { hasProviderLogo, ProviderLogo, providerFallbackInitial } from "@/components/settings/model/ProviderLogo";
@@ -117,7 +117,7 @@ export function TopModelSelector() {
   const activeModel = models.find((model) => model.name === currentModel);
   const displayName = activeModel ? displayModelLabel(activeModel) : currentModel || "选择模型";
   const currentModelUnhealthy = Boolean(currentModel && capsMap[currentModel]?.healthy === false);
-  const activeProvider = activeModel ? inferModelBrand(activeModel) : "unknown";
+  const activeBrand = activeModel ? inferModelBrand(activeModel) : "unknown";
   const pickerProps = {
     models, currentModel, capsMap, switching, loading, loadError, switchError,
     onSelect: handleSwitch,
@@ -130,7 +130,7 @@ export function TopModelSelector() {
       data-coach-id="coach-model-selector" aria-label={`选择模型：${displayName}`}
       aria-haspopup={isMobile ? "dialog" : undefined} aria-expanded={isMobile ? open : undefined}
       onClick={isMobile ? () => setOpen(true) : undefined}>
-      <ModelBrandMark provider={activeProvider} label={displayName} unhealthy={currentModelUnhealthy} />
+      <ModelBrandMark provider={activeBrand} label={activeModel ? getProviderDisplayName(activeBrand) : displayName} unhealthy={currentModelUnhealthy} />
       <AnimatePresence mode="wait" initial={false}>
         <motion.span key={currentModel || "_none"}
           initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }}

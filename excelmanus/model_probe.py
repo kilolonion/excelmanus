@@ -37,11 +37,11 @@ _TINY_PNG_B64 = (
 )
 
 
-def _cap_key(model: str, base_url: str) -> str:
+def _cap_key(model: str, base_url: str, scope: str = "") -> str:
     from excelmanus.auth.providers.registry import strip_managed_prefix
 
     model = strip_managed_prefix(model)
-    raw = f"{model.strip().lower()}|{base_url.strip().rstrip('/')}"
+    raw = f"v2|{model.strip().lower()}|{base_url.strip().rstrip('/')}|{scope}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -49,6 +49,9 @@ def _cap_key(model: str, base_url: str) -> str:
 class ModelCapabilities:
     """模型能力探测结果。"""
 
+    cache_scope: str = ""
+    probe_version: int = 2
+    evidence: dict[str, str] = field(default_factory=dict)
     model: str = ""
     base_url: str = ""
     healthy: bool | None = None
@@ -94,9 +97,9 @@ def capabilities_cache_is_fresh(
     *,
     now: datetime | None = None,
 ) -> bool:
-    """手动覆盖长期有效；自动探测的未知结果和过期结果需要重试。"""
-    if caps.manual_override:
-        return True
+    """Only current observations may suppress another automatic probe."""
+    if caps.probe_version != 2:
+        return False
     if caps.healthy is None or (caps.healthy and any(value is None for value in (
         caps.supports_tool_calling, caps.supports_vision, caps.supports_thinking,
     ))):
@@ -104,7 +107,7 @@ def capabilities_cache_is_fresh(
     raw = str(caps.fresh_until or "").strip()
     if not raw:
         if not caps.detected_at:
-            return caps.healthy is True
+            return False
         raw = caps.detected_at
     try:
         expires = datetime.fromisoformat(raw)
@@ -168,13 +171,13 @@ async def probe_health(
         try:
             if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
                 await asyncio.wait_for(
-                    client.chat.completions.create(model=model, messages=messages),
+                    _probe_create(client, model=model, messages=messages),
                     timeout=timeout,
                 )
             else:
                 await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=model, messages=messages, max_tokens=5,
+                    _probe_create(client,
+                        model=model, messages=messages, **_probe_limits(client, model, 256),
                     ),
                     timeout=timeout,
                 )
@@ -187,102 +190,112 @@ async def probe_health(
     return None, err
 
 
-async def probe_tool_calling(
-    client: Any,
-    model: str,
-    timeout: float = 30.0,
-) -> tuple[bool, str]:
-    """探测模型是否支持 tool calling，返回 (supported, error_msg)。"""
-    tool_def = {
-        "type": "function",
-        "function": {
-            "name": "test_add",
-            "description": "Add two numbers",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"},
-                },
-                "required": ["a", "b"],
-            },
-        },
-    }
-    messages = [{"role": "user", "content": "What is 2+3? Use the tool."}]
-
+async def probe_tool_calling(client: Any, model: str, timeout: float = 30.0) -> tuple[bool | None, str]:
+    """Validate a function call and a complete tool-result roundtrip."""
+    import secrets
+    tool = {"type": "function", "function": {"name": "test_add", "description": "Add two numbers and return a verification code", "parameters": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}, "required": ["a", "b"], "additionalProperties": False}}}
+    messages = [{"role": "user", "content": "Use test_add with a=2 and b=3. Then return the verification code from the tool result verbatim."}]
+    deadline = time.monotonic() + timeout
     try:
-        if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=[tool_def],
-                ),
-                timeout=timeout,
-            )
-        else:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=[tool_def],
-                    max_tokens=100,
-                ),
-                timeout=timeout,
-            )
-
-        # 有些模型即使不 call tool 也不报错，只要不报错就算支持
-        msg = _extract_message(resp)
-        tc = getattr(msg, "tool_calls", None)
+        response = await asyncio.wait_for(_probe_create(client, model=model, messages=messages, tools=[tool], **_probe_limits(client, model, 1024)), timeout=timeout)
+        msg = _extract_message(response)
+        calls = getattr(msg, "tool_calls", None)
+        if not calls or len(calls) != 1:
+            return None, "未观察到唯一工具调用，不能据请求成功判断支持"
+        call = calls[0]
+        fn = getattr(call, "function", None)
+        try:
+            args = json.loads(getattr(fn, "arguments", ""))
+        except (TypeError, ValueError):
+            return None, "工具参数不是合法 JSON"
+        if getattr(fn, "name", "") != "test_add" or args != {"a": 2, "b": 3} or any(isinstance(v, bool) for v in args.values()) or not getattr(call, "id", ""):
+            return None, "工具名称、参数或调用 ID 校验失败"
+        replay = {"role": "assistant", "content": getattr(msg, "content", None), "tool_calls": [{"id": call.id, "type": "function", "function": {"name": "test_add", "arguments": json.dumps(args)}}]}
+        for key in ("reasoning_content", "replay_state", "thinking", "signature"):
+            value = getattr(msg, key, None)
+            if value:
+                replay[key] = value
+        code = secrets.token_hex(6)
+        messages += [replay, {"role": "tool", "tool_call_id": call.id, "content": json.dumps({"sum": 5, "verification_code": code})}]
+        response = await asyncio.wait_for(_probe_create(client, model=model, messages=messages, tools=[tool], **_probe_limits(client, model, 1024)), timeout=max(0.01, deadline-time.monotonic()))
+        final = _extract_message(response)
+        if code not in str(getattr(final, "content", "")) or getattr(final, "tool_calls", None):
+            return None, "模型未正确使用工具结果完成第二轮对话"
         return True, ""
     except Exception as exc:
         err = _err_text(exc)
-        if _is_param_unsupported_error(err):
+        if any(word in err.lower() for word in ("not support", "unsupported", "not allowed", "unknown parameter")) and any(t in err.lower() for t in ("tools", "tool_call", "function calling")) and not _is_fatal_probe_error(err):
             return False, err
-        logger.debug("tool_calling 探测异常: %s", err)
         return None, err
+
+
+def _probe_limits(client: Any, model: str, tokens: int) -> dict:
+    if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
+        return {}
+    from excelmanus.model_catalog import model_spec
+    key = (model_spec(model) or {}).get("token_limit_parameter") or ("max_completion_tokens" if has_token_prefix(model, ("gpt-5", "gpt-6", "o1", "o3", "o4")) else "max_tokens")
+    return {key: tokens}
+
+
+async def _probe_create(client: Any, **kwargs: Any) -> Any:
+    identity = getattr(client, "_capability_identity", {})
+    headers = identity.get("headers", {}) if isinstance(identity, dict) else {}
+    extra_headers = getattr(client, "_capability_extra_headers", None)
+    if isinstance(extra_headers, dict):
+        headers = {**headers, **extra_headers}
+    if headers:
+        kwargs["extra_headers"] = {**headers, **kwargs.get("extra_headers", {})}
+    raw = getattr(client, "_capability_extra_body", "")
+    if isinstance(raw, str) and raw:
+        custom = json.loads(raw)
+        if isinstance(custom, dict):
+            kwargs["extra_body"] = {**custom, **kwargs.get("extra_body", {})}
+    return await client.chat.completions.create(**kwargs)
+
+
+async def close_probe_client(client: Any) -> None:
+    """Release clients owned by manual/background probe jobs."""
+    close = getattr(client, "close", None) or getattr(client, "aclose", None)
+    if callable(close):
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("关闭探测客户端失败", exc_info=True)
 
 
 async def probe_vision(
     client: Any,
     model: str,
     timeout: float = 30.0,
-) -> tuple[bool, str]:
-    """探测模型是否支持图片输入。"""
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Describe this image in one word."},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{_TINY_PNG_B64}",
-                    },
-                },
-            ],
-        }
-    ]
+) -> tuple[bool | None, str]:
+    """探测并验证实际图片内容识别。"""
+    # Unannounced randomized colours distinguish actual perception from a
+    # provider merely accepting/ignoring an image part.
+    import base64
+    import io
+    import secrets
+    from PIL import Image, ImageDraw
+    palette = {"red": (255,0,0), "blue": (0,0,255), "green": (0,255,0), "yellow": (255,255,0)}
+    left, right = secrets.SystemRandom().sample(list(palette), 2)
+    picture = Image.new("RGB", (96, 48), palette[left])
+    ImageDraw.Draw(picture).rectangle((48, 0, 95, 47), fill=palette[right])
+    buffer = io.BytesIO()
+    picture.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Name the colour of the left half, then the right half. Reply only as two English colour names separated by a comma."},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}},
+    ]}]
 
     try:
-        if isinstance(client, GeminiClient):
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(model=model, messages=messages),
-                timeout=timeout,
-            )
-        elif isinstance(client, (ClaudeClient, OpenAIResponsesClient)):
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(model=model, messages=messages),
-                timeout=timeout,
-            )
-        else:
-            resp = await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model, messages=messages, max_tokens=20,
-                ),
-                timeout=timeout,
-            )
-        return True, ""
+        resp = await asyncio.wait_for(_probe_create(client, model=model, messages=messages, **_probe_limits(client, model, 256)), timeout=timeout)
+        content = str(getattr(_extract_message(resp), "content", "") or "").strip().lower()
+        colours = re.findall(r"\b(?:red|blue|green|yellow)\b", content)
+        if colours == [left, right]:
+            return True, ""
+        return None, "图片请求被接受，但内容识别未通过；能力未知"
     except Exception as exc:
         err = _err_text(exc)
         # ── ResponsesAPIError：利用 HTTP 状态码精确分类 ──
@@ -327,11 +340,15 @@ async def probe_thinking(
       - "disabled"：跳过探测，返回不支持
       - 其他值：跳过探测，直接信任用户配置
     """
-    # 用户显式指定 thinking_mode 时，跳过探测直接信任
+    if thinking_mode == "disabled":
+        return None, "已配置关闭思考；未验证模型推理能力", ""
     if thinking_mode not in ("auto", ""):
-        if thinking_mode == "disabled":
-            return False, "", ""
-        return True, "", thinking_mode
+        from excelmanus.engine_types import ThinkingConfig
+        from excelmanus.providers.thinking import compile_thinking
+        protocol = "anthropic" if isinstance(client, ClaudeClient) else "gemini" if isinstance(client, GeminiClient) else "openai_responses" if isinstance(client, OpenAIResponsesClient) else "openai"
+        kwargs = compile_thinking(model, base_url, protocol, thinking_mode, ThinkingConfig(effort="low", budget_tokens=2048))
+        ok, err = await _try_thinking_stream(client, model, [{"role":"user", "content":"What is 17*23?"}], timeout, kwargs)
+        return (True, "", thinking_mode) if ok else (None, err or "未观察到推理摘要；不代表不支持内部推理", "")
 
     messages = [{"role": "user", "content": "What is 17*23? Think step by step."}]
 
@@ -370,7 +387,7 @@ async def _probe_claude_thinking(
         return True, "", "claude"
     if err and (_is_fatal_probe_error(err) or not _is_param_unsupported_error(err)):
         return None, err, ""
-    return False, err, ""
+    return None, err or "未观察到推理摘要", ""
 
 
 async def _probe_gemini_thinking(
@@ -380,14 +397,19 @@ async def _probe_gemini_thinking(
     timeout: float,
 ) -> tuple[bool | None, str, str]:
     """Gemini thinking 探测。"""
-    ok, err = await _try_thinking_stream(
-        client, model, messages, timeout, {"_thinking_budget": 2048},
-    )
+    from excelmanus.model_catalog import model_spec
+    from excelmanus.engine_types import ThinkingConfig
+    from excelmanus.providers.thinking import compile_thinking
+    spec = model_spec(model)
+    kwargs = compile_thinking(model, "https://generativelanguage.googleapis.com", "gemini", "auto",
+                              ThinkingConfig(effort="low", budget_tokens=2048)) if spec else {
+        "extra_body": {"thinkingConfig": {"thinkingBudget": 2048, "includeThoughts": True}}}
+    ok, err = await _try_thinking_stream(client, model, messages, timeout, kwargs)
     if ok:
-        return True, "", "gemini"
+        return True, "", (spec or {}).get("reasoning", {}).get("dialect", "gemini")
     if err and (_is_fatal_probe_error(err) or not _is_param_unsupported_error(err)):
         return None, err, ""
-    return False, err, ""
+    return None, err or "未观察到推理摘要", ""
 
 
 async def _probe_openai_thinking(
@@ -438,7 +460,7 @@ async def _probe_openai_thinking(
         logger.debug("所有思考探测策略均失败 (provider=%s): %s", provider, last_err)
     if inconclusive:
         return None, last_err, ""
-    return False, last_err, ""
+    return None, last_err or "未观察到推理摘要；不代表不支持内部推理", ""
 
 
 async def run_full_probe(
@@ -457,16 +479,21 @@ async def run_full_probe(
     stage_callback: Any = None,
     source: str = "",
     canonical_model: str = "",
+    custom_extra_body: str = "",
+    custom_extra_headers: dict | None = None,
 ) -> ModelCapabilities:
     """运行完整的三项能力探测，返回 ModelCapabilities。
 
     如果 db 中有缓存且 skip_if_cached=True，直接返回缓存。
     canonical_model 非空时，缓存读取回退到规范模型名，思考策略探测也以其为提示。
     """
-    cap_id = _cap_key(model, base_url)
+    from excelmanus.capability_identity import scope_from_client
+    client._capability_extra_body = custom_extra_body
+    client._capability_extra_headers = custom_extra_headers or {}
+    scope = scope_from_client(client, model, base_url, thinking_mode, custom_extra_body, custom_extra_headers)
 
     if skip_if_cached and db is not None:
-        cached = load_capabilities(db, model, base_url, canonical_model=canonical_model)
+        cached = load_capabilities(db, model, base_url, scope=scope)
         if cached is not None and capabilities_cache_is_fresh(cached):
             logger.info(
                 "模型 %s 能力探测已缓存（tool=%s, vision=%s, thinking=%s）",
@@ -484,6 +511,7 @@ async def run_full_probe(
 
     logger.info("开始探测模型 %s 的能力...", model)
     caps = ModelCapabilities(
+        cache_scope=scope,
         model=model,
         base_url=base_url,
         detected_at=datetime.now(tz=timezone.utc).isoformat(),
@@ -540,6 +568,7 @@ async def run_full_probe(
     caps.supports_tool_calling = tool_ok
     caps.supports_vision = vision_ok
     caps.supports_thinking = thinking_ok
+    caps.evidence = {"supports_tool_calling": "tool_roundtrip" if tool_ok is True else "explicit_rejection" if tool_ok is False else "inconclusive", "supports_vision": "image_content_test" if vision_ok is True else "explicit_rejection" if vision_ok is False else "inconclusive", "supports_thinking": "observed_summary" if thinking_ok is True else "inconclusive"}
     caps.thinking_type = thinking_type
 
     if tool_err:
@@ -580,7 +609,7 @@ async def run_full_probe(
 
 def save_capabilities(db: Any, caps: ModelCapabilities) -> None:
     """将能力探测结果存入 config_kv 表。"""
-    key = f"model_caps:{_cap_key(caps.model, caps.base_url)}"
+    key = f"model_caps:{_cap_key(caps.model, caps.base_url, caps.cache_scope)}"
     try:
         db.conn.execute(
             "INSERT OR REPLACE INTO config_kv (key, value, updated_at) VALUES (?, ?, ?)",
@@ -591,33 +620,34 @@ def save_capabilities(db: Any, caps: ModelCapabilities) -> None:
         logger.warning("保存模型能力探测结果失败", exc_info=True)
 
 
-def load_capabilities(
-    db: Any,
-    model: str,
-    base_url: str,
-    canonical_model: str = "",
-) -> ModelCapabilities | None:
-    """从 config_kv 表加载缓存的能力探测结果。
-
-    canonical_model 非空且真实坐标无缓存时，回退读规范模型名的缓存，
-    返回值的 model/base_url 仍改写为真实坐标供请求编译使用。
-    """
-    caps = _load_capabilities_row(db, model, base_url)
-    if caps is not None:
-        return caps
-    if canonical_model and canonical_model != model:
-        caps = _load_capabilities_row(db, canonical_model, base_url)
-        if caps is not None:
-            caps.model = model
-            caps.base_url = base_url
-            if not caps.source:
-                caps.source = "canonical"
-        return caps
+def load_capabilities(db: Any, model: str, base_url: str, canonical_model: str = "", *, scope: str = "") -> ModelCapabilities | None:
+    """Load only an observation for the exact endpoint identity; never a canonical alias."""
+    caps = _load_capabilities_row(db, model, base_url, scope=scope)
+    if caps is not None and caps.probe_version == 2:
+        try:
+            expires = datetime.fromisoformat(caps.fresh_until)
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if datetime.now(tz=timezone.utc) < expires:
+                return caps
+        except (ValueError, TypeError):
+            pass
+        if caps.manual_override:
+            # A user declaration does not extend the life of unrelated probes.
+            caps.healthy = None
+            caps.health_error = ""
+            for name in ("supports_tool_calling", "supports_vision", "supports_thinking"):
+                if caps.evidence.get(name) != "user_override":
+                    setattr(caps, name, None)
+                    caps.evidence.pop(name, None)
+            if caps.supports_thinking is None:
+                caps.thinking_type = ""
+            return caps
     return None
 
 
-def _load_capabilities_row(db: Any, model: str, base_url: str) -> ModelCapabilities | None:
-    key = f"model_caps:{_cap_key(model, base_url)}"
+def _load_capabilities_row(db: Any, model: str, base_url: str, *, scope: str = "") -> ModelCapabilities | None:
+    key = f"model_caps:{_cap_key(model, base_url, scope)}"
     try:
         row = db.conn.execute(
             "SELECT value FROM config_kv WHERE key = ?", (key,)
@@ -629,9 +659,9 @@ def _load_capabilities_row(db: Any, model: str, base_url: str) -> ModelCapabilit
     return None
 
 
-def delete_capabilities(db: Any, model: str, base_url: str) -> None:
+def delete_capabilities(db: Any, model: str, base_url: str, *, scope: str = "") -> None:
     """删除指定模型的能力缓存，强制下次重新探测。"""
-    key = f"model_caps:{_cap_key(model, base_url)}"
+    key = f"model_caps:{_cap_key(model, base_url, scope)}"
     try:
         db.conn.execute("DELETE FROM config_kv WHERE key = ?", (key,))
         db.conn.commit()
@@ -644,15 +674,17 @@ def update_capabilities_override(
     model: str,
     base_url: str,
     overrides: dict[str, Any],
+    *, scope: str = "",
 ) -> ModelCapabilities | None:
     """手动覆盖特定能力标记（前端设置用）。"""
-    caps = load_capabilities(db, model, base_url)
+    caps = load_capabilities(db, model, base_url, scope=scope)
     if caps is None:
-        caps = ModelCapabilities(model=model, base_url=base_url)
+        caps = ModelCapabilities(model=model, base_url=base_url, cache_scope=scope)
 
     for k, v in overrides.items():
-        if hasattr(caps, k):
+        if k in {"supports_tool_calling", "supports_vision", "supports_thinking"} and isinstance(v, bool):
             setattr(caps, k, v)
+            caps.evidence[k] = "user_override"
     caps.manual_override = True
     caps.detected_at = datetime.now(tz=timezone.utc).isoformat()
     _mark_freshness(caps, source="override")
@@ -938,14 +970,14 @@ async def _try_thinking_stream(
             **extra_kwargs,
         }
         if not isinstance(client, (OpenAIResponsesClient, ClaudeClient, GeminiClient)):
-            request_kwargs["max_tokens"] = 300
+            request_kwargs.update(_probe_limits(client, model, 1024))
             # Claude 兼容代理要求输出上限大于显式 thinking budget。
             thinking = (extra_kwargs.get("extra_body") or {}).get("thinking")
             budget = thinking.get("budget_tokens", 0) if isinstance(thinking, dict) else 0
             if isinstance(budget, int) and budget > 0:
                 request_kwargs["max_tokens"] = budget + 300
         stream = await asyncio.wait_for(
-            client.chat.completions.create(**request_kwargs),
+            _probe_create(client, **request_kwargs),
             timeout=timeout,
         )
 
@@ -1008,7 +1040,7 @@ async def query_model_context_window(
     """尝试从 provider API 查询模型的上下文窗口大小。
 
     支持的 provider：
-      - OpenAI: GET /v1/models/{model} → context_window 字段
+      - 部分兼容服务扩展 /models/{model} 提供 context_window（OpenAI 不保证该字段）
       - Mistral: GET /v1/models/{model} → max_context_length 字段
       - 其他 provider: 通常不支持，返回 None
 
@@ -1029,7 +1061,7 @@ async def query_model_context_window(
             client.models.retrieve(model),
             timeout=timeout,
         )
-        # OpenAI 返回 context_window（int）
+        # 部分兼容服务扩展返回 context_window（int）
         ctx = getattr(resp, "context_window", None)
         if isinstance(ctx, int) and ctx > 0:
             logger.info("从 API 查询到模型 %s 上下文窗口: %d tokens", model, ctx)
@@ -1063,66 +1095,10 @@ async def probe_context_window(
     base_url: str = "",
     timeout: float = 30.0,
 ) -> int | None:
-    """探测模型实际上下文窗口大小（二分法，耗时较长）。
+    """Read an upstream-declared window; do not infer a limit from padded requests.
 
-    策略：发送渐增长度的 padding 消息，找到被拒绝的边界。
-    仅作为手动 /probe context 命令使用，不在启动时自动执行。
-
-    返回探测到的 token 上限（近似值），失败返回 None。
+    A successful request can be silently truncated and approximate token counts
+    differ between providers. It cannot establish a true model context limit.
+    Documented limits and local transport budgets live in model_catalog.
     """
-    # 第一步：先尝试 API 查询（零成本）
-    api_result = await query_model_context_window(client, model, base_url, timeout)
-    if api_result is not None:
-        return api_result
-
-    # 第二步：二分法探测
-    # 起始范围：4k ~ 2M tokens
-    lo, hi = 4_000, 2_000_000
-    last_ok: int | None = None
-
-    # 构造 padding 消息（每个 "a " ≈ 1 token）
-    def _make_messages(token_count: int) -> list[dict]:
-        padding = "a " * token_count
-        return [{"role": "user", "content": padding}]
-
-    for _ in range(12):  # 最多 12 轮二分（精度 ~0.02%）
-        if hi - lo < 2000:
-            break
-        mid = (lo + hi) // 2
-        messages = _make_messages(mid)
-        try:
-            if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
-                await asyncio.wait_for(
-                    client.chat.completions.create(model=model, messages=messages),
-                    timeout=timeout,
-                )
-            else:
-                await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=model, messages=messages, max_tokens=1,
-                    ),
-                    timeout=timeout,
-                )
-            # 成功 → 当前长度在窗口内
-            last_ok = mid
-            lo = mid
-        except Exception as exc:
-            err_str = _err_text(exc).lower()
-            # 上下文超限 → 当前长度超出窗口
-            ctx_keywords = (
-                "context_length", "too many tokens", "max_tokens",
-                "token limit", "request too large", "payload too large",
-                "reduce the length", "reduce your prompt", "maximum context",
-            )
-            if any(kw in err_str for kw in ctx_keywords):
-                hi = mid
-            else:
-                # 非上下文错误（网络、鉴权等），中止探测
-                logger.debug("上下文窗口探测遇到非预期错误，中止: %s", exc)
-                break
-
-    if last_ok is not None:
-        # 实际窗口略大于 last_ok（还需留空给输出），返回 last_ok 作为保守估计
-        logger.info("二分法探测模型 %s 上下文窗口: ~%d tokens", model, last_ok)
-        return last_ok
-    return None
+    return await query_model_context_window(client, model, base_url, timeout)

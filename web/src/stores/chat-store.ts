@@ -27,6 +27,7 @@ import {
   toPublicFileIdentity,
 } from "@/lib/file-identity";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
+import { historyAssistantContent, normalizeTaskItems, restoreTaskLists } from "@/lib/history-blocks";
 import {
   blocksHaveProgress,
   dedupeFailureGuidance,
@@ -166,8 +167,7 @@ const _ALL_WRITE_TOOL_NAMES = new Set([
 
 const _MAX_DIFFS_IN_STORE = 500;
 
-// 仅由 SSE 事件产生的块类型，不持久化到后端消息存储。
-// 从后端刷新时，必须从已有缓存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 时 thinking 块消失）。
+// SSE 提供的展示块；部分可从历史重建，其余从缓存补齐。
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent", "task_list",
   // verification_report 仅出现在历史缓存中，保留以便刷新时不丢旧卡片
@@ -178,7 +178,7 @@ const _SSE_ONLY_BLOCK_TYPES = new Set([
 
 /**
  * 将仅由 SSE 产生的块（thinking、iteration、approval_action、subagent）从 oldMessages 合并到 newMessages，
- * 使后端刷新不会丢失块数据。在 assistant 消息间按位置保留。
+ * 使后端刷新不会丢失块数据。按消息和块身份合并，不能按位置消费后端块。
  */
 function _preserveSseOnlyBlocks(
   oldMessages: Message[],
@@ -186,93 +186,116 @@ function _preserveSseOnlyBlocks(
 ): Message[] {
   const oldById = new Map(oldMessages.map((message) => [message.id, message]));
   const oldUsers = oldMessages.filter((message) => message.role === "user");
+  const assistantsByTool = new Map<string, Extract<Message, { role: "assistant" }>>();
   const assistantsByUser = new Map<string, Extract<Message, { role: "assistant" }>>();
   let previousUser = "";
   for (const message of oldMessages) {
     if (message.role === "user") previousUser = message.id;
-    else if (previousUser) assistantsByUser.set(previousUser, message);
+    else {
+      if (previousUser) assistantsByUser.set(previousUser, message);
+      for (const block of message.blocks) {
+        if (block.type === "tool_call" && block.toolCallId) assistantsByTool.set(block.toolCallId, message);
+      }
+    }
   }
   let matchingUser: string | undefined;
   const result = newMessages.map((msg) => {
     const exact = oldById.get(msg.id);
     if (msg.role === "user") {
-      const old = exact?.role === "user" ? exact
-        : oldUsers.findLast((user) => user.content === msg.content);
+      const matches = oldUsers.filter((user) => user.content === msg.content);
+      const old = exact?.role === "user" ? exact : matches.length === 1 ? matches[0] : undefined;
       matchingUser = old?.id;
       return old?.files?.length && !msg.files?.length ? { ...msg, files: old.files } : msg;
     }
     if (msg.role !== "assistant") return msg;
+    const toolMatch = msg.blocks.flatMap((block) => block.type === "tool_call" && block.toolCallId
+      ? [assistantsByTool.get(block.toolCallId)] : []).find(Boolean);
     const old = exact?.role === "assistant" ? exact
-      : matchingUser ? assistantsByUser.get(matchingUser) : undefined;
+      : toolMatch ?? (matchingUser ? assistantsByUser.get(matchingUser) : undefined);
     const oldBlocks = old?.blocks;
     if (!oldBlocks) return msg;
 
-    // 鎸?toolCallId 寤虹珛鏃?tool_call 鍧楁槧灏勶紝鐢ㄤ簬鐘舵€佹仮澶嶃€?
-    // SSE 浜嬩欢鎼哄甫鐨勭姸鎬侊紙error/result/status锛夋瘮鍚庣鎸佷箙鍖栨洿瀹屾暣锛屾鏄犲皠鐢ㄤ簬寤剁画璇ョ姸鎬併€?
-    const oldToolCallMap = new Map<string, AssistantBlock>();
-    for (const ob of oldBlocks) {
-      if (ob.type === "tool_call" && ob.toolCallId) {
-        oldToolCallMap.set(ob.toolCallId, ob);
-      }
-    }
-
     const recovered = blocksHaveProgress(msg.blocks);
-    const sseBlocks = oldBlocks.filter((b) => {
-      if (!_SSE_ONLY_BLOCK_TYPES.has(b.type)) return false;
-      if (recovered && isFailureGuidanceBlock(b)) return false;
-      return true;
-    });
-    if (sseBlocks.length === 0 && oldToolCallMap.size === 0) return msg;
-
-    // 浠ユ棫鍧楅『搴忎负妯℃澘锛氫繚鐣欎粎 SSE 鐨勫潡涓嶅姩锛岀敤鍒锋柊鍚庣殑鍧楁浛鎹㈠悗绔寔涔呭寲鐨勫潡銆?
-    // 只移除身份匹配的持久化失败，不能按位置消费后端块（可能吞掉工具结果）。
-    const preservedFailures = sseBlocks.filter(isFailureGuidanceBlock);
-    const newBackendBlocks = msg.blocks.filter((nb) =>
-      !isFailureGuidanceBlock(nb) || !preservedFailures.some((old) => isSameFailure(old, nb)),
-    ).map((nb) => {
-      // 寤剁画 SSE 浜х敓鐨?tool_call 鐘舵€侊紙閿欒鐘舵€併€佺粨鏋溿€侀敊璇俊鎭級锛屽悗绔浆鎹㈠彲鑳藉凡涓㈠け銆?
-      if (
-        nb.type === "tool_call"
-        && nb.toolCallId
-        && oldToolCallMap.has(nb.toolCallId)
-      ) {
-        const ob = oldToolCallMap.get(nb.toolCallId)!;
-        if (ob.type === "tool_call") {
-          // 鑻ユ棫鍧椾负閿欒鐘舵€佸垯淇濈暀锛堝悗绔宸茶В鏋愯皟鐢ㄦ€绘槸杩斿洖 "success"锛夈€?
-          if (ob.status === "error" && nb.status === "success") {
-            return { ...nb, status: ob.status, result: ob.result, error: ob.error };
-          }
-          // 鑻ユ柊鍧楃己灏戠粨鏋滄枃鏈垯娌跨敤鏃х殑
-          if (!nb.result && ob.result) {
-            return { ...nb, result: ob.result };
-          }
-        }
+    const sameReasoning = (left: string, right: string): boolean => {
+      if (!left || !right) return false;
+      if (left === right) return true;
+      return (left.length >= 2000 && right.startsWith(left))
+        || (right.length >= 2000 && left.startsWith(right));
+    };
+    const matchesBlock = (old: AssistantBlock, next: AssistantBlock): boolean => {
+      if ((old.type === "thinking" && next.type === "thinking")
+        || (old.type === "reasoning_notice" && next.type === "reasoning_notice")) {
+        const oldContent = old.content;
+        const nextContent = next.content;
+        const oldIteration = old.iteration;
+        const nextIteration = next.iteration;
+        return (oldIteration === undefined || nextIteration === undefined || oldIteration === nextIteration)
+          && sameReasoning(oldContent, nextContent);
       }
-      return nb;
-    });
-
-    if (sseBlocks.length === 0) {
-      // 鏃犱粎 SSE 鐨勫潡闇€瑕佹寜浣嶅悎骞讹紝浣嗕笂闈㈠彲鑳藉凡淇ˉ浜?tool_call 鐘舵€併€?
-      return { ...msg, blocks: newBackendBlocks };
-    }
-
-    let ni = 0;
+      // ``reasoning_notice`` is a legacy projection of the same provider
+      // reasoning that modern clients render as ``thinking``.  Treat the two
+      // shapes as one block while merging a cold history snapshot.
+      if ((old.type === "reasoning_notice" && next.type === "thinking")
+        || (old.type === "thinking" && next.type === "reasoning_notice")) {
+        const oldContent = old.content;
+        const nextContent = next.content;
+        const oldIteration = old.iteration;
+        const nextIteration = next.iteration;
+        return (oldIteration === undefined || nextIteration === undefined || oldIteration === nextIteration)
+          && sameReasoning(oldContent, nextContent);
+      }
+      if (old.type !== next.type) return false;
+      if (old.type === "tool_call" && next.type === "tool_call") {
+        return Boolean(old.toolCallId && old.toolCallId === next.toolCallId);
+      }
+      if (old.type === "text" && next.type === "text") {
+        return old.content === next.content || Boolean(old.content && next.content.startsWith(old.content));
+      }
+      if (old.type === "task_list") return true;
+      if (old.type === "file_download" && next.type === "file_download") {
+        return old.filePath === next.filePath;
+      }
+      return isFailureGuidanceBlock(old) && isFailureGuidanceBlock(next) && isSameFailure(old, next);
+    };
+    let cursor = 0;
     const merged: AssistantBlock[] = [];
-
-    for (const ob of oldBlocks) {
-      if (_SSE_ONLY_BLOCK_TYPES.has(ob.type)) {
-        if (recovered && isFailureGuidanceBlock(ob)) continue;
-        merged.push(ob);
-      } else {
-        if (ni < newBackendBlocks.length) {
-          merged.push(newBackendBlocks[ni++]);
+    for (const oldBlock of oldBlocks) {
+      if (recovered && isFailureGuidanceBlock(oldBlock)) continue;
+      const index = msg.blocks.findIndex((block, i) => i >= cursor && matchesBlock(oldBlock, block));
+      if (index >= 0) {
+        merged.push(...msg.blocks.slice(cursor, index));
+        let block = msg.blocks[index];
+        if (oldBlock.type === "thinking" && block.type === "thinking") {
+          // Keep measured timing without duplicating reasoning restored from the server.
+          block = { ...block, duration: oldBlock.duration };
+        } else if (oldBlock.type === "tool_call" && block.type === "tool_call") {
+          block = { ...block, executionId: oldBlock.executionId, executionState: oldBlock.executionState,
+            parentCallId: block.parentCallId ?? oldBlock.parentCallId,
+            result: block.result || oldBlock.result };
+          if (oldBlock.status === "error" && block.status === "success") {
+            block = { ...block, status: "error", result: oldBlock.result, error: oldBlock.error };
+          }
+        } else if (isFailureGuidanceBlock(oldBlock)) {
+          block = oldBlock;
         }
+        merged.push(block);
+        cursor = index + 1;
+      } else if (_SSE_ONLY_BLOCK_TYPES.has(oldBlock.type)) {
+        // A partial cache must not reinsert stale copies of durable cards.
+        if ((oldBlock.type === "thinking" || oldBlock.type === "task_list")
+          && msg.blocks.some((block) => block.type === oldBlock.type)) continue;
+        if (oldBlock.type === "reasoning_notice"
+          && msg.blocks.some((block) => block.type === "thinking"
+            && (oldBlock.iteration === undefined || block.iteration === undefined || oldBlock.iteration === block.iteration)
+            && sameReasoning(oldBlock.content, block.content))) continue;
+        if (oldBlock.type === "task_list" && msg.blocks.some((block) => block.type === "tool_call" && block.taskList?.length)) continue;
+        merged.push(oldBlock);
+      } else if (oldBlock.type === "tool_call" && oldBlock.parentCallId
+        && msg.blocks.some((block) => block.type === "tool_call" && block.toolCallId === oldBlock.parentCallId)) {
+        merged.push(oldBlock);
       }
     }
-    // 杩藉姞鍓╀綑鐨勬柊鍧楋紙濡傛棫娑堟伅涓渶鍚庝竴涓粎 SSE 鍧椾箣鍚庢柊澧炵殑 tool_calls锛夈€?
-    while (ni < newBackendBlocks.length) {
-      merged.push(newBackendBlocks[ni++]);
-    }
+    merged.push(...msg.blocks.slice(cursor));
 
     return { ...msg, blocks: merged };
   });
@@ -502,7 +525,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
         timestamp: _resolveBackendTimestamp(msg),
       };
       const dispatch = msg._dispatch as Record<string, unknown> | undefined;
-      if (dispatch && typeof dispatch.dispatch_id === "string") {
+      if (dispatch && typeof dispatch.dispatch_id === "string" && dispatch.dispatch_ui !== false) {
         userMsg.dispatchId = dispatch.dispatch_id;
         userMsg.dispatchMode = dispatch.dispatch_mode as import("@/lib/types").MessageDispatchMode;
         userMsg.dispatchStatus = "applied";
@@ -522,9 +545,11 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
     } else if (role === "assistant") {
       const blocks: AssistantBlock[] = [];
       const affectedFilePaths = new Set<string>();
-      if (msg.content && typeof msg.content === "string") {
-        const hydrated = hydrateFailureGuidanceFromText(msg.content);
-        blocks.push(hydrated ?? { type: "text", content: msg.content });
+      const content = historyAssistantContent(msg);
+      if (content.thinking) blocks.push({ type: "thinking", content: content.thinking });
+      if (content.text) {
+        const hydrated = hydrateFailureGuidanceFromText(content.text);
+        blocks.push(hydrated ?? { type: "text", content: content.text });
       }
       if (Array.isArray(msg.tool_calls)) {
         for (const tc of msg.tool_calls as Record<string, unknown>[]) {
@@ -534,7 +559,8 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
           const toolName = (fn?.name as string) ?? "unknown";
           let args: Record<string, unknown> = {};
           try {
-            args = fn?.arguments ? JSON.parse(fn.arguments as string) : {};
+            const parsed = typeof fn?.arguments === "string" ? JSON.parse(fn.arguments) : fn?.arguments;
+            args = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
           } catch {
             args = {};
           }
@@ -550,6 +576,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             status: hasResult ? (isError ? "error" : "success") : "error",
             result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
             parentCallId,
+            ...(tc.task_list ? { taskList: normalizeTaskItems(tc.task_list) } : {}),
           });
           // 从 offer_download 结果恢复 file_download 块（兼容旧 _file_download 与提升后的顶层字段）
           if (toolName === "offer_download" && hasResult && tcId) {
@@ -604,6 +631,9 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
           }
         }
       }
+      for (let index = 0; index < blocks.length; index++) {
+        blocks[index] = { ...blocks[index], historyKey: `${backendMessageId}:${index}` };
+      }
       const prev = result[result.length - 1];
       if (prev && prev.role === "assistant") {
         prev.blocks = [...prev.blocks, ...blocks];
@@ -646,7 +676,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
     }
   }
   return {
-    messages: result,
+    messages: restoreTaskLists(result),
     recoveredDiffs,
     recoveredFilePaths: Array.from(recoveredFilePaths),
   };
@@ -654,30 +684,36 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
 
 /** Merge two chronological UI pages without duplicating overlap rows. */
 function _mergeMessagePages(older: Message[], newer: Message[]): Message[] {
+  const mergeAssistant = (previous: Extract<Message, { role: "assistant" }>, next: Extract<Message, { role: "assistant" }>): Message => {
+    const keys = new Set(next.blocks.flatMap((block) => block.historyKey ? [block.historyKey] : []));
+    const calls = new Set(next.blocks.flatMap((block) => block.type === "tool_call" && block.toolCallId ? [block.toolCallId] : []));
+    return { ...previous, blocks: [
+      ...previous.blocks.filter((block) => !(block.historyKey && keys.has(block.historyKey))
+        && !(block.type === "tool_call" && block.toolCallId && calls.has(block.toolCallId))),
+      ...next.blocks,
+    ], affectedFiles: mergeAffectedFiles(previous.affectedFiles ?? [], next.affectedFiles ?? []) };
+  };
   const merged = [...older];
   const indexById = new Map(merged.map((message, index) => [message.id, index]));
   for (const message of newer) {
     const existingIndex = indexById.get(message.id);
     if (existingIndex !== undefined) {
       // The newer page has the authoritative tool-call status/result.
-      merged[existingIndex] = message;
+      const previous = merged[existingIndex];
+      merged[existingIndex] = previous.role === "assistant" && message.role === "assistant"
+        ? mergeAssistant(previous, message) : message;
       continue;
     }
     const previous = merged[merged.length - 1];
     if (previous?.role === "assistant" && message.role === "assistant") {
-      merged[merged.length - 1] = {
-        ...previous,
-        blocks: [...previous.blocks, ...message.blocks],
-        timestamp: previous.timestamp ?? message.timestamp,
-        affectedFiles: mergeAffectedFiles(previous.affectedFiles ?? [], message.affectedFiles ?? []),
-      };
+      merged[merged.length - 1] = mergeAssistant(previous, message);
       indexById.set(message.id, merged.length - 1);
       continue;
     }
     indexById.set(message.id, merged.length);
     merged.push(message);
   }
-  return merged;
+  return restoreTaskLists(merged);
 }
 
 function _mergeRecoveredExcelState(
@@ -944,11 +980,14 @@ async function _loadMessagesAsyncWithOptions(
               if (cb.type !== fb.type) { equiv = false; break; }
               if (cb.type === "tool_call" && fb.type === "tool_call") {
                 equiv = cb.status === fb.status && cb.toolCallId === fb.toolCallId
-                  && cb.result === fb.result && cb.error === fb.error;
+                  && cb.result === fb.result && cb.error === fb.error
+                  && JSON.stringify(cb.taskList) === JSON.stringify(fb.taskList);
               } else if (cb.type === "text" && fb.type === "text") {
                 equiv = cb.content === fb.content;
               } else if (cb.type === "thinking" && fb.type === "thinking") {
-                equiv = cb.content === fb.content;
+                equiv = cb.content === fb.content && cb.duration === fb.duration;
+              } else if (cb.type === "task_list" && fb.type === "task_list") {
+                equiv = JSON.stringify(cb.items) === JSON.stringify(fb.items);
               }
             }
           }
@@ -1587,6 +1626,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const controller = new AbortController();
     _sessionLoadController = controller;
     const version = ++_switchSessionVersion;
+    const turnVersion = _localTurnVersion;
     const isCurrent = () => !controller.signal.aborted && version === _switchSessionVersion
       && get().loadedSessionId === sessionId;
     useJevStore.getState().reset();
@@ -1622,10 +1662,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!cached?.length) {
       void loadCachedMessages(sessionId).then((messages) => {
         const latest = get();
-        if (!isCurrent() || !messages?.length || !latest.isLoadingMessages
+        if (!isCurrent() || turnVersion !== _localTurnVersion || !messages?.length
           || latest.abortController || latest.isStreaming) return;
-        _cacheSessionMessages(sessionId, messages);
-        set({ ..._setMessagesSnapshot(messages), isLoadingMessages: false });
+        if (latest.isLoadingMessages) {
+          _cacheSessionMessages(sessionId, messages);
+          set({ ..._setMessagesSnapshot(messages), isLoadingMessages: false });
+        } else if (latest.messages.length > 0) {
+          // HTTP may win the race. Still recover cached UI-only cards/timing,
+          // while retaining the server's messages, text and task progress.
+          const merged = _preserveSseOnlyBlocks(messages, latest.messages);
+          _cacheSessionMessages(sessionId, merged);
+          set(_setMessagesSnapshot(merged));
+          saveCachedMessages(sessionId, merged).catch(() => {});
+        }
       }).catch(() => {});
     }
     void refreshSessionMessagesFromBackend(sessionId);

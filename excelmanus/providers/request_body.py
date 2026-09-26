@@ -24,6 +24,15 @@ def claude_body(model: str, messages: list, tools: Any = None, *, tool_choice: A
         body["tool_choice"] = choice
     if extra_body:
         body.update(_strip_non_claude_extra_body(extra_body))
+    if max_tokens is not None and max_tokens > 0:
+        # Thinking defaults must not silently enlarge a user-specified output cap.
+        body["max_tokens"] = max_tokens
+        thinking = body.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            if max_tokens <= 1024:
+                body.pop("thinking", None)
+            elif isinstance(thinking.get("budget_tokens"), int):
+                body["thinking"] = {**thinking, "budget_tokens": min(thinking["budget_tokens"], max_tokens - 1)}
     if stream:
         body["stream"] = True
     return body
@@ -108,6 +117,8 @@ def responses_body(model: str, messages: list, tools: Any = None, *, tool_choice
 def compile_provider_body(protocol: str, chat: dict) -> dict:
     from copy import deepcopy
     args = deepcopy(chat)
+    from excelmanus.providers.thinking import reject_unsupported_media
+    reject_unsupported_media(args.get("messages", []))
     messages = args.get("messages", [])
     model = args["model"]
     # Replay blobs belong to a provider/model. Never replay them on another route.

@@ -354,6 +354,23 @@ def is_content_filter_error(exc: Exception) -> bool:
     return False
 
 
+# ── 异常类型 ──────────────────────────────────────────────
+
+
+class LLMRetryExhaustedError(RuntimeError):
+    """瞬时传输故障（断流/连接重置/429/5xx）在重试预算耗尽后仍未恢复。
+
+    由 run_tool_loop 在可重试故障的最后一次失败时抛出，Agent Driver 将其
+    收尾成本轮失败结果：用户看到明确的中断提示并可重试，而不是让原始
+    传输异常一路击穿回合与 SSE 流。异常链保留原始异常，分类器仍可判定。
+    """
+
+    def __init__(self, cause: Exception, attempts: int) -> None:
+        super().__init__(f"LLM 调用在 {attempts} 次尝试后仍失败: {cause}")
+        self.cause = cause
+        self.attempts = int(attempts)
+
+
 # ── LLMCaller 类 ──────────────────────────────────────────
 
 

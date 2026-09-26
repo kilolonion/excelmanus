@@ -41,6 +41,7 @@ class DetectedImage:
     frame_count: int = 1
     max_frame_pixels: int = 0
     max_frame_dimension: int = 0
+    orientation: int = 1
 
 
 @dataclass(frozen=True)
@@ -76,16 +77,20 @@ def detect_image(data: bytes, declared: str | None = None) -> DetectedImage:
         with Image.open(BytesIO(data)) as image:
             fmt = image.format
             image.load()
-            image = ImageOps.exif_transpose(image) or image
             n_frames = getattr(image, "n_frames", 1) or 1
             if n_frames > DEFAULT_MAX_ANIMATED_FRAMES:
                 raise AttachmentError(
                     f"animated image has too many frames: {n_frames}",
                     "LIMIT_EXCEEDED",
                 )
-            has_alpha = (
-                image.mode in {"RGBA", "LA", "PA"}
-                or (image.mode == "P" and "transparency" in image.info)
+            # Read frame metadata before applying EXIF orientation.  Pillow's
+            # exif_transpose returns a new image and can hide n_frames on GIFs;
+            # doing it first silently turned animated inputs into single-frame
+            # images during admission.
+            first_mode = image.mode
+            first_has_alpha = (
+                first_mode in {"RGBA", "LA", "PA"}
+                or (first_mode == "P" and "transparency" in image.info)
             )
             max_frame_pixels = int(image.width) * int(image.height)
             max_frame_dimension = max(int(image.width), int(image.height))
@@ -101,16 +106,31 @@ def detect_image(data: bytes, declared: str | None = None) -> DetectedImage:
                 image.seek(0)
             except EOFError:
                 pass
+            if n_frames > 1:
+                width, height = int(image.width), int(image.height)
+                has_alpha = first_has_alpha
+                mode = first_mode
+                orientation = 1
+            else:
+                orientation = int(image.getexif().get(274, 1) or 1)
+                oriented = ImageOps.exif_transpose(image) or image
+                width, height = int(oriented.width), int(oriented.height)
+                has_alpha = (
+                    oriented.mode in {"RGBA", "LA", "PA"}
+                    or (oriented.mode == "P" and "transparency" in oriented.info)
+                )
+                mode = oriented.mode
             return DetectedImage(
                 media_type=_media_type_of_format(fmt, declared),
-                width=int(image.width),
-                height=int(image.height),
+                width=width,
+                height=height,
                 has_alpha=has_alpha,
                 animated=n_frames > 1,
-                mode=image.mode,
+                mode=mode,
                 frame_count=int(n_frames),
                 max_frame_pixels=max_frame_pixels,
                 max_frame_dimension=max_frame_dimension,
+                orientation=orientation,
             )
     except AttachmentError:
         raise
@@ -149,6 +169,7 @@ def can_passthrough(detected: DetectedImage, nbytes: int, policy: NormalizationP
     return (
         detected.media_type in {"image/png", "image/jpeg", "image/webp"}
         and not detected.animated
+        and detected.orientation == 1
         and detected.mode in {"RGB", "RGBA", "L", "LA"}
         and nbytes <= policy.max_bytes
         and detected.width * detected.height <= policy.max_pixels
@@ -169,13 +190,16 @@ def _initial_dimensions(detected: DetectedImage, policy: NormalizationPolicy) ->
 
 
 def _open_oriented(data: bytes) -> Image.Image:
-    image = Image.open(BytesIO(data))
-    image.load()
-    if getattr(image, "n_frames", 1) > 1:
-        image = ImageSequence.Iterator(image)[0].copy()
-    else:
-        image = ImageOps.exif_transpose(image) or image
-    return image
+    with Image.open(BytesIO(data)) as image:
+        image.load()
+        if getattr(image, "n_frames", 1) > 1:
+            # Images are a static visual observation tool.  Animated inputs
+            # are admitted with frame metadata, then the first frame is
+            # selected for a request variant.  The request text reports that
+            # reduction.
+            return ImageSequence.Iterator(image)[0].copy()
+        oriented = ImageOps.exif_transpose(image) or image
+        return oriented.copy()
 
 
 def _to_work_mode(image: Image.Image, has_alpha: bool) -> Image.Image:

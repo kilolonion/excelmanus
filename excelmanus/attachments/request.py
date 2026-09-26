@@ -7,7 +7,7 @@ import json
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps, ImageSequence
 
 from excelmanus.attachments.limits import (
     DEFAULT_REQUEST_IMAGE_MAX_BYTES,
@@ -48,10 +48,16 @@ def request_image_dimensions(width: int, height: int, max_pixels: int) -> tuple[
 
 
 def request_image_variant_id(attachment: ImageAttachmentRef, policy: ImageRequestPolicy) -> str:
+    source_dimensions = attachment.source_dimensions or attachment.original_dimensions
     descriptor = json.dumps(
         {
             "transformVersion": REQUEST_IMAGE_TRANSFORM_VERSION,
             "attachmentId": attachment.attachment_id,
+            "sourceDigest": attachment.source_digest,
+            "sourceDimensions": (
+                source_dimensions.width,
+                source_dimensions.height,
+            ) if source_dimensions is not None else None,
             "routePixelBudget": policy.max_pixels,
             "encodedByteBudget": policy.max_bytes,
             "encoding": {
@@ -88,13 +94,36 @@ def _has_alpha(image: Image.Image) -> bool:
     )
 
 
-def _has_alpha_bytes(data: bytes) -> bool:
-    with Image.open(BytesIO(data)) as probe:
-        return _has_alpha(probe)
+def _open_request_image(data: bytes) -> tuple[Image.Image, bool, bool]:
+    """Decode a source into a correctly oriented static request image.
+
+    Returns ``(image, animated, transformed)``.  EXIF orientation is applied
+    before dimensions are used for resizing.  Animated inputs are deliberately
+    reduced to their first frame for the static vision API, with the reduction
+    reported in the request handle.
+    """
+    with Image.open(BytesIO(data)) as image:
+        image.load()
+        frame_count = int(getattr(image, "n_frames", 1) or 1)
+        animated = frame_count > 1
+        if animated:
+            return ImageSequence.Iterator(image)[0].copy(), True, True
+        orientation = int(image.getexif().get(274, 1) or 1)
+        oriented = ImageOps.exif_transpose(image) or image
+        return oriented.copy(), False, orientation != 1
 
 
 def _encode_request(image: Image.Image, has_alpha: bool, max_bytes: int) -> tuple[bytes, str]:
     candidates: list[tuple[int, bytes, str]] = []
+    if has_alpha:
+        # Preserve transparent screenshots whenever the request cap allows it.
+        # Fall back to the quality ladder only when lossless WebP is too large.
+        lossless = BytesIO()
+        image.save(lossless, format="WEBP", lossless=True, method=0)
+        payload = lossless.getvalue()
+        if len(payload) <= max_bytes:
+            return payload, "image/webp"
+        candidates.append((len(payload), payload, "image/webp"))
     for quality in IMAGE_ENCODING_QUALITIES:
         buf = BytesIO()
         if has_alpha:
@@ -119,7 +148,13 @@ def read_image_request(
     policy = policy or default_request_policy()
     if policy.max_pixels <= 0 or policy.max_bytes <= 0:
         raise AttachmentError("request policy must be positive", "INVALID_ATTACHMENT")
-    source = store.get_bytes(ref)
+    # New refs point directly at source bytes.  Older refs point at a
+    # normalized object but retain sourceDigest; prefer that source when it is
+    # still available, then fall back to the legacy object for compatibility.
+    try:
+        source = store.get_source(ref) if ref.source_digest else store.get_bytes(ref)
+    except (AttachmentError, OSError):
+        source = store.get_bytes(ref)
     variant_id = request_image_variant_id(ref, policy)
     cached_path = _cache_path(store, variant_id)
     if cached_path.is_file():
@@ -137,37 +172,57 @@ def read_image_request(
                 has_alpha=_has_alpha(probe),
             )
 
-    width, height = request_image_dimensions(ref.width, ref.height, policy.max_pixels)
-    if width == ref.width and height == ref.height and len(source) <= policy.max_bytes:
-        return RequestImageAttachment(
-            variant_id=variant_id,
-            attachment=ref,
-            data=source,
-            media_type=ref.media_type,
-            bytes=len(source),
-            width=ref.width,
-            height=ref.height,
-            has_alpha=_has_alpha_bytes(source),
+    with Image.open(BytesIO(source)) as probe:
+        source_format = (probe.format or "").upper()
+        source_media = _media_of(probe)
+    work, animated, transformed = _open_request_image(source)
+    try:
+        source_width, source_height = work.width, work.height
+        logical_dimensions = ref.source_dimensions or ref.original_dimensions
+        logical_width = logical_dimensions.width if logical_dimensions is not None else (ref.width or source_width)
+        logical_height = logical_dimensions.height if logical_dimensions is not None else (ref.height or source_height)
+        width, height = request_image_dimensions(
+            logical_width,
+            logical_height,
+            policy.max_pixels,
         )
+        passthrough_formats = {"PNG", "JPEG", "JPG", "WEBP", "GIF"}
+        if (
+            not animated
+            and not transformed
+            and (width, height) == (source_width, source_height)
+            and len(source) <= policy.max_bytes
+            and source_format in passthrough_formats
+        ):
+            return RequestImageAttachment(
+                variant_id=variant_id,
+                attachment=ref,
+                data=source,
+                media_type=source_media,
+                bytes=len(source),
+                width=source_width,
+                height=source_height,
+                has_alpha=_has_alpha(work),
+            )
 
-    with Image.open(BytesIO(source)) as image:
-        image.load()
-        has_alpha = _has_alpha(image)
-        work = image.convert("RGBA" if has_alpha else "RGB")
+        has_alpha = _has_alpha(work)
+        work = work.convert("RGBA" if has_alpha else "RGB")
         if (work.width, work.height) != (width, height):
             work = work.resize((width, height), Image.Resampling.LANCZOS)
         data, media = _encode_request(work, has_alpha, policy.max_bytes)
-    _atomic_write(cached_path, data)
-    return RequestImageAttachment(
-        variant_id=variant_id,
-        attachment=ref,
-        data=data,
-        media_type=media,
-        bytes=len(data),
-        width=width,
-        height=height,
-        has_alpha=has_alpha,
-    )
+        _atomic_write(cached_path, data)
+        return RequestImageAttachment(
+            variant_id=variant_id,
+            attachment=ref,
+            data=data,
+            media_type=media,
+            bytes=len(data),
+            width=width,
+            height=height,
+            has_alpha=has_alpha,
+        )
+    finally:
+        work.close()
 
 
 def _media_of(image: Image.Image) -> str:

@@ -85,6 +85,14 @@ it("materializes a steer once and retargets subsequent output", () => {
   expect(context.batcher.setTarget).toHaveBeenCalledOnce();
 });
 
+it("does not label the initial idle send as an in-flight intervention", () => {
+  const context = { ...ctx(), showDispatch: false, turnId: undefined };
+  dispatchSSEEvent({ event: "turn_start", data: { turn_id: "t1", dispatch: receipt({ client_message_id: "c1", mode: "steer" }) } }, context);
+  const initial = useChatStore.getState().messagesById.c1;
+  expect(initial?.role === "user" ? initial.dispatchMode : undefined).toBeUndefined();
+  expect(context.turnId).toBe("t1");
+});
+
 it("materializes queued attachment receipts without leaking transport context", () => {
   const context = ctx();
   const data = receipt({

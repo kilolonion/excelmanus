@@ -39,4 +39,18 @@ describe("session polling updates", () => {
     useSessionStore.getState().mergeSessions([row("c", "2026-09-20")]);
     expect(useSessionStore.getState().sessions.map((s) => s.id)).toEqual(["c", "a"]);
   });
+
+  it("does not resurrect a session from a poll that overlapped its deletion", () => {
+    const deleted = row("deleted-race", "2026-09-20");
+    const kept = row("kept-race", "2026-09-19");
+    useSessionStore.getState().setSessions([deleted, kept]);
+
+    useSessionStore.getState().removeSession(deleted.id);
+    useSessionStore.getState().mergeSessions([deleted, kept]);
+    expect(useSessionStore.getState().sessions.map((s) => s.id)).toEqual([kept.id]);
+
+    // A failed DELETE is still allowed to restore the row explicitly.
+    useSessionStore.getState().addSession(deleted);
+    expect(useSessionStore.getState().sessions.map((s) => s.id)).toContain(deleted.id);
+  });
 });

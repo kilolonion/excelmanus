@@ -44,7 +44,7 @@ function splitToolChain(blocks: AssistantBlock[]): {
 }
 
 function isGroupedTool(block: AssistantBlock): block is Extract<AssistantBlock, { type: "tool_call" }> {
-  return block.type === "tool_call" && block.name !== "ask_user" && block.name !== "suggest_mode_switch" && block.name !== "show_workbook";
+  return block.type === "tool_call" && !block.taskList?.length && block.name !== "ask_user" && block.name !== "suggest_mode_switch" && block.name !== "show_workbook";
 }
 
 type ChainSegment =
@@ -205,6 +205,9 @@ export const AssistantMessage = React.memo(function AssistantMessage({
                 />
               );
             })}
+            {affectedFiles && affectedFiles.length > 0 && (
+              <AffectedFilesBadges files={affectedFiles} />
+            )}
           </div>
           {clock && (
             <span
@@ -217,10 +220,6 @@ export const AssistantMessage = React.memo(function AssistantMessage({
             </span>
           )}
         </div>
-
-        {affectedFiles && affectedFiles.length > 0 && (
-          <AffectedFilesBadges files={affectedFiles} />
-        )}
 
         <MessageActions
           blocks={blocks}

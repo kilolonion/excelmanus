@@ -8,6 +8,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MiniCheckbox } from "@/components/ui/MiniCheckbox";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Textarea } from "@/components/ui/textarea";
 import { apiPost } from "@/lib/api";
 export function ConfigTransferPanel({ onImported }: { onImported?: () => void }) {
   const [mode, setMode] = useState<"idle" | "export" | "import">("idle");
@@ -165,16 +167,20 @@ export function ConfigTransferPanel({ onImported }: { onImported?: () => void })
           </div>
           <div>
             <p className="text-xs font-medium mb-2">加密模式</p>
-            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+            <RadioGroup
+              value={exportMode}
+              onValueChange={(next) => setExportMode(next as typeof exportMode)}
+              className="flex flex-col sm:flex-row gap-2 sm:gap-3"
+            >
               <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-                <input type="radio" name="export-mode" checked={exportMode === "password"} onChange={() => setExportMode("password")} />
+                <RadioGroupItem value="password" />
                 <Lock className="h-3 w-3" /> 口令加密（推荐）
               </label>
               <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer">
-                <input type="radio" name="export-mode" checked={exportMode === "simple"} onChange={() => setExportMode("simple")} />
+                <RadioGroupItem value="simple" />
                 <Unlock className="h-3 w-3" /> 简单分享
               </label>
-            </div>
+            </RadioGroup>
           </div>
           {exportMode === "password" && (
             <div className="space-y-2">
@@ -238,10 +244,10 @@ export function ConfigTransferPanel({ onImported }: { onImported?: () => void })
             <span className="text-sm font-medium">配置导出成功</span>
           </div>
           <div className="relative">
-            <textarea
+            <Textarea
               readOnly
               value={resultToken}
-              className="w-full h-20 rounded-md border border-border bg-muted/30 px-3 py-2 text-[10px] font-mono resize-none focus:outline-none"
+              className="h-20 resize-none rounded-lg border-border bg-muted/30 px-3 py-2 text-[10px] font-mono"
             />
             <Button
               size="sm"
@@ -266,10 +272,10 @@ export function ConfigTransferPanel({ onImported }: { onImported?: () => void })
         <div className="rounded-lg border border-dashed border-border p-3 space-y-3">
           <div>
             <label className="text-xs text-muted-foreground">粘贴配置令牌</label>
-            <textarea
+            <Textarea
               value={importToken}
               onChange={(e) => handleDetectToken(e.target.value)}
-              className="w-full h-20 rounded-md border border-border bg-background px-3 py-2 text-[10px] font-mono resize-none focus:outline-none focus:ring-1 focus:ring-ring mt-1"
+              className="mt-1 h-20 resize-none rounded-lg px-3 py-2 text-[10px] font-mono"
               placeholder="粘贴 EMX1:... 令牌"
             />
           </div>

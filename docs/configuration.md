@@ -1,6 +1,6 @@
 # 配置参考
 
-适用版本：1.8.1 源码 · 更新日期：2026-09-21
+适用版本：1.8.1 源码 · 更新日期：2026-09-25
 
 [文档导航](README.md) · [English](configuration_en.md) · [运维手册](ops-manual.md)
 
@@ -42,6 +42,35 @@
 
 模型档案的 API Key 加密后存在主数据库，Fernet 密钥在 `$EXCELMANUS_HOME/.secret_key`（不跟随 DATA_ROOT，避免落入 Agent 工作区）。迁移或恢复时必须保留与数据库配套的密钥；仅复制数据库可能导致凭证无法解密。
 
+## 设置页怎么找
+
+所有设置页面顶部共用「搜索全部设置」，支持中文名称、用途和配置字段名。搜索结果会显示所在分类；点击后跳转，运行设置会展开并定位到对应字段。各页面不再重复展示图标、大标题和说明页头。
+
+| 要做的事 | 设置入口 |
+|---|---|
+| 填写 API Key、连接地址和模型 ID | 模型与连接 → 模型连接 |
+| 选择当前使用的模型 | 模型与连接 → 模型配置 |
+| 连接订阅账号 | 模型与连接 → 订阅账号 |
+| 思考深度菜单、模型能力、图片传输、接口兼容、导入导出 | 模型与连接 → 模型配置 |
+| 消息处理方式、子任务开关、本机表格切换习惯 | 偏好与运行 → 对话偏好 |
+| 每条消息的时间、步数、token、费用上限与失败重试 | 偏好与运行 → 任务限制 |
+| 自动匹配上下文容量、自动摘要和内容长度 | 偏好与运行 → 对话容量 |
+| 保存聊天记录、空闲内存回收、日志 | 偏好与运行 → 服务维护 |
+| 技能、额外扫描目录与 Hook 命令白名单 | 扩展与记忆 → 技能 |
+| 记忆开关、加载量、过期时间与自动维护 | 扩展与记忆 → 记忆 |
+| MCP 和联网搜索服务 | 扩展与记忆 → MCP |
+| 登录保护、管理员密码与代码执行保护 | 访问与安全 |
+
+本机表格切换偏好自动保存；运行配置需点击「保存配置」。运行设置草稿在切换页面和关闭设置对话框后保留于当前浏览器页面内存，刷新或离开网页前会提示未保存。草稿不写入服务器，也不跨浏览器同步。保存失败不会清除草稿。
+
+字段旁标明生效时间：立即、下一条消息、新对话或重启服务。需要重启的修改会列出涉及的项目，按钮显示「保存并重启」。这会中断当前任务。费用单价以美元 / 千 token 为单位；成本限制依赖服务商回传或配置的估算单价，并非账单硬限额。
+
+「默认对话容量」推荐勾选自动匹配。取消勾选可指定全局容量，再勾选可清除旧的全局手动值；单个模型档案中的容量设置仍然优先。旧版客户端的 `max_context_tokens` 正整数更新继续有效，新界面使用 `max_context_tokens_override`（0 恢复自动）。读取接口同时返回全局手动值与当前推断容量。
+
+记忆维护模型 ID 仅在「扩展与记忆 → 记忆 → 自动维护」配置；留空跟随当前模型。维护复用当前模型的地址和凭据，自定义 ID 必须能由该连接调用，不能用于切换到另一提供商。
+
+配置项的展示与维护准则见 [设置设计说明](settings-design.md)。
+
 ## 基础配置
 
 | 配置键 | 说明 | 默认值 |
@@ -64,7 +93,7 @@
 | `EXCELMANUS_WORKSPACE_ROOT` | 文件访问白名单根目录 | `~/.excelmanus/data` |
 | `EXCELMANUS_LOG_LEVEL` | 日志级别 | `INFO` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS 允许来源（逗号分隔）。启动时还会自动补上 `localhost` / `127.0.0.1` / `[::1]` 与前端端口 | `http://localhost:3000,http://127.0.0.1:3000` |
-| `EXCELMANUS_MAX_CONTEXT_TOKENS` | 显式设置时覆盖模型推断的上下文上限 | 按模型推断；未知模型回退 `256000` |
+| `EXCELMANUS_MAX_CONTEXT_TOKENS` | 显式设置时覆盖模型推断的上下文上限 | 按有来源的精确型号及传输限制计算；未知型号使用本地保守预算 `32000`（不是官方能力） |
 | `EXCELMANUS_PROMPT_CACHE_KEY_ENABLED` | 向 API 发送 prompt_cache_key 提升缓存命中率 | `true` |
 | `EXCELMANUS_PROMPT_CACHE_RETENTION` | 提示词缓存保留策略（`default`/`extended`）。`extended` 仅对一方端点生效：Anthropic（`api.anthropic.com`）为各 `cache_control` 断点加 `ttl=1h` 并发送 `anthropic-beta: extended-cache-ttl-2025-04-11`；OpenAI（`api.openai.com`，Chat 与 Responses）发送顶层 `prompt_cache_retention=24h`。兼容网关与自部署端点不发送这些字段 | `default` |
 
@@ -120,7 +149,7 @@
 
 只读能力与配置认知可通过 `introspect_capability` 的[统一认知门户](knowledge-portal.md)直接查询，不受自我管理开关限制。以下开关仍控制原有自我管理技能及工具，门户不修改配置或授权。
 
-默认启用，可在「设置 → 系统 → 能力」关闭。开关开启时，agent 可加载 `agent_self_management` 技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话的推理、上下文和工具开关。保存开关后立即同步已有会话；修改仅作用于当前内存会话，不能更改密钥、审批权限或全局默认。
+默认启用，可在「设置 → 偏好与运行 → 对话偏好」关闭。开关开启时，agent 可加载 `agent_self_management` 技能，使用 `inspect_agent` 查询能力与配置、`configure_agent` 调整当前会话的推理、上下文和工具开关。保存开关后立即同步已有会话；修改仅作用于当前内存会话，不能更改密钥、审批权限或全局默认。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
@@ -190,6 +219,8 @@
 ## 视觉配置
 
 图片只交给当前激活模型阅读。无视觉时拒绝附件；有视觉时用 `read_image` 或工作台附件注入，再由模型产出 `WorkbookSpec` 并调用 `apply_spreadsheet_changes(workbook_spec=)` 建表。没有独立视觉流水线，也没有附属 VLM 描述。
+
+附件准入保留源图字节；请求发送时才按模型预算生成派生图，并在模型可见文本中披露源尺寸、请求尺寸和变换。动画图的静态视觉请求取首帧并明确标注。一次任务中同一附件同一 detail/crop 不会重复注入；小字或局部复核使用 `read_image(crop={x,y,width,height,zoom})`，由 `zoom=1..8` 将局部区域放大后一次送入视觉上下文。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
@@ -378,12 +409,12 @@ SessionManager 先同步已有会话消息和工具结果，再保存引用它�
 
 ## System One / Jev
 
-Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 → 模型 → 供应商」配置 TypeSafe、Vercel 或自定义决策提供商，在「模型 → 模型配置」选择模型及各类策略开关。
+Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 → 模型 → 模型连接」配置 TypeSafe、Vercel 或自定义决策提供商，在「模型 → 模型配置」选择模型及各类策略开关。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_JEV_ENABLED` | 总开关：`off` 关闭全部环节，`enforce` 全面接入 | `enforce` |
-| `EXCELMANUS_JEV_EXPERIMENTAL_ENABLED` | 前端实验性 Jev 入口开关；关闭时隐藏 Jev 供应商、设置、时间线按钮、消息内记录和侧栏，不删除已有配置 | `false` |
+| `EXCELMANUS_JEV_EXPERIMENTAL_ENABLED` | Jev 实验性功能总入口；关闭时停止后端评估并隐藏 Jev 供应商、设置、时间线按钮、消息内记录和侧栏，但不删除已有配置 | `false` |
 | `EXCELMANUS_JEV_EXPOSURE` | 工具披露与工作区/表格上下文建议：`off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_OBSERVATION` | 观察结果策略：`off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_VERIFICATION` | 修改后检查建议：`off` / `enforce` | `enforce` |
@@ -397,9 +428,9 @@ Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 →
 | `EXCELMANUS_JEV_CALIBRATED` | 高风险审批自动放行的标定开关；还需要 approval pack 的签名标定；未满足时 Jev 仍可拒绝或给出建议，但不能跳过人工确认 | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe 直连密钥（与提供商列表同步） | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway 密钥（与提供商列表同步） | — |
-| `EXCELMANUS_MODEL_CANONICAL_MATCH` | 「模型 → 模型配置」的模型名智能匹配：保存档案时按置信度把 Model ID 绑定到已知规范模型名，继承其上下文窗口与能力配置；不改写发给上游的 Model ID，开启时会为已有档案补绑 | `true` |
+| `EXCELMANUS_MODEL_CANONICAL_MATCH` | 「模型 → 模型配置」的模型名智能匹配：保存档案时按置信度把 Model ID 绑定到已知规范模型名，仅用作名称提示；实际能力按端点探测与有来源的精确型号记录判断；不改写发给上游的 Model ID，开启时会为已有档案补绑 | `true` |
 
-这是可选的决策模型功能，需要 `system-one` extra。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。高风险审批另有一层保护：只有 `EXCELMANUS_JEV_CALIBRATED=true` 且 approval pack 已通过签名标定时，Jev 才能把高风险调用从人工确认改为自动放行；拒绝和普通建议不受此开关阻断。旧配置中的 `shadow` 会在读取时迁移为 `enforce`。
+这是可选的决策模型功能，需要 `system-one` extra。实验性总入口关闭时，后端不会发起 Jev 评估、记录 Jev 日志或发送 Jev 事件；重新开启后保留的提供商和题包配置会恢复使用。`off` 会停用总闸或对应环节；`enforce` 会直接接入开启的环节，系统不再提供仅记录的运行模式。开启总闸时，未单独指定的环节默认全部开启；关闭任一子闸只停用该环节。新增 `context.resolve` 为纯建议题包：总开关和 `EXCELMANUS_JEV_EXPOSURE` 都为 `enforce` 时，将工作区选择、表格/选区定位和最少澄清建议交给主模型，额外评估最多等待一秒，不自动新建/切换工作区或修改文件。高风险审批另有一层保护：只有 `EXCELMANUS_JEV_CALIBRATED=true` 且 approval pack 已通过签名标定时，Jev 才能把高风险调用从人工确认改为自动放行；拒绝和普通建议不受此开关阻断。旧配置中的 `shadow` 会在读取时迁移为 `enforce`。
 
 ## 加密配置
 

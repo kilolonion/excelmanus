@@ -320,9 +320,8 @@ class TestCodeModeBridge:
         assert summary["count"] == 2
         assert summary["succeeded"] == 1
         assert summary["failed"] == 1
-        assert summary["writes"] == [
-            {"tool": "lookup_rows", "content_version": "sha256:abc"},
-        ]
+        assert summary["writes"] == []  # observed versions are not publications
+        assert summary["outcome"] == "failed"
 
     @pytest.mark.asyncio
     async def test_prefers_execute_subcall_over_registry_shortcut(
@@ -1374,7 +1373,7 @@ class TestCodeModeWrapUp:
         result = ToolResult(success=True, model_text="{}", value={"status": "ok"})
         attached = attach_sdk_calls(result, session)
         assert attached.value["sdk_calls"]["count"] == 1
-        assert attached.value["sdk_calls"]["writes"][0]["content_version"] == "v1"
+        assert attached.value["sdk_calls"]["writes"] == []
 
     @pytest.mark.asyncio
     async def test_stop_does_not_join_on_running_loop(self, tmp_path: Path) -> None:

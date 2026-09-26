@@ -38,21 +38,10 @@ _CLAUDE_NATIVE_BODY_KEYS = frozenset({
     "metadata", "service_tier", "output_config",
 })
 
-# Claude 5 / Fable / Mythos / Opus 4.7+：extended thinking 的 budget_tokens 会 400，需用 adaptive。
-_ADAPTIVE_THINKING_MARKERS = (
-    "claude-sonnet-5",
-    "claude-opus-5",
-    "claude-fable",
-    "claude-mythos",
-    "claude-opus-4.7",
-    "claude-opus-4.8",
-)
-_ADAPTIVE_THINKING_PATTERN = token_sequence_pattern(_ADAPTIVE_THINKING_MARKERS)
-
-
 def uses_adaptive_thinking(model: str) -> bool:
-    """判断模型是否必须使用 adaptive thinking（不能再传 budget_tokens）。"""
-    return matches_token_sequence(model, _ADAPTIVE_THINKING_PATTERN)
+    from excelmanus.model_catalog import model_spec
+    spec = model_spec(model)
+    return bool(spec and spec.get("reasoning", {}).get("adaptive"))
 
 
 def _apply_thinking_to_body(
@@ -67,7 +56,7 @@ def _apply_thinking_to_body(
     if uses_adaptive_thinking(model):
         if thinking_enabled:
             body["thinking"] = {"type": "adaptive"}
-            effort = (thinking_effort or "high").strip().lower()
+            effort = (thinking_effort or "").strip().lower()
             if effort and effort != "none":
                 body["output_config"] = {"effort": effort}
             body["max_tokens"] = max(body.get("max_tokens", 0), 64_000)
@@ -198,6 +187,8 @@ def _openai_messages_to_claude(
     返回 (system, claude_messages)。
     system 可能是 str（无 cache_control）或 list[dict]（带 cache_control breakpoint）。
     """
+    from excelmanus.providers.thinking import reject_unsupported_media
+    reject_unsupported_media(messages)
     system_parts: list[str] = []
     claude_messages: list[dict[str, Any]] = []
 

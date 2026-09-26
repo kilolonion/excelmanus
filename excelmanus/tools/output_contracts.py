@@ -286,7 +286,15 @@ OUTPUT_CONTRACTS: dict[str, OutputContract] = {
         {"status": "str", "query": "str", "match_mode": "str", "total_matches": "int", "matches": "list"},
         {"errors"}, optional_types={"errors": "list"},
     ),
-    "read_image": _obj({"status": "str", "mime_type": "str", "attachment_id": "str"}, {"width", "height", "crop"}),
+    "read_image": _obj(
+        {"status": "str", "mime_type": "str", "attachment_id": "str"},
+        {
+            "width", "height", "crop", "crop_zoom", "layout", "source_digest",
+            "source_dimensions", "source_media_type", "source_bytes", "animated",
+            "source_orientation", "frame_count", "parent_attachment_id",
+        },
+    ),
+    "convert_image": _obj({"status": "str", "file_path": "str", "source_path": "str", "format": "str", "content_version": "str"}, {"source_version", "source_size", "output_size", "size_bytes", "receipt"}),
     "parallel_search": _obj(
         {"status": "str", "query": "str", "variants_used": "list", "total_results": "int", "query_summaries": "list", "results": "list"},
     ),

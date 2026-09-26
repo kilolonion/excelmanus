@@ -17,6 +17,7 @@ from excelmanus.system_one.types import Decision
 def _ask_engine(*, jev_enabled: str = "off", jev_calibrated: bool = False):
     engine = SimpleNamespace(
         config=SimpleNamespace(
+            jev_experimental_enabled=True,
             jev_enabled=jev_enabled,
             jev_exposure="off",
             jev_mode_hint=False,

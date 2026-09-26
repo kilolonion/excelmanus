@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
 class EventType(Enum):
@@ -14,6 +14,9 @@ class EventType(Enum):
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_END = "tool_call_end"
     TOOL_CALL_STATE = "tool_call_state"
+    # 调用被整段放弃（模型流中断/重试/回退），从未进入执行器：
+    # 终态是"未执行"，前端据此把卡片定案为失败，不留"进行中"。
+    TOOL_CALL_ABORTED = "tool_call_aborted"
     THINKING = "thinking"
     ITERATION_START = "iteration_start"
     ROUTE_START = "route_start"  # 历史 replay only；默认路径不再发射
@@ -119,6 +122,7 @@ class ToolCallEvent:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int | None = None
     # 任务清单事件字段
     task_list_data: Optional[Dict[str, Any]] = None  # TaskList.to_dict() 的结果
     task_index: Optional[int] = None                  # 更新的任务项索引
@@ -213,6 +217,9 @@ class ToolCallEvent:
     retry_delay_seconds: float = 0.0     # 本次等待延迟（秒）
     retry_error_message: str = ""        # 触发重试的错误信息
     retry_status: str = ""               # "retrying" | "succeeded" | "exhausted"
+    # tool_call_aborted 事件字段：调用未执行即被放弃的确切状态
+    abort_reason: str = ""               # aborted_calls.ABORT_REASON_*
+    abort_effect: str = ""               # "write" | "command" | "read"
     # failure_guidance 事件字段
     fg_category: str = ""                # "model" | "transport" | "config" | "quota" | "unknown"
     fg_code: str = ""                    # 机器可读错误码
@@ -281,6 +288,10 @@ class MutationEvent:
     before: str | None = None
     after: str | None = None
     source: str = "runtime"
+    # True when the identity no longer exists after the operation (unlink,
+    # rename source, external delete). Clients must evict it from every
+    # file surface instead of treating it as a fresh write.
+    deleted: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -293,7 +304,14 @@ class MutationEvent:
             payload["before"] = self.before
         if self.after:
             payload["after"] = self.after
+        if self.deleted:
+            payload["deleted"] = True
         return payload
+
+
+def _normalize_identity(raw: str) -> str:
+    """Compare identities regardless of the ``./`` public prefix."""
+    return str(raw or "").replace("\\", "/").removeprefix("./")
 
 
 def mutations_from_identities(
@@ -302,13 +320,16 @@ def mutations_from_identities(
     content_version: str | None = None,
     content_versions: Dict[str, str] | None = None,
     source: str = "runtime",
+    deleted: Iterable[str] | None = None,
 ) -> List[Dict[str, Any]]:
     versions = content_versions or {}
+    deleted_set = {_normalize_identity(item) for item in (deleted or ()) if item}
     return [
         MutationEvent(
             identity=ident,
             content_version=versions.get(ident, content_version),
             source=source,
+            deleted=_normalize_identity(ident) in deleted_set,
         ).to_dict()
         for ident in identities
         if ident
@@ -321,11 +342,15 @@ def changed_mutations(
     workspace_root: str | None = None,
     content_versions: Dict[str, str] | None = None,
     source: str = "runtime",
+    deleted: Iterable[str] | None = None,
 ) -> List[Dict[str, Any]]:
     """Build MutationEvent dicts for a successful write batch.
 
     Prefer host-tracked after-versions (``remember_content_version`` / receipt).
     Do not re-hash disk: that invents a version the write never reported.
+
+    ``deleted`` marks identities that no longer exist after the batch, so
+    every client surface can evict them instead of offering dead paths.
     """
     merged: Dict[str, str] = dict(content_versions or {})
     try:
@@ -342,6 +367,7 @@ def changed_mutations(
         identities,
         content_versions=merged,
         source=source,
+        deleted=deleted,
     )
 
 

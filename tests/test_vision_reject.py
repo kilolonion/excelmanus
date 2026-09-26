@@ -85,21 +85,21 @@ class TestVisionRejectGuard:
 
 
 class TestVisionProbeKeywordCrossValidation:
-    """probe 与关键词推断交叉验证：probe=False 不覆盖已知视觉模型的关键词推断。"""
+    """端点实测优先于型号文档；不按关键词猜测能力。"""
 
     def _make_caps(self, *, vision: bool | None) -> object:
         """构造 fake ModelCapabilities。"""
         from types import SimpleNamespace
         return SimpleNamespace(supports_vision=vision)
 
-    def test_probe_false_known_vision_model_trusts_keyword(self) -> None:
-        """probe=False + 已知视觉模型（gpt-5-codex）→ 信任关键词，返回 True。"""
+    def test_probe_false_known_vision_model_trusts_observation(self) -> None:
+        """probe=False + 已知视觉模型：拒绝结果优先于官方文档。"""
         config = _make_config(model="gpt-5.2-codex", main_model_vision="auto")
         fake_caps = self._make_caps(vision=False)
         with patch("excelmanus.model_probe.load_capabilities", return_value=fake_caps):
             from excelmanus.database import Database
             result = AgentEngine._infer_vision_capable(config, db=Database.__new__(Database))
-        assert result is True
+        assert result is False
 
     def test_probe_false_unknown_model_trusts_probe(self) -> None:
         """probe=False + 非视觉模型 → 信任 probe，返回 False。"""
@@ -276,9 +276,9 @@ class TestFlagshipVisionKeywordInference:
         assert self._infer("gpt-6-astra") is True
         assert self._infer("claude-sonnet-5") is True
         assert self._infer("gemini-3.8-flash") is True
-        assert self._infer("glm-5.3") is True
+        assert self._infer("glm-5.3") is False  # 官方为纯文本，Flash 才有视觉
         assert self._infer("glm-5.3-flash") is True
         assert self._infer("kimi-k3") is True
         assert self._infer("MiniMax-M3") is True
-        assert self._infer("grok-4.6") is True
-        assert self._infer("doubao-seed-2.1-pro") is True
+        assert self._infer("grok-build-0.1") is True
+        assert self._infer("doubao-seed-2-1-pro-260915") is True

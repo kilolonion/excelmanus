@@ -22,6 +22,7 @@ PACK = "context.resolve"
 def config(tmp_path, **kw):
     return ExcelManusConfig(api_key="test", model="test", base_url="https://test.invalid",
                            workspace_root=str(tmp_path), ai_gateway_api_key="vck_test",
+                           jev_experimental_enabled=kw.pop("jev_experimental_enabled", True),
                            jev_enabled=kw.pop("jev_enabled", "enforce"),
                            jev_exposure=kw.pop("jev_exposure", "enforce"), **kw)
 

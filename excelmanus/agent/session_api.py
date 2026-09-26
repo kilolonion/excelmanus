@@ -68,6 +68,12 @@ def dispatch_message(
         raise ValueError("消息内容不能为空")
     if mode not in DISPATCH_MODES:
         raise ValueError("未知发送策略")
+    # This path is used for messages admitted while a turn is already
+    # running. Keep an explicit marker so the UI can distinguish these
+    # interventions from an ordinary idle send with the same idempotency
+    # fields.
+    extra = dict(extra or {})
+    extra["dispatch_ui"] = True
     existing = engine._driver.check_dispatch(client_message_id, text, mode, extra or {})
     if existing is not None:
         return dict(existing)
@@ -141,6 +147,7 @@ async def followup(
     prompt_kind: str | None = None,
     dispatch_mode: str | None = None,
     client_message_id: str | None = None,
+    example_context: dict[str, Any] | None = None,
 ) -> ChatResult:
     """用户后续：控制面处理完毕后入 inbox next-turn 并 wakeup。
 
@@ -237,6 +244,7 @@ async def followup(
                         prompt_tokens=pending_result.prompt_tokens,
                         completion_tokens=pending_result.completion_tokens,
                         total_tokens=pending_result.total_tokens,
+                        cached_tokens=pending_result.cached_tokens,
                     ),
                 )
             return pending_result
@@ -262,8 +270,12 @@ async def followup(
             "question_resolver": question_resolver,
             "chat_mode": chat_mode,
             "context_input": context_input or {},
+            "example_context": dict(example_context or {}),
             "jev_budget": jev_budget,
             "prompt_kind": prompt_kind,
+            # A direct chat starts a new turn. Its dispatch id is retained for
+            # idempotency, but it is not an in-flight task intervention.
+            "dispatch_ui": False,
         }
     if client_message_id:
         existing = engine._driver.check_dispatch(client_message_id, user_message, effective_dispatch_mode, extra)
@@ -393,6 +405,7 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
         metadata = {"workbook_action": action} if isinstance(action, dict) else {}
         if extra.get("dispatch_id"):
             metadata["dispatch"] = {key: extra[key] for key in ("dispatch_id", "client_message_id", "dispatch_mode")}
+            metadata["dispatch"]["dispatch_ui"] = bool(extra.get("dispatch_ui", True))
             metadata["dispatch"]["created_at"] = (engine._driver.dispatch_receipt(extra["client_message_id"]) or {}).get("created_at")
         from excelmanus.workbook.ui_context import render_workbook_ui_context
         group = incoming.get("sheet_contexts")
@@ -638,6 +651,7 @@ def finalize_driver_turn(
         "prompt_tokens": chat_result.prompt_tokens,
         "completion_tokens": chat_result.completion_tokens,
         "total_tokens": chat_result.total_tokens,
+        "cached_tokens": chat_result.cached_tokens,
         "write_guard_triggered": chat_result.write_guard_triggered,
         "turn_diagnostics": [d.to_dict() for d in engine._turn_diagnostics],
         "prompt_injection_summary": _injection_summary_for_diag,
@@ -657,6 +671,7 @@ def finalize_driver_turn(
             prompt_tokens=chat_result.prompt_tokens,
             completion_tokens=chat_result.completion_tokens,
             total_tokens=chat_result.total_tokens,
+            cached_tokens=chat_result.cached_tokens,
         ),
     )
     from excelmanus.system_one.host import emit_recovery_outcome, remember_turn_tools

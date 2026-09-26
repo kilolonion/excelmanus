@@ -11,9 +11,10 @@ import { apiGet } from "@/lib/api";
 import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { AssistantBlock, ModelInfo } from "@/lib/types";
-import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
+import { getProviderColor, inferModelBrand } from "@/lib/provider-brand";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
+import { modelProviderId, modelProviderLabel } from "./model-provider";
 
 interface MessageActionsProps {
   blocks: AssistantBlock[];
@@ -43,7 +44,7 @@ interface ProviderGroup {
 function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
   const map = new Map<string, ModelInfo[]>();
   for (const m of models) {
-    const provider = inferModelBrand(m);
+    const provider = modelProviderId(m);
     if (!map.has(provider)) map.set(provider, []);
     map.get(provider)!.push(m);
   }
@@ -195,11 +196,12 @@ export const MessageActions = React.memo(function MessageActions({
                         className="text-[10px] font-semibold uppercase tracking-widest"
                         style={{ color }}
                       >
-                        {getProviderDisplayName(group.provider)}
+                        {modelProviderLabel(models, group.provider)}
                       </span>
                     </div>
                     {group.models.map((m) => {
                       const isCurrent = m.name === currentModel;
+                      const brand = inferModelBrand(m);
                       return (
                         <button
                           key={m.name}
@@ -214,7 +216,7 @@ export const MessageActions = React.memo(function MessageActions({
                         >
                           <span
                             className="h-2 w-2 rounded-full shrink-0"
-                            style={{ backgroundColor: color, opacity: 0.6 }}
+                            style={{ backgroundColor: getProviderColor(brand), opacity: 0.6 }}
                           />
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-1.5">

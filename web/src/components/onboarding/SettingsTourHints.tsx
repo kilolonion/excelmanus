@@ -26,7 +26,14 @@ const HINTS: HintDef[] = [
   {
     anchor: "[data-coach-id='coach-settings-profiles']",
     tab: "model",
-    text: "先在「供应商」添加提供商，再到「模型配置」为任务选模型",
+    text: "这里只管理供应商凭证和接口；完成后到「模型配置」选择模型并调整参数",
+    variant: "tip",
+    placement: "right",
+  },
+  {
+    anchor: "[data-coach-id='coach-settings-model-roles']",
+    tab: "model",
+    text: "模型列表、默认模型、能力探测和思考等级都在这里完成",
     variant: "tip",
     placement: "right",
   },
@@ -47,7 +54,7 @@ const HINTS: HintDef[] = [
   {
     anchor: "[data-coach-id='coach-settings-advanced-toggle']",
     tab: "runtime",
-    text: "建议保持默认值",
+    text: "任务时长、用量和费用上限集中在这里",
     variant: "warn",
     placement: "right",
   },

@@ -59,6 +59,89 @@ describe("model picker interactions", () => {
     expect(select).toHaveBeenCalledWith("reasoning");
   });
 
+  it("keeps the active model in its provider group and highlights it without reordering", () => {
+    const providerModels: ModelInfo[] = [
+      { name: "codex proxy", model: "gpt-6-astra", base_url: "https://gateway.example.com/v1", protocol: "openai", active: true },
+      { name: "codex direct", model: "gpt-6-sol", base_url: "https://gateway.example.com/v1", protocol: "openai", active: false },
+    ];
+    const view = render(<ModelPickerContent models={providerModels} currentModel="codex proxy" onSelect={vi.fn()} onClose={vi.fn()} />);
+    const group = screen.getByRole("region", { name: "codex proxy" });
+    const rows = () => Array.from(group.querySelectorAll<HTMLButtonElement>("[data-model-row]"));
+    expect(group.textContent).toContain("codex proxy2");
+    expect(rows().map((row) => row.textContent)).toEqual(expect.arrayContaining([expect.stringContaining("codex proxy"), expect.stringContaining("codex direct")]));
+    expect(rows()).toHaveLength(2);
+    expect(rows().map((row) => row.getAttribute("aria-pressed"))).toEqual(["true", "false"]);
+    expect(rows().every((row) => row.querySelector('[style*="openai.svg"]'))).toBe(true);
+
+    view.rerender(<ModelPickerContent models={providerModels} currentModel="codex direct" onSelect={vi.fn()} onClose={vi.fn()} />);
+    expect(rows().map((row) => row.textContent?.includes("codex proxy"))).toEqual([true, false]);
+    expect(rows().map((row) => row.getAttribute("aria-pressed"))).toEqual(["false", "true"]);
+    expect(screen.queryByText("当前使用")).toBeNull();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "codex proxy" } });
+    expect(screen.getByRole("region", { name: "codex proxy" }).querySelectorAll("[data-model-row]")).toHaveLength(2);
+  });
+
+  it("uses each model brand for logos while retaining provider groups", () => {
+    const brandedModels: ModelInfo[] = [
+      { name: "claude-sonnet-4-6", model: "antigravity/claude-sonnet-4-6", active: false },
+      { name: "codex proxy", model: "gpt-6-astra", base_url: "https://gateway.example.com/v1", active: true },
+      { name: "小米 MiMo", model: "mimo-v2.6-pro-ultraspeed", active: false },
+    ];
+    render(<ModelPickerContent models={brandedModels} currentModel="codex proxy" onSelect={vi.fn()} onClose={vi.fn()} />);
+    const rows = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-model-row]"));
+    expect(rows.map((row) => row.querySelector("[role=img]")?.getAttribute("aria-label")))
+      .toEqual(["Antigravity", "OpenAI", "小米 MiMo"]);
+    expect(rows.map((row) => row.querySelector("[role=img] > span")?.getAttribute("style")))
+      .toEqual([expect.stringContaining("gemini.svg"), expect.stringContaining("openai.svg"), expect.stringContaining("xiaomi.svg")]);
+    expect(screen.getByRole("region", { name: "codex proxy" })).toBeTruthy();
+  });
+
+  it("opens at the active model after loading and does not scroll again on selection", () => {
+    const rect = (top: number, height: number) => ({ top, height }) as DOMRect;
+    const geometry = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute("data-selected") === "true" ? rect(350, 50) : rect(100, 200);
+    });
+    const height = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.hasAttribute("aria-busy") ? 200 : 0;
+    });
+    try {
+      const view = render(<ModelPickerContent models={[]} currentModel="reasoning" onSelect={vi.fn()} onClose={vi.fn()} />);
+      const list = document.getElementById(screen.getByRole("textbox").getAttribute("aria-controls")!)!;
+      expect(list.scrollTop).toBe(0);
+      view.rerender(<ModelPickerContent models={models} currentModel="reasoning" onSelect={vi.fn()} onClose={vi.fn()} />);
+      expect(list.scrollTop).toBe(175);
+
+      list.scrollTop = 40;
+      view.rerender(<ModelPickerContent models={models} currentModel="fast" onSelect={vi.fn()} onClose={vi.fn()} />);
+      expect(list.scrollTop).toBe(40);
+
+      view.unmount();
+      const reopened = render(<ModelPickerContent models={models} currentModel="fast" onSelect={vi.fn()} onClose={vi.fn()} />);
+      const reopenedList = document.getElementById(screen.getByRole("textbox").getAttribute("aria-controls")!)!;
+      expect(reopenedList.scrollTop).toBe(175);
+      reopened.unmount();
+    } finally {
+      geometry.mockRestore();
+      height.mockRestore();
+    }
+  });
+
+  it("uses the configured custom provider name in the top selector", async () => {
+    const providerModels: ModelInfo[] = [
+      { name: "codex proxy", model: "gpt-6-astra", base_url: "https://gateway.example.com/v1", active: true },
+      { name: "codex direct", model: "gpt-6-sol", base_url: "https://gateway.example.com/v1", active: false },
+    ];
+    apiGet.mockImplementation(async (path: string) => path === "/models" ? { models: providerModels } : { items: [] });
+    useUIStore.setState({ currentModel: "codex proxy" });
+    render(<TopModelSelector />);
+    const trigger = await screen.findByRole("button", { name: "选择模型：codex proxy" });
+    expect(trigger.querySelector('[aria-label="OpenAI 品牌"] [role="img"]')?.getAttribute("style"))
+      .toContain("openai.svg");
+    fireEvent.click(trigger);
+    const group = await screen.findByRole("region", { name: "codex proxy" });
+    expect(group.querySelectorAll("[data-model-row]")).toHaveLength(2);
+  });
+
   it("distinguishes empty, loading and failed lists and offers a real reload action", () => {
     const reload = vi.fn();
     const props = { models: [], currentModel: "", onSelect: vi.fn(), onClose: vi.fn(), onReload: reload };

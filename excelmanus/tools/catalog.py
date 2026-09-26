@@ -43,9 +43,19 @@ _CSV_SUFFIXES: frozenset[str] = frozenset({".csv"})
 _WORKBOOK_SUFFIXES: frozenset[str] = _XLSX_SUFFIXES | _CSV_SUFFIXES
 _DOCX_SUFFIXES: frozenset[str] = frozenset({".docx"})
 _DEFAULT_FAMILIES: frozenset[str] = frozenset({"xlsx"})
-_CSV_ONLY_DISALLOWED: frozenset[str] = frozenset(
-    {"trace_spreadsheet_formulas", "apply_spreadsheet_changes"}
+# 文件存在性不是写权限：apply_spreadsheet_changes 可通过 workbook_spec 新建，
+# 不要求预先存在 xlsx。mode / allowed / disallowed 仍统一决定真实授权。
+_CSV_ONLY_DISALLOWED: frozenset[str] = frozenset({"trace_spreadsheet_formulas"})
+# CSV 不包含公式，追踪工具仍需已有工作簿；以下迁移路线只提示当前可用工具。
+# 它们可写出第一个 xlsx，让下一轮目录提供依赖已有工作簿的能力。
+# 只列产出 xlsx 的仍可见工具，且调用方必须按当前目录过滤后才对外播报。
+_CSV_BOOTSTRAP_TOOLS: tuple[str, ...] = (
+    "convert_spreadsheet",
+    "query_spreadsheet",
+    "split_spreadsheet",
 )
+# 目录扫描只覆盖工作区顶层、uploads/**、outputs/**；写到这里才会被看到。
+_CSV_BOOTSTRAP_LOCATION: str = "outputs/（或工作区顶层）"
 
 
 def resolve_catalog_mode(
@@ -336,11 +346,16 @@ def _pruned_schema_for_digest(tool: Any) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class EffectiveToolCatalog:
-    """一次推导产出 schemas / 索引文本 / introspect 源 / digest。"""
+    """一次推导产出 schemas / 索引文本 / introspect 源 / digest。
+
+    ``gate_notes`` 只描述“已注册但被当前 mode/profile 门控”的写工具及其
+    解锁路径；它不扩大可见集，也不进入 ``introspection_source``。
+    """
 
     mode: CatalogMode
     tools: tuple[Any, ...]
     skill_names: tuple[str, ...] = ()
+    gate_notes: tuple[str, ...] = ()
 
     def names(self) -> list[str]:
         return [_tool_name(tool) for tool in self.tools]
@@ -350,6 +365,16 @@ class EffectiveToolCatalog:
 
     def contains(self, name: str) -> bool:
         return str(name) in self.name_set()
+
+    def gated_reason(self, name: str) -> str:
+        """工具不在本目录时的门控说明；可见或未知返回空串。"""
+        tool = str(name or "").strip()
+        if not tool or tool in self.name_set():
+            return ""
+        for note in self.gate_notes:
+            if tool in note:
+                return note
+        return ""
 
     def tool_schemas(self, schema_mode: OpenAISchemaMode = "chat_completions") -> list[dict[str, Any]]:
         """按工具名排序后的出网 tools 数组（本目录内的条目）。"""
@@ -459,7 +484,11 @@ class EffectiveToolCatalog:
             "需要 ExcelManus 的流程、设计、配置或限制时，用 knowledge_index 浏览、knowledge_search 定位后 knowledge_read 取正文；knowledge_spec 查工具规范与示例。"
             if "introspect_capability" in visible else ""
         )
-        return "\n".join(filter(None, ["## 能力地图（当前目录）", guidance, *routes]))
+        sections = ["## 能力地图（当前目录）", guidance, *routes]
+        if self.gate_notes:
+            # 门控不是不存在：把解锁路径写进目录本身，避免模型靠猜或绕过守卫。
+            sections.extend(["", "## 被门控（工具仍在，可解锁）", *self.gate_notes])
+        return "\n".join(filter(None, sections))
 
     def introspection_source(self) -> dict[str, Any]:
         """introspect / can_i_do 只扫当前目录。"""
@@ -474,6 +503,8 @@ class EffectiveToolCatalog:
         """稳定内容摘要：排序 + 规范化 JSON。不含注册计数器。"""
         from excelmanus.tools.output_contracts import output_schema_for
 
+        # gate_notes 不进 digest：它只影响能力地图文案（由 system_digest 覆盖），
+        # 而 digest 必须与 registry.catalog_digest() 保持一致（绑定投影无 gates）。
         payload = {
             "mode": self.mode,
             "model_index": self.tool_index_text(),
@@ -509,8 +540,12 @@ def derive_effective_catalog(
     skill_names: Sequence[str] = (),
     allow_run_code: bool = False,
     families: frozenset[str] | None = None,
+    gate_notes: Sequence[str] = (),
 ) -> EffectiveToolCatalog:
-    """从 registry 快照 + mode + scope 推导目录，未知模式不得放宽到 write。"""
+    """从 registry 快照 + mode + scope 推导目录，未知模式不得放宽到 write。
+
+    ``gate_notes`` 是给发现层的“被门控 + 解锁”说明，不参与可见集判定。
+    """
     if mode not in _VALID_MODES:
         raise ValueError(f"unknown catalog mode: {mode!r}")
     resolved: CatalogMode = mode  # type: ignore[assignment]
@@ -542,7 +577,10 @@ def derive_effective_catalog(
         )
     )
     skills = tuple(sorted({str(name) for name in skill_names if str(name).strip()}))
-    return EffectiveToolCatalog(mode=resolved, tools=visible, skill_names=skills)
+    gates = tuple(str(note) for note in gate_notes if str(note).strip())
+    return EffectiveToolCatalog(
+        mode=resolved, tools=visible, skill_names=skills, gate_notes=gates
+    )
 
 
 def _skill_names_of(engine: Any) -> tuple[str, ...]:
@@ -616,8 +654,10 @@ def inspect_workspace_catalog(root: str | None) -> dict[str, Any]:
                 except OSError:
                     continue
                 suf = path.suffix.lower()
-                if suf in _XLSX_SUFFIXES:
-                    has_xlsx = True
+                if suf in _XLSX_SUFFIXES and not has_xlsx:
+                    from excelmanus.workbook.file_format import is_workbook_file
+
+                    has_xlsx = is_workbook_file(path)
                 elif suf in _CSV_SUFFIXES:
                     has_csv = True
                 elif suf in _DOCX_SUFFIXES:
@@ -658,6 +698,160 @@ def _workspace_flags(engine: Any) -> dict[str, Any]:
     config = getattr(engine, "config", None)
     root = getattr(config, "workspace_root", None)
     return inspect_workspace_catalog(str(root) if root else None)
+
+
+def workspace_catalog_profile(engine: Any) -> str:
+    """当前工作区的目录 profile（csv / docx / xlsx）。"""
+    return str(_workspace_flags(engine).get("profile") or "xlsx")
+
+
+def csv_profile_bootstrap_hint(visible_names: Any = None) -> str:
+    """csv-only 工作区产出第一个 xlsx 的可执行细节（按需查询用，不进 prompt）。
+
+    ``visible_names`` 传入当前有效目录名集合时，只播报该集合里真实存在的
+    工具，绝不指向当前不可调用的 API；``None`` 表示调用方已知目录。
+    """
+    available = None if visible_names is None else {str(name) for name in visible_names}
+    calls: list[str] = []
+    if available is None or "convert_spreadsheet" in available:
+        calls.append(
+            "convert_spreadsheet(file_path='uploads/<数据>.csv', "
+            "output_path='outputs/<结果>.xlsx', mode='preserve')"
+        )
+    if available is None or "query_spreadsheet" in available:
+        calls.append(
+            "query_spreadsheet(sources=[{'file_path': 'uploads/<数据>.csv'}], "
+            "sql='SELECT * FROM data1', output_path='outputs/<结果>.xlsx')"
+        )
+    named = "；".join(calls)
+    head = (
+        f"可执行解锁步骤：{named}。"
+        if named
+        else "当前目录没有可确认的转换调用；可由用户上传有效 xlsx。"
+    )
+    return (
+        head
+        + f"xlsx 必须落在 {_CSV_BOOTSTRAP_LOCATION}才会被目录扫描到；"
+        "下一轮目录仅重新评估文件族门控，仍受模式和会话授权限制。"
+    )
+
+
+def _csv_gate_notes(
+    *,
+    profile: str,
+    mode: CatalogMode | str,
+    registered: Sequence[Any],
+    disallowed: Sequence[str],
+    allowed: Sequence[str] | None,
+) -> tuple[str, ...]:
+    """csv-only 工作区“依赖已有工作簿的工具被 profile 门控”的单行指路。
+
+    只保留模型最需要的事实（工具仍注册、被 profile 门控、解锁靠 outputs 下
+    的第一个 xlsx），不展开调用示例：system prompt 里已有
+    ``14_csv_bootstrap`` 策略段承担完整路线，避免同一段 prompt 重复。
+    解锁指针只在工具真实可见时才点名（``bootstrap`` 已按目录过滤）。
+
+    注意：工作簿写工具不再按 CSV profile 门控（新建不依赖已有 xlsx），
+    当前 ``_CSV_ONLY_DISALLOWED`` 只含依赖已有工作簿的追踪类工具。
+    """
+    if str(profile) != "csv" or str(mode) != "write":
+        return ()
+    names = {_tool_name(tool) for tool in registered}
+    gated = sorted(name for name in _CSV_ONLY_DISALLOWED if name in names)
+    if not gated:
+        return ()
+    blocked = {str(name) for name in disallowed}
+    keep = None if allowed is None else {str(name) for name in allowed}
+    bootstrap = {
+        name
+        for name in _CSV_BOOTSTRAP_TOOLS
+        if name in names and name not in blocked and (keep is None or name in keep)
+    }
+    if "convert_spreadsheet" in bootstrap:
+        unlock = ("解锁：先用 apply_spreadsheet_changes(workbook_spec=...) 新建，"
+                  "或用 convert_spreadsheet 写出 outputs/ 下的第一个 xlsx")
+    elif bootstrap:
+        unlock = "解锁：可用 " + "、".join(sorted(bootstrap)) + " 写出 outputs/ 下的第一个 xlsx"
+    else:
+        unlock = "解锁：由用户上传有效 xlsx；当前没有已确认可用的转换工具"
+    return (
+        "被 profile 门控（工具仍注册，只是不进当前目录）："
+        + "、".join(gated)
+        + "——工作区只有 CSV、尚无 xlsx；"
+        + unlock
+        + "，下一轮重评估文件族门控（仍受模式和会话授权限制）。",
+    )
+
+
+def gated_tool_reason(
+    engine: Any,
+    name: str,
+    *,
+    catalog: EffectiveToolCatalog | None = None,
+) -> str:
+    """工具在当前有效目录中不可见时的原因与解锁路径；可见/未知返回空串。
+
+    只依据当前有效目录与工作区事实作答，供 introspect_capability 与报错
+    文案消费：把“工具不存在”换成“被什么门控、怎么解锁”。``catalog`` 可
+    由调用方传入已绑定的目录（``catalog.gated_reason``），避免重复推导。
+    """
+    tool = str(name or "").strip()
+    if not tool:
+        return ""
+    if catalog is None and engine is not None:
+        catalog = execution_catalog_from_engine(engine)
+    if catalog is not None and tool in catalog.name_set():
+        return ""
+    cap = getattr(engine, "_fixed_capability", None)
+    allowed = getattr(cap, "allowed_tools", None)
+    fixed_blocked = set(getattr(cap, "disallowed_tools", ()) or ())
+    if tool in fixed_blocked or (allowed is not None and tool not in allowed):
+        gate = "disallowed_tools" if tool in fixed_blocked else "allowed_tools"
+        return (f"{tool} 被当前会话授权限制（{gate}）；需要授权方调整权限。"
+                "创建 xlsx、查询详情或 configure_agent 均不能扩大这项授权。")
+    if catalog is not None:
+        note = catalog.gated_reason(tool)
+        if note:
+            # 目录里的 gate note 是给 prompt 的单行指路；按需查询补可执行细节。
+            if tool in _CSV_ONLY_DISALLOWED:
+                return note + " " + csv_profile_bootstrap_hint(catalog.name_set())
+            return note
+    if engine is None:
+        return ""
+    registry = getattr(engine, "_registry", None) or getattr(engine, "registry", None)
+    getter = getattr(registry, "get_all_tools", None)
+    registered = {_tool_name(t) for t in getter()} if callable(getter) else set()
+    if registered and tool not in registered:
+        return f"{tool} 未注册在当前宿主注册表：不是目录门控，本会话无法调用。"
+
+    mode = catalog.mode if catalog is not None else ""
+    if mode in _READ_PLAN_MODES:
+        return (
+            f"{tool} 是写效应工具，当前目录模式为 {mode}（只读/计划），故不进目录；"
+            "切到 write 模式后即可调用。"
+        )
+    cap = getattr(engine, "_fixed_capability", None)
+    blocked = {str(n) for n in (getattr(cap, "disallowed_tools", ()) or ())}
+    try:
+        from excelmanus.self_management import disallowed_tools
+
+        blocked |= {str(n) for n in (disallowed_tools(engine) or ())}
+    except Exception:
+        pass
+    if tool in blocked:
+        return (
+            f"{tool} 被当前会话授权禁用（工具仍注册）：若它只是被暂停，"
+            "可用 configure_agent enable_tools 恢复。"
+        )
+    if workspace_catalog_profile(engine) == "csv" and tool in _CSV_ONLY_DISALLOWED:
+        return (
+            f"{tool} 被 csv-only profile 门控（工作区只有 CSV、尚无 xlsx），不是被删除。"
+            + csv_profile_bootstrap_hint(catalog.name_set() if catalog is not None else None)
+        )
+    return (
+        f"{tool} 不在当前有效目录中：可能被 mode / 文件族 / 会话授权过滤。"
+        "用 category_tools 查询当前可用能力。"
+    )
 
 
 def _families_with_mcp(flags: dict[str, Any], registered: Sequence[Any]) -> frozenset[str]:
@@ -701,14 +895,22 @@ def execution_catalog_from_engine(
     disallowed.extend(disallowed_tools(engine))
     if profile == "csv":
         disallowed.extend(_CSV_ONLY_DISALLOWED)
+    allowed = None if cap.allowed_tools is None else list(cap.allowed_tools)
     return derive_effective_catalog(
         tools=registered,
         mode=mode,
-        allowed=None if cap.allowed_tools is None else list(cap.allowed_tools),
+        allowed=allowed,
         disallowed=disallowed,
         skill_names=_skill_names_of(engine),
         allow_run_code=_allow_run_code_of(engine, mode),
         families=families,
+        gate_notes=_csv_gate_notes(
+            profile=profile,
+            mode=mode,
+            registered=registered,
+            disallowed=disallowed,
+            allowed=allowed,
+        ),
     )
 
 
@@ -751,6 +953,14 @@ def catalog_from_engine(
     registered = registry.get_all_tools()
     families = _families_with_mcp(flags, registered)
     engine._catalog_families = families
+    gate_notes = _csv_gate_notes(
+        profile=profile,
+        mode=mode,
+        registered=registered,
+        disallowed=disallowed,
+        allowed=allowed,
+    )
+    engine._catalog_gate_notes = gate_notes
     catalog = derive_effective_catalog(
         tools=registered,
         mode=mode,
@@ -759,6 +969,7 @@ def catalog_from_engine(
         skill_names=skill_names,
         allow_run_code=allow_run_code,
         families=families,
+        gate_notes=gate_notes,
     )
     registry.bind_catalog(
         mode=mode,

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from excelmanus.providers.antigravity import AntigravityClient
 from excelmanus.providers.claude import ClaudeClient
 from excelmanus.providers.gemini import GeminiClient
+from excelmanus.providers.mimo import MimoClient, is_mimo_base_url
 from excelmanus.providers.openai_responses import OpenAIResponsesClient
 from excelmanus.providers.workbuddy import WorkBuddyClient, is_workbuddy_base_url
 
@@ -118,7 +119,7 @@ def _infer_protocol_from_model(model: str) -> str | None:
     return None
 
 
-def create_client(
+def _create_client(
     api_key: str,
     base_url: str,
     protocol: str = "auto",
@@ -142,6 +143,11 @@ def create_client(
       5. 其他 → 标准 openai.AsyncOpenAI（Chat Completions）
     """
     normalized = (protocol or "auto").strip().lower()
+    if normalized == "auto":
+        from excelmanus.model_catalog import model_spec
+        recommended = (model_spec(model, base_url, route_only=True) or {}).get("recommended_protocol")
+        if recommended:
+            normalized = recommended
 
     if normalized == "antigravity":
         # Cloud Code v1internal 端点不含版本段，跳过 /v1 规范化。
@@ -161,6 +167,11 @@ def create_client(
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
     if normalized == "openai":
         base_url = normalize_openai_base_url(base_url)
+        if is_mimo_base_url(base_url):
+            return MimoClient(
+                api_key=api_key, base_url=base_url,
+                default_headers=default_headers,
+            )
         if is_workbuddy_base_url(base_url):
             return WorkBuddyClient(
                 api_key=api_key, base_url=base_url,
@@ -178,6 +189,9 @@ def create_client(
         return GeminiClient(api_key=api_key, base_url=base_url)
     if is_claude_provider(base_url):
         return ClaudeClient(api_key=api_key, base_url=base_url)
+
+    if is_mimo_base_url(base_url):
+        return MimoClient(api_key=api_key, base_url=base_url)
 
     # auto: URL 未匹配时，按模型名称前缀推断
     inferred = _infer_protocol_from_model(model)
@@ -209,6 +223,13 @@ def create_client(
     )
 
 
+
+def create_client(api_key: str, base_url: str, protocol: str = "auto", model: str = "", default_headers: dict[str, str] | None = None) -> Any:
+    client = _create_client(api_key, base_url, protocol, model, default_headers)
+    client._capability_identity = {"api_key": api_key, "protocol": protocol, "headers": default_headers or {}}
+    return client
+
+
 __all__ = [
     "create_client",
     "normalize_openai_base_url",
@@ -217,6 +238,8 @@ __all__ = [
     "is_workbuddy_base_url",
     "is_responses_api_enabled",
     "GeminiClient",
+    "MimoClient",
+    "is_mimo_base_url",
     "ClaudeClient",
     "OpenAIResponsesClient",
     "WorkBuddyClient",

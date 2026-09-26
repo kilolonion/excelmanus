@@ -133,6 +133,7 @@ def build_stable_system_prompt(engine: Any) -> str:
         visible_tools=visible_names,
         new_workbook=bool(getattr(engine, "_catalog_new_workbook", True)),
         full_access=bool(getattr(engine, "_full_access_enabled", False)),
+        profile=getattr(engine, "_catalog_profile", None),
         strategy_names=frozenset(inherited) if inherited else None,
     )
     assembly = composer.registry.assemble(assemble_ctx)

@@ -192,6 +192,8 @@ def _chat_messages_to_responses_input(
 
     返回 (instructions, input_items)。
     """
+    from excelmanus.providers.thinking import reject_unsupported_media
+    reject_unsupported_media(messages)
     instructions_parts: list[str] = []
     input_items: list[dict[str, Any]] = []
 
@@ -668,13 +670,14 @@ class OpenAIResponsesClient:
         self._http = httpx.AsyncClient(timeout=300.0)
         self.chat = _ResponsesChat(self)
 
-    def _request_headers(self) -> dict[str, str]:
+    def _request_headers(self, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
         }
         if self._chatgpt_account_id:
             headers["ChatGPT-Account-Id"] = self._chatgpt_account_id
+        headers.update(extra_headers or {})
         return headers
 
     async def _generate(
@@ -702,7 +705,7 @@ class OpenAIResponsesClient:
         responses_tools = body.get("tools", [])
 
         url = f"{self._base_url}/responses"
-        headers = self._request_headers()
+        headers = self._request_headers((extra_kwargs or {}).get("extra_headers"))
 
         logger.debug(
             "Responses API 请求 (collected stream): model=%s, input=%d项, tools=%d个",
@@ -764,12 +767,14 @@ class OpenAIResponsesClient:
         the same compatibility object after the provider reaches a terminal
         status, so the Agent loop never mistakes ``queued`` for an empty reply.
         """
-        payload = await self.start_background_response(body)
+        header_kwargs = {"extra_headers": extra_kwargs["extra_headers"]} if (extra_kwargs or {}).get("extra_headers") else {}
+        payload = await self.start_background_response(body, **header_kwargs)
         response_id = str(payload.get("id") or "")
         status = str(payload.get("status") or "")
         if status in {"queued", "in_progress", "pending"}:
             payload = await self.wait_background_response(
                 response_id,
+                **header_kwargs,
                 timeout_seconds=float(
                     (extra_kwargs or {}).get("_responses_background_poll_seconds", 300.0)
                     or 300.0
@@ -781,14 +786,14 @@ class OpenAIResponsesClient:
             raise ResponsesAPIError(422, f"Responses background 执行失败: {error}")
         return _responses_output_to_openai(payload, model)
 
-    async def start_background_response(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def start_background_response(self, body: dict[str, Any], *, extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
         """Submit a background response and return its provider handle."""
         payload = dict(body)
         payload["background"] = True
         response = await self._http.post(
             f"{self._base_url}/responses",
             json=payload,
-            headers=self._request_headers(),
+            headers=self._request_headers(extra_headers),
         )
         if response.status_code not in {200, 201, 202}:
             raise await _http_response_error(response)
@@ -797,10 +802,10 @@ class OpenAIResponsesClient:
             raise ResponsesAPIError(0, "Responses background 返回不是 JSON 对象")
         return result
 
-    async def get_background_response(self, response_id: str) -> dict[str, Any]:
+    async def get_background_response(self, response_id: str, *, extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
         response = await self._http.get(
             f"{self._base_url}/responses/{response_id}",
-            headers=self._request_headers(),
+            headers=self._request_headers(extra_headers),
         )
         if response.status_code != 200:
             raise await _http_response_error(response)
@@ -810,11 +815,11 @@ class OpenAIResponsesClient:
         return result
 
     async def wait_background_response(
-        self, response_id: str, *, timeout_seconds: float = 300.0,
+        self, response_id: str, *, timeout_seconds: float = 300.0, extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + max(0.1, timeout_seconds)
         while True:
-            payload = await self.get_background_response(response_id)
+            payload = await self.get_background_response(response_id, **({"extra_headers": extra_headers} if extra_headers else {}))
             status = str(payload.get("status") or "")
             if status not in {"queued", "in_progress", "pending"}:
                 return payload
@@ -822,12 +827,12 @@ class OpenAIResponsesClient:
                 raise ResponsesAPIError(408, "Responses background 响应等待超时")
             await asyncio.sleep(0.5)
 
-    async def cancel_background_response(self, response_id: str) -> dict[str, Any]:
+    async def cancel_background_response(self, response_id: str, *, extra_headers: dict[str, str] | None = None) -> dict[str, Any]:
         """Request cancellation of a queued/in-progress background response."""
         response = await self._http.post(
             f"{self._base_url}/responses/{response_id}/cancel",
             json={},
-            headers=self._request_headers(),
+            headers=self._request_headers(extra_headers),
         )
         if response.status_code not in {200, 202}:
             raise await _http_response_error(response)
@@ -870,7 +875,7 @@ class OpenAIResponsesClient:
         responses_tools = body.get("tools", [])
 
         url = f"{self._base_url}/responses"
-        headers = self._request_headers()
+        headers = self._request_headers((extra_kwargs or {}).get("extra_headers"))
 
         async def _stream_generator():
             current_tools: dict[int, dict] = {}

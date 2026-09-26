@@ -16,6 +16,8 @@ export interface ModelCapabilities {
   fresh_until?: string;
   stale_until?: string;
   source?: string;
+  evidence?: Record<string, string>;
+  probe_version?: number;
 }
 
 export interface ProbeJobTarget {

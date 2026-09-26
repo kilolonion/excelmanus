@@ -118,10 +118,39 @@ def _image_content_hash_b64(b64_str: str) -> str:
 def _image_injection_key(injection: dict[str, Any]) -> tuple[str, str]:
     attachment = injection.get("attachment")
     if isinstance(attachment, dict) and attachment.get("attachmentId"):
-        digest = str(attachment["attachmentId"])
+        digest = str(attachment["attachmentId"]).removeprefix("sha256:")[:16]
     else:
         digest = _image_content_hash_b64(str(injection.get("base64") or ""))
     return digest, str(injection.get("detail", "auto"))
+
+
+def _image_observation_is_live(engine: Any, key: tuple[str, str]) -> bool:
+    """Whether this exact image/detail is already in the live model surface.
+
+    A new crop has a different attachment id and is intentionally allowed. A
+    same-image recall after compaction is also allowed because the hidden
+    observation node no longer exists in the live surface.
+    """
+    memory = getattr(engine, "memory", None) or getattr(engine, "_memory", None)
+    messages = getattr(memory, "messages", None) if memory is not None else None
+    if not isinstance(messages, list):
+        return False
+    attachment_id, detail = key
+    for message in messages:
+        if not isinstance(message, dict) or message.get("_prompt_kind") != "image_observation":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "image":
+                continue
+            attachment = block.get("attachment")
+            live_id = str(attachment.get("attachmentId") or "").removeprefix("sha256:")[:16] if isinstance(attachment, dict) else ""
+            if live_id == attachment_id:
+                if str(block.get("detail", "auto")) == detail:
+                    return True
+    return False
 
 
 _REPEAT_REMINDER_THRESHOLDS = (3, 5, 8)
@@ -305,8 +334,8 @@ class ToolDispatcher:
         )
 
         version = getattr(result.ui_meta, "content_version", None)
-        for path in result.ui_meta.files or []:
-            remember_content_version(path, version)
+        if len(result.ui_meta.files or []) == 1:
+            remember_content_version(result.ui_meta.files[0], version)
         value = result.value
         if isinstance(value, dict):
             nested = value.get("content_version")
@@ -318,6 +347,12 @@ class ToolDispatcher:
                 for save_path, save_ver in saves.items():
                     if save_path and save_ver:
                         remember_content_version(str(save_path), str(save_ver))
+            from excelmanus.engine_core.execution_facts import publications, records
+            for source in records(value.get("source_snapshots")):
+                if isinstance(source, dict) and source.get("file_path") and source.get("content_version"):
+                    remember_content_version(source["file_path"], source["content_version"])
+            for effect in publications(value):
+                remember_content_version(effect["file_path"], effect.get("content_version"))
         state = getattr(self._engine, "state", None)
         remember = getattr(state, "remember_file_version", None)
         if callable(remember):
@@ -331,20 +366,24 @@ class ToolDispatcher:
         """唯一消费边界：任意工具返回值 → ToolResult。"""
         return coerce_legacy_result(result_value)
 
-    def _schedule_image_injection(self, injection: dict[str, Any]) -> None:
+    def _schedule_image_injection(self, injection: dict[str, Any]) -> bool:
         e = self._engine
         attachment = injection.get("attachment")
         base64_data = injection.get("base64")
         if not attachment and not base64_data:
-            return
+            return False
 
         if e.is_vision_capable:
             key = _image_injection_key(injection)
-            # Deduplicate only pending observations at the same detail. A prior
-            # observation may have been compacted or offloaded; explicit recall
-            # must append fresh pixels after the current tool-result batch.
+            # Deduplicate pending observations and live hidden observations at
+            # the same detail.  Once compaction removes the hidden observation,
+            # an explicit recall is allowed to append fresh pixels again.
             if any(_image_injection_key(item) == key for item in self._deferred_image_injections):
                 logger.info("图片已在待注入批次中 (hash=%s)，跳过重复注入", key[0])
+                return False
+            elif _image_observation_is_live(e, key):
+                logger.info("图片已在当前视觉上下文中 (hash=%s, detail=%s)，跳过重复注入", key[0], key[1])
+                return False
             else:
                 self._deferred_image_injections.append({
                     "attachment": attachment,
@@ -357,13 +396,19 @@ class ToolDispatcher:
                     key[0],
                     injection.get("mime_type"),
                 )
+                return True
         else:
             logger.info("当前模型无视觉能力，跳过图片注入")
+        return False
 
     def _apply_ui_meta_effects(self, tool_result: ToolResult) -> None:
         ui = tool_result.ui_meta
         if ui.image:
-            self._schedule_image_injection(ui.image)
+            injected = self._schedule_image_injection(ui.image)
+            if not injected and tool_result.success:
+                tool_result.model_text += (
+                    " 本轮已有相同视觉证据，未重复注入像素；如需新证据请改用不同 crop/zoom 或 detail。"
+                )
 
     def flush_deferred_images(self) -> int:
         """将延迟的图片注入实际写入 memory。
@@ -754,6 +799,16 @@ class ToolDispatcher:
                 self._readonly_replay_expiry.pop(replay_key, None)
                 cached = None
         if cached is not None:
+            # read_image is replay-safe within one agent run, but replaying a
+            # successful call must not inject another identical hidden image
+            # observation.  Tell the model why no new pixels were added and
+            # point it at the only useful next action: a different crop/zoom
+            # or a different detail level.
+            if tool_name == "read_image":
+                return cached.with_model_text(
+                    cached.model_text
+                    + " 本轮已提供同一视觉证据，未重复注入像素；若仍需确认，请改用不同 crop/zoom 或 detail。"
+                )
             return cached
 
         spill_locator = extract_spill_locator(arguments)
@@ -874,12 +929,29 @@ class ToolDispatcher:
                     settled = await asyncio.gather(work, return_exceptions=True)
                     if not isinstance(settled[0], BaseException):
                         completed = self._coerce_tool_result(settled[0])
+                        from excelmanus.engine_core.execution_facts import project_publications, tool_publications
+                        completed = project_publications(completed, tool_name)
                         if active_execution is not None:
                             active_execution.outcome = completed
                         self._remember_tool_versions(completed)
                         self._apply_ui_meta_effects(completed)
-                        if self._write_effect_of(tool_name, arguments) != "none" and completed.ui_meta.files:
-                            self._record_public_identities(self._engine, completed.ui_meta.files)
+                        effects = tool_publications(tool_name, completed.value, success=completed.success)
+                        if effects:
+                            from excelmanus.engine_core.delivery import DeliveryLedger
+                            from excelmanus.events import EventType, ToolCallEvent, changed_mutations
+                            ledger = getattr(getattr(self._engine, "_state", None), "delivery", None)
+                            if isinstance(ledger, DeliveryLedger):
+                                ledger.record(tool_name, arguments, completed, vision=False, workspace_root=self._workspace_root())
+                            changed = self._record_public_identities(self._engine, [item["file_path"] for item in effects])
+                            deleted_idents = self._record_public_identities(
+                                self._engine,
+                                [item["file_path"] for item in effects if item.get("operation") == "delete"],
+                            )
+                            self._engine.emit(getattr(self, "_current_on_event", None), ToolCallEvent(
+                                event_type=EventType.MUTATION, changed_files=changed,
+                                mutations=changed_mutations(changed, workspace_root=self._workspace_root(),
+                                                            deleted=deleted_idents),
+                            ))
                     raise
             finally:
                 reset_cancel_event(_sleep_token)
@@ -2146,6 +2218,17 @@ class ToolDispatcher:
                 )
                 result_str = structured.model_text
 
+        new_publications = None
+        if structured is not None:
+            from excelmanus.engine_core.execution_facts import project_publications
+            from excelmanus.engine_core.delivery import DeliveryLedger
+            structured = project_publications(structured, tool_name)
+            ledger = getattr(getattr(e, "_state", None), "delivery", None)
+            if isinstance(ledger, DeliveryLedger):
+                new_publications = ledger.record(tool_name, arguments, structured, vision=e.is_vision_capable is True,
+                                                 mutating=self._write_effect_of(tool_name, arguments) in {"workspace_write", "external_write"},
+                                                 workspace_root=self._workspace_root())
+
         unshaped_text = result_str
         # Semantic shaping sees the full result before deterministic spilling.
         # The subsequent spill/hard cap remains authoritative on failure/keep.
@@ -2271,145 +2354,50 @@ class ToolDispatcher:
                 iteration,
             )
 
-        # ── 自动追踪 affected_files + write_operations_log ──
-        if success:
-            _state = getattr(e, "_state", None)
-            if _state is not None:
-                if (
-                    self._is_excel_mutating_call(tool_name, arguments)
-                    or tool_name in self._WORD_WRITE_TOOLS
-                ):
-                    _afp = (arguments.get("file_path") or "").strip()
-                    if _afp:
-                        _state.record_affected_file(_afp)
-                    # 写入操作日志（会话级索引；单元格语义在 meta.write_verification）
-                    _summary = self._extract_write_summary(tool_name, arguments, result_str)
-                    _verify_bit = compact_write_verification(write_verification)
-                    if _verify_bit:
-                        _summary = f"{_summary}; {_verify_bit}".strip("; ")
-                    _state.record_write_operation(
-                        tool_name=tool_name,
-                        file_path=_afp,
-                        sheet=(arguments.get("sheet") or "").strip(),
-                        cell_range=(arguments.get("range") or "").strip(),
-                        summary=_summary,
-                    )
-                elif tool_name == "split_spreadsheet":
-                    # 多文件拆分：源文件只读，产物按结果 files 逐条登记
-                    try:
-                        _split_files: list = []
-                        if structured is not None and isinstance(structured.value, dict):
-                            _split_files = structured.value.get("files") or []
-                        _split_paths: list[str] = []
-                        for _sf in _split_files:
-                            _sfp = str(_sf.get("file_path") or "").strip() if isinstance(_sf, dict) else ""
-                            if _sfp:
-                                _state.record_affected_file(_sfp)
-                                _split_paths.append(_sfp)
-                        _by_col = (arguments.get("by_column") or arguments.get("column") or "").strip()
-                        _state.record_write_operation(
-                            tool_name=tool_name,
-                            file_path=", ".join(_split_paths),
-                            summary=f"split_spreadsheet 按 {_by_col or '?'} 拆出 {len(_split_paths)} 个文件",
-                        )
-                    except Exception:
-                        pass
-                elif tool_name == "run_code":
-                    try:
-                        _published_paths = ""
-                        if structured is not None and isinstance(structured.value, dict):
-                            _items = structured.value.get("published") or []
-                            if isinstance(_items, list):
-                                for _item in _items:
-                                    if not isinstance(_item, dict):
-                                        continue
-                                    if _item.get("status") != "committed":
-                                        continue
-                                    _p = str(_item.get("path") or "").strip()
-                                    if _p:
-                                        _state.record_affected_file(_p)
-                                        _published_paths = (
-                                            f"{_published_paths}, {_p}" if _published_paths else _p
-                                        )
-                        if _published_paths or _state.has_write_tool_call:
-                            _already_logged = any(
-                                e.get("tool_name") == "run_code"
-                                for e in _state.write_operations_log
-                            )
-                            if not _already_logged:
-                                _state.record_write_operation(
-                                    tool_name="run_code",
-                                    file_path=_published_paths,
-                                    summary=self._extract_run_code_write_summary(result_str),
-                                )
-                    except Exception:
-                        pass
-                elif self._write_effect_of(tool_name, arguments) == "workspace_write":
-                    for _pk in ("file_path", "output_path", "path", "target_path",
-                                "source", "destination"):
-                        _pv = (arguments.get(_pk) or "").strip()
-                        if _pv:
-                            _state.record_affected_file(_pv)
-                    # 通用写入工具日志
-                    _first_path = next(
-                        ((arguments.get(k) or "").strip() for k in ("file_path", "output_path", "path", "target_path",
-                                                                     "source", "destination")
-                         if (arguments.get(k) or "").strip()),
-                        "",
-                    )
-                    _state.record_write_operation(
-                        tool_name=tool_name,
-                        file_path=_first_path,
-                    )
-
-        # 写后事件记录到 FileRegistry
-        if success:
-            _freg = e.file_registry
-            if _freg is not None:
+        # Publications are authoritative even when the enclosing script failed.
+        # Native calls and SDK subcalls share this path; source input arguments
+        # no longer masquerade as modified or newly produced files.
+        from excelmanus.engine_core.execution_facts import tool_publications
+        effects = new_publications if new_publications is not None else tool_publications(tool_name, structured.value if structured else None, success=success)
+        state = getattr(e, "_state", None)
+        if effects and state is not None:
+            deleted_paths: list[str] = []
+            for effect in effects:
+                path = effect["file_path"]
+                is_delete = effect.get("operation") == "delete"
+                state.record_write_action()
+                state.record_affected_file(path, deleted=is_delete)
+                if is_delete:
+                    deleted_paths.append(path)
+                state.record_write_operation(
+                    tool_name=tool_name, file_path=path,
+                    sheet=str(arguments.get("sheet") or ""),
+                    cell_range=str(arguments.get("range") or ""),
+                    summary=f"{effect.get('operation', 'update')} @{effect.get('content_version') or ''}",
+                )
+            from excelmanus.events import changed_mutations
+            changed = self._record_public_identities(e, [item["file_path"] for item in effects])
+            # Deletions must stay distinguishable from writes on the wire, so
+            # every client surface evicts the path instead of re-listing it.
+            deleted_idents = self._record_public_identities(e, deleted_paths) if deleted_paths else []
+            e.emit(on_event, ToolCallEvent(
+                event_type=EventType.MUTATION, tool_call_id=tool_call_id,
+                parent_call_id=parent_call_id, changed_files=changed,
+                mutations=changed_mutations(changed, workspace_root=self._workspace_root(),
+                                            deleted=deleted_idents),
+            ))
+            registry = e.file_registry
+            if registry is not None:
                 try:
-                    # rename_file 特殊处理：原子迁移路径，保留 file_id / provenance
-                    if tool_name == "rename_file":
-                        _src = (arguments.get("source") or "").strip()
-                        _dst = (arguments.get("destination") or "").strip()
-                        if _src and _dst:
-                            _freg.rename_entry(
-                                _src, _dst,
-                                session_id=getattr(e, "session_id", None),
-                                turn=e.state.session_turn,
-                            )
-
-                    _write_paths: list[str] = []
-                    if (
-                        self._is_excel_mutating_call(tool_name, arguments)
-                        or tool_name in self._WORD_WRITE_TOOLS
-                    ):
-                        _wp = (arguments.get("file_path") or "").strip()
-                        if _wp:
-                            _write_paths.append(_wp)
-                    elif tool_name == "split_spreadsheet":
-                        # 源文件只读；产物路径在结果 files 里
-                        if structured is not None and isinstance(structured.value, dict):
-                            for _sf2 in structured.value.get("files") or []:
-                                _sf2p = str(_sf2.get("file_path") or "").strip() if isinstance(_sf2, dict) else ""
-                                if _sf2p:
-                                    _write_paths.append(_sf2p)
-                    elif self._write_effect_of(tool_name, arguments) == "workspace_write":
-                        for _pk2 in ("file_path", "output_path", "path", "target_path",
-                                     "source", "destination"):
-                            _pv2 = (arguments.get(_pk2) or "").strip()
-                            if _pv2:
-                                _write_paths.append(_pv2)
-                    for _wpath in _write_paths:
-                        _entry = _freg.get_by_path(_wpath)
-                        if _entry is not None:
-                            _freg.record_event(
-                                _entry.id,
-                                "tool_write",
-                                tool_name=tool_name,
-                                turn=e.state.session_turn,
-                            )
+                    if tool_name == "rename_file" and success:
+                        registry.rename_entry(arguments["source"], arguments["destination"],
+                                              session_id=getattr(e, "session_id", None), turn=e.state.session_turn)
+                    for effect in effects:
+                        entry = registry.get_by_path(effect["file_path"])
+                        if entry is not None:
+                            registry.record_event(entry.id, "tool_write", tool_name=tool_name, turn=e.state.session_turn)
                 except Exception:
-                    logger.debug("FileRegistry 写后事件记录失败", exc_info=True)
+                    logger.debug("FileRegistry publication event failed", exc_info=True)
 
         # 任务清单事件：成功执行 task_create/task_update/write_plan 后发射对应事件
         if success and tool_name == "write_plan":
@@ -2430,6 +2418,7 @@ class ToolDispatcher:
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.TASK_LIST_CREATED,
+                        tool_call_id=tool_call_id,
                         task_list_data=task_list.to_dict(),
                     ),
                 )
@@ -2460,10 +2449,16 @@ class ToolDispatcher:
         elif success and tool_name == "task_create":
             task_list = e._task_store.current
             if task_list is not None:
+                from excelmanus.engine_core.delivery import DeliveryLedger
+                ledger = getattr(getattr(e, "_state", None), "delivery", None)
+                if isinstance(ledger, DeliveryLedger):
+                    created_at = getattr(task_list, "created_at", None)
+                    ledger.start_task(created_at.isoformat() if hasattr(created_at, "isoformat") else "")
                 e.emit(
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.TASK_LIST_CREATED,
+                        tool_call_id=tool_call_id,
                         task_list_data=task_list.to_dict(),
                     ),
                 )
@@ -2474,6 +2469,7 @@ class ToolDispatcher:
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.TASK_ITEM_UPDATED,
+                        tool_call_id=tool_call_id,
                         task_index=arguments.get("task_index"),
                         task_status=arguments.get("status", ""),
                         task_result=arguments.get("result"),

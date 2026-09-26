@@ -28,6 +28,7 @@ The running service exposes its request and response schemas at [the local API r
 | [Web README](../web/README.md) | 前端开发、地址配置、构建与检查 / Frontend development, origin settings, builds, checks |
 | [Desktop README](../desktop/README.md) | App 界面、桌面打包、运行时、签名与数据目录 / App UI, packaging, runtimes, signing, profiles |
 | [提示词分层与维护](prompt-layering.md) | 提示词、工具参数与执行约束的维护边界 / Prompt, schema, and runtime responsibilities |
+| [工具调用状态定案](tool-call-state.md) | 模型流中断/重试时"未执行"调用的终态、事件与文案 / Tool-call terminal state after stream aborts |
 | [Agent 统一认知门户](knowledge-portal.md) | 按需查询产品设计、流程、配置、能力及恢复说明 / On-demand product knowledge and live capabilities |
 | [技能装载与工作区](skill-isolation-design.md) | 技能发现与工作区范围 / Skill discovery and workspace scope |
 | [Bench](../bench/README.md) | 真实模型评测、隔离配置与结果解释 / Live-model evaluation and result interpretation |

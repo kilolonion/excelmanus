@@ -37,6 +37,10 @@ class ModelProfile:
     custom_extra_body: str = ""  # 自定义 extra_body JSON
     custom_extra_headers: str = ""  # 自定义 extra_headers JSON
     canonical_model: str = ""  # 智能匹配绑定的已知规范模型名（仅用于本地配置，不改写上游 Model ID）
+    max_context_tokens: int = 0  # 0 沿用自动/全局上下文预算
+    vision_mode: str = "auto"  # auto|true|false：档案级图片输入覆盖
+    input_modalities: tuple[str, ...] | None = None  # None 自动；显式列表可独立声明四种输入模态
+    max_output_tokens: int = 0  # 0 使用服务端/协议默认输出上限
 
 
 # 基础 URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
@@ -51,354 +55,23 @@ logger = logging.getLogger(__name__)
 # 键为模型标识符的前缀或完整名称；匹配时先归一化（点/横线/下划线等价、
 # 字母→数字边界分段），再按 "-" 边界做最长前缀匹配，支持 provider/
 # 前缀与 Bedrock 命名空间（us.anthropic. 等）。未匹配回退默认值。
-_DEFAULT_CONTEXT_TOKENS = 256_000
+from excelmanus.model_catalog import catalog, model_spec, local_context_budget
 
-_MODEL_CONTEXT_WINDOW: dict[str, int] = {
-    # OpenAI 提供商
-    "gpt-6-astra": 1_050_000,
-    "gpt-6-sol": 1_050_000,
-    "gpt-6-luna": 1_050_000,
-    "gpt-6": 1_050_000,
-    "gpt-5.6-sol": 1_050_000,
-    "gpt-5.6-terra": 1_050_000,
-    "gpt-5.6-luna": 1_050_000,
-    "gpt-5.6": 1_050_000,
-    "gpt-5.6-cyber": 400_000,
-    "gpt-5.5": 1_050_000,
-    "gpt-5.4": 1_050_000,
-    "gpt-5": 400_000,
-    "gpt-5-pro": 400_000,
-    "gpt-5-mini": 400_000,
-    "gpt-5-nano": 400_000,
-    "gpt-5.2": 400_000,
-    "gpt-5.3": 400_000,
-    "gpt-5-codex": 400_000,
-    "gpt-5-codex-mini": 400_000,
-    "gpt-5.2-codex": 400_000,
-    "gpt-5.3-codex": 400_000,
-    "gpt-5.1-codex-mini": 400_000,
-    "gpt-5.1-codex-max": 400_000,
-    "gpt-5.3-codex-spark": 128_000,
-    "gpt-5.1": 400_000,
-    "gpt-5.1-codex": 400_000,
-    "gpt-5-chat-latest": 128_000,
-    "gpt-5.1-chat-latest": 128_000,
-    "gpt-5.3-chat-latest": 128_000,
-    "gpt-4o": 128_000,
-    "gpt-4o-mini": 128_000,
-    "gpt-4.1": 1_047_576,
-    "gpt-4.1-mini": 1_047_576,
-    "gpt-4.1-nano": 1_047_576,
-    "o1": 200_000,
-    "o1-pro": 200_000,
-    "o3": 200_000,
-    "o3-mini": 200_000,
-    "o3-pro": 200_000,
-    "o3-deep-research": 200_000,
-    "o4": 200_000,
-    "o4-mini": 200_000,
-    "o4-mini-deep-research": 200_000,
-    # Anthropic（Claude）提供商
-    "claude-4-sonnet": 200_000,
-    "claude-4-opus": 200_000,
-    "claude-sonnet-4": 200_000,
-    "claude-opus-4": 200_000,
-    "claude-sonnet-4.5": 200_000,
-    "claude-opus-4.5": 200_000,
-    "claude-opus-4.1": 200_000,
-    "claude-opus-4.6": 200_000,
-    "claude-opus-4.7": 1_000_000,
-    "claude-opus-4.8": 1_000_000,
-    "claude-sonnet-4.6": 200_000,
-    "claude-fable-5": 1_000_000,
-    "claude-fable-5-1": 1_000_000,
-    "claude-mythos-5": 1_000_000,
-    "claude-mythos-5-1": 1_000_000,
-    "claude-opus-5": 1_000_000,
-    "claude-opus-5-5": 1_000_000,
-    "claude-sonnet-5": 1_000_000,
-    "claude-haiku-4.5": 200_000,
-    # Google Gemini 提供商
-    "gemini-2.5-pro": 1_048_576,
-    "gemini-2.5-flash": 1_048_576,
-    "gemini-2.5-flash-lite": 1_048_576,
-    "gemini-live-2.5-flash-preview": 1_048_576,
-    "gemini-2.5-flash-live-preview": 1_048_576,
-    "gemini-2.5-flash-native-audio-preview": 1_048_576,
-    "gemini-3.8-flash": 1_048_576,
-    "gemini-3.8-flash-cyber": 1_048_576,
-    "gemini-3.8-live": 1_048_576,
-    "gemini-3.8-live-extended-thinking": 1_048_576,
-    "gemini-3.7-flash": 1_048_576,
-    "gemini-3.6-flash": 1_048_576,
-    "gemini-3.5-flash-lite": 1_048_576,
-    "gemini-3.5-flash": 1_048_576,
-    "gemini-3.1-pro": 1_048_576,
-    "gemini-3.1-flash-lite": 1_048_576,
-    "gemini-3.1-flash": 1_048_576,
-    "gemini-3.1-flash-image": 128_000,
-    "gemini-3-pro-image": 65_536,
-    "gemini-3-flash": 1_048_576,
-    "gemini-3.0-pro-preview-02-2026": 1_048_576,
-    "gemini-3.0-flash-preview-02-2026": 1_048_576,
-    "gemini-3.0-flash-lite-preview-02-2026": 1_048_576,
-    "gemini-3.0-flash-thinking-preview-02-2026": 262_144,
-    # 通义千问（Qwen）提供商
-    "qwen-max": 262_144,
-    "qwen-max-latest": 262_144,
-    "qwen3-max": 262_144,
-    "qwen3-vl-plus": 262_144,
-    "qwen3-vl-flash": 262_144,
-    "qwen-vl-max": 131_072,
-    "qwen-vl-plus": 131_072,
-    "qwq-32b": 131_072,
-    "qwen-plus": 1_000_000,
-    "qwen-plus-us": 1_000_000,
-    "qwen-plus-latest": 1_000_000,
-    "qwen3.8-max": 1_000_000,
-    "qwen3.8-flash": 1_000_000,
-    "qwen3.8-omni-flash": 1_000_000,
-    "qwen3.8-omni-flash-realtime": 1_000_000,
-    "qwen3.7-plus": 1_000_000,
-    "qwen3.7-flash": 1_000_000,
-    "qwen3.7-max": 1_000_000,
-    "qwen3.6-plus": 1_000_000,
-    "qwen3.6-flash": 1_000_000,
-    "qwen3.5-plus": 1_000_000,
-    "qwq-plus": 131_072,
-    "qwq-plus-latest": 131_072,
-    "qwen-flash": 1_000_000,
-    "qwen-flash-latest": 1_000_000,
-    "qwen-turbo": 1_000_000,
-    "qwen-long": 1_000_000,
-    "qwen-long-latest": 10_000_000,
-    "qwen-coder": 1_000_000,
-    "qwen-coder-plus": 131_072,
-    "qwen-coder-plus-latest": 131_072,
-    "qwen-coder-turbo": 131_072,
-    "qwen3-coder-plus": 1_000_000,
-    "qwen3-235b": 131_072,
-    "qwen3-30b": 131_072,
-    "qwen3-32b": 131_072,
-    "qvq-72b-preview": 32_768,
-    "qwen-vl-ocr": 38_192,
-    "qwen-vl-ocr-2025-08-28": 34_096,
-    "qwen2.5-omni-7b": 32_768,
-    "qwen2.5-72b": 131_072,
-    "qwen2.5-32b": 131_072,
-    # DeepSeek 提供商
-    "deepseek-flash": 1_000_000,
-    "deepseek-v4-pro": 1_000_000,
-    "deepseek-v4-flash": 1_000_000,
-    "deepseek-v4.1": 1_000_000,
-    "deepseek-chat": 128_000,
-    "deepseek-reasoner": 128_000,
-    "deepseek-v3": 128_000,
-    "deepseek-r1": 128_000,
-    "deepseek-v3.2": 131_072,
-    "deepseek-v3.2-exp": 131_072,
-    # Mistral 提供商
-    "mistral-large-2512": 256_000,
-    "mistral-large-latest": 256_000,
-    "mistral-medium-2508": 128_000,
-    "mistral-medium-latest": 128_000,
-    "mistral-small-4": 262_144,
-    "mistral-small-2603": 262_144,
-    "mistral-small-2506": 128_000,
-    "mistral-small-latest": 262_144,
-    "devstral-2512": 256_000,
-    "labs-devstral-small-2512": 256_000,
-    "labs-devstral-small-latest": 256_000,
-    "devstral-small-2505": 128_000,
-    "codestral-2508": 128_000,
-    "codestral-latest": 128_000,
-    "magistral-small-2509": 128_000,
-    "magistral-medium-2509": 128_000,
-    "magistral-small-2507": 40_000,
-    "magistral-small-2506": 40_000,
-    "pixtral-large-2411": 128_000,
-    "pixtral-large-latest": 128_000,
-    "voxtral-mini-2507": 128_000,
-    "voxtral-mini-latest": 128_000,
-    "voxtral-small-2507": 32_000,
-    "voxtral-small-latest": 32_000,
-    "labs-mistral-small-creative": 32_000,
-    "mistral-small-2503": 128_000,
-    "ministral-14b-2512": 256_000,
-    "ministral-8b-2512": 256_000,
-    "ministral-3b-2512": 256_000,
-    # AI21 Jamba 提供商
-    "jamba-large": 256_000,
-    "jamba-mini": 256_000,
-    "jamba-3b": 256_000,
-    # Amazon Nova（含 Bedrock 区域前缀，靠命名空间剥离匹配）
-    "nova-premier": 1_000_000,
-    "nova-pro": 300_000,
-    "nova-lite": 300_000,
-    "nova-micro": 128_000,
-    "nova-sonic": 300_000,
-    "nova-2-lite": 1_000_000,
-    "nova-2-sonic": 1_000_000,
-    # MiniMax 提供商
-    "minimax-m3": 1_000_000,
-    "minimax-m2.7": 204_800,
-    "minimax-m2.5": 204_800,
-    "minimax-m2.5-highspeed": 204_800,
-    "minimax-m2.1": 204_800,
-    "minimax-m2.1-highspeed": 204_800,
-    "minimax-m2.1-lightning": 204_800,
-    "minimax-m2": 204_800,
-    "m2-her": 64_000,
-    # Moonshot（Kimi）提供商
-    "kimi-k3": 1_000_000,
-    "kimi-k2.7-code": 256_000,
-    "kimi-k2.7-code-highspeed": 256_000,
-    "kimi-k2.7": 256_000,
-    "kimi-k2.6": 256_000,
-    "kimi-k2": 262_144,
-    "kimi-k2-thinking": 262_144,
-    "kimi-k2.5": 262_144,
-    "kimi-k2.5-thinking": 262_144,
-    "moonshot-kimi-k2.5": 262_144,
-    "moonshot-kimi-k2.5-thinking": 262_144,
-    "moonshot-kimi-k2-instruct": 131_072,
-    "moonshot-v1-128k": 128_000,
-    "moonshot-v1-32k": 32_000,
-    "moonshot-v1-8k": 8_000,
-    # Cohere 提供商
-    "command-a-plus": 128_000,
-    "command-a-plus-05-2026": 128_000,
-    "command-a": 256_000,
-    "command-a-03-2025": 256_000,
-    "command-a-reasoning": 256_000,
-    "command-r-plus": 128_000,
-    "command-r-plus-08-2024": 128_000,
-    "command-r7b": 128_000,
-    "command-r7b-12-2024": 128_000,
-    "c4ai-command-r7b-12-2024": 128_000,
-    "command-r": 128_000,
-    "command-r-08-2024": 128_000,
-    # 智谱 GLM 提供商
-    "glm-5.3": 1_000_000,
-    "glm-5.3-flash": 1_000_000,
-    "glm-5.3-flashx": 1_000_000,
-    "glm-5.2": 1_000_000,
-    "glm-5.1": 200_000,
-    "glm-5-turbo": 200_000,
-    "glm-5v-turbo": 200_000,
-    "glm-5": 200_000,
-    "glm-4.7": 200_000,
-    "glm-4.6": 200_000,
-    "glm-4.5": 128_000,
-    "glm-4.5-air": 128_000,
-    "glm-4-plus": 128_000,
-    "glm-4-long": 1_000_000,
-    "glm-4": 128_000,
-    # 字节豆包（火山方舟）
-    "doubao-seed-evolving": 256_000,
-    "doubao-seed-2.1-pro": 256_000,
-    "doubao-seed-2.1-turbo": 256_000,
-    "doubao-seed-2.0-pro": 256_000,
-    "doubao-seed-2.0-code": 256_000,
-    "doubao-seed-2.0-lite": 256_000,
-    "doubao-seed-2.0-mini": 256_000,
-    "doubao-seed-2.0": 256_000,
-    "doubao-seed-1.6": 256_000,
-    # xAI Grok 提供商
-    "grok-4.7": 500_000,
-    "grok-4.6": 500_000,
-    "grok-4.5": 500_000,
-    "grok-4.3": 1_000_000,
-    "grok-4-fast-reasoning": 2_000_000,
-    "grok-4-fast-non-reasoning": 2_000_000,
-    "grok-4.1-fast-reasoning": 2_000_000,
-    "grok-4.1-fast-non-reasoning": 2_000_000,
-    "grok-code-fast-1": 256_000,
-    "grok-4": 256_000,
-    # Meta Llama / Muse 提供商
-    "muse-spark": 1_000_000,
-    "muse-glimmer-30b": 131_072,
-    "llama-4-scout": 10_000_000,
-    "llama-4-maverick": 1_000_000,
-    "llama-3.3": 131_072,
-    "llama-3.2": 131_072,
-    "llama-3.1": 131_072,
-    # 小米 MiMo 提供商
-    "mimo-v2.6-pro-ultraspeed": 1_000_000,
-    "mimo-v2.6-pro": 1_000_000,
-    "mimo-v2.6-flash": 1_000_000,
-    "mimo-v2.5-pro": 1_000_000,
-    "mimo-v2.5": 1_000_000,
-    "mimo-v2-pro": 256_000,
-    "mimo-v2-omni": 256_000,
-    "mimo-v2-flash": 256_000,
-    "mimo-v2.5-asr": 8_192,
-    "mimo-v2.5-tts": 8_192,
-    "mimo-v2.5-tts-voiceclone": 8_192,
-    "mimo-v2.5-tts-voicedesign": 8_192,
-    "mimo-v2-tts": 8_192,
-}
-
-
+_DEFAULT_CONTEXT_TOKENS = catalog()["default_local_context_budget"]
+# Legacy records are name-match hints only. Runtime budgets use sourced records.
+_MODEL_CONTEXT_WINDOW = dict(catalog()["legacy_context_hints"]["values"])
+for _entry in catalog()["models"]:
+    for _key in list(_MODEL_CONTEXT_WINDOW):
+        if normalize_model_tokens(_key) == normalize_model_tokens(_entry["id"]):
+            _MODEL_CONTEXT_WINDOW.pop(_key)
+    if _entry.get("context_window"):
+        _MODEL_CONTEXT_WINDOW[_entry["id"]] = _entry["context_window"]
 _CONTEXT_WINDOW_LOOKUP = normalize_lookup_table(_MODEL_CONTEXT_WINDOW)
 
 
-_DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
-    # OpenAI
-    "codex-mini-latest": "gpt-6-luna",
-    "gpt-4-turbo": "gpt-6-astra",
-    "gpt-4-turbo-preview": "gpt-6-astra",
-    "gpt-4-0125-preview": "gpt-6-astra",
-    "gpt-4-1106-preview": "gpt-6-astra",
-    "o1-mini": "o4-mini",
-    # Anthropic Claude 3.x
-    "claude-3-opus": "claude-opus-5",
-    "claude-3-sonnet": "claude-sonnet-5",
-    "claude-3-haiku": "claude-haiku-4-5",
-    "claude-3-5-sonnet": "claude-sonnet-5",
-    "claude-3-5-haiku": "claude-haiku-4-5",
-    "claude-3-7-sonnet": "claude-sonnet-5",
-    # Anthropic 旧旗舰（已被 5.5 / 5.1 取代）
-    "claude-opus-5": "claude-opus-5-5",
-    "claude-fable-5": "claude-fable-5-1",
-    "claude-mythos-5": "claude-mythos-5-1",
-    # Gemini 1.5 / 2.0 generations（2.0 已关停）
-    "gemini-1.5-pro": "gemini-3.8-flash",
-    "gemini-1.5-flash": "gemini-3.8-flash",
-    "gemini-2.0-flash": "gemini-3.8-flash",
-    "gemini-2.0-flash-001": "gemini-3.8-flash",
-    "gemini-2.0-flash-live": "gemini-live-2.5-flash-preview",
-    "gemini-2.0-flash-thinking-exp": "gemini-3.8-flash",
-    "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
-    # Gemini 3 预览别名（官方已关停/更名）
-    "gemini-3-pro-preview": "gemini-3.1-pro-preview",
-    "gemini-3.1-flash-lite-preview": "gemini-3.1-flash-lite",
-    # 2026 年 9 月前的模型别名，统一迁移到当前旗舰默认值
-    "qwen3.7-plus": "qwen3.8-max",
-    "qwen3.7-flash": "qwen3.8-flash",
-    "qwen3.7-max": "qwen3.8-max",
-    "qwen3.6-plus": "qwen3.8-max",
-    "qwen3.6-flash": "qwen3.8-flash",
-    "grok-4.5": "grok-4.7",
-    "grok-4.3": "grok-4.7",
-    # DeepSeek 旧别名（2026-07-24 下线）
-    "deepseek-chat": "deepseek-flash",
-    "deepseek-reasoner": "deepseek-flash",
-    # 已下线，暂时路由到 V4.1-Flash
-    "deepseek-v4-flash": "deepseek-flash",
-    # Moonshot 已下线系列
-    "moonshot-v1": "kimi-k3",
-    "kimi-k2.5": "kimi-k3",
-    "kimi-k2": "kimi-k3",
-    # 智谱旧旗舰
-    "glm-4-plus": "glm-5.3",
-    "glm-4-long": "glm-5.3",
-    "glm-z1": "glm-5.3",
-    # 小米 MiMo V2 系列（2026-06-30 官方下线）
-    "mimo-v2-pro": "mimo-v2.6-pro",
-    "mimo-v2-omni": "mimo-v2.6-flash",
-    "mimo-v2-flash": "mimo-v2.6-flash",
-    "mimo-v2-tts": "mimo-v2.5-tts",
+_DEPRECATED_MODEL_REPLACEMENTS = {
+    m["id"]: m["replacement"] for m in catalog()["models"]
+    if m.get("replacement") and m["status"] in {"deprecated", "retired"}
 }
 
 
@@ -435,23 +108,11 @@ def _log_deprecated_model_warning(scope: str, model: str) -> None:
 
 @lru_cache(maxsize=1024)
 def _infer_context_tokens_for_model(model: str) -> int:
-    """根据模型名推断上下文窗口大小，归一化最长前缀匹配优先。"""
-    matched = longest_prefix_match(model, _CONTEXT_WINDOW_LOOKUP)
-    if matched is not None:
-        best_key, best_val = matched
-        logger.debug(
-            "模型 %r 匹配上下文窗口映射 %r → %d tokens",
-            model, best_key, best_val,
-        )
-        return best_val
-    logger.debug(
-        "模型 %r 未匹配到已知映射，使用默认 %d tokens",
-        model, _DEFAULT_CONTEXT_TOKENS,
-    )
-    return _DEFAULT_CONTEXT_TOKENS
+    """读取精确型号的有来源输入预算；未知型号使用本地保守预算。"""
+    return local_context_budget(model)
 
 
-def is_context_window_user_pinned(max_context_tokens: int, model: str) -> bool:
+def is_context_window_user_pinned(max_context_tokens: int, model: str, canonical_model: str = "") -> bool:
     """用户是否显式锁定了上下文窗口。
 
     设置页保存会写入 ``EXCELMANUS_MAX_CONTEXT_TOKENS``；只要该设置存在
@@ -467,7 +128,7 @@ def is_context_window_user_pinned(max_context_tokens: int, model: str) -> bool:
 
 # ── 已知模型规范名匹配（Jev 智能匹配，可开关）─────────────────────
 # 把用户填写的 Model ID 与内置已知模型表比对，置信度足够时把档案绑定到
-# 规范模型名，从而继承其上下文窗口、模型族与已探测能力配置。
+# 规范模型名，用于名称提示与模型族展示；不继承别名的端点探测。
 # 只绑定本地配置，不改写发给上游 API 的 Model ID。
 CANONICAL_MATCH_THRESHOLD = 0.85
 
@@ -858,7 +519,7 @@ class ExcelManusConfig:
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
     # Jev / TypeSafe System One（可选 extra；走运行时设置 / config_kv，不进 model_profiles）
-    # Jev 前端入口默认隐藏，需在实验性功能中显式开启。
+    # Jev 后端与前端入口默认关闭，需在实验性功能中显式开启。
     jev_experimental_enabled: bool = False
     # JEV is binary: off disables a gate, enforce enables it fully.  The
     # loader migrates the removed legacy ``shadow`` value to ``enforce``.
@@ -1292,14 +953,14 @@ def _load_context_optimization_config(
 ) -> _ContextOptimizationConfig:
     """加载上下文优化相关配置，避免字段声明/解析/回填三处漂移。
 
-    优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 设置 > 模型自动推断 > 默认 256k。
+    优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 设置 > 有来源的精确型号预算 > 本地默认 32k。
     智能匹配开启时优先用绑定的规范模型名推断。
     """
     env_max_ctx = _s("EXCELMANUS_MAX_CONTEXT_TOKENS")
     if env_max_ctx:
         max_context_tokens = _parse_int(env_max_ctx, "EXCELMANUS_MAX_CONTEXT_TOKENS", _DEFAULT_CONTEXT_TOKENS)
     elif model or canonical:
-        max_context_tokens = _infer_context_tokens_for_model(canonical or model)
+        max_context_tokens = _infer_context_tokens_for_model(model)
     else:
         max_context_tokens = _DEFAULT_CONTEXT_TOKENS
     retention_raw = (_s("EXCELMANUS_PROMPT_CACHE_RETENTION") or "").strip().lower()

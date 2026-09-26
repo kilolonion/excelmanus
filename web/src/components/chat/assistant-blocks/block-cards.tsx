@@ -206,19 +206,17 @@ export function FileDownloadCard({ block }: { block: Extract<AssistantBlock, { t
   }, [block.filePath, block.filename, activeSessionId, activeWorkspaceId]);
 
   return (
-    <div className="my-1.5">
-      <RelatedFilesCard
-        files={[
-          {
-            key: block.filePath,
-            filename: block.filename,
-            filePath: block.filePath,
-            onOpen: handleOpen,
-            onDownload: handleDownload,
-          },
-        ]}
-      />
-    </div>
+    <RelatedFilesCard
+      files={[
+        {
+          key: block.filePath,
+          filename: block.filename,
+          filePath: block.filePath,
+          onOpen: handleOpen,
+          onDownload: handleDownload,
+        },
+      ]}
+    />
   );
 }
 

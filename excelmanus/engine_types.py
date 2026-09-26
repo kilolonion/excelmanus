@@ -168,6 +168,8 @@ class ChatResult:
     tool_access: str = ""
     route_mode: str = ""
     skills_used: list[str] = field(default_factory=list)
+    # 本轮所有 LLM 调用的缓存命中 token；任一调用未提供统计时为 None。
+    cached_tokens: int | None = None
 
 
 # ── 审批解析器回调类型 ──────────────────────────────────────

@@ -506,6 +506,38 @@ def _project_spreadsheet_fields(payload: dict[str, Any]) -> dict[str, Any]:
     return projected
 
 
+def _decision_preview(payload: dict[str, Any], *, max_chars: int = 2600) -> dict[str, Any]:
+    """Bounded cell facts, not a prefix of manifest/identity JSON.
+
+    Keep addresses, formula/cache distinctions and sampling explicit. Never
+    shorten a cell value into a different value. The original stays in spill.
+    """
+    preview: dict[str, Any] = {"regions": [], "complete": True}
+    for region in payload.get("regions") or []:
+        if not isinstance(region, dict):
+            continue
+        cells = region.get("cells") or {}
+        if not isinstance(cells, dict):
+            continue
+        row = {"sheet": region.get("sheet"), "rect": region.get("rect"), "cells": {},
+               "available_cells": len(cells)}
+        preview["regions"].append(row)
+        for address, cell in cells.items():
+            if not isinstance(cell, dict):
+                continue
+            fact = {k: cell[k] for k in ("t", "v", "f", "cached", "e", "inferred_type") if k in cell}
+            row["cells"][address] = fact
+            if len(json.dumps(preview, ensure_ascii=False)) > max_chars:
+                del row["cells"][address]
+                preview["complete"] = False
+                break
+        row["shown_cells"] = len(row["cells"])
+        if not preview["complete"]:
+            break
+    preview["scope"] = "requested regions only; coverage still applies"
+    return preview
+
+
 def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore, project_large: bool = True) -> ToolResult:
     """Keep native tool results as usable as their SDK value, with bounded text.
 
@@ -526,11 +558,17 @@ def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore, project_l
     locator = store.put(raw)
     envelope = {
         "result_spill": str(locator),
-        "read_result": "按 next_call 取回完整 JSON；file_path 原样使用 result_spill 字段的值（spill:…），不要把 result_spill 当作前缀或目录。",
+        "read_result": (
+            "本投影仅含关键事实（裁剪明细见 result_projection）；仅当缺少你需要的事实时"
+            "按 next_call 用 read_text_file 取回完整 JSON（file_path 原样用 result_spill 的值，"
+            "spill:… 不是前缀或目录），不必仅为确认成功再读。"
+        ),
         "next_call": {"tool": "read_text_file", "arguments": {"file_path": str(locator)}},
     }
+    kept_from_payload: set[str] = set()
     for key in (
         "schema_version", "observation_id", "snapshot_id", "attachment_id", "render_id", "surface", "limitations",
+        "visual_coverage", "requested_surface",
         "status", "file_path", "file_a", "file_b", "content_version",
         "content_version_a", "content_version_b", "resolved_sheet", "scope",
         "coverage", "selection_spill", "warnings", "error_code", "message", "remediation",
@@ -539,8 +577,28 @@ def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore, project_l
     ):
         if key in payload:
             envelope[key] = payload[key]
+            kept_from_payload.add(key)
     # A short summary is navigation only; the complete structured payload is
     # always recoverable, including artifact lists, selections and warnings.
     envelope["preview"] = model_text[:DEFAULT_PREVIEW_CHARS]
-    envelope["result_projection"] = "partial; full payload in result_spill"
+    partially_projected: list[str] = []
+    if payload.get("regions"):
+        envelope["data_preview"] = _decision_preview(payload)
+        partially_projected.append("regions→data_preview（有界单元格事实；complete=false 时只是样本）")
+    observation = payload.get("observation")
+    if isinstance(observation, dict):
+        envelope["verification_requirements"] = observation.get("verification_requirements")
+        envelope["cell_checks"] = (observation.get("cell_checks") or [])[:8]
+        partially_projected.append("observation→verification_requirements + cell_checks(前8)")
+    if len(model_text) > DEFAULT_PREVIEW_CHARS:
+        partially_projected.append("preview 已截断")
+    # 说清裁掉了什么，让"读不读 spill"成为确定性决策而不是猜测。
+    projected_special = {"result_spill", "read_result", "next_call", "preview",
+                         "data_preview", "verification_requirements", "cell_checks", "result_projection"}
+    envelope["result_projection"] = {
+        "status": "partial",
+        "full_payload": "result_spill",
+        "omitted_fields": sorted(key for key in payload if key not in kept_from_payload and key not in projected_special),
+        "partially_projected": partially_projected,
+    }
     return result.with_model_text(json.dumps(envelope, ensure_ascii=False, default=str))

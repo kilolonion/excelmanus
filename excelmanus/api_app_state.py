@@ -444,6 +444,10 @@ def build_model_profiles_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
             custom_extra_body=row.get("custom_extra_body", ""),
             custom_extra_headers=row.get("custom_extra_headers", ""),
             canonical_model=profile_canonical(row),
+            max_context_tokens=row.get("max_context_tokens", 0),
+            vision_mode=row.get("vision_mode", "auto"),
+            input_modalities=tuple(row["input_modalities"]) if row.get("input_modalities") is not None else None,
+            max_output_tokens=row.get("max_output_tokens", 0),
         ))
     return profiles
 

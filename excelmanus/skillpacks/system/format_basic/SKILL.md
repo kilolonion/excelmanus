@@ -26,6 +26,11 @@ apply_spreadsheet_changes(
 ```
 
 布局先用 observe_spreadsheet(mode="range", sheet=..., range=..., facets=["geometry","presentation"])。
+
+## 字段合同速查（样式键名两套合同）
+
+改已有表的 `operations` 样式键名：`fill` 用 `{"patternType":"solid","fgColor":"FFC7CE"}`（或 `{"type":"solid","color":"FFC7CE","end_color":...}` 等价），`font` 用 `{name,size,bold,italic,color,underline,strike}`。创建 `workbook_spec` 的样式键名不同：`fill` 只收 `{type, color, end_color}`（`type` 默认 `solid`），`font` 收 `{name,size,bold,italic,color,underline,strike}`。对照：`patternType`/`fill_type`/`pattern`→`type`，`fgColor`/`fg_color`/`fgcolor`/`start_color`→`color`，`strikethrough`→`strike`。创建用 workbook_spec 键名，改样式用 operations 键名；混用只有这些同义键会被归一，其余混入的键名会被拒（SPEC_VALIDATION_FAILED）。
+
 横向是列宽，纵向是行高。`geometry.scale` 明确传 `x`、`y`；`size` 用 `column_widths={"A":18}` 与 `row_heights={"1":22}`。
 按内容自动适配传 `auto_fit=true` 并带 `axis`，不要覆盖用户给定比例。列宽行高影响整轴。
 样式、合并、尺寸、冻结和对象可放入同一批 operations；检查最终 observation 与 receipt，必要时 preview_spreadsheet 回看。

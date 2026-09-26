@@ -101,6 +101,7 @@ _BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
     "excelmanus.tools.spreadsheet_engine_tools",
     "excelmanus.tools.spreadsheet_data_tools",
     "excelmanus.tools.image_tools",
+    "excelmanus.tools.image_conversion_tools",
     "excelmanus.tools.memory_tools",
     "excelmanus.tools.sleep_tools",
     "excelmanus.tools.word_tools",

@@ -43,8 +43,11 @@ describe("groupProfilesByProvider", () => {
     expect(groups.map((g) => g.id)).toEqual(["openai", "deepseek", "custom:127.0.0.1"]);
     expect(groups[0].profiles.map((p) => p.name)).toEqual(["gpt5", "gpt-mini"]);
     expect(groups[0].label).toBe("OpenAI");
+    expect(groups[0].logoId).toBe("openai");
     expect(groups[1].label).toBe("DeepSeek");
+    expect(groups[1].logoId).toBe("deepseek");
     expect(groups[2].label).toBe("local");
+    expect(groups[2].logoId).toBe("unknown");
   });
 
   it("keeps custom endpoints as their own provider even when the model looks branded", () => {
@@ -67,8 +70,23 @@ describe("groupProfilesByProvider", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].id).toBe("custom:proxy.example.com");
     expect(groups[0].label).toBe("Claude 官方");
+    expect(groups[0].logoId).toBe("anthropic");
     expect(groups[0].profiles.map((p) => p.name)).toEqual(["Claude 官方", "Claude 备用"]);
     expect(formatProviderModelLabel(profiles[0])).toBe("Claude 官方 · claude-sonnet-5");
+  });
+
+  it("uses a branded logo for a custom MiMo connection while keeping its configured group name", () => {
+    const groups = groupProfilesByProvider([
+      profile({
+        name: "小米 MiMo",
+        model: "mimo-v2.6-pro-ultraspeed",
+        base_url: "https://proxy.example.com/v1",
+        api_key: "sk-test",
+      }),
+    ]);
+    expect(groups[0].id).toBe("custom:proxy.example.com");
+    expect(groups[0].label).toBe("小米 MiMo");
+    expect(groups[0].logoId).toBe("mimo");
   });
 
   it("still groups official endpoints by brand", () => {

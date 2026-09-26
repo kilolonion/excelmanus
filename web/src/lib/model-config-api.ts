@@ -29,7 +29,17 @@ export const fetchAvailableModels = () => readModels<{ models: ModelInfo[] }>("/
 
 function profilePayload(input: ModelProfileInput): ModelProfileInput {
   const body = { ...input, name: input.name.trim(), model: input.model.trim() };
+  delete body.default_input_modalities;
+  delete body.capability_metadata;
+  delete body.effective_input_modalities;
+  if (body.input_modalities !== undefined) delete body.vision_mode;
   if (!body.name || !body.model) throw new Error("请填写模型名称和 Model ID");
+  if (body.max_context_tokens !== undefined && (
+    !Number.isInteger(body.max_context_tokens) || body.max_context_tokens < 0 || body.max_context_tokens > 2147483647
+  )) throw new Error("上下文上限必须是 0 到 2147483647 之间的整数");
+  if (body.max_output_tokens !== undefined && (
+    !Number.isInteger(body.max_output_tokens) || body.max_output_tokens < 0 || body.max_output_tokens > 2147483647
+  )) throw new Error("最大输出长度必须是 0 到 2147483647 之间的整数");
   // An empty key preserves saved credentials; masked previews are never secrets.
   if (!body.api_key?.trim() || /[*•]{3,}/.test(body.api_key)) delete body.api_key;
   else body.api_key = body.api_key.trim();

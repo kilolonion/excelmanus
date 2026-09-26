@@ -2078,23 +2078,26 @@ def _collect_column_hints(
     hints.extend(_hint_columns_from_value(index))
     hints.extend(_hint_columns_from_value(values))
     hints.extend(_hint_columns_from_value(sort_by))
+    aggregations = _maybe_json(aggregations)
     if isinstance(aggregations, dict):
         for key in aggregations:
             clean = _sanitize_hint_name(key)
             if clean:
                 hints.append(clean)
+    conditions = _maybe_json(conditions)
+    if isinstance(conditions, dict):
+        conditions = [conditions]
     if isinstance(conditions, list):
         for cond in conditions:
             if isinstance(cond, dict):
                 clean = _sanitize_hint_name(cond.get("column"))
                 if clean:
                     hints.append(clean)
+    join = _maybe_json(join)
     if isinstance(join, dict):
-        # 只消歧主表（左表）：left_on 纳入，right_on/join.columns 不纳入。
-        for key in ("left_on",):
-            clean = _sanitize_hint_name(join.get(key))
-            if clean:
-                hints.append(clean)
+        # 只消歧主表（左表）：on/left_on 纳入，right_on/join.columns 不纳入。
+        for key in ("left_on", "on"):
+            hints.extend(_hint_columns_from_value(join.get(key)))
     seen: set[str] = set()
     ordered: list[str] = []
     for h in hints:
@@ -2341,6 +2344,39 @@ def _maybe_json(value: Any) -> Any:
     return value
 
 
+def _arg_shape_error(field: str, *, prefix: str = "") -> ToolResult:
+    """结构化参数解析/形状错误：一句中文说明期望形状 + 正确示例。
+
+    期望形状与示例以 workbook_query_schemas.QUERY_ARG_SHAPES 为准，
+    与 schema 描述保持同一口径。
+    """
+    try:
+        from excelmanus.tools.workbook_query_schemas import query_arg_shape_error
+
+        hint = query_arg_shape_error(field)
+    except Exception:  # pragma: no cover - 分层兜底
+        hint = None
+    if not hint:
+        hint = f"{field} 需要结构化对象/数组，或等价 JSON 字符串"
+    return error_result(f"{prefix}{hint}", code="INVALID_ARGS")
+
+
+def _load_json_arg(value: Any, field: str) -> tuple[Any, ToolResult | None]:
+    """结构化参数统一入口：对象/数组原样返回，JSON 字符串自动解析（与 schema 合同一致）。
+
+    以 { 或 [ 开头但无法解析的字符串视为坏 JSON，返回含正确示例的中文错误。
+    """
+    if not isinstance(value, str):
+        return value, None
+    text = value.strip()
+    if text[:1] not in ("{", "["):
+        return value, None
+    try:
+        return json.loads(text), None
+    except (ValueError, TypeError):
+        return None, _arg_shape_error(field, prefix=f"{field} 的 JSON 字符串无法解析；")
+
+
 def _normalize_conditions(
     df: "pd.DataFrame",
     *,
@@ -2351,16 +2387,15 @@ def _normalize_conditions(
     logic: str,
     require: bool,
 ) -> tuple[list[dict[str, Any]] | None, ToolResult | None]:
-    """兼容单条件/多条件，返回 (cond_list, err)；require=False 时允许无条件。"""
-    conditions = _maybe_json(conditions)
+    """兼容单条件/多条件（或等价 JSON 字符串，自动解析），返回 (cond_list, err)；require=False 时允许无条件。"""
+    conditions, json_err = _load_json_arg(conditions, "conditions")
+    if json_err is not None:
+        return None, json_err
     # 显式传入的 conditions（含空数组）优先：[] 表示全表，dict 视作单条件。
     if isinstance(conditions, dict):
         conditions = [conditions]
     if conditions is not None and not isinstance(conditions, list):
-        return None, _error_payload_result(
-            {"error": "conditions 必须是条件对象数组（或单条件对象）"},
-            code="INVALID_ARGS",
-        )
+        return None, _arg_shape_error("conditions")
     if conditions is not None:
         cond_list = conditions
     elif column is not None and operator is not None:
@@ -2495,6 +2530,13 @@ def filter_data(
     Returns:
         ToolResult（value 含过滤结果，model_text 为短摘要）。
     """
+    columns, cols_err = _load_json_arg(columns, "columns")
+    if cols_err is not None:
+        return cols_err
+    if isinstance(columns, str):
+        columns = [columns] if columns.strip() else None
+    elif columns is not None and not isinstance(columns, list):
+        return _arg_shape_error("columns")
     ctx, err = _load_df_for_tool(
         file_path, sheet_name, header_row,
         column_hints=_collect_column_hints(column=column, conditions=conditions, columns=columns, sort_by=sort_by),
@@ -2630,12 +2672,19 @@ _GROUP_TRANSFORMS: dict[str, Any] = {
 }
 
 
-def _normalize_group_keys(group_by: Any, columns: Any) -> tuple[list[str] | None, list[tuple[str, str, str]] | None, ToolResult | None]:
-    """归一 group_by：列名字符串或 {"column": X, "transform": 日期粒度} 派生键。
+def _normalize_group_keys(
+    group_by: Any,
+    columns: Any,
+    field: str = "group_by",
+) -> tuple[list[str] | None, list[tuple[str, str, str]] | None, ToolResult | None]:
+    """归一 group_by/index/columns：列名字符串、数组或 {"column": X, "transform": 日期粒度} 派生键。
 
-    返回 (keys, derived_specs, err)；derived_specs 为 (输出列, 源列, transform)。
+    结构化对象/数组与等价 JSON 字符串等价（自动解析）。返回 (keys, derived_specs, err)；
+    derived_specs 为 (输出列, 源列, transform)。
     """
-    group_by = _maybe_json(group_by)
+    group_by, json_err = _load_json_arg(group_by, field)
+    if json_err is not None:
+        return None, None, json_err
     if isinstance(group_by, str):
         raw_keys = [group_by]
     elif isinstance(group_by, dict):
@@ -2697,12 +2746,14 @@ def _materialize_derived_keys(
 def _normalize_aggs(aggregations: Any) -> tuple[list[tuple[str, str, str]] | None, ToolResult | None]:
     """把 aggregations 规范成 [(输出列名, 源列或 "*", aggfunc)]。
 
-    接受两种写法：
+    接受两种写法（或其等价 JSON 字符串，自动解析）：
     - {"金额": "sum", "订单号": ["count", "nunique"]}
     - [{"column": "金额", "func": "sum"}, {"column": "金额", "funcs": ["mean"]}]
     "*" 列表示行计数。
     """
-    aggregations = _maybe_json(aggregations)
+    aggregations, json_err = _load_json_arg(aggregations, "aggregations")
+    if json_err is not None:
+        return None, json_err
     entries: list[tuple[str, str, str]] = []
 
     def _add(col: Any, funcs: Any) -> ToolResult | None:
@@ -2732,24 +2783,17 @@ def _normalize_aggs(aggregations: Any) -> tuple[list[tuple[str, str, str]] | Non
     elif isinstance(aggregations, list):
         for item in aggregations:
             if not isinstance(item, dict):
-                return None, _error_payload_result(
-                    {"error": "aggregations 列表元素必须是对象"}, code="INVALID_ARGS",
-                )
+                return None, _arg_shape_error("aggregations")
             funcs = item.get("funcs") or item.get("func") or item.get("agg")
             if funcs is None:
-                return None, _error_payload_result(
-                    {"error": "aggregations 元素缺少 func/funcs"}, code="INVALID_ARGS",
-                )
+                return None, _arg_shape_error("aggregations")
             err = _add(item.get("column") or item.get("col"), funcs)
             if err is not None:
                 return None, err
     elif aggregations in (None, "", [], {}):
         return [], None
     else:
-        return None, _error_payload_result(
-            {"error": "aggregations 必须是 {列名: 函数} 对象或 [{column, func}] 数组"},
-            code="INVALID_ARGS",
-        )
+        return None, _arg_shape_error("aggregations")
     return entries, None
 
 
@@ -2759,16 +2803,16 @@ def _normalize_join(
 ) -> tuple[dict[str, Any] | None, "ToolResult | None"]:
     """归一 aggregate 的 join/lookup 参数（VLOOKUP 语义：左连接、右表按键去重首值）。
 
-    返回 (spec, err)。spec 含 right_file/right_sheet/left_on/right_on/columns。
+    接受结构化对象或等价 JSON 字符串（自动解析）。返回 (spec, err)。
+    spec 含 right_file/right_sheet/left_on/right_on/columns。
     """
-    join = _maybe_json(join)
+    join, json_err = _load_json_arg(join, "join")
+    if json_err is not None:
+        return None, json_err
     if join is None:
         return None, None
     if not isinstance(join, dict):
-        return None, _error_payload_result(
-            {"error": "join 必须是对象：{sheet|file_path, on|left_on+right_on, columns?}"},
-            code="INVALID_ARGS",
-        )
+        return None, _arg_shape_error("join")
     on = join.get("on")
     left_on = join.get("left_on") or join.get("leftOn") or on
     right_on = join.get("right_on") or join.get("rightOn") or on
@@ -2955,8 +2999,7 @@ def aggregate_data(
         assert merged is not None
         df = merged
 
-    group_by = _maybe_json(group_by)
-    keys, derived_specs, keys_err = _normalize_group_keys(group_by, df.columns)
+    keys, derived_specs, keys_err = _normalize_group_keys(group_by, df.columns, "group_by")
     if keys_err is not None:
         return keys_err
     assert keys is not None and derived_specs is not None
@@ -3250,14 +3293,19 @@ def _pivot_frame(
     if missing:
         return None, f"透视列不存在: {missing}；可用列: {[str(c) for c in df.columns]}"
     func = str(aggfunc or "sum").lower()
-    allowed = {"sum", "count", "mean", "min", "max", "median", "nunique", "first", "last"}
+    # Keep pivot's single-function shorthand in lock-step with the richer
+    # ``aggregations`` API: avg/average are mean aliases and std is supported
+    # by pandas just like the aggregate path.
+    aliases = {"avg": "mean", "average": "mean", "distinct": "nunique"}
+    func = aliases.get(func, func)
+    allowed = {"sum", "count", "mean", "min", "max", "median", "std", "nunique", "first", "last"}
     if func not in allowed:
         return None, f"不支持的 aggfunc={aggfunc}，可用: {sorted(allowed)}"
     use_margins = margins is True or str(margins).strip().lower() in {"1", "true", "yes", "on"}
     total_label = str(margins_name or "合计")
     work = df
     for col in val_cols:
-        if func in {"sum", "mean", "min", "max", "median"} and not pd.api.types.is_numeric_dtype(work[col]):
+        if func in {"sum", "mean", "min", "max", "median", "std"} and not pd.api.types.is_numeric_dtype(work[col]):
             work = work.assign(**{col: _coerce_numeric(work[col])})
     try:
         table = pd.pivot_table(
@@ -3315,6 +3363,8 @@ def write_dataframe_to_worksheet(
     source_columns: list[int] | None = None,
 ) -> None:
     """Write a DataFrame while preserving an optional prefix above start_row."""
+    from excelmanus.workbook.cells import coerce_cell_value
+
     start_row = max(int(start_row or 1), 1)
     max_row = ws.max_row or start_row
     max_col = max(ws.max_column or 1, len(df.columns) or 1)
@@ -3347,7 +3397,8 @@ def write_dataframe_to_worksheet(
         ws.delete_cols(target_cols + 1, max_col - target_cols)
     for r, row in enumerate(matrix, start=start_row):
         for c, val in enumerate(row, start=1):
-            ws.cell(row=r, column=c).value = val
+            # 空串 = 清空单元格：str.split 等派生列会产生 ""，落盘后回读只能是 None。
+            ws.cell(row=r, column=c).value = coerce_cell_value(val)
             if (r, c) in styles:
                 cell = ws.cell(r, c)
                 cell._style, cell.comment, link = styles[(r, c)]
@@ -3557,13 +3608,13 @@ def pivot_data(
         assert merged is not None
         df = merged
 
-    keys, derived_specs, keys_err = _normalize_group_keys(group_by, df.columns)
+    keys, derived_specs, keys_err = _normalize_group_keys(group_by, df.columns, "group_by")
     if keys_err is not None:
         return keys_err
-    idx_keys, idx_derived, idx_err = _normalize_group_keys(index, df.columns)
+    idx_keys, idx_derived, idx_err = _normalize_group_keys(index, df.columns, "index")
     if idx_err is not None:
         return idx_err
-    col_keys, col_derived, col_err = _normalize_group_keys(columns, df.columns)
+    col_keys, col_derived, col_err = _normalize_group_keys(columns, df.columns, "columns")
     if col_err is not None:
         return col_err
     assert derived_specs is not None and idx_derived is not None and col_derived is not None

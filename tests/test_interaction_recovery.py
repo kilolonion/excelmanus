@@ -292,7 +292,7 @@ async def test_started_approved_write_is_not_replayed_when_its_result_is_uncerta
     await restored.engine.followup("/resume")
     assert setup.writes == ["write"]
     content = next(m["content"] for m in restored.engine.memory.messages if m.get("tool_call_id") == "original-call")
-    assert ("已写入" if receipt else "结果未完整记录") in content
+    assert ("已写入" if receipt else "不能假定已经生效") in content
 
 
 @pytest.mark.asyncio

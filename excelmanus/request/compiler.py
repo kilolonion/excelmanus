@@ -24,7 +24,8 @@ from excelmanus.request.types import PreparedRequest, RequestHeader, ResolvedRou
 def create_extra_from_engine(engine: Any) -> dict[str, Any]:
     """Thinking / profile extras. Same snapshot as ResolvedRoute."""
     extra: dict[str, Any] = {}
-    caps = getattr(engine, "_model_capabilities", None)
+    from excelmanus.capability_identity import active_observation
+    caps = active_observation(engine)
     tc = getattr(engine, "_thinking_config", None)
     profile = getattr(engine, "_active_profile", None)
     api_model = str(
@@ -80,57 +81,11 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
         api_model = strip_managed_prefix(api_model) or api_model
     except Exception:
         pass
-    profile_thinking_mode = getattr(profile, "thinking_mode", "auto") if profile else "auto"
-    if profile_thinking_mode not in ("auto", ""):
-        effective = profile_thinking_mode if profile_thinking_mode != "disabled" else ""
-    elif caps and getattr(caps, "supports_thinking", False):
-        effective = getattr(caps, "thinking_type", "")
-    else:
-        effective = ""
-    budget = tc.effective_budget() if tc is not None else 0
-    disabled = bool(tc is None or getattr(tc, "is_disabled", False))
-    if effective == "claude":
-        extra["_thinking_enabled"] = not disabled
-        extra["_thinking_budget"] = budget if not disabled else 0
-        extra["_thinking_effort"] = getattr(tc, "claude_effort", None) if tc is not None else None
-    elif not disabled:
-        if effective == "claude_compat":
-            from excelmanus.providers.claude import uses_adaptive_thinking
-
-            body: dict[str, Any] = dict(extra.get("extra_body") or {})
-            if uses_adaptive_thinking(api_model):
-                body["thinking"] = {"type": "adaptive"}
-                body["output_config"] = {"effort": getattr(tc, "claude_effort", None)}
-            else:
-                body["thinking"] = {"type": "enabled", "budget_tokens": budget}
-            extra["extra_body"] = body
-        elif effective == "gemini":
-            extra["_thinking_budget"] = budget
-        elif effective == "gemini_level":
-            extra["_thinking_level"] = getattr(tc, "gemini_level", None)
-        elif effective == "openai_reasoning":
-            extra["reasoning_effort"] = getattr(tc, "openai_effort", None)
-        elif effective == "enable_thinking":
-            body = dict(extra.get("extra_body") or {})
-            body["enable_thinking"] = True
-            body["thinking_budget"] = budget
-            extra["extra_body"] = body
-        elif effective == "chat_template":
-            body = dict(extra.get("extra_body") or {})
-            body["chat_template_kwargs"] = {"enable_thinking": True}
-            extra["extra_body"] = body
-        elif effective == "glm_thinking":
-            body = dict(extra.get("extra_body") or {})
-            body["thinking"] = {"type": "enabled"}
-            body["reasoning_effort"] = getattr(tc, "openai_effort", None)
-            extra["extra_body"] = body
-        elif effective == "openrouter":
-            body = dict(extra.get("extra_body") or {})
-            body["reasoning"] = {
-                "effort": getattr(tc, "openai_effort", None),
-                "max_tokens": budget,
-            }
-            extra["extra_body"] = body
+    from excelmanus.providers.thinking import compile_thinking
+    base_url = str(getattr(engine, "_active_base_url", "") or getattr(config, "base_url", "") or "")
+    mode = getattr(profile, "thinking_mode", "auto") if profile else "auto"
+    extra.update(compile_thinking(api_model, base_url, protocol_hint, mode, tc, caps,
+                                  declared_efforts=getattr(config, "thinking_effort_options", None)))
     if profile is not None:
         if (
             getattr(profile, "service_tier", "") == "fast"
@@ -160,6 +115,32 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
                     extra["extra_headers"] = parsed
             except (ValueError, TypeError):
                 pass
+        max_output = getattr(profile, "max_output_tokens", 0)
+        if max_output > 0:
+            from excelmanus.model_catalog import model_spec
+            output_limit = (model_spec(api_model, base_url, route_only=True) or {}).get("max_output_tokens")
+            if output_limit and max_output > output_limit:
+                raise ValueError(f"最大输出 {max_output} 超过 {api_model} 官方上限 {output_limit}")
+            # The model's explicit limit wins over conflicting custom body fields.
+            body = dict(extra.get("extra_body") or {})
+            if protocol_hint in {"gemini", "antigravity"}:
+                body["maxOutputTokens"] = max_output
+            elif protocol_hint == "openai_responses":
+                body["max_output_tokens"] = max_output
+            elif protocol_hint == "anthropic":
+                extra["max_tokens"] = max_output
+                body["max_tokens"] = max_output
+            else:
+                from excelmanus.model_identity import has_token_prefix
+
+                key = (model_spec(api_model, base_url) or {}).get("token_limit_parameter") or ("max_completion_tokens" if has_token_prefix(api_model, ("gpt-5", "gpt-6", "o1", "o3", "o4")) else "max_tokens")
+                body.pop("max_tokens", None)
+                body.pop("max_completion_tokens", None)
+                extra[key] = max_output
+            if body:
+                extra["extra_body"] = body
+            else:
+                extra.pop("extra_body", None)
     # 订阅凭证解析出的 provider 专属请求头（含刷新后的 token）覆盖静态值
     oauth_headers = getattr(engine, "_oauth_extra_headers", None)
     if isinstance(oauth_headers, dict) and oauth_headers:
@@ -340,6 +321,11 @@ def _provider_body(
     from excelmanus.providers.request_body import compile_provider_body
 
     native = compile_provider_body(route.protocol, _omit_degraded_keys(body, route))
+    if route.protocol == "openai":
+        from excelmanus.providers.mimo import is_mimo_base_url, sanitize_mimo_request
+
+        if is_mimo_base_url(route.endpoint):
+            native = sanitize_mimo_request(native)
     from excelmanus.engine_core.llm_caller import degraded_params
 
     if not route.capabilities.get("prompt_cache_key") or "prompt_cache_key" in (
@@ -438,7 +424,7 @@ def _native_header(
     non_prefix = {
         message_key, "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention", "cache_control",
         "previous_response_id", "stream", "stream_options", "store", "background", "metadata",
-        "max_tokens", "max_output_tokens", "temperature", "top_p", "seed", "service_tier",
+        "max_tokens", "max_completion_tokens", "max_output_tokens", "temperature", "top_p", "seed", "service_tier",
         "safety_identifier", "user", "extra_headers",
     }
     effective = dict(body)
@@ -567,7 +553,10 @@ async def _compile_request(
     if handoff_error:
         return None, handoff_error + "；请恢复有效会话历史后继续。"
     if extra is None:
-        extra = create_extra_from_engine(engine)
+        try:
+            extra = create_extra_from_engine(engine)
+        except (ValueError, TypeError) as exc:
+            return None, f"模型能力配置无效：{exc}"
     engine._compile_extra = extra
     route = resolve_route(engine)
     engine._resolved_route = route
@@ -628,6 +617,18 @@ async def _compile_request(
         )
         if error is not None or envelope is None:
             return None, error or "附件配额重装失败"
+
+    from excelmanus.model_catalog import model_spec
+    documented = model_spec(route.model, route.endpoint, route_only=True)
+    from excelmanus.capability_identity import active_observation
+    caps = active_observation(engine)
+    tool_support = getattr(caps, "supports_tool_calling", None)
+    if tool_support is None:
+        tool_support = (documented or {}).get("tool_calling")
+    if (documented or {}).get("tools_protocols") and route.protocol not in documented["tools_protocols"] and getattr(envelope, "tools", None):
+        return None, "该模型的工具调用需要 Responses 协议，请在模型设置中选择自动或 OpenAI Responses。"
+    if tool_support is False and getattr(envelope, "tools", None):
+        return None, "当前模型不支持工具调用，无法执行表格 Agent 任务；请选择支持工具的模型或重新探测该端点。"
 
     sealed, seal_error = await seal_envelope(
         engine,

@@ -6,6 +6,8 @@ import {
   FolderPlus,
   Plus,
   CheckSquare,
+  Check,
+  Minus,
   Trash2,
   FolderTree,
   List,
@@ -16,7 +18,6 @@ import {
   AtSign,
   Combine,
   ArrowLeftRight,
-  Layers,
   Search,
   X,
   RefreshCw,
@@ -45,6 +46,7 @@ import {
   workspaceDeleteItem,
 } from "@/lib/api";
 import { mapWithConcurrency } from "@/lib/concurrency";
+import { handleWorkspaceFilesDeleted } from "@/lib/file-deletion";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import {
   recentFilesForWorkspace,
@@ -62,7 +64,6 @@ import {
 import { InlineCreateInput } from "./InlineInputs";
 import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
-import { FileGroupListView } from "./FileGroupListView";
 import { RemoveConfirmDialog } from "./ExcelFilesDialogs";
 import {
   DropdownMenu,
@@ -71,6 +72,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
+import styles from "./FilePanel.module.css";
 
 function isNotFoundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
@@ -87,8 +90,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const recentFiles = useExcelStore((s) => s.recentFiles);
   const activeWorkspaceKey = useExcelStore((s) => s.activeWorkspaceKey);
   const addRecentFile = useExcelStore((s) => s.addRecentFile);
-  const removeRecentFile = useExcelStore((s) => s.removeRecentFile);
-  const removeRecentFiles = useExcelStore((s) => s.removeRecentFiles);
   const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
   const workspaceFiles = useExcelStore((s) => s.workspaceFiles);
   const wsFilesLoaded = useExcelStore((s) => s.wsFilesLoaded);
@@ -98,10 +99,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const showSystemFiles = useExcelStore((s) => s.showSystemFiles);
   const toggleShowSystemFiles = useExcelStore((s) => s.toggleShowSystemFiles);
   const demoFile = useExcelStore((s) => s.demoFile);
-  const groupViewMode = useExcelStore((s) => s.groupViewMode);
-  const toggleGroupViewMode = useExcelStore((s) => s.toggleGroupViewMode);
-  const createGroupFromSelected = useExcelStore((s) => s.createGroupFromSelected);
-  const loadFileGroups = useExcelStore((s) => s.loadFileGroups);
 
   // 先按系统文件开关过滤，再按搜索词过滤展示列表。
   const workspaceVisibleFiles = useMemo(
@@ -155,7 +152,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   const [pendingRemovePaths, setPendingRemovePaths] = useState<string[]>([]);
   const [creatingRootFolder, setCreatingRootFolder] = useState(false);
-  const [creatingGroup, setCreatingGroup] = useState(false);
 
   const exitSelectMode = useCallback(() => {
     setSelectMode(false);
@@ -186,16 +182,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       return new Set(wsFilePaths);
     });
   }, [wsFilePaths]);
-
-  const setViewMode = useCallback((mode: "list" | "tree" | "groups") => {
-    if (mode === "groups") {
-      if (!groupViewMode) toggleGroupViewMode();
-      void loadFileGroups({ force: true });
-      return;
-    }
-    if (groupViewMode) toggleGroupViewMode();
-    setTreeView(mode === "tree");
-  }, [groupViewMode, toggleGroupViewMode, loadFileGroups]);
 
   const handleCreateRootFolder = useCallback(async (name: string) => {
     const folderName = name.trim();
@@ -249,7 +235,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
   // Agent 创建/修改文件时自动刷新树（mutation SSE 事件）
   const prevVersionRef = useRef(workspaceFilesVersion);
-  const prevGroupVersionRef = useRef(workspaceFilesVersion);
   useEffect(() => {
     if (workspaceFilesVersion === prevVersionRef.current) return;
     prevVersionRef.current = workspaceFilesVersion;
@@ -259,16 +244,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     }, 500);
     return () => clearTimeout(timer);
   }, [workspaceFilesVersion, refreshWorkspaceFiles]);
-
-  // File mutations also invalidate group membership. Keep this debounce
-  // separate from the file-list timer so toggling views cannot cancel it.
-  useEffect(() => {
-    if (workspaceFilesVersion === prevGroupVersionRef.current) return;
-    prevGroupVersionRef.current = workspaceFilesVersion;
-    if (!groupViewMode) return;
-    const timer = setTimeout(() => { void loadFileGroups({ force: true }); }, 500);
-    return () => clearTimeout(timer);
-  }, [workspaceFilesVersion, groupViewMode, loadFileGroups]);
 
   const handleUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -372,13 +347,13 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       if (hasFailure) {
         useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
       } else {
-        // 同步清理 recentFiles 中对应条目
-        if (pendingRemovePaths.length === 1) {
-          removeRecentFile(pendingRemovePaths[0], activeWorkspaceKey);
-        } else if (pendingRemovePaths.length > 0) {
-          removeRecentFiles(pendingRemovePaths, activeWorkspaceKey);
-        }
-        useExcelStore.getState().bumpWorkspaceFilesVersion();
+        // 统一清理：最近打开、已打开的表格标签、全屏视图、对话绑定等
+        // 所有入口一并剔除，避免“侧栏已删、其他入口还在”的口径混乱。
+        const currentSession = useSessionStore.getState().sessions?.find((s) => s.id === activeSessionId);
+        handleWorkspaceFilesDeleted(
+          pendingRemovePaths,
+          activeWorkspaceKey ?? workspaceKeyFromSession(currentSession),
+        );
       }
       refreshWorkspaceFiles(activeSessionId);
     } finally {
@@ -387,7 +362,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     setConfirmRemoveOpen(false);
     setPendingRemovePaths([]);
     exitSelectMode();
-  }, [pendingRemovePaths, removeRecentFile, removeRecentFiles, exitSelectMode, refreshWorkspaceFiles, activeSessionId, activeWorkspaceId, activeWorkspaceKey]);
+  }, [pendingRemovePaths, exitSelectMode, refreshWorkspaceFiles, activeSessionId, activeWorkspaceId, activeWorkspaceKey]);
 
   const requestClearAll = useCallback(() => {
     if (allVisibleFilePaths.length === 0) return;
@@ -502,7 +477,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   if (totalFileCount === 0 && !wsFilesLoaded && !embedded) return null;
 
   return (
-    <div className={embedded ? "flex h-full min-h-0 flex-col px-2 py-1" : "px-3 pb-2"}>
+    <div className={embedded ? styles.panel : "px-3 pb-2"}>
       {/* Section header — only in standalone mode */}
       {!embedded && (
         <div className="flex items-center justify-between mb-1.5">
@@ -562,18 +537,18 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       {embedded && (
         <TooltipProvider delayDuration={300}>
           <div
-            className="mb-2 shrink-0 space-y-2 border-b border-border/40 pb-2"
+            className={styles.controls}
             data-coach-id="coach-sidebar-file-tools"
           >
-            <div className="flex items-center justify-between gap-2">
+            <div className={styles.heading}>
               <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[13px] font-semibold text-foreground">工作区文件</span>
-                  <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                <div className={styles.title}>
+                  <span>工作区文件</span>
+                  <span className={styles.count}>
                     {totalFileCount}
                   </span>
                 </div>
-                <span className="text-[10px] text-muted-foreground/70">
+                <p className={styles.subtitle}>
                   {hasQuery
                     ? `找到 ${wsFilePaths.length} 个匹配项`
                     : hiddenCount > 0
@@ -581,82 +556,71 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                       : workspaceFilesLoading
                         ? "正在同步文件列表…"
                         : "拖拽文件到聊天框即可引用"}
-                </span>
+                </p>
               </div>
               <button
                 type="button"
                 onClick={openFilePicker}
-                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium text-white shadow-sm transition-opacity hover:opacity-90"
-                style={{ backgroundColor: "var(--em-primary)" }}
+                disabled={uploading}
+                className={styles.upload}
               >
                 <Plus className="h-3.5 w-3.5" />
                 {uploading ? "上传中…" : "上传文件"}
               </button>
             </div>
 
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
+            <div className={styles.search}>
+              <Search className={styles.searchIcon} />
               <input
                 type="search"
                 value={fileQuery}
                 onChange={(event) => setFileQuery(event.target.value)}
                 placeholder="搜索文件名或路径"
                 aria-label="搜索工作区文件"
-                className="h-8 w-full rounded-md border border-border/70 bg-background/70 pl-8 pr-8 text-[11px] outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-[var(--em-primary)] focus:ring-1 focus:ring-[var(--em-primary-alpha-10)]"
               />
               {fileQuery && (
                 <button
                   type="button"
                   onClick={() => setFileQuery("")}
                   aria-label="清除文件搜索"
-                  className="absolute right-1.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                  className={styles.clearSearch}
                 >
                   <X className="h-3 w-3" />
                 </button>
               )}
             </div>
 
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-0.5 rounded-md bg-muted/60 p-0.5">
+            <div className={styles.toolbar}>
+              <div className={styles.viewSwitch} role="group" aria-label="文件视图">
                 {([
                   ["list", List, "列表"],
                   ["tree", FolderTree, "文件夹"],
-                  ["groups", Layers, "文件组"],
                 ] as const).map(([mode, Icon, label]) => {
-                  const active = mode === "groups"
-                    ? groupViewMode
-                    : !groupViewMode && (mode === "tree" ? treeView : !treeView);
+                  const active = mode === "tree" ? treeView : !treeView;
                   return (
                     <button
                       key={mode}
                       type="button"
-                      onClick={() => setViewMode(mode)}
+                      onClick={() => setTreeView(mode === "tree")}
                       aria-label={`${label}视图`}
                       aria-pressed={active}
-                      className={`inline-flex h-7 items-center gap-1 rounded px-2 text-[10px] transition-colors ${
-                        active
-                          ? "bg-background text-[var(--em-primary)] shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
-                      }`}
+                      className={styles.viewButton}
                     >
                       <Icon className="h-3.5 w-3.5" />
-                      <span className="hidden min-[360px]:inline">{label}</span>
+                      <span>{label}</span>
                     </button>
                   );
                 })}
               </div>
 
-              <div className="flex shrink-0 items-center gap-0.5">
+              <div className={styles.toolbarActions}>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
                       type="button"
                       onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
-                      className={`flex h-7 w-7 items-center justify-center rounded-md transition-all duration-150 ${
-                        selectMode
-                          ? "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                      }`}
+                      className={styles.iconButton}
+                      aria-pressed={selectMode}
                       aria-label={selectMode ? "退出多选" : "批量选择"}
                     >
                       <CheckSquare className="h-3.5 w-3.5" />
@@ -668,7 +632,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                   <DropdownMenuTrigger asChild>
                     <button
                       type="button"
-                      className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      className={styles.iconButton}
                       aria-label="更多文件操作"
                     >
                       <MoreHorizontal className="h-3.5 w-3.5" />
@@ -706,38 +670,30 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       )}
 
       {embedded && workbookWorkspace.files.length > 1 && (
-        <div
-          className="mb-2 flex shrink-0 items-center gap-2.5 rounded-lg border px-2.5 py-2"
-          style={{
-            borderColor: "var(--em-primary-alpha-20)",
-            background: "linear-gradient(135deg, var(--em-primary-alpha-10), var(--em-panel))",
+        <button
+          type="button"
+          className={styles.workspaceCard}
+          aria-label={`进入工作区，${workbookWorkspace.files.length} 张表格已打开`}
+          onClick={() => {
+            const target = workbookWorkspace.files.find((file) => file.path === workbookWorkspace.focused)
+              ?? workbookWorkspace.files[0];
+            if (target) useExcelStore.getState().openFullView(target.path, target.sheet);
           }}
         >
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--em-primary-alpha-12)] text-[var(--em-primary)]">
-            <LayoutGrid className="h-3.5 w-3.5" />
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold">
+          <span className={styles.workspaceIcon}>
+            <LayoutGrid className="h-4 w-4" />
+          </span>
+          <span className={styles.workspaceBody}>
+            <span className={styles.workspaceTitle}>
               <span>多表工作区</span>
-              <span className="rounded-full bg-[var(--em-primary-alpha-12)] px-1.5 py-0.5 text-[9px] font-medium text-[var(--em-primary)]">
+              <span className={styles.workspaceCount}>
                 {workbookWorkspace.files.length} 张已打开
               </span>
-            </div>
-            <p className="mt-0.5 truncate text-[10px] text-muted-foreground">并排查看、对比和引用当前工作簿</p>
-          </div>
-          <button
-            type="button"
-            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[10px] font-semibold text-[var(--em-primary)] transition-colors hover:bg-[var(--em-primary-alpha-10)]"
-            onClick={() => {
-              const target = workbookWorkspace.files.find((file) => file.path === workbookWorkspace.focused)
-                ?? workbookWorkspace.files[0];
-              if (target) useExcelStore.getState().openFullView(target.path, target.sheet);
-            }}
-          >
-            进入工作区
-            <ArrowRight className="h-3 w-3" />
-          </button>
-        </div>
+            </span>
+            <span className={styles.workspaceCaption}>进入工作区，继续并排查看与对比</span>
+          </span>
+          <ArrowRight className={styles.workspaceArrow} />
+        </button>
       )}
 
       {/* Onboarding demo file (injected during coach marks, auto-removed after) */}
@@ -775,19 +731,29 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
       {/* Multi-select action bar */}
       {selectMode && (
-        <div className="order-last flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/40 bg-background/80 px-1 pt-2">
-          <button
-            onClick={toggleSelectAll}
-            className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
-          >
-            {selectedPaths.size === wsFilePaths.length && wsFilePaths.length > 0 ? "取消全选" : "全选"}
-          </button>
-          {selectedPaths.size > 0 && (
-            <>
-              <span className="text-[10px] text-muted-foreground">
-                · 已选 {selectedPaths.size} 项
+        <div className={styles.selection} role="region" aria-label="文件批量操作">
+          <div className={styles.selectionHeader}>
+            <button
+              type="button"
+              onClick={toggleSelectAll}
+              className={styles.selectAll}
+              aria-label={selectedPaths.size === wsFilePaths.length && wsFilePaths.length > 0 ? "取消全选" : "全选"}
+            >
+              <span className={styles.checkbox}
+                data-checked={selectedPaths.size === wsFilePaths.length && wsFilePaths.length > 0}
+                data-mixed={selectedPaths.size > 0 && selectedPaths.size !== wsFilePaths.length}
+                aria-hidden="true">
+                {selectedPaths.size > 0 && (selectedPaths.size === wsFilePaths.length ? <Check /> : <Minus />)}
               </span>
+              全选
+            </button>
+            <span className={styles.selectionCount} role="status">已选 <strong>{selectedPaths.size}</strong> 项</span>
+            <button type="button" onClick={exitSelectMode} className={styles.done}>完成</button>
+          </div>
+          {selectedPaths.size > 0 && (
+            <div className={styles.selectionActions}>
               <button
+                type="button"
                 onClick={() => {
                   const selectedFiles = visibleFiles
                     .filter((f) => !f.is_dir && selectedPaths.has(f.path))
@@ -797,124 +763,73 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                     exitSelectMode();
                   }
                 }}
-                className="ml-auto text-[10px] transition-colors"
-                style={{ color: "var(--em-primary)" }}
+                className={cn(styles.action, styles.primaryAction)}
                 title="将已选文件引用到聊天输入框"
               >
-                <span className="inline-flex items-center gap-0.5">
-                  <AtSign className="h-3 w-3" />
-                  引用到聊天
-                </span>
+                <AtSign />
+                引用到聊天
               </button>
-              {selectedPaths.size === 2 && selectedWorkbookFiles.length === 2 && (() => {
-                const pair = selectedWorkbookFiles.map((f) => f.path);
-                return pair.length === 2 ? (
-                  <>
-                    <button
-                      onClick={() => {
-                        useExcelStore.getState().setPendingTemplateMessage(
-                          `请将 ${formatFileMention({ path: pair[0] })} 与 ${formatFileMention({ path: pair[1] })} 进行合并`
-                        );
-                        exitSelectMode();
-                      }}
-                      className="text-[10px] transition-colors"
-                      style={{ color: "var(--em-primary)" }}
-                      title="将两个文件合并"
-                    >
-                      <span className="inline-flex items-center gap-0.5">
-                        <Combine className="h-3 w-3" />
-                        合并
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        useExcelStore.getState().openCompare(pair[0], pair[1]);
-                        exitSelectMode();
-                      }}
-                      className="text-[10px] transition-colors"
-                      style={{ color: "var(--em-primary)" }}
-                      title="可视化对比两个文件"
-                    >
-                      <span className="inline-flex items-center gap-0.5">
-                        <ArrowLeftRight className="h-3 w-3" />
-                        对比
-                      </span>
-                    </button>
-                  </>
-                ) : null;
-              })()}
               {selectedWorkbookFiles.length >= 2 && (
                 <button
+                  type="button"
                   onClick={() => {
                     const paths = selectedWorkbookFiles.map((file) => file.path);
                     for (const path of paths) openWorkspaceFile(path, { intent: "full" });
                     if (paths[0]) useExcelStore.getState().focusWorkbook(paths[0]);
                     exitSelectMode();
                   }}
-                  className="text-[10px] transition-colors"
-                  style={{ color: "var(--em-primary)" }}
+                  className={styles.action}
                   title="在多表工作区中同时打开已选表格"
+                  aria-label="打开到多表工作区"
                 >
-                  <span className="inline-flex items-center gap-0.5">
-                    <LayoutGrid className="h-3 w-3" />
-                    打开到多表工作区
-                  </span>
+                  <LayoutGrid />
+                  打开工作区
                 </button>
               )}
+              {selectedPaths.size === 2 && selectedWorkbookFiles.length === 2 && (() => {
+                const pair = selectedWorkbookFiles.map((f) => f.path);
+                return pair.length === 2 ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        useExcelStore.getState().setPendingTemplateMessage(
+                          `请将 ${formatFileMention({ path: pair[0] })} 与 ${formatFileMention({ path: pair[1] })} 进行合并`
+                        );
+                        exitSelectMode();
+                      }}
+                      className={styles.action}
+                      title="将两个文件合并"
+                    >
+                      <Combine />
+                      合并表格
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        useExcelStore.getState().openCompare(pair[0], pair[1]);
+                        exitSelectMode();
+                      }}
+                      className={styles.action}
+                      title="可视化对比两个文件"
+                    >
+                      <ArrowLeftRight />
+                      对比差异
+                    </button>
+                  </>
+                ) : null;
+              })()}
               <button
-                onClick={() => setCreatingGroup(true)}
-                className="text-[10px] transition-colors"
-                style={{ color: "var(--em-primary)" }}
-                title="将已选文件创建为文件组"
-              >
-                <span className="inline-flex items-center gap-0.5">
-                  <Layers className="h-3 w-3" />
-                  创建文件组
-                </span>
-              </button>
-              <button
+                type="button"
                 onClick={() => requestRemove(Array.from(selectedPaths))}
-                className="text-[10px] text-destructive hover:text-destructive/80 transition-colors"
+                className={cn(styles.action, styles.dangerAction, selectedWorkbookFiles.length >= 2 && styles.wideAction)}
               >
+                <Trash2 />
                 移除所选
               </button>
-            </>
-          )}
-          {creatingGroup && (
-            <div className="flex items-center gap-1 mt-1 w-full">
-              <Layers className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-              <InlineCreateInput
-                placeholder="输入文件组名称"
-                onConfirm={async (name) => {
-                  setCreatingGroup(false);
-                  const fileIds = Array.from(selectedPaths);
-                  // 需要通过 file registry 获取 file_id，这里用 path 作为 id
-                  // 后端 create_group 接收的是 file_registry 的 id
-                  // 前端需要先获取 registry entry ids
-                  const { fetchFileRegistry } = await import("@/lib/api");
-                  try {
-                    const regData = await fetchFileRegistry({ sessionId: activeSessionId });
-                    if ("files" in regData) {
-                      const pathToId = new Map<string, string>();
-                      for (const f of regData.files) {
-                        pathToId.set(f.canonical_path, f.id);
-                      }
-                      const ids = fileIds
-                        .map((p) => pathToId.get(p) ?? pathToId.get(`./${p}`))
-                        .filter((id): id is string => !!id);
-                      if (ids.length > 0) {
-                        await createGroupFromSelected(name, ids);
-                      }
-                    }
-                  } catch {
-                    // silent
-                  }
-                  exitSelectMode();
-                }}
-                onCancel={() => setCreatingGroup(false)}
-              />
             </div>
           )}
+          {selectedPaths.size === 0 && <p className={styles.selectionHint}>选择文件，批量引用或整理</p>}
         </div>
       )}
 
@@ -929,10 +844,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           {uploadFailureCount} 个文件上传失败，请重试。
         </div>
       )}
-      <div ref={scrollRef} data-file-scroll-viewport className={embedded ? "min-h-0 flex-1 overflow-y-auto pr-1" : undefined}>
-        {groupViewMode ? (
-          <FileGroupListView key={fileQuery} onClickFile={handleClick} query={fileQuery} />
-        ) : !wsFilesLoaded ? (workspaceFilesError ? null : (
+      <div ref={scrollRef} data-file-scroll-viewport className={embedded ? styles.viewport : undefined}>
+        {!wsFilesLoaded ? (workspaceFilesError ? null : (
           <div className="flex flex-col items-center justify-center py-6 gap-2 text-muted-foreground/60">
             <div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
             <span className="text-[11px]">加载文件列表…</span>

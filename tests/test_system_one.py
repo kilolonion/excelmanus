@@ -68,6 +68,7 @@ def test_jev_is_active_requires_gate_and_key() -> None:
         jev_timeout_seconds=1.5,
     ))
     on = settings_from(SimpleNamespace(
+        jev_experimental_enabled=True,
         jev_enabled="shadow",
         jev_exposure="shadow",
         jev_mode_hint=False,
@@ -84,6 +85,7 @@ def test_jev_is_active_requires_gate_and_key() -> None:
 
 def _jev_cfg(**overrides: object) -> SimpleNamespace:
     base: dict[str, object] = {
+        "jev_experimental_enabled": True,
         "jev_enabled": "shadow",
         "jev_exposure": "off",
         "jev_mode_hint": False,
@@ -240,6 +242,7 @@ def test_gate_matrix_legacy_shadow_migrates_to_enforce() -> None:
     assert effective_gate("enforce", "enforce") == "enforce"
     assert effective_flag("enforce", True) == "enforce"
     settings = SimpleNamespace(
+        jev_experimental_enabled=True,
         jev_enabled="shadow",
         jev_exposure="shadow",
         jev_mode_hint=True,
@@ -363,6 +366,7 @@ def test_jev_settings_come_from_store_not_process_env(monkeypatch: pytest.Monkey
         "EXCELMANUS_JEV_OBSERVATION": "shadow",
         "EXCELMANUS_JEV_UI_HINT": "true",
         "EXCELMANUS_JEV_CALIBRATED": "0",
+        "EXCELMANUS_JEV_EXPERIMENTAL_ENABLED": "true",
         "EXCELMANUS_AI_GATEWAY_API_KEY": "vck_test_not_real",
     })
     assert get_setting("EXCELMANUS_JEV_ENABLED") == "shadow"

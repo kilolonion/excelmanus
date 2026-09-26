@@ -425,6 +425,29 @@ class ChatHistoryStore:
         )
         self._conn.commit()
 
+    def load_task_history(self, session_id: str) -> list[dict]:
+        """Read task calls and their results without deserializing the full transcript."""
+        from excelmanus.history_projection import TASK_TOOLS, task_calls
+
+        patterns = [f'%"{name}"%' for name in sorted(TASK_TOOLS)]
+        rows = self._conn.execute(
+            "SELECT id, content FROM messages WHERE session_id = ? AND role = 'assistant' "
+            "AND (" + " OR ".join("content LIKE ?" for _ in patterns) + ") ORDER BY id",
+            (session_id, *patterns),
+        ).fetchall()
+        messages = {row["id"]: self._deserialize_message(row) for row in rows}
+        call_ids = [call["id"] for message in messages.values()
+                    for call in task_calls(message) if isinstance(call.get("id"), str)]
+        for start in range(0, len(call_ids), 100):
+            batch = call_ids[start:start + 100]
+            results = self._conn.execute(
+                "SELECT id, content FROM messages WHERE session_id = ? AND role = 'tool' "
+                "AND (" + " OR ".join("content LIKE ?" for _ in batch) + ")",
+                (session_id, *(f"%{call_id}%" for call_id in batch)),
+            ).fetchall()
+            messages.update({row["id"]: self._deserialize_message(row) for row in results})
+        return [message for _, message in sorted(messages.items())]
+
     def load_messages(
         self, session_id: str, limit: int = 10000, offset: int = 0
     ) -> list[dict]:

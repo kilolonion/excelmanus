@@ -34,8 +34,6 @@
 .sectionLabel { display: flex; align-items: center; gap: 8px; padding: 10px 8px 5px; font-size: 11px; line-height: 16px; font-weight: 550; color: var(--em-muted); }
 .groupCount { color: var(--em-muted); font-size: 10px; opacity: 0.7; font-variant-numeric: tabular-nums; }
 .group + .group { margin-top: 4px; }
-.current { padding-bottom: 8px; margin-bottom: 2px; border-bottom: 1px solid var(--em-line); }
-.current .sectionLabel { color: var(--picker-accent); }
 .model { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 54px; margin-top: 2px; padding: 9px 8px; border: 1px solid transparent; border-radius: 11px; text-align: left; cursor: pointer; transition: background 140ms, border-color 140ms; }
 .model:hover { background: var(--em-panel-soft); }
 .model[data-selected="true"] { background: color-mix(in srgb, var(--picker-accent) 6%, var(--em-panel)); border-color: color-mix(in srgb, var(--picker-accent) 20%, var(--em-line)); }

@@ -18,7 +18,7 @@ OPERATION_SCHEMAS = {'append': {'additionalProperties': False,
                                                     'anyOf': [{'required': ['value']}, {'required': ['style']}],
                                                     'properties': {'cell': {'type': 'string'},
                                                                    'style': {'type': ['object', 'null']},
-                                                                   'value': {}},
+                                                                   'value': {'description': 'null 或空串 "" 表示清空该格'}},
                                                     'required': ['cell'],
                                                     'type': 'object'},
                                           'maxItems': 20000,
@@ -29,7 +29,8 @@ OPERATION_SCHEMAS = {'append': {'additionalProperties': False,
                  'required': ['kind', 'sheet', 'cells'],
                  'type': 'object'},
  'chart': {'additionalProperties': False,
-           'properties': {'categories_range': {'type': 'string'},
+           'description': 'sheet 指数据源表，target_sheet 指图表放置表。data_range 含系列表头；categories_range 指类别轴。',
+           'properties': {'categories_range': {'type': 'string', 'description': '类别轴范围，不含表头；若与 data_range 的边缘行/列重合，会从数据系列排除。'},
                           'chart_type': {'type': 'string'},
                           'data_range': {'type': 'string'},
                           'from_rows': {'type': 'boolean'},
@@ -37,10 +38,10 @@ OPERATION_SCHEMAS = {'append': {'additionalProperties': False,
                           'index': {'minimum': 0, 'type': 'integer'},
                           'kind': {'enum': ['chart'], 'type': 'string'},
                           'old_title': {'type': 'string'},
-                          'sheet': {'type': 'string'},
+                          'sheet': {'type': 'string', 'description': '数据源工作表，须与 data_range 内表名一致。'},
                           'style': {'type': ['string', 'integer']},
                           'target_cell': {'type': 'string'},
-                          'target_sheet': {'type': 'string'},
+                          'target_sheet': {'type': 'string', 'description': '图表放置工作表，默认与数据源 sheet 相同。'},
                           'title': {'type': 'string'},
                           'width': {'exclusiveMinimum': 0, 'type': 'number'},
                           'x_title': {'type': 'string'},
@@ -897,7 +898,8 @@ OPERATION_SCHEMAS = {'append': {'additionalProperties': False,
                           'values': {'oneOf': [{'items': {'items': {}, 'type': 'array'},
                                                 'minItems': 1,
                                                 'type': 'array'},
-                                               {'pattern': '^spill:[0-9a-f]{64}$', 'type': 'string'}]}},
+                                               {'pattern': '^spill:[0-9a-f]{64}$', 'type': 'string'}],
+                                     'description': '矩形二维数组；null 或空串 "" 表示清空该格（Excel 无字面空串单元格）'}},
            'required': ['kind', 'values'],
            'type': 'object'}}
 
@@ -937,6 +939,28 @@ for _selection_kind in ("write", "delete_rows"):
         if isinstance(_selection, dict):
             _selection.clear()
             _selection["type"] = "object"
+
+# Keep the public style contract in sync with the execution layer.  The
+# mutation style builder already accepts the Excel/openpyxl spellings below;
+# exposing them here prevents a valid SDK call from being rejected by the
+# JSON-Schema gate merely because it uses a familiar casing.  ``type`` /
+# snake_case remain the canonical WorkbookSpec spellings and callers should
+# prefer those names when generating new payloads.
+_format_style = OPERATION_SCHEMAS.get("format", {}).get("properties", {})
+_font_schema = _format_style.get("font")
+if isinstance(_font_schema, dict) and isinstance(_font_schema.get("properties"), dict):
+    _font_schema["properties"].setdefault(
+        "strikethrough", {"type": ["boolean", "null"], "description": "strike 的别名"}
+    )
+_alignment_schema = _format_style.get("alignment")
+if isinstance(_alignment_schema, dict) and isinstance(_alignment_schema.get("properties"), dict):
+    _alignment_schema["properties"].update({
+        "horizontalAlignment": {"type": ["string", "null"], "description": "horizontal 的别名"},
+        "verticalAlignment": {"type": ["string", "null"], "description": "vertical 的别名"},
+        "wrapText": {"type": ["boolean", "null"], "description": "wrap_text 的别名"},
+        "shrinkToFit": {"type": ["boolean", "null"], "description": "shrink_to_fit 的别名"},
+        "textRotation": {"type": ["integer", "null"], "description": "text_rotation 的别名"},
+    })
 
 OPERATION_SCHEMAS["geometry.scale"]["properties"]["preserve_outside"] = {"type":"boolean", "description":"Reject if other occupied/styled cells share resized axes"}
 OPERATION_SCHEMAS["geometry.resize"] = {"type":"object", "additionalProperties":False,
@@ -982,5 +1006,19 @@ def validate_operations(operations: Any) -> list[dict[str, Any]]:
             error.fields.update(operation_kind=operation["kind"], partial=False, applied=[])
             if exc.validator == "additionalProperties" and isinstance(exc.instance, dict):
                 error.fields["invalid_fields"] = sorted(set(exc.instance) - set(exc.schema.get("properties", {})))
+                from difflib import get_close_matches
+
+                declared = sorted(str(key) for key in (exc.schema.get("properties") or {}))
+                suggestions = {}
+                for invalid in error.fields["invalid_fields"]:
+                    matches = get_close_matches(str(invalid), declared, n=1, cutoff=0.45)
+                    if matches:
+                        suggestions[str(invalid)] = matches[0]
+                if suggestions:
+                    error.fields["field_suggestions"] = suggestions
+                    error.args = (
+                        f"{error.args[0]}；可能的规范字段: "
+                        + ", ".join(f"{key}→{value}" for key, value in suggestions.items()),
+                    )
             raise error from exc
     return deepcopy(operations)

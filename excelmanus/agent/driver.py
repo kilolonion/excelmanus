@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
 from excelmanus.agent.inbox import Inbox, InboxItem, InboxTarget
+from excelmanus.engine_core.llm_caller import LLMRetryExhaustedError
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.agent.budget import TurnBudget
@@ -660,6 +661,41 @@ class Driver:
                     turn_error=str(exc),
                 ),
             )
+        except LLMRetryExhaustedError as exc:
+            from excelmanus.engine_types import ChatResult
+
+            # 瞬时传输故障（流中断连等）重试耗尽：降级为明确的失败收尾，
+            # 回合与 SSE 正常结束，用户可重试或继续，不触发异常级联。
+            cause_brief = str(getattr(exc, "cause", exc))[:200]
+            last_result = ChatResult(
+                reply=(
+                    "模型服务连接中断，自动重试后仍未恢复，本轮已停止。"
+                    "已完成的操作均已保留，请稍后重试。"
+                ),
+                truncated=True,
+            )
+            logger.warning(
+                "模型服务瞬时故障重试 %d 次仍未恢复，本轮降级收尾: %s",
+                exc.attempts, cause_brief,
+            )
+            if ran_loop:
+                self.engine._finalize_driver_turn(
+                    last_result,
+                    on_event=self._on_event,
+                    chat_start=turn_started,
+                )
+            if self._turn_record is not None:
+                self._turn_record.update(status="error", stop_reason="llm_unavailable", error=cause_brief)
+            self._emit(
+                ToolCallEvent(
+                    event_type=EventType.TURN_FAILED,
+                    turn_id=self.turn_id,
+                    iteration=self.turn_index,
+                    dispatch=self.dispatch_receipt(str(queued.extra.get("client_message_id") or "")) or {},
+                    stop_reason="llm_unavailable",
+                    turn_error=cause_brief,
+                ),
+            )
         except asyncio.CancelledError:
             from excelmanus.engine_types import ChatResult
 
@@ -741,6 +777,7 @@ class Driver:
                     self._emit(ToolCallEvent(event_type=EventType.TURN_REPLY,
                         turn_id=self.turn_id, result=getattr(last_result, "reply", "本轮执行失败，请查看错误信息后重试。"), dispatch=self.last_reply,
                         prompt_tokens=getattr(last_result, "prompt_tokens", 0), completion_tokens=getattr(last_result, "completion_tokens", 0),
+                        cached_tokens=getattr(last_result, "cached_tokens", None),
                         total_tokens=getattr(last_result, "total_tokens", 0), total_iterations=getattr(last_result, "iterations", 0)))
                 item.result = last_result
                 item.completed.set()

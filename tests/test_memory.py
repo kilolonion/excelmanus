@@ -555,8 +555,9 @@ class TestRepairDanglingToolCalls:
         tool_results = [m for m in memory.messages if m.get("role") == "tool"]
         assert len(tool_results) == 2
         assert {m["tool_call_id"] for m in tool_results} == {"tc_a", "tc_b"}
+        # 未登记效果的工具（read_excel / write_cells）按"结果未确认"给：不能假定已经生效。
         for m in tool_results:
-            assert "中断" in m["content"]
+            assert "不能假定已经生效" in m["content"]
 
     def test_partial_missing_results_repaired(self, memory: ConversationMemory) -> None:
         """assistant 有 3 个 tool_calls，只有 1 个 result → 补 2 个。"""
@@ -659,6 +660,8 @@ class TestSanitizeMessagesForApi:
         assert len(assistant_msgs) == 1
         a = assistant_msgs[0]
         assert a["reasoning_content"] == "I should read the file first"
+        assert "thinking" not in a
+        assert "reasoning" not in a
         assert a["replay_state"]["thinking_blocks"][0]["signature"] == "sig"
         assert a["role"] == "assistant"
         assert a["content"] == "Let me check"

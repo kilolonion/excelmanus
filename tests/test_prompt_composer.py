@@ -547,6 +547,139 @@ class TestPromptArchitectureNoTagStrategies:
         assert "spreadsheet:invariants" not in names
 
 
+class TestCsvProfileBootstrap:
+    """CSV-only 工作区（profile=csv）的 xlsx 引导：门控与组装文本契约。"""
+
+    PROMPTS_DIR = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+    BOOTSTRAP_MARKER = "不是新建工作簿的前置步骤"
+    SPEC_MARKER = "WorkbookSpec V2 只用于新建"
+
+    def _loaded(self) -> PromptComposer:
+        composer = PromptComposer(self.PROMPTS_DIR)
+        composer.load_all()
+        return composer
+
+    @staticmethod
+    def _csv_only_workspace(root: Path) -> Path:
+        (root / "uploads").mkdir(parents=True, exist_ok=True)
+        (root / "outputs").mkdir(exist_ok=True)
+        (root / "uploads" / "广告与销售数据.csv").write_text(
+            "广告投入,销售额\n2.5,18.3\n3.0,21.0\n", encoding="utf-8"
+        )
+        return root
+
+    def test_frontmatter_rejects_unknown_profile(self, tmp_path: Path) -> None:
+        md = tmp_path / "boot.md"
+        md.write_text(
+            '---\nname: bootstrap\nversion: "1.0"\npriority: 10\nlayer: strategy\n'
+            "conditions:\n  profile: pdf\n---\n引导。\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="profile"):
+            parse_prompt_file(md)
+
+    def test_profile_condition_only_matches_csv(self, tmp_path: Path) -> None:
+        core = tmp_path / "core"
+        core.mkdir()
+        (core / "00_id.md").write_text(
+            '---\nname: id\nversion: "1.0"\npriority: 0\nlayer: core\n---\n身份。',
+            encoding="utf-8",
+        )
+        strats = tmp_path / "strategies"
+        strats.mkdir()
+        (strats / "14_boot.md").write_text(
+            '---\nname: spreadsheet:bootstrap\nversion: "1.0"\npriority: 1\nlayer: strategy\n'
+            'conditions:\n  catalog_mode: write\n  profile: csv\n'
+            '  tool: convert_spreadsheet\n---\nCSV 引导正文。',
+            encoding="utf-8",
+        )
+        composer = PromptComposer(tmp_path)
+        composer.load_all(auto_repair=False)
+        assert "CSV 引导正文。" in composer.compose_system_text(
+            PromptContext(chat_mode="write"),
+            profile="csv",
+            visible_tools=frozenset({"convert_spreadsheet", "run_code"}),
+        )
+        for kwargs in ({"profile": "xlsx"}, {"profile": None}, {}):
+            text = composer.compose_system_text(PromptContext(chat_mode="write"), **kwargs)
+            assert "CSV 引导正文。" not in text, kwargs
+        # profile 命中但解锁通道不在目录里时不注入，避免指向不可用的工具。
+        assert "CSV 引导正文。" not in composer.compose_system_text(
+            PromptContext(chat_mode="write"),
+            profile="csv",
+            visible_tools=frozenset({"run_code"}),
+        )
+        assert "CSV 引导正文。" not in composer.compose_system_text(
+            PromptContext(chat_mode="plan"), profile="csv"
+        )
+
+    def test_real_bootstrap_segment_frontmatter(self) -> None:
+        seg = parse_prompt_file(self.PROMPTS_DIR / "strategies" / "14_csv_bootstrap.md")
+        assert seg.name == "spreadsheet:bootstrap"
+        assert seg.conditions == {
+            "catalog_mode": "write",
+            "profile": "csv",
+            "tool": "convert_spreadsheet",
+        }
+        assert seg.max_tokens > 0
+
+    def test_csv_only_assembly_carries_bootstrap_route(self, tmp_path: Path) -> None:
+        from excelmanus.prompt.assemble import build_stable_system_prompt
+        from excelmanus.prompt.budget import _make_engine
+        from excelmanus.tools.catalog import catalog_from_engine, inspect_workspace_catalog
+
+        workspace = self._csv_only_workspace(tmp_path / "csv_only")
+        flags = inspect_workspace_catalog(str(workspace))
+        assert flags["profile"] == "csv"
+
+        engine = _make_engine(chat_mode="write", workspace=workspace, composer=self._loaded())
+        catalog = catalog_from_engine(engine)
+        assert catalog is not None
+        # csv-only 不再门控写工具：新建工作簿不依赖已有 xlsx。
+        assert "apply_spreadsheet_changes" in catalog.name_set()
+        assert "convert_spreadsheet" in catalog.name_set()
+        # 仍被门控的是需要"已存在工作簿"的追踪工具。
+        assert "trace_spreadsheet_formulas" not in catalog.name_set()
+
+        text = build_stable_system_prompt(engine)
+        assert self.BOOTSTRAP_MARKER in text
+        assert "convert_spreadsheet" in text
+        assert "outputs/" in text
+        assert "下一轮" in text
+        assert "workbook_spec" in text
+        assert "被目录门控" in text
+        # 转换产物：工作表名是 input；convert 不是新建工作簿的前置步骤。
+        assert "工作表名是 `input`" in text
+        # 写工具可用，建表策略同时在场。
+        assert self.SPEC_MARKER in text
+        assert "唯一的工作簿意图提交入口" not in text
+
+    def test_xlsx_workspace_drops_bootstrap_and_keeps_write_strategies(
+        self, tmp_path: Path
+    ) -> None:
+        from excelmanus.prompt.assemble import build_stable_system_prompt
+        from excelmanus.prompt.budget import _make_engine
+        from excelmanus.tools.catalog import catalog_from_engine, inspect_workspace_catalog
+
+        workspace = self._csv_only_workspace(tmp_path / "unlocked")
+        from openpyxl import Workbook
+
+        workbook = Workbook()
+        workbook.save(workspace / "outputs" / "广告与销售数据.xlsx")
+        workbook.close()
+        flags = inspect_workspace_catalog(str(workspace))
+        assert flags["profile"] == "xlsx"
+
+        engine = _make_engine(chat_mode="write", workspace=workspace, composer=self._loaded())
+        catalog = catalog_from_engine(engine)
+        assert catalog is not None
+        assert "apply_spreadsheet_changes" in catalog.name_set()
+
+        text = build_stable_system_prompt(engine)
+        assert self.BOOTSTRAP_MARKER not in text
+        assert self.SPEC_MARKER in text
+
+
 class TestVariableSubstitution:
     """变量替换机制测试。"""
 

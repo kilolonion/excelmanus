@@ -503,7 +503,18 @@ class TestContextWindowInference:
 
     def test_infers_mainstream_model_context_window(self, monkeypatch, tmp_path) -> None:
         monkeypatch.chdir(tmp_path)
-        model_to_expected_tokens = {'gpt-5': 400000, 'gpt-5-chat-latest': 128000, 'gpt-5-codex-mini': 400000, 'gpt-5.2-codex': 400000, 'gpt-5.3-codex': 400000, 'gpt-5.3-codex-spark': 128000, 'gpt 5.3 codex': 400000, 'gpt_5_1_codex_max': 400000, 'openai/gpt-5.2-codex': 400000, 'o4': 200000, 'claude-opus-4.1': 200000, 'claude-sonnet-4.6': 200000, 'gemini-2.5-flash-lite': 1048576, 'gemini-live-2.5-flash-preview': 1048576, 'qwen-plus': 1000000, 'qwen3.5-plus': 1000000, 'qwen-flash': 1000000, 'qwen3-coder-plus': 1000000, 'qwen-coder-plus': 131072, 'qwen-long-latest': 10000000, 'qwq-plus': 131072, 'qvq-72b-preview': 32768, 'qwen-vl-ocr': 38192, 'qwen2.5-omni-7b': 32768, 'kimi-k2-turbo-preview': 262144, 'moonshot-kimi-k2-instruct-v1': 131072, 'moonshot-kimi-k2.5': 262144, 'deepseek-v3.2-exp': 131072, 'mistral-large-2512': 256000, 'mistral-medium-2508': 128000, 'ministral-8b-2512': 256000, 'mistral/mistral-large-2512': 256000, 'devstral-2512': 256000, 'labs-devstral-small-2512': 256000, 'magistral-small-2509': 128000, 'magistral-small-2507': 40000, 'voxtral-small-2507': 32000, 'labs-mistral-small-creative': 32000, 'jamba-mini': 256000, 'jamba-3b': 256000, 'amazon.nova-pro-v1:0': 300000, 'us.amazon.nova-premier-v1:0': 1000000, 'eu.amazon.nova-pro-v1:0': 300000, 'apac.amazon.nova-lite-v1:0': 300000, 'amazon.nova-sonic-v1:0': 300000, 'amazon.nova-2-sonic': 1000000, 'minimax-m2.5-highspeed': 204800, 'minimax-m2.1-lightning': 204800, 'm2-her': 64000, 'command-a-reasoning-08-2025': 256000, 'grok-4-fast-reasoning': 2000000, 'xai.grok-4-1-fast-reasoning': 2000000, 'xai.grok-code-fast-1': 256000, 'llama-4-scout-17b-16e-instruct': 10000000}
+        model_to_expected_tokens = {
+            'gpt-5': 400000, 'gpt-5.2-codex': 400000, 'gpt-5.3-codex': 400000,
+            'gpt-5.3-codex-spark': 128000, 'gpt 5.3 codex': 400000,
+            'gpt_5_1_codex_max': 400000, 'openai/gpt-5.2-codex': 400000,
+            'claude-sonnet-4.6': 1000000, 'gemini-2.5-flash-lite': 1048576,
+            'qwen-plus': 995904, 'qwen-max': 30720, 'qwen-turbo': 98304,
+            'qwen-flash': 1000000, 'qwen-coder-plus': 129024,
+            'qwen-long': 1000000, 'm2-her': 64000,
+            # Unverified families and aliases cannot inherit a guessed window.
+            'gpt-5-codex-mini': 32000, 'amazon.nova-pro-v1:0': 32000,
+            'unknown-vl-model': 32000,
+        }
         for model, expected_tokens in model_to_expected_tokens.items():
             cfg = _load(EXCELMANUS_MODEL=model)
             assert cfg.max_context_tokens == expected_tokens
@@ -512,13 +523,16 @@ class TestContextWindowInference:
         monkeypatch.chdir(tmp_path)
         for model in ('gemini-2.0-flash', 'claude-3.5-sonnet', 'codex-mini-latest'):
             cfg = _load(EXCELMANUS_MODEL=model)
-            assert cfg.max_context_tokens == 256000
+            assert cfg.max_context_tokens == 32000
 
-    @pytest.mark.parametrize(('model', 'expected'), [('gemini-2.0-flash', ('gemini-2.0-flash', 'gemini-3.8-flash')), ('claude-3-5-sonnet', ('claude-3-5-sonnet', 'claude-sonnet-5')), ('openai-codex/codex-mini-latest', ('codex-mini-latest', 'gpt-6-luna')), ('mimo-v2-flash', ('mimo-v2-flash', 'mimo-v2.6-flash')), ('gpt-5', None)])
+    @pytest.mark.parametrize(('model', 'expected'), [
+        ('claude-sonnet-4', ('claude-sonnet-4', 'claude-sonnet-4-6')),
+        ('deepseek-v4-flash', None), ('mimo-v2-flash', None), ('gpt-5', None),
+    ])
     def test_deprecated_model_replacement_lookup(self, model: str, expected) -> None:
         assert get_deprecated_model_replacement(model) == expected
 
     def test_deprecated_model_message_includes_replacement(self) -> None:
-        message = format_deprecated_model_message('gemini-2.0-flash')
+        message = format_deprecated_model_message('claude-sonnet-4')
         assert message is not None
-        assert 'gemini-3.8-flash' in message
+        assert 'claude-sonnet-4-6' in message

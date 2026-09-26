@@ -58,6 +58,24 @@ def assistant_message_to_dict(message: Any) -> dict[str, Any]:
         if _fallback:
             payload["reasoning_content"] = _fallback
 
+    # Provider adapters expose the same visible reasoning under several
+    # compatibility names.  Persisting all three copies makes an exported
+    # turn look like three independent thinking passes and needlessly inflates
+    # the next prompt.  Keep the canonical ``reasoning_content`` field when
+    # the aliases carry the exact same value; retain distinct values because
+    # some providers use one field for metadata and another for visible text.
+    reasoning_values = [
+        payload.get(key)
+        for key in ("reasoning_content", "thinking", "reasoning")
+        if payload.get(key) not in (None, "", [])
+    ]
+    if len(reasoning_values) >= 2 and all(
+        value == reasoning_values[0] for value in reasoning_values[1:]
+    ):
+        payload["reasoning_content"] = reasoning_values[0]
+        payload.pop("thinking", None)
+        payload.pop("reasoning", None)
+
     return payload
 
 

@@ -107,6 +107,7 @@ include = ["excelmanus*"]
 
 [tool.setuptools.package-data]
 excelmanus = [
+    "model_catalog.json",
     "prompts/**/*.md",
     "skillpacks/**/*",
     "knowledge/topics/*.md",

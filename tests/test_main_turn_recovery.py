@@ -358,7 +358,7 @@ async def test_resume_repairs_incomplete_tool_results_before_adding_hidden_conte
     result_index = next(i for i, message in enumerate(sent) if message.get("tool_call_id") == "uncertain-call")
     context_index = next(i for i, message in enumerate(sent) if "中断任务的原始要求" in str(message.get("content")))
     assert result_index < context_index
-    assert "结果未完整记录" in sent[result_index]["content"]
+    assert "不能假定已经生效" in sent[result_index]["content"]
     assert any(message.get("_prompt_kind") == "task_resume" and message.get("_ui_hidden") for message in engine.memory.messages)
 
 

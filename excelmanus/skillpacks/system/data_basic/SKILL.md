@@ -12,6 +12,15 @@ version: "1.2.0"
 
 `analyze_spreadsheet` 的 `conditions` 一次可带多个条件，`logic` 为 `"and"` 或 `"or"`（默认 `"and"`）。求和/分组汇总/TopN 用 `mode="aggregate"` + `group_by`/`aggregations`；列取值分布与重复键用 `mode="distinct"`。
 
+## 字段合同速查（aggregate）
+
+`analyze_spreadsheet(mode="aggregate")` 的 `aggregations` 有两种等价形状，也可传等价 JSON 字符串（自动解析）：
+
+- 对象形：`{"销售额": ["sum", "mean"]}`（列名 → 函数或函数数组）。
+- 数组形：`[{"column": "销售额", "func": "sum"}]`。
+
+函数固定为 `sum/count/mean/min/max/median/std/nunique/first/last`；`"*"` 表示行计数。TopN 不是函数：用 `sort_by`（聚合输出列名如 `销售额_sum`，或源列名自动映射）+ `max_rows` + `ascending=false` 取最大 N 条（V2 入口不接受 `limit` 别名，传了会被判为未知字段）。
+
 筛选结果里的行才是证据，不要编造未出现的记录。已有文件改写需带 `expected_version`。
 
 把筛选结果写回时，使用返回的 selection（含文件、表、版本和原始行列），不能按投影列重编号。

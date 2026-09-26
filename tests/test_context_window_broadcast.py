@@ -75,13 +75,31 @@ class TestIsContextWindowUserPinned:
         assert is_context_window_user_pinned(400_000, "test-model") is True
 
     def test_inferred_default_is_not_pinned(self) -> None:
-        assert is_context_window_user_pinned(256_000, "test-model") is False
+        assert is_context_window_user_pinned(32_000, "test-model") is False
 
 
 class TestContextBudgetSetBaseTokens:
+    @pytest.mark.asyncio
+    async def test_profile_budget_precedes_global_and_skips_remote_inference(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        query = AsyncMock(return_value=1_000_000)
+        monkeypatch.setattr("excelmanus.model_probe.query_model_context_window", query)
+        budget = ContextBudget(base_tokens=128_000, model="gpt-6-astra")
+        assert budget.update_for_model("gpt-6-astra", profile_tokens=64_000) == 64_000
+        assert budget.is_user_overridden
+        assert await budget.update_for_model_async(
+            "gpt-6-astra", client=object(), profile_tokens=64_000,
+        ) == 64_000
+        query.assert_not_awaited()
+        budget.set_override(32_000, adaptive=True)
+        assert budget.max_tokens == 32_000
+        assert budget.update_for_model("gpt-6-astra", profile_tokens=64_000) == 64_000
+        assert budget.update_for_model("other") == 128_000
+
     def test_set_base_tokens_clears_adaptive_override(self) -> None:
         budget = ContextBudget(base_tokens=0, model="test-model")
-        assert budget.max_tokens == 256_000
+        assert budget.max_tokens == 32_000
         budget.set_override(80_000, adaptive=True)
         assert budget.max_tokens == 80_000
         assert budget.set_base_tokens(1_000_000) == 1_000_000
@@ -173,3 +191,16 @@ class TestBroadcastContextOptimization:
         assert engine.max_context_tokens == 500_000
         assert engine.get_compaction_status()["max_tokens"] == 500_000
         assert engine._config.max_context_tokens == 500_000
+
+
+@pytest.mark.asyncio
+async def test_reset_context_override_restores_model_inference(manager):
+    sid, engine = await manager.acquire_for_chat(None)
+    await manager.release_for_chat(sid)
+    engine.apply_context_optimization(max_context_tokens=64000)
+    assert engine.max_context_tokens == 64000
+    await manager.broadcast_context_optimization(max_context_tokens=0)
+    assert not engine._context_budget.is_user_overridden
+    assert engine.max_context_tokens == engine._context_budget.model_tokens
+    assert engine._memory._max_context_tokens == engine.max_context_tokens
+    assert engine._compaction_manager.max_context_tokens == engine.max_context_tokens

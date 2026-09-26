@@ -1,0 +1,2782 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-09-25",
+  "default_local_context_budget": 32000,
+  "application_input_modalities": [
+    "text",
+    "image"
+  ],
+  "evidence_policy": "Official declarations, endpoint observations, and user overrides are separate evidence. Unknown is not supported.",
+  "models": [
+    {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-4o"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-4o-mini",
+      "provider": "openai",
+      "context_window": 128000,
+      "max_output_tokens": 16384,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-4o-mini"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": false,
+        "efforts": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.1",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.1"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.2",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.2"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.2-codex",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.2-codex"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.3-codex"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5-codex",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5-codex"
+      ],
+      "verified_at": "2026-09-25",
+      "notes": "Effort controls are unverified; omit effort and use the provider default. OAuth availability requires account verification."
+    },
+    {
+      "id": "gpt-5.1-codex",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.1-codex"
+      ],
+      "verified_at": "2026-09-25",
+      "notes": "Effort controls are unverified; omit effort and use the provider default. OAuth availability requires account verification."
+    },
+    {
+      "id": "gpt-5.1-codex-mini",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.1-codex-mini"
+      ],
+      "verified_at": "2026-09-25",
+      "notes": "Effort controls are unverified; omit effort and use the provider default. OAuth availability requires account verification."
+    },
+    {
+      "id": "gpt-5.1-codex-max",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.1-codex-max"
+      ],
+      "verified_at": "2026-09-25",
+      "notes": "Effort controls are unverified; omit effort and use the provider default. OAuth availability requires account verification."
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "provider": "openai-codex",
+      "context_window": 128000,
+      "max_output_tokens": null,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": false,
+        "efforts": []
+      },
+      "tool_calling": null,
+      "status": "active",
+      "source_urls": [
+        "https://learn.chatgpt.com/docs/changelog"
+      ],
+      "verified_at": "2026-09-25",
+      "notes": "Historical launch specification (2026-02-12); current account availability and effort levels are unverified."
+    },
+    {
+      "id": "claude-sonnet-5",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "adaptive": true,
+        "budget_min": 1024,
+        "budget_max": 32000
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/sonnet-5/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "adaptive": true,
+        "budget_min": 1024,
+        "budget_max": 32000
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/sonnet-4-6/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "adaptive": false,
+        "budget_min": 1024,
+        "budget_max": 32000
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/haiku-4-5/overview"
+      ],
+      "verified_at": "2026-09-25",
+      "aliases": [
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "id": "claude-sonnet-4",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "budget_min": 1024,
+        "budget_max": 32000
+      },
+      "tool_calling": true,
+      "status": "retired",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+      ],
+      "verified_at": "2026-09-25",
+      "replacement": "claude-sonnet-4-6"
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "gemini",
+        "can_disable": true,
+        "efforts": [],
+        "budget_min": 0,
+        "budget_max": 24576
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "gemini",
+        "can_disable": false,
+        "efforts": [],
+        "budget_min": 128,
+        "budget_max": 32768
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-pro"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "gemini",
+        "can_disable": true,
+        "efforts": [],
+        "budget_min": 512,
+        "budget_max": 24576
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "qwen-plus",
+      "provider": "qwen",
+      "context_window": 1000000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "enable_thinking",
+        "can_disable": true,
+        "efforts": [],
+        "budget_min": 1,
+        "budget_max": 81920
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen-plus"
+      ],
+      "verified_at": "2026-09-25",
+      "region": "cn",
+      "transport_input_limit": null,
+      "max_input_tokens": 995904
+    },
+    {
+      "id": "qwen-flash",
+      "provider": "qwen",
+      "context_window": 1000000,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "enable_thinking",
+        "can_disable": true,
+        "efforts": [],
+        "budget_min": 1,
+        "budget_max": 81920
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen-flash"
+      ],
+      "verified_at": "2026-09-25",
+      "region": "cn",
+      "transport_input_limit": null,
+      "max_input_tokens": null
+    },
+    {
+      "id": "qwen-max",
+      "provider": "qwen",
+      "context_window": 32768,
+      "max_output_tokens": 8192,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen-max"
+      ],
+      "verified_at": "2026-09-25",
+      "region": "cn",
+      "transport_input_limit": null,
+      "max_input_tokens": 30720
+    },
+    {
+      "id": "qwen-turbo",
+      "provider": "qwen",
+      "context_window": 131072,
+      "max_output_tokens": 16384,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "enable_thinking",
+        "can_disable": true,
+        "efforts": [],
+        "budget_min": 1,
+        "budget_max": 32768
+      },
+      "tool_calling": false,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen-turbo"
+      ],
+      "verified_at": "2026-09-25",
+      "region": "cn",
+      "transport_input_limit": null,
+      "max_input_tokens": 98304
+    },
+    {
+      "id": "qwen-long",
+      "provider": "qwen",
+      "context_window": 10000000,
+      "max_output_tokens": 8192,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": false,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen-long"
+      ],
+      "verified_at": "2026-09-25",
+      "region": "cn",
+      "transport_input_limit": 1000000,
+      "max_input_tokens": null
+    },
+    {
+      "id": "qwen-coder-plus",
+      "provider": "qwen",
+      "context_window": 131072,
+      "max_output_tokens": 8192,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": false,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen-coder-plus"
+      ],
+      "verified_at": "2026-09-25",
+      "region": "cn",
+      "transport_input_limit": null,
+      "max_input_tokens": 129024
+    },
+    {
+      "id": "glm-4.5",
+      "provider": "glm",
+      "context_window": 128000,
+      "max_output_tokens": 96000,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.bigmodel.cn/cn/guide/models/text/glm-4.5"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "glm-4.7",
+      "provider": "glm",
+      "context_window": 200000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.bigmodel.cn/cn/guide/models/text/glm-4.7"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "glm-4.6v",
+      "provider": "glm",
+      "context_window": 128000,
+      "max_output_tokens": null,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-4.6v"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "kimi-k2.6",
+      "provider": "moonshot",
+      "context_window": 256000,
+      "max_output_tokens": null,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.kimi.com/docs/guide/kimi-k2-6-quickstart"
+      ],
+      "verified_at": "2026-09-25",
+      "tool_choice_with_reasoning": [
+        "auto",
+        "none"
+      ],
+      "requires_tool_reasoning": true
+    },
+    {
+      "id": "MiniMax-M2",
+      "provider": "minimax",
+      "context_window": 204800,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "deepseek",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.minimax.io/docs/guides/text-generation"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "M2-her",
+      "provider": "minimax",
+      "context_window": 64000,
+      "max_output_tokens": null,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": null,
+        "dialect": "",
+        "efforts": [],
+        "can_disable": null
+      },
+      "tool_calling": null,
+      "status": "active",
+      "source_urls": [
+        "https://platform.minimax.io/docs/guides/text-generation"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "deepseek-flash",
+      "provider": "deepseek",
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://api-docs.deepseek.com/quick_start/pricing/"
+      ],
+      "verified_at": "2026-09-25",
+      "requires_tool_reasoning": true
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://api-docs.deepseek.com/quick_start/pricing/"
+      ],
+      "verified_at": "2026-09-25",
+      "requires_tool_reasoning": true
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "provider": "deepseek",
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "redirected",
+      "source_urls": [
+        "https://api-docs.deepseek.com/quick_start/pricing/"
+      ],
+      "verified_at": "2026-09-25",
+      "replacement": "deepseek-flash",
+      "aliases": [
+        "deepseek-v4-flash-vision-exp"
+      ]
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "provider": "mimo",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://mimo.mi.com/models/zh-CN/mimo-v2.6-flash"
+      ],
+      "verified_at": "2026-09-25",
+      "requires_tool_reasoning": true
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "provider": "mimo",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://mimo.mi.com/models/zh-CN/mimo-v2.6-pro"
+      ],
+      "verified_at": "2026-09-25",
+      "requires_tool_reasoning": true,
+      "aliases": [
+        "mimo-v2.6-pro-ultraspeed"
+      ],
+      "notes": "官方公开资料使用 mimo-v2.6-pro；ultraspeed 是本地/平台变体，当前未找到单独的官方型号页，资料仅按 Pro 相关型号展示。"
+    },
+    {
+      "id": "grok-build-0.1",
+      "provider": "xai",
+      "context_window": 256000,
+      "max_output_tokens": null,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "deepseek",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.x.ai/developers/models/grok-code-fast-1"
+      ],
+      "verified_at": "2026-09-25",
+      "aliases": [
+        "grok-code-fast-1",
+        "grok-code-fast",
+        "grok-code-fast-1-0825"
+      ]
+    },
+    {
+      "id": "grok-4.7",
+      "provider": "xai",
+      "context_window": 500000,
+      "max_output_tokens": null,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.x.ai/developers/models"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "doubao-seed-2-1-pro-260915",
+      "provider": "doubao",
+      "context_window": 1048576,
+      "max_output_tokens": 262144,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.volcengine.com/docs/ark/model-list?lang=zh"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "doubao-seed-2-1-pro-260628",
+      "provider": "doubao",
+      "context_window": 262144,
+      "max_output_tokens": 262144,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.volcengine.com/docs/ark/model-list?lang=zh"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "anthropic/claude-sonnet-4",
+      "provider": "openrouter",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openrouter",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://openrouter.ai/api/v1/models"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-6-astra",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": false,
+        "efforts": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-6-astra"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-6-sol",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-6-sol"
+      ],
+      "verified_at": "2026-09-25",
+      "tools_protocols": [
+        "openai_responses"
+      ],
+      "recommended_protocol": "openai_responses"
+    },
+    {
+      "id": "gpt-6-luna",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-6-luna"
+      ],
+      "verified_at": "2026-09-25",
+      "tools_protocols": [
+        "openai_responses"
+      ],
+      "recommended_protocol": "openai_responses"
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-terra"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-luna"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.6",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.6-cyber",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.6-cyber"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.5",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.5"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5.4",
+      "provider": "openai",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": true,
+        "efforts": [
+          "none",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5.4"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5-pro",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 272000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5-pro"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5-mini",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5-mini"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-5-nano",
+      "provider": "openai",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-5-nano"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-4.1",
+      "provider": "openai",
+      "context_window": 1047576,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-4.1"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-4.1-mini",
+      "provider": "openai",
+      "context_window": 1047576,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-4.1-mini"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gpt-4.1-nano",
+      "provider": "openai",
+      "context_window": 1047576,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": false,
+        "dialect": "",
+        "can_disable": true,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/gpt-4.1-nano"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "o1",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/o1"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "o1-pro",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/o1-pro"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "o3",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/o3"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "o3-mini",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/o3-mini"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "o3-pro",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/o3-pro"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "o4-mini",
+      "provider": "openai",
+      "context_window": 200000,
+      "max_output_tokens": 100000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "can_disable": null,
+        "efforts": []
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://developers.openai.com/api/docs/models/o4-mini"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-fable-5-1",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": false,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-opus-5-5",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": false,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "adaptive": false,
+        "budget_min": 1024,
+        "budget_max": 32000
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/sonnet-4-5/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-opus-4-5",
+      "provider": "anthropic",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "adaptive": false,
+        "budget_min": 1024,
+        "budget_max": 32000
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/opus-4-5/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-opus-4-6",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/opus-4-6/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-opus-4-7",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/opus-4-7/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-opus-4-8",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/opus-4-8/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-opus-5",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": true,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/opus-5/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-fable-5",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": false,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/fable-5/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-mythos-5",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": false,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/mythos-5/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "claude-mythos-5-1",
+      "provider": "anthropic",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "claude",
+        "can_disable": false,
+        "efforts": [],
+        "adaptive": true
+      },
+      "tool_calling": true,
+      "status": "legacy",
+      "source_urls": [
+        "https://platform.claude.com/docs/en/models/mythos-5-1/overview"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "provider": "gemini",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "gemini_level",
+        "efforts": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "can_disable": false
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash",
+        "https://ai.google.dev/gemini-api/docs/thinking"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "glm-5.3",
+      "provider": "glm",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "can_disable": false
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "provider": "glm",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "efforts": [],
+        "can_disable": false
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "glm-5.3-flashx",
+      "provider": "glm",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "glm_thinking",
+        "efforts": [],
+        "can_disable": false
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "kimi-k3",
+      "provider": "moonshot",
+      "context_window": 1000000,
+      "max_output_tokens": 1048576,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "openai_reasoning",
+        "efforts": [
+          "low",
+          "high",
+          "max"
+        ],
+        "can_disable": false
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.kimi.com/docs/guide/kimi-k3-quickstart"
+      ],
+      "verified_at": "2026-09-25",
+      "token_limit_parameter": "max_completion_tokens",
+      "requires_tool_reasoning": true
+    },
+    {
+      "id": "MiniMax-M3",
+      "provider": "minimax",
+      "context_window": 1000000,
+      "max_output_tokens": null,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "deepseek",
+        "efforts": [],
+        "can_disable": null
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://platform.minimax.io/docs/guides/text-generation"
+      ],
+      "verified_at": "2026-09-25"
+    },
+    {
+      "id": "qwen3.8-max",
+      "provider": "qwen",
+      "context_window": 1000000,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "enable_thinking",
+        "efforts": [],
+        "can_disable": true,
+        "budget_min": 1,
+        "budget_max": 262144
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen3-8-max",
+        "https://help.aliyun.com/zh/model-studio/deep-thinking"
+      ],
+      "verified_at": "2026-09-25",
+      "max_input_tokens": 983616,
+      "region": "cn"
+    },
+    {
+      "id": "qwen3.8-flash",
+      "provider": "qwen",
+      "context_window": 1000000,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "enable_thinking",
+        "efforts": [],
+        "can_disable": true,
+        "budget_min": 1,
+        "budget_max": 262144
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen3-8-flash",
+        "https://help.aliyun.com/zh/model-studio/deep-thinking"
+      ],
+      "verified_at": "2026-09-25",
+      "max_input_tokens": 983616,
+      "region": "cn"
+    },
+    {
+      "id": "qwen3.7-plus",
+      "provider": "qwen",
+      "context_window": 1000000,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "enable_thinking",
+        "efforts": [],
+        "can_disable": true,
+        "budget_min": 1,
+        "budget_max": 262144
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen3-7-plus",
+        "https://help.aliyun.com/zh/model-studio/deep-thinking"
+      ],
+      "verified_at": "2026-09-25",
+      "max_input_tokens": 983616,
+      "region": "cn"
+    },
+    {
+      "id": "qwen3.7-flash",
+      "provider": "qwen",
+      "context_window": 1000000,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "reasoning": {
+        "supported": true,
+        "dialect": "enable_thinking",
+        "efforts": [],
+        "can_disable": true,
+        "budget_min": 1,
+        "budget_max": 262144
+      },
+      "tool_calling": true,
+      "status": "active",
+      "source_urls": [
+        "https://help.aliyun.com/zh/model-studio/qwen3-7-flash",
+        "https://help.aliyun.com/zh/model-studio/deep-thinking"
+      ],
+      "verified_at": "2026-09-25",
+      "max_input_tokens": 983616,
+      "region": "cn"
+    }
+  ],
+  "providers": {
+    "openai": {
+      "model": "gpt-4o",
+      "base_url": "https://api.openai.com/v1",
+      "protocol": "auto",
+      "thinking_mode": "auto",
+      "model_family": "gpt",
+      "description": "GPT-4o · 文本与图片"
+    },
+    "anthropic": {
+      "model": "claude-sonnet-4-6",
+      "base_url": "https://api.anthropic.com",
+      "protocol": "anthropic",
+      "thinking_mode": "auto",
+      "model_family": "claude",
+      "description": "Claude Sonnet 4.6 · 1M"
+    },
+    "gemini": {
+      "model": "gemini-2.5-flash",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "gemini",
+      "description": "Gemini 2.5 Flash"
+    },
+    "deepseek": {
+      "model": "deepseek-flash",
+      "base_url": "https://api.deepseek.com/v1",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "deepseek",
+      "description": "DeepSeek Flash · 1M"
+    },
+    "qwen": {
+      "model": "qwen-plus",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "qwen",
+      "description": "Qwen Plus · 北京地域"
+    },
+    "zhipu": {
+      "model": "glm-4.7",
+      "base_url": "https://open.bigmodel.cn/api/paas/v4",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "glm",
+      "description": "GLM-4.7 · 文本推理"
+    },
+    "openrouter": {
+      "model": "anthropic/claude-sonnet-4",
+      "base_url": "https://openrouter.ai/api/v1",
+      "protocol": "openai",
+      "thinking_mode": "openrouter",
+      "model_family": "",
+      "description": "OpenRouter · 能力以实际路由为准"
+    },
+    "kimi": {
+      "model": "kimi-k2.6",
+      "base_url": "https://api.moonshot.cn/v1",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "moonshot",
+      "description": "Kimi K2.6"
+    },
+    "minimax": {
+      "model": "MiniMax-M2",
+      "base_url": "https://api.minimax.io/v1",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "minimax",
+      "description": "MiniMax M2 · 文本与工具"
+    },
+    "xai": {
+      "model": "grok-4.7",
+      "base_url": "https://api.x.ai/v1",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "grok",
+      "description": "Grok 4.7"
+    },
+    "doubao": {
+      "model": "doubao-seed-2-1-pro-260915",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "doubao",
+      "description": "Doubao Seed 2.1 Pro · 260915"
+    },
+    "mimo": {
+      "model": "mimo-v2.6-flash",
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "protocol": "openai",
+      "thinking_mode": "auto",
+      "model_family": "mimo",
+      "description": "MiMo V2.6 Flash · 文本与图片接入"
+    }
+  },
+  "legacy_context_hints": {
+    "source": "legacy_unverified",
+    "values": {
+      "gpt-6-astra": 1050000,
+      "gpt-6-sol": 1050000,
+      "gpt-6-luna": 1050000,
+      "gpt-6": 1050000,
+      "gpt-5.6-sol": 1050000,
+      "gpt-5.6-terra": 1050000,
+      "gpt-5.6-luna": 1050000,
+      "gpt-5.6": 1050000,
+      "gpt-5.6-cyber": 400000,
+      "gpt-5.5": 1050000,
+      "gpt-5.4": 1050000,
+      "gpt-5": 400000,
+      "gpt-5-pro": 400000,
+      "gpt-5-mini": 400000,
+      "gpt-5-nano": 400000,
+      "gpt-5.2": 400000,
+      "gpt-5.3": 400000,
+      "gpt-5-codex": 400000,
+      "gpt-5-codex-mini": 400000,
+      "gpt-5.2-codex": 400000,
+      "gpt-5.3-codex": 400000,
+      "gpt-5.1-codex-mini": 400000,
+      "gpt-5.1-codex-max": 400000,
+      "gpt-5.3-codex-spark": 128000,
+      "gpt-5.1": 400000,
+      "gpt-5.1-codex": 400000,
+      "gpt-5-chat-latest": 128000,
+      "gpt-5.1-chat-latest": 128000,
+      "gpt-5.3-chat-latest": 128000,
+      "gpt-4o": 128000,
+      "gpt-4o-mini": 128000,
+      "gpt-4.1": 1047576,
+      "gpt-4.1-mini": 1047576,
+      "gpt-4.1-nano": 1047576,
+      "o1": 200000,
+      "o1-pro": 200000,
+      "o3": 200000,
+      "o3-mini": 200000,
+      "o3-pro": 200000,
+      "o3-deep-research": 200000,
+      "o4": 200000,
+      "o4-mini": 200000,
+      "o4-mini-deep-research": 200000,
+      "claude-4-sonnet": 200000,
+      "claude-4-opus": 200000,
+      "claude-sonnet-4": 200000,
+      "claude-opus-4": 200000,
+      "claude-sonnet-4.5": 200000,
+      "claude-opus-4.5": 200000,
+      "claude-opus-4.1": 200000,
+      "claude-opus-4.6": 200000,
+      "claude-opus-4.7": 1000000,
+      "claude-opus-4.8": 1000000,
+      "claude-sonnet-4.6": 200000,
+      "claude-fable-5": 1000000,
+      "claude-fable-5-1": 1000000,
+      "claude-mythos-5": 1000000,
+      "claude-mythos-5-1": 1000000,
+      "claude-opus-5": 1000000,
+      "claude-opus-5-5": 1000000,
+      "claude-sonnet-5": 1000000,
+      "claude-haiku-4.5": 200000,
+      "gemini-2.5-pro": 1048576,
+      "gemini-2.5-flash": 1048576,
+      "gemini-2.5-flash-lite": 1048576,
+      "gemini-live-2.5-flash-preview": 1048576,
+      "gemini-2.5-flash-live-preview": 1048576,
+      "gemini-2.5-flash-native-audio-preview": 1048576,
+      "gemini-3.8-flash": 1048576,
+      "gemini-3.8-flash-cyber": 1048576,
+      "gemini-3.8-live": 1048576,
+      "gemini-3.8-live-extended-thinking": 1048576,
+      "gemini-3.7-flash": 1048576,
+      "gemini-3.6-flash": 1048576,
+      "gemini-3.5-flash-lite": 1048576,
+      "gemini-3.5-flash": 1048576,
+      "gemini-3.1-pro": 1048576,
+      "gemini-3.1-flash-lite": 1048576,
+      "gemini-3.1-flash": 1048576,
+      "gemini-3.1-flash-image": 128000,
+      "gemini-3-pro-image": 65536,
+      "gemini-3-flash": 1048576,
+      "gemini-3.0-pro-preview-02-2026": 1048576,
+      "gemini-3.0-flash-preview-02-2026": 1048576,
+      "gemini-3.0-flash-lite-preview-02-2026": 1048576,
+      "gemini-3.0-flash-thinking-preview-02-2026": 262144,
+      "qwen-max": 262144,
+      "qwen-max-latest": 262144,
+      "qwen3-max": 262144,
+      "qwen3-vl-plus": 262144,
+      "qwen3-vl-flash": 262144,
+      "qwen-vl-max": 131072,
+      "qwen-vl-plus": 131072,
+      "qwq-32b": 131072,
+      "qwen-plus": 1000000,
+      "qwen-plus-us": 1000000,
+      "qwen-plus-latest": 1000000,
+      "qwen3.8-max": 1000000,
+      "qwen3.8-flash": 1000000,
+      "qwen3.8-omni-flash": 1000000,
+      "qwen3.8-omni-flash-realtime": 1000000,
+      "qwen3.7-plus": 1000000,
+      "qwen3.7-flash": 1000000,
+      "qwen3.7-max": 1000000,
+      "qwen3.6-plus": 1000000,
+      "qwen3.6-flash": 1000000,
+      "qwen3.5-plus": 1000000,
+      "qwq-plus": 131072,
+      "qwq-plus-latest": 131072,
+      "qwen-flash": 1000000,
+      "qwen-flash-latest": 1000000,
+      "qwen-turbo": 1000000,
+      "qwen-long": 1000000,
+      "qwen-long-latest": 10000000,
+      "qwen-coder": 1000000,
+      "qwen-coder-plus": 131072,
+      "qwen-coder-plus-latest": 131072,
+      "qwen-coder-turbo": 131072,
+      "qwen3-coder-plus": 1000000,
+      "qwen3-235b": 131072,
+      "qwen3-30b": 131072,
+      "qwen3-32b": 131072,
+      "qvq-72b-preview": 32768,
+      "qwen-vl-ocr": 38192,
+      "qwen-vl-ocr-2025-08-28": 34096,
+      "qwen2.5-omni-7b": 32768,
+      "qwen2.5-72b": 131072,
+      "qwen2.5-32b": 131072,
+      "deepseek-flash": 1000000,
+      "deepseek-v4-pro": 1000000,
+      "deepseek-v4-flash": 1000000,
+      "deepseek-v4.1": 1000000,
+      "deepseek-chat": 128000,
+      "deepseek-reasoner": 128000,
+      "deepseek-v3": 128000,
+      "deepseek-r1": 128000,
+      "deepseek-v3.2": 131072,
+      "deepseek-v3.2-exp": 131072,
+      "mistral-large-2512": 256000,
+      "mistral-large-latest": 256000,
+      "mistral-medium-2508": 128000,
+      "mistral-medium-latest": 128000,
+      "mistral-small-4": 262144,
+      "mistral-small-2603": 262144,
+      "mistral-small-2506": 128000,
+      "mistral-small-latest": 262144,
+      "devstral-2512": 256000,
+      "labs-devstral-small-2512": 256000,
+      "labs-devstral-small-latest": 256000,
+      "devstral-small-2505": 128000,
+      "codestral-2508": 128000,
+      "codestral-latest": 128000,
+      "magistral-small-2509": 128000,
+      "magistral-medium-2509": 128000,
+      "magistral-small-2507": 40000,
+      "magistral-small-2506": 40000,
+      "pixtral-large-2411": 128000,
+      "pixtral-large-latest": 128000,
+      "voxtral-mini-2507": 128000,
+      "voxtral-mini-latest": 128000,
+      "voxtral-small-2507": 32000,
+      "voxtral-small-latest": 32000,
+      "labs-mistral-small-creative": 32000,
+      "mistral-small-2503": 128000,
+      "ministral-14b-2512": 256000,
+      "ministral-8b-2512": 256000,
+      "ministral-3b-2512": 256000,
+      "jamba-large": 256000,
+      "jamba-mini": 256000,
+      "jamba-3b": 256000,
+      "nova-premier": 1000000,
+      "nova-pro": 300000,
+      "nova-lite": 300000,
+      "nova-micro": 128000,
+      "nova-sonic": 300000,
+      "nova-2-lite": 1000000,
+      "nova-2-sonic": 1000000,
+      "minimax-m3": 1000000,
+      "minimax-m2.7": 204800,
+      "minimax-m2.5": 204800,
+      "minimax-m2.5-highspeed": 204800,
+      "minimax-m2.1": 204800,
+      "minimax-m2.1-highspeed": 204800,
+      "minimax-m2.1-lightning": 204800,
+      "minimax-m2": 204800,
+      "m2-her": 64000,
+      "kimi-k3": 1000000,
+      "kimi-k2.7-code": 256000,
+      "kimi-k2.7-code-highspeed": 256000,
+      "kimi-k2.7": 256000,
+      "kimi-k2.6": 256000,
+      "kimi-k2": 262144,
+      "kimi-k2-thinking": 262144,
+      "kimi-k2.5": 262144,
+      "kimi-k2.5-thinking": 262144,
+      "moonshot-kimi-k2.5": 262144,
+      "moonshot-kimi-k2.5-thinking": 262144,
+      "moonshot-kimi-k2-instruct": 131072,
+      "moonshot-v1-128k": 128000,
+      "moonshot-v1-32k": 32000,
+      "moonshot-v1-8k": 8000,
+      "command-a-plus": 128000,
+      "command-a-plus-05-2026": 128000,
+      "command-a": 256000,
+      "command-a-03-2025": 256000,
+      "command-a-reasoning": 256000,
+      "command-r-plus": 128000,
+      "command-r-plus-08-2024": 128000,
+      "command-r7b": 128000,
+      "command-r7b-12-2024": 128000,
+      "c4ai-command-r7b-12-2024": 128000,
+      "command-r": 128000,
+      "command-r-08-2024": 128000,
+      "glm-5.3": 1000000,
+      "glm-5.3-flash": 1000000,
+      "glm-5.3-flashx": 1000000,
+      "glm-5.2": 1000000,
+      "glm-5.1": 200000,
+      "glm-5-turbo": 200000,
+      "glm-5v-turbo": 200000,
+      "glm-5": 200000,
+      "glm-4.7": 200000,
+      "glm-4.6": 200000,
+      "glm-4.5": 128000,
+      "glm-4.5-air": 128000,
+      "glm-4-plus": 128000,
+      "glm-4-long": 1000000,
+      "glm-4": 128000,
+      "doubao-seed-evolving": 256000,
+      "doubao-seed-2.1-pro": 256000,
+      "doubao-seed-2.1-turbo": 256000,
+      "doubao-seed-2.0-pro": 256000,
+      "doubao-seed-2.0-code": 256000,
+      "doubao-seed-2.0-lite": 256000,
+      "doubao-seed-2.0-mini": 256000,
+      "doubao-seed-2.0": 256000,
+      "doubao-seed-1.6": 256000,
+      "grok-4.7": 500000,
+      "grok-4.6": 500000,
+      "grok-4.5": 500000,
+      "grok-4.3": 1000000,
+      "grok-4-fast-reasoning": 2000000,
+      "grok-4-fast-non-reasoning": 2000000,
+      "grok-4.1-fast-reasoning": 2000000,
+      "grok-4.1-fast-non-reasoning": 2000000,
+      "grok-code-fast-1": 256000,
+      "grok-4": 256000,
+      "muse-spark": 1000000,
+      "muse-glimmer-30b": 131072,
+      "llama-4-scout": 10000000,
+      "llama-4-maverick": 1000000,
+      "llama-3.3": 131072,
+      "llama-3.2": 131072,
+      "llama-3.1": 131072,
+      "mimo-v2.6-pro-ultraspeed": 1000000,
+      "mimo-v2.6-pro": 1000000,
+      "mimo-v2.6-flash": 1000000,
+      "mimo-v2.5-pro": 1000000,
+      "mimo-v2.5": 1000000,
+      "mimo-v2-pro": 256000,
+      "mimo-v2-omni": 256000,
+      "mimo-v2-flash": 256000,
+      "mimo-v2.5-asr": 8192,
+      "mimo-v2.5-tts": 8192,
+      "mimo-v2.5-tts-voiceclone": 8192,
+      "mimo-v2.5-tts-voicedesign": 8192,
+      "mimo-v2-tts": 8192
+    }
+  },
+  "codex_models": [
+    {
+      "model": "gpt-5.2-codex",
+      "display_name": "Codex 5.2 (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5.1-codex",
+      "display_name": "Codex 5.1 (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5.1-codex-mini",
+      "display_name": "Codex Mini (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5.1-codex-max",
+      "display_name": "Codex Max (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5-codex",
+      "display_name": "Codex 5 (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5.2",
+      "display_name": "GPT-5.2 (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5.1",
+      "display_name": "GPT-5.1 (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5",
+      "display_name": "GPT-5 (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5.3-codex",
+      "display_name": "Codex 5.3 (Legacy)",
+      "pro_only": false,
+      "availability": "account_unverified"
+    },
+    {
+      "model": "gpt-5.3-codex-spark",
+      "display_name": "Codex Spark (Legacy)",
+      "pro_only": true,
+      "availability": "account_unverified"
+    }
+  ]
+}

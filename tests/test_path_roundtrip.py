@@ -122,6 +122,10 @@ async def test_nondefault_history_and_sse_roundtrip(tmp_path):
         session = await manager.create_or_reuse_session(workspace_id=workspace["id"])
         event = ToolCallEvent(event_type=EventType.EXCEL_PREVIEW, tool_call_id="preview", excel_file_path=str(file))
         _persist_excel_event(session["id"], event)
+        assert manager.chat_history.load_affected_files(session["id"]) == []
+        _persist_excel_event(session["id"], ToolCallEvent(
+            event_type=EventType.MUTATION, changed_files=[str(file)],
+        ))
         sse = _sse_event_to_sse(event, session["id"])
         assert '"file_path": "./nested/sales.xlsx"' in sse
         assert "<path>" not in sse

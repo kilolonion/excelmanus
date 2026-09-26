@@ -220,6 +220,21 @@ class TestRunCodeInline:
         assert "outside-ok" in result["stdout_tail"]
         assert external.read_text(encoding="utf-8") == "updated-ok"
 
+    def test_full_access_can_spawn_authorized_child(self, workspace: Path) -> None:
+        from excelmanus.tools.context import reset_call
+
+        token = _bind_full_access(workspace)
+        try:
+            result = _payload(code_tools.run_code(
+                code="import subprocess, sys\np = subprocess.run([sys.executable, '-c', \"print('child-ok')\"], capture_output=True, text=True, check=True)\nprint(p.stdout)",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            ))
+        finally:
+            reset_call(token)
+        assert result["status"] == "success", result
+        assert "child-ok" in result["stdout_tail"]
+
     def test_inline_stdout_utf8_chinese(self, workspace: Path) -> None:
         result = _payload(
             code_tools.run_code(

@@ -9,7 +9,7 @@ from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.system_one.context import is_host_session
 from excelmanus.logger import get_logger
 from excelmanus.system_one.client import client_ready, detect_transport
-from excelmanus.system_one.policy import gate_for_pack, jev_is_active, live_jev_settings
+from excelmanus.system_one.policy import gate_for_pack, live_jev_settings
 from excelmanus.system_one.types import ChoiceAnswer, Decision, NoulAnswer, ScoreAnswer
 
 logger = get_logger("system_one.trace")
@@ -324,7 +324,7 @@ def emit_jev_trace(
     if not is_host_session(engine):
         return
     settings = live_jev_settings(getattr(engine, "config", None))
-    if settings.enabled == "off":
+    if not settings.experimental_enabled or settings.enabled == "off":
         return
     try:
         gate = gate_for_pack(pack_id, settings)
@@ -388,7 +388,7 @@ def record_host_effect(
             return
         settings = live_jev_settings(getattr(engine, "config", None))
         gate = gate_for_pack(pack_id, settings)
-        if gate == "off":
+        if not settings.experimental_enabled or gate == "off":
             return
         decision = Decision(
             kind="noop", reason="host_effect", applied=changed or delivered,

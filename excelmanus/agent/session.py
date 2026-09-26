@@ -397,7 +397,7 @@ class AgentEngine:
         # 未锁定时由 model_tokens 驱动，切换模型时自动更新。
         from excelmanus.config import is_context_window_user_pinned
         _user_pinned = is_context_window_user_pinned(
-            config.max_context_tokens, config.model,
+            config.max_context_tokens, config.model, getattr(config, "canonical_model", "") or "",
         )
         self._context_budget = ContextBudget(
             base_tokens=config.max_context_tokens if _user_pinned else 0,
@@ -441,6 +441,17 @@ class AgentEngine:
         # 构造成功后再调度，避免路径/技能校验失败仍不断发出探测请求。
         self._schedule_background_probe(config, database)
 
+    @property
+    def capability_scope(self) -> str:
+        from excelmanus.capability_identity import scope_from_client
+        profile = getattr(self, "_active_profile", None)
+        import json
+        from excelmanus.capability_identity import json_object
+        headers = json_object(getattr(profile, "custom_extra_headers", ""))
+        headers.update(getattr(self, "_oauth_extra_headers", None) or {})
+        return scope_from_client(self._client, self.current_model, self.active_base_url,
+                                 getattr(profile, "thinking_mode", "auto"), getattr(profile, "custom_extra_body", ""), headers)
+
     def _schedule_background_probe(self, config: "ExcelManusConfig", db: "Database | None") -> None:
         """后台触发 probe 检测当前模型视觉能力，结果缓存到 DB 供下次使用。"""
         if not self._is_host_session or config.main_model_vision != "auto" or db is None:
@@ -454,8 +465,14 @@ class AgentEngine:
         probe_model = strip_managed_prefix(config.model)
         probe_base_url = config.base_url
         probe_canonical = getattr(config, "canonical_model", "") or ""
+        probe_mode = getattr(self._active_profile, "thinking_mode", "auto")
+        probe_body = getattr(self._active_profile, "custom_extra_body", "")
+        import json
+        from excelmanus.capability_identity import json_object
+        probe_headers = json_object(getattr(self._active_profile, "custom_extra_headers", ""))
+        probe_headers.update(getattr(self, "_oauth_extra_headers", None) or {})
         cached = load_capabilities(
-            db, probe_model, probe_base_url, canonical_model=probe_canonical,
+            db, probe_model, probe_base_url, scope=self.capability_scope,
         )
         if cached is not None and capabilities_cache_is_fresh(cached):
             return
@@ -463,7 +480,7 @@ class AgentEngine:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        key = (id(loop), id(db), probe_model, probe_base_url.rstrip("/"))
+        key = (id(loop), id(db), probe_model, probe_base_url.rstrip("/"), self.capability_scope)
 
         async def _do_probe() -> Any:
             return await run_full_probe(
@@ -473,6 +490,9 @@ class AgentEngine:
                 skip_if_cached=True,
                 db=db,
                 canonical_model=probe_canonical,
+                thinking_mode=probe_mode,
+                custom_extra_body=probe_body,
+                custom_extra_headers=probe_headers,
                 health_timeout=config.cap_probe_health_timeout,
                 tool_timeout=config.cap_probe_tool_timeout,
                 vision_timeout=config.cap_probe_vision_timeout,
@@ -506,29 +526,30 @@ class AgentEngine:
     def _infer_vision_capable(config: "ExcelManusConfig", db: "Database | None" = None) -> bool:
         """推断当前模型是否支持视觉输入。
 
-        优先级：手动覆盖 > 关键词+probe 交叉验证 > 关键词推断。
-        对已知视觉模型（关键词匹配），probe=False 不覆盖关键词推断，
-        避免 Codex 等 backend-api 的 probe 误判导致图片被拦截。
+        优先级：手动声明 > 当前身份下的有效实测 > 有来源的精确型号资料。
+        未知型号不按名称关键词猜测视觉能力。
         """
         from excelmanus.vision_capability import infer_vision_capable
 
+        from excelmanus.capability_identity import capability_scope
         canonical = getattr(config, "canonical_model", "") or ""
         probe: bool | None = None
         if db is not None:
             try:
                 from excelmanus.model_probe import load_capabilities
                 caps = load_capabilities(
-                    db, config.model, config.base_url, canonical_model=canonical,
+                    db, config.model, config.base_url, scope=capability_scope(config.protocol, config.api_key, base_url=config.base_url, model=config.model),
                 )
                 if caps is not None:
                     probe = caps.supports_vision
             except Exception:
-                logger.debug("加载 probe 视觉检测结果失败，回退到关键词推断", exc_info=True)
+                logger.debug("加载 probe 视觉检测结果失败，回退到有来源的型号资料", exc_info=True)
         return infer_vision_capable(
             config.model,
             override=config.main_model_vision,
             probe=probe,
             canonical_model=canonical,
+            base_url=config.base_url,
         )
 
     def _refresh_vision_capability(self) -> None:
@@ -539,24 +560,30 @@ class AgentEngine:
         base_url = self._active_base_url or self._config.base_url
         canonical = self.active_canonical_model
         probe: bool | None = None
-        caps = getattr(self, "_model_capabilities", None)
+        from excelmanus.capability_identity import active_observation
+        caps = active_observation(self)
         if caps is not None:
             probe = getattr(caps, "supports_vision", None)
         elif self._database is not None:
             try:
                 from excelmanus.model_probe import load_capabilities
                 cached = load_capabilities(
-                    self._database, model, base_url, canonical_model=canonical,
+                    self._database, model, base_url, scope=self.capability_scope,
                 )
                 if cached is not None:
                     probe = cached.supports_vision
             except Exception:
                 logger.debug("刷新视觉能力时加载 probe 失败", exc_info=True)
+        vision_mode = getattr(self._active_profile, "vision_mode", "auto")
+        modalities = getattr(self._active_profile, "input_modalities", None)
+        if modalities is not None:
+            vision_mode = "true" if "image" in modalities else "false"
         self._is_vision_capable = infer_vision_capable(
             model,
-            override=self._config.main_model_vision,
+            override=vision_mode if vision_mode != "auto" else self._config.main_model_vision,
             probe=probe,
             canonical_model=canonical,
+            base_url=base_url,
         )
         logger.info("视觉模式已刷新: model=%s vision=%s", model, self._is_vision_capable)
 
@@ -1463,9 +1490,9 @@ class AgentEngine:
         不会自动传到已打开的对话，必须显式同步。
         """
         if max_context_tokens is not None:
-            tokens = max(1, int(max_context_tokens))
-            object.__setattr__(self._config, "max_context_tokens", tokens)
-            self._context_budget.set_base_tokens(tokens)
+            tokens = max(0, int(max_context_tokens))
+            effective = self._context_budget.set_base_tokens(tokens)
+            object.__setattr__(self._config, "max_context_tokens", effective)
             self._sync_context_window_consumers()
         if compaction_enabled is not None:
             object.__setattr__(self._config, "compaction_enabled", compaction_enabled)
@@ -2044,6 +2071,7 @@ class AgentEngine:
         prompt_kind: str | None = None,
         dispatch_mode: str | None = None,
         client_message_id: str | None = None,
+        example_context: dict[str, Any] | None = None,
     ) -> ChatResult:
         from excelmanus.agent.session_api import followup as _impl
         return await _impl(
@@ -2062,6 +2090,7 @@ class AgentEngine:
             prompt_kind=prompt_kind,
             dispatch_mode=dispatch_mode,
             client_message_id=client_message_id,
+            example_context=example_context,
         )
 
 
@@ -2862,9 +2891,23 @@ class AgentEngine:
         from excelmanus.engine_core.tool_result import coerce_legacy_result
 
         structured = coerce_legacy_result(payload)
+        # 审批恢复路径同样要区分删除与写入：delete_file 的结果带 deleted 字段，
+        # 由 tool_publications 统一投影成 operation=delete 的发布事实。
+        from excelmanus.engine_core.execution_facts import tool_publications
+        resume_effects = tool_publications(
+            pending.tool_name,
+            structured.value,
+            success=bool(getattr(structured, "success", True)),
+        )
+        resume_deleted = [
+            item["file_path"] for item in resume_effects
+            if item.get("operation") == "delete"
+        ]
         if self._get_tool_write_effect(pending.tool_name) == "workspace_write":
             for path in [*structured.ui_meta.files, *(change.path for change in record.changes)]:
                 self._state.record_affected_file(path)
+            for path in resume_deleted:
+                self._state.record_affected_file(path, deleted=True)
         self._tool_dispatcher._apply_ui_meta_effects(structured)
         if on_event is not None:
             self._tool_dispatcher._emit_ui_meta_events(
@@ -2891,8 +2934,11 @@ class AgentEngine:
                     if item.get("status") == "committed" and path and path not in changed:
                         changed.append(path)
             changed = collect_public_identities(changed, self._workspace.root_dir)
+            deleted_idents = collect_public_identities(resume_deleted, self._workspace.root_dir)
             for ident in changed:
                 self._state.record_affected_file(ident)
+            for ident in deleted_idents:
+                self._state.record_affected_file(ident, deleted=True)
             if changed:
                 self._emit(
                     on_event,
@@ -2904,6 +2950,7 @@ class AgentEngine:
                         mutations=changed_mutations(
                             changed,
                             workspace_root=self._workspace.root_dir,
+                            deleted=deleted_idents,
                         ),
                     ),
                 )
@@ -3060,12 +3107,15 @@ class AgentEngine:
 
     def set_model_capabilities(self, caps: Any) -> None:
         """设置当前模型的能力探测结果。"""
+        if getattr(caps, "cache_scope", "") and caps.cache_scope != self.capability_scope:
+            return
         self._model_capabilities = caps
         self._refresh_vision_capability()
 
     def get_model_capabilities(self) -> Any:
         """返回当前模型的能力探测结果。"""
-        return self._model_capabilities
+        from excelmanus.capability_identity import active_observation
+        return active_observation(self)
 
     def set_thinking_budget(self, budget: int) -> None:
         """设置 thinking token 预算（兼容旧接口）。"""
@@ -3134,7 +3184,17 @@ class AgentEngine:
         if self._active_model_name:
             for p in profiles:
                 if p.name == self._active_model_name:
+                    previous = self._active_profile
                     self._active_profile = p
+                    if previous is None or (
+                        previous.model, previous.canonical_model, previous.max_context_tokens
+                    ) != (p.model, p.canonical_model, p.max_context_tokens):
+                        self._context_budget.update_for_model(
+                            p.model, canonical_model=p.canonical_model,
+                            profile_tokens=p.max_context_tokens,
+                        )
+                        self._sync_context_window_consumers()
+                    self._refresh_vision_capability()
                     break
 
     def list_models(self) -> list[dict[str, str]]:
@@ -3291,9 +3351,10 @@ class AgentEngine:
             available = ", ".join(p.name for p in profiles) if profiles else "无"
             return f"未找到模型 {name!r}。可用模型：{available}"
 
-        deprecated_msg = format_deprecated_model_message(matched.model)
-        if deprecated_msg:
-            return f"模型 {matched.name!r} 使用了已弃用 Model ID。{deprecated_msg}"
+        from excelmanus.model_catalog import model_spec
+        documented = model_spec(matched.model, matched.base_url, route_only=True)
+        if documented and documented["status"] == "retired":
+            return f"该供应商已停用 {matched.model}；建议使用 {documented.get('replacement', '其他模型')}"
 
         # W1: 委托给 LLMClientManager 统一管理客户端切换
         self._llm_clients.switch_active_model(
@@ -3310,6 +3371,7 @@ class AgentEngine:
         self._context_budget.update_for_model(
             matched.model,
             canonical_model=getattr(matched, "canonical_model", "") or "",
+            profile_tokens=matched.max_context_tokens,
         )
         self._sync_context_window_consumers()
         self._refresh_vision_capability()

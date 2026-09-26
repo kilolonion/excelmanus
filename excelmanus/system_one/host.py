@@ -74,6 +74,8 @@ async def _eval_traced(
             gate = gate_for_pack(pack_id, settings)
         except Exception:
             gate = "off"
+        if not settings.experimental_enabled or gate == "off":
+            return decision
         record_jev_decision(pack_id=pack_id, gate=gate, decision=decision)
         emit_jev_trace(engine, decision, pack_id=pack_id, on_event=on_event)
         return decision
@@ -546,9 +548,12 @@ async def maybe_emit_ui_hint(
         # visible in the JEV timeline, but let the completed reply continue
         # without a UI_HINT event.
         decision = Decision.noop("timeout", transport="unavailable")
+        current = live_jev_settings(getattr(engine, "config", None))
+        if not current.experimental_enabled or gate_for_pack("ui.surface", current) == "off":
+            return
         record_jev_decision(
             pack_id="ui.surface",
-            gate=gate_for_pack("ui.surface", settings),
+            gate=gate_for_pack("ui.surface", current),
             decision=decision,
         )
         emit_jev_trace(engine, decision, pack_id="ui.surface", on_event=on_event)
@@ -712,6 +717,8 @@ def emit_recovery_outcome(engine: Any, *, on_event: Any | None = None) -> None:
         gate = gate_for_pack("recovery.next_step", settings)
     except Exception:
         gate = "off"
+    if not settings.experimental_enabled or gate == "off":
+        return
     decision = Decision(
         kind="outcome",
         reason=f"recovery_outcome:{outcome}",
@@ -1127,11 +1134,13 @@ async def maybe_jev_approval(
     if is_known_dangerous_call(tool_name, arguments, str(root) if root else None):
         applied = decision_is_applied("approval.tool_call", settings)
         decision = Decision(kind="deny", reason="known_dangerous", applied=applied)
-        record_jev_decision(
-            pack_id="approval.tool_call",
-            gate="enforce" if applied else gate_for_pack("approval.tool_call", settings),
-            decision=decision,
-        )
+        current = live_jev_settings(config)
+        if current.experimental_enabled and gate_for_pack("approval.tool_call", current) != "off":
+            record_jev_decision(
+                pack_id="approval.tool_call",
+                gate="enforce" if applied else gate_for_pack("approval.tool_call", current),
+                decision=decision,
+            )
         emit_jev_trace(engine, decision, pack_id="approval.tool_call")
         return decision
     from excelmanus.system_one.adapter import approval_state_from_engine as _approval_state

@@ -4,14 +4,14 @@ import { useMemo, useState, type RefObject } from "react";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import {
   Ellipsis,
-  CheckSquare,
-  Square,
+  Check,
+  Folder,
+  FolderOpen,
   Trash2,
   Download,
   AtSign,
   Combine,
   ArrowLeftRight,
-  Layers,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -28,9 +28,16 @@ import { isSpreadsheetFile, workspaceFileOpenHint } from "@/lib/file-kind";
 import { displayFilePath } from "@/lib/file-identity";
 import { useOpenWorkspacePathSet } from "@/lib/open-workspace-file";
 import { useExcelStore } from "@/stores/excel-store";
-import { downloadFile, normalizeExcelPath, fetchFileRegistry, updateFileGroupMembers } from "@/lib/api";
+import { downloadFile, normalizeExcelPath } from "@/lib/api";
 import { formatFileMention } from "@/components/chat/chat-input-insert";
+import {
+  glassMenuDangerItemClass,
+  glassMenuItemClass,
+  glassMenuPanelClass,
+} from "@/components/ui/menu-panel";
+import { cn } from "@/lib/utils";
 import { normalizePath } from "./file-tree-helpers";
+import styles from "./FilePanel.module.css";
 
 export interface FlatFileListViewProps {
   scrollRef?: RefObject<HTMLDivElement | null>;
@@ -70,7 +77,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
     [flatFiles],
   );
   const pinnedIndex = flatFiles.findIndex((file) => file.path === (menuPath ?? draggingPath));
-  const estimatedRowSize = 56;
+  const estimatedRowSize = 64;
   const virtualizer = useVirtualizer({
     count: flatFiles.length,
     getScrollElement: () => props.scrollRef?.current ?? null,
@@ -95,7 +102,8 @@ export function FlatFileListView(props: FlatFileListViewProps) {
 
   if (flatFiles.length === 0) {
     return (
-      <div className="px-2 py-3 text-[11px] text-muted-foreground/60 text-center">
+      <div className={styles.empty}>
+        <FolderOpen aria-hidden="true" />
         {emptyMessage}
       </div>
     );
@@ -113,41 +121,54 @@ export function FlatFileListView(props: FlatFileListViewProps) {
         const dirPart = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : "";
 
         return (
-          <div key={row.key} data-index={row.index}
+          <div key={row.key} data-index={row.index} className={styles.rowSlot}
             ref={props.scrollRef ? virtualizer.measureElement : undefined}
-            style={props.scrollRef ? { position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)`, paddingBottom: 2 } : undefined}>
+            style={props.scrollRef ? { position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)` } : undefined}>
           <div
             draggable={!selectMode || isSelected}
             onDragStart={(e) => onDragStart(e, file)}
             onDragEnd={onDragEnd}
             onClick={() => onClick(file.path)}
             onDoubleClick={() => { if (selectMode) return; onDoubleClick(file.path); }}
-            className={`em-file-row group relative flex items-center gap-2.5 pl-5 pr-2 py-2 rounded-lg transition-colors duration-100 text-[13px] cursor-pointer ${
-              isSelected ? "bg-accent/80" : isFileActive ? "bg-accent/60" : "hover:bg-accent/40"
-            } ${isDragging ? "opacity-70 scale-[0.98]" : ""}`}
+            onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return;
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onClick(file.path);
+              }
+            }}
+            role={selectMode ? "checkbox" : "button"}
+            aria-checked={selectMode ? isSelected : undefined}
+            aria-label={selectMode ? `选择 ${file.filename}` : `打开 ${file.filename}`}
+            tabIndex={0}
+            data-active={isFileActive}
+            data-selected={isSelected}
+            data-dragging={isDragging}
+            className={cn("em-file-row group relative", styles.fileRow)}
             title={
               selectMode
                 ? "点击选择"
                 : `${workspaceFileOpenHint(file.filename)}\n${displayFilePath(file.path)}`
             }
           >
-            {selectMode ? (
-              isSelected ? (
-                <CheckSquare className="h-4.5 w-4.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-              ) : (
-                <Square className="h-4.5 w-4.5 flex-shrink-0 text-muted-foreground/50" />
-              )
-            ) : (
-              <FileTypeIcon filename={file.filename} className={`h-4.5 w-4.5 flex-shrink-0${isFileActive ? " opacity-100" : ""}`} />
+            {selectMode && (
+              <span className={styles.checkbox} data-checked={isSelected} aria-hidden="true">
+                {isSelected && <Check />}
+              </span>
             )}
+            <span className={styles.fileIcon} aria-hidden="true">
+              <FileTypeIcon filename={file.filename} />
+            </span>
 
-            <div className="flex-1 min-w-0">
-              <span className={`block truncate leading-snug ${isFileActive ? "font-medium text-foreground" : "text-foreground/80"}`}>
-                {file.filename}
+            <div className={styles.fileInfo}>
+              <span className={styles.fileName}>
+                <span>{file.filename}</span>
+                {isFileActive && <span className={styles.openDot} title="已在工作区打开" />}
               </span>
               {dirPart && (
-                <span className="block truncate text-[11px] text-muted-foreground/60 leading-tight mt-0.5">
-                  {dirPart}
+                <span className={styles.filePath}>
+                  <Folder aria-hidden="true" />
+                  <span>{dirPart}</span>
                 </span>
               )}
             </div>
@@ -173,19 +194,19 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                       <Ellipsis className="h-3.5 w-3.5" />
                     </button>
                   </DropdownMenuTrigger>
-                  {menuPath === file.path && <DropdownMenuContent side="right" align="start" className="w-36">
-                    <DropdownMenuItem onClick={(e) => { e.stopPropagation(); useExcelStore.getState().mentionFileToInput(file); }}>
+                  {menuPath === file.path && <DropdownMenuContent side="right" align="start" className={glassMenuPanelClass}>
+                    <DropdownMenuItem className={glassMenuItemClass} onClick={(e) => { e.stopPropagation(); useExcelStore.getState().mentionFileToInput(file); }}>
                       <AtSign className="h-4 w-4" />
                       添加到输入框
                     </DropdownMenuItem>
-                    <DropdownMenuItem onClick={(e) => { e.stopPropagation(); downloadFile(file.path, file.filename, sessionId).catch(() => {}); }}>
+                    <DropdownMenuItem className={glassMenuItemClass} onClick={(e) => { e.stopPropagation(); downloadFile(file.path, file.filename, sessionId).catch(() => {}); }}>
                       <Download className="h-4 w-4" />
                       下载
                     </DropdownMenuItem>
                     {isWorkbook && (
                       <>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onClick={(e) => {
+                        <DropdownMenuItem className={glassMenuItemClass} onClick={(e) => {
                           e.stopPropagation();
                           useExcelStore.getState().setPendingTemplateMessage(
                             `请将 ${formatFileMention({ path: file.path })} 与 进行合并`
@@ -199,20 +220,23 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                           if (otherExcels.length > 0) {
                             return (
                               <DropdownMenuSub>
-                                <DropdownMenuSubTrigger>
+                                <DropdownMenuSubTrigger className={glassMenuItemClass}>
                                   <ArrowLeftRight className="h-4 w-4" />
                                   与其他文件对比
                                 </DropdownMenuSubTrigger>
-                                <DropdownMenuSubContent className="w-44">
+                                <DropdownMenuSubContent className={glassMenuPanelClass}>
                                   {otherExcels.slice(0, 10).map((other) => (
                                     <DropdownMenuItem
                                       key={other.path}
+                                      className={cn(glassMenuItemClass, "max-w-[min(24rem,calc(100vw-2rem))]")}
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         useExcelStore.getState().openCompare(file.path, other.path);
                                       }}
                                     >
-                                      {other.filename}
+                                      <span className="min-w-0 truncate" title={other.filename}>
+                                        {other.filename}
+                                      </span>
                                     </DropdownMenuItem>
                                   ))}
                                 </DropdownMenuSubContent>
@@ -220,7 +244,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                             );
                           }
                           return (
-                            <DropdownMenuItem onClick={(e) => {
+                            <DropdownMenuItem className={glassMenuItemClass} onClick={(e) => {
                               e.stopPropagation();
                               useExcelStore.getState().setPendingTemplateMessage(
                                 `请对比 ${formatFileMention({ path: file.path })} 和 的差异`
@@ -233,46 +257,8 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                         })()}
                       </>
                     )}
-                    {(() => {
-                      const groups = useExcelStore.getState().fileGroups;
-                      if (groups.length > 0) {
-                        return (
-                          <DropdownMenuSub>
-                            <DropdownMenuSubTrigger>
-                              <Layers className="h-4 w-4" />
-                              加入文件组
-                            </DropdownMenuSubTrigger>
-                            <DropdownMenuSubContent className="w-36">
-                              {groups.map((g) => (
-                                <DropdownMenuItem
-                                  key={g.id}
-                                  onClick={async (e) => {
-                                    e.stopPropagation();
-                                    try {
-                                      const regData = await fetchFileRegistry({ sessionId });
-                                      if ("files" in regData) {
-                                        const entry = regData.files.find(
-                                          (f) => f.canonical_path === file.path || f.canonical_path === `./${file.path}`,
-                                        );
-                                        if (entry) {
-                                          await updateFileGroupMembers(g.id, { add: [{ file_id: entry.id }], sessionId });
-                                          void useExcelStore.getState().loadFileGroups({ force: true });
-                                        }
-                                      }
-                                    } catch { /* silent */ }
-                                  }}
-                                >
-                                  {g.name}
-                                </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuSubContent>
-                          </DropdownMenuSub>
-                        );
-                      }
-                      return null;
-                    })()}
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onClick={(e) => { e.stopPropagation(); onRemove(file.path); }}>
+                    <DropdownMenuItem variant="destructive" className={glassMenuDangerItemClass} onClick={(e) => { e.stopPropagation(); onRemove(file.path); }}>
                       <Trash2 className="h-4 w-4" />
                       删除
                     </DropdownMenuItem>

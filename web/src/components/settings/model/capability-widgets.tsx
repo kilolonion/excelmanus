@@ -1,14 +1,15 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { Wrench, ImageIcon, Brain } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import type { ModelCapabilities } from "./types";
 
-export function CapabilityBadges({ caps }: { caps: ModelCapabilities | null }) {
-  const items: { key: string; label: string; icon: React.ReactNode; value: boolean | null }[] = [
+export function CapabilityBadges({ caps, visionMode }: { caps: ModelCapabilities | null; visionMode?: string }) {
+  const items: { key: string; label: string; icon: ReactNode; value: boolean | null }[] = [
     { key: "tools", label: "工具", icon: <Wrench className="h-2.5 w-2.5" />, value: caps?.supports_tool_calling ?? null },
-    { key: "vision", label: "视觉", icon: <ImageIcon className="h-2.5 w-2.5" />, value: caps?.supports_vision ?? null },
+    { key: "vision", label: "视觉", icon: <ImageIcon className="h-2.5 w-2.5" />, value: visionMode === "true" ? true : visionMode === "false" ? false : caps?.supports_vision ?? null },
     { key: "thinking", label: "思考", icon: <Brain className="h-2.5 w-2.5" />, value: caps?.supports_thinking ?? null },
   ];
 
@@ -44,51 +45,70 @@ export function CapabilityBadges({ caps }: { caps: ModelCapabilities | null }) {
   );
 }
 
-export function CapabilityRow({
+function EvidenceBadge({ value, evidence }: { value: boolean | null; evidence?: string }) {
+  if (value === true) {
+    return (
+      <Badge className="text-[9px] h-4 bg-emerald-500/15 text-emerald-600 border-emerald-500/20">
+        {evidence === "user_override" ? "手动声明" : evidence ? "实测通过" : "支持（来源待核）"}
+      </Badge>
+    );
+  }
+  if (value === false) {
+    return (
+      <Badge variant="secondary" className="text-[9px] h-4">
+        {evidence === "user_override" ? "手动声明不支持" : "不支持"}
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="text-[9px] h-4">
+      未知
+    </Badge>
+  );
+}
+
+/**
+ * 统一配置表单里的能力行：一行同时表达实测结果、手动声明和开关，
+ * 不再单独成卡，随表单一次保存。
+ */
+export function CapabilityToggleRow({
   icon,
   label,
   desc,
   value,
+  evidence,
   error,
+  hint,
+  disabled = false,
   onToggle,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
   desc: string;
   value: boolean | null;
+  evidence?: string;
   error?: string;
-  onToggle: (v: boolean) => void;
+  hint?: string;
+  disabled?: boolean;
+  onToggle: (value: boolean) => void;
 }) {
   return (
-    <div className="flex items-center gap-2.5 sm:gap-3 rounded-lg border border-border px-3 py-3 sm:py-2.5">
+    <div className="flex items-start gap-2.5 border-b border-border/50 py-2.5 last:border-b-0">
       <span
-        className="flex-shrink-0"
+        className="mt-0.5 shrink-0"
         style={{ color: value === true ? "var(--em-primary)" : value === false ? "var(--destructive, #ef4444)" : "var(--muted-foreground)" }}
       >
         {icon}
       </span>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          <span className="text-sm font-medium">{label}</span>
-          {value === true && (
-            <Badge className="text-[9px] h-4 bg-emerald-500/15 text-emerald-600 border-emerald-500/20">
-              支持
-            </Badge>
-          )}
-          {value === false && (
-            <Badge variant="secondary" className="text-[9px] h-4">
-              不支持
-            </Badge>
-          )}
-          {value === null && (
-            <Badge variant="outline" className="text-[9px] h-4">
-              未知
-            </Badge>
-          )}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-xs font-medium">{label}</span>
+          <EvidenceBadge value={value} evidence={evidence} />
+          {hint ? <span className="text-[9px] text-muted-foreground">{hint}</span> : null}
         </div>
-        <p className="text-[11px] text-muted-foreground leading-relaxed break-words">{desc}</p>
+        <p className="mt-0.5 text-[11px] text-muted-foreground leading-relaxed break-words">{desc}</p>
         {error && (
-          <p className="text-[10px] text-destructive truncate mt-0.5" title={error}>
+          <p className="mt-0.5 text-[10px] text-destructive truncate" title={error}>
             {error}
           </p>
         )}
@@ -96,7 +116,8 @@ export function CapabilityRow({
       <Switch
         checked={value === true}
         onCheckedChange={onToggle}
-        className="flex-shrink-0"
+        disabled={disabled}
+        className="flex-shrink-0 mt-0.5"
       />
     </div>
   );

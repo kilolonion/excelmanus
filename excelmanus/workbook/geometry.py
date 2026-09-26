@@ -150,6 +150,32 @@ def axis_offset(ws: Any, before: int, *, axis: str) -> float:
     return total
 
 
+def drawing_preview_range(ws: Any, obj: dict) -> str | None:
+    """Smallest cell rectangle from a drawing anchor through its pixel extent."""
+    from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter
+    box = obj.get("bounds") or {}
+    if not obj.get("target_cell") or any(box.get(k) is None for k in ("x", "y", "width", "height")):
+        return None
+    row, column = coordinate_to_tuple(obj["target_cell"])
+
+    def end(start, edge, axis, maximum):
+        hi = start
+        while axis_offset(ws, hi + 1, axis=axis) < edge and hi < maximum:
+            hi = min(maximum, hi + max(1, hi - start + 1))
+        lo = start
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if axis_offset(ws, mid + 1, axis=axis) >= edge:
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo
+
+    last_col = end(column, box["x"] + box["width"], "column", 16384)
+    last_row = end(row, box["y"] + box["height"], "row", 1048576)
+    return f"{get_column_letter(column)}{row}:{get_column_letter(last_col)}{last_row}"
+
+
 def scale_region(
     ws: Any, rect: Any, x: float, y: float, *, preserve_outside: bool = False
 ) -> dict[str, Any]:

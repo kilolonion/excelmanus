@@ -35,10 +35,10 @@ export function SubscriptionAccountCard({ provider, title, description, status, 
         className="em-subscription-card-header w-full p-3 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring sm:p-4"
       >
         <span className="flex size-10 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-muted/40"><ProviderLogo id={provider} className="size-5" /></span>
-        <span className="min-w-0 flex-1 space-y-1">
-          <span className="block text-[13px] font-semibold">{title}</span>
-          <span className="block text-xs leading-relaxed text-muted-foreground break-words">{connected ? (account || "账号已连接") : description}</span>
-          {connected && <span className="block text-[11px] text-muted-foreground">已添加 {modelCount} 个模型</span>}
+        <span className="em-subscription-card-copy min-w-0 flex-1">
+          <span className="em-subscription-card-title block text-[13px] font-semibold">{title}</span>
+          <span className="em-subscription-card-desc text-xs text-muted-foreground break-words">{connected ? (account || "账号已连接") : description}</span>
+          <span className="em-subscription-card-meta block text-[11px] text-muted-foreground">{connected ? `已添加 ${modelCount} 个模型` : ""}</span>
         </span>
         <span className="em-subscription-card-status flex shrink-0 items-center gap-2 whitespace-nowrap">
           <span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] ${expired || statusError ? "bg-amber-500/10 text-amber-700 dark:text-amber-400" : connected ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" : "bg-muted text-muted-foreground"}`}>

@@ -40,15 +40,15 @@ export function getTourScenes(isMobile: boolean): TourScene[] {
     },
     {
       id: "settings", label: "模型与扩展", steps: [
-        { target: "coach-settings-profiles", title: "管理模型供应商", description: "在供应商页添加连接并测试可用性。这里切换的是演示选项，不会修改你的默认模型。", icon: "Server", placement: "left", onEnter: "openSettings_model", practice: "model" },
-        { target: "coach-settings-model-roles", title: "为不同任务分配模型", description: "在模型配置中，为聊天、记忆等任务选择模型。正式下拉列表来自你已添加的供应商。", icon: "Cpu", placement: "left", onEnter: "openSettings_model_roles", practice: "model" },
-        { target: "coach-settings-subtab-subscription", title: "订阅与授权", description: "已有订阅时，可在“订阅与 OAuth”中完成授权；API Key 在供应商页配置。授权流程可以稍后进行。", icon: "KeyRound", placement: "bottom", onEnter: "openSettings_subscription", practice: "subscription" },
+        { target: "coach-settings-profiles", title: "管理模型连接", description: "在模型连接页添加连接并测试可用性。默认模型和其他模型选项会在下一步统一配置。", icon: "Server", placement: "left", onEnter: "openSettings_model", practice: "model" },
+        { target: "coach-settings-model-roles", title: "统一配置模型", description: "在模型配置中选择聊天、子任务与摘要共用的模型，并集中调整能力、推理和请求行为。", icon: "Cpu", placement: "left", onEnter: "openSettings_model_roles", practice: "model" },
+        { target: "coach-settings-subtab-subscription", title: "订阅与授权", description: "已有订阅时，可在“订阅与 OAuth”中完成授权；API Key 在模型连接页配置。授权流程可以稍后进行。", icon: "KeyRound", placement: "bottom", onEnter: "openSettings_subscription", practice: "subscription" },
         { target: "coach-settings-rule-input", title: "让 AI 记住工作规则", description: "规则越具体越容易执行。试着添加一条演示规则，例如“金额保留两位小数”。", icon: "ScrollText", placement: "top", onEnter: "openSettings_rules", practice: "rule" },
         { target: "coach-settings-skills-list", title: "用技能复用工作流程", description: "技能将常用流程整理为指令。点击下面的示例查看内容，实际技能可在此页导入或管理。", icon: "Package", placement: "left", onEnter: "openSettings_skills", practice: "skill" },
         { target: "coach-settings-mcp-add-btn", title: "连接外部工具", description: "MCP 可连接额外工具和数据源。先了解本地进程与网络服务的区别，再按服务文档填写。", icon: "Plug", placement: "bottom", onEnter: "openSettings_mcp", practice: "mcp" },
         { target: "coach-settings-memory-list", title: "查看跨会话记忆", description: "记忆帮助后续对话沿用偏好和上下文。试着展开示例记忆；真实条目可在此页管理。", icon: "Brain", placement: "left", onEnter: "openSettings_memory", practice: "memory" },
-        { target: "coach-settings-runtime-compaction", title: "按需调整系统设置", description: "上下文、压缩和其他运行参数在系统页管理。先用演示开关了解自动压缩，正式配置可保持默认。", icon: "SlidersHorizontal", placement: "left", onEnter: "openSettings_runtime", practice: "runtime" },
-        { target: "coach-settings-tab-version", title: "更新与重新查看引导", description: "版本页用于检查更新。以后可在“设置 → 系统 → 新手引导”选择任意章节重新体验。", icon: "ArrowUpCircle", placement: "bottom", onEnter: "openSettings_version" },
+        { target: "coach-settings-runtime-context", title: "按目的查找设置", description: "在偏好与运行中调整消息处理、任务限制和对话容量。自动摘要可以概括较早的对话，正式配置通常保持自动即可。", icon: "SlidersHorizontal", placement: "left", onEnter: "openSettings_runtime", practice: "runtime" },
+        { target: "coach-settings-tab-version", title: "更新与重新查看引导", description: "版本页用于检查更新。以后可在“设置 → 偏好与运行 → 对话偏好 → 新手引导”选择任意章节重新体验。", icon: "ArrowUpCircle", placement: "bottom", onEnter: "openSettings_version" },
       ],
     },
   ];

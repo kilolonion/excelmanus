@@ -32,14 +32,14 @@ export function WorkbookChatSettings() {
           <div>
             <label htmlFor="workbook-learn-navigation" className="text-sm font-medium">根据使用习惯自动调整</label>
             <p id="workbook-learn-navigation-description" className="text-[11px] sm:text-xs text-muted-foreground">
-              最近 5 次中有 4 次在发送后 10 秒内切回表格，就关闭自动返回；关闭后若经常立即切到对话，则重新开启。关闭习惯学习可固定当前选择。
+              根据发送消息后你经常切换到的面板，自动调整是否返回对话。关闭后保持上方的固定选择。
             </p>
           </div>
         </div>
         <Switch id="workbook-learn-navigation" checked={learnFromNavigation} onCheckedChange={setLearnFromNavigation}
           aria-describedby="workbook-learn-navigation-description" className="shrink-0" />
       </div>
-      <p className="text-[11px] text-muted-foreground">更改立即生效，并保存在本机。</p>
+      <p className="text-[11px] text-muted-foreground">此设备偏好 · 自动保存，立即生效。</p>
     </section>
   );
 }

@@ -5,6 +5,29 @@ from __future__ import annotations
 from excelmanus.workbook.snapshot import open_snapshot
 
 
+def _fold_query_aliases(arguments: dict, alias_map: dict[str, str]) -> dict:
+    """Fold a query's declared compatibility aliases to canonical keys.
+
+    Schema validation runs before this helper, so aliases are explicit on the
+    wire contract rather than silently accepted by an implementation detail.
+    If both spellings are present they must carry the same value; otherwise a
+    caller gets an actionable INVALID_ARGS error instead of whichever value
+    happened to win dictionary order.
+    """
+    folded = dict(arguments)
+    for alias, canonical in alias_map.items():
+        if alias not in folded:
+            continue
+        alias_value = folded.get(alias)
+        canonical_value = folded.get(canonical)
+        if canonical in folded and canonical_value not in (None, "") and alias_value not in (None, "") and canonical_value != alias_value:
+            raise ValueError(f"别名冲突：{alias} 与 {canonical} 值不同")
+        if canonical not in folded or folded.get(canonical) in (None, ""):
+            folded[canonical] = alias_value
+        folded.pop(alias, None)
+    return folded
+
+
 class WorkbookService:
     def query(self, name: str, arguments: dict):
         import jsonschema
@@ -24,7 +47,31 @@ class WorkbookService:
                 "Use observe_spreadsheet for overview/range/search/objects/dependencies"
             )
         jsonschema.Draft202012Validator(QUERY_SCHEMAS[name]).validate(arguments)
-        domain_arguments = dict(arguments)
+        alias_maps = {
+            "analyze_spreadsheet": {
+                "path": "file_path", "sheet_name": "sheet", "content_version": "expected_version",
+                "groupBy": "group_by", "aggs": "aggregations", "maxRows": "max_rows",
+                "sampleRows": "sample_rows", "sortBy": "sort_by", "headerRow": "header_row",
+                "filePaths": "file_paths", "dupOnly": "dup_only", "lookup": "join",
+            },
+            "compare_spreadsheets": {
+                "path": "file_a", "other_path": "file_b", "sheet": "sheet_a", "other_sheet": "sheet_b",
+                "keyColumns": "key_columns", "maxDifferences": "max_diffs",
+            },
+            "manage_spreadsheet_versions": {"path": "file_path", "content_version": "expected_version"},
+            "split_spreadsheet": {
+                "path": "file_path", "column": "by_column", "sheet_name": "sheet", "content_version": "expected_version",
+                "maxFiles": "max_files", "outputDir": "output_dir", "filenameTemplate": "filename_template",
+                "headerRow": "header_row",
+            },
+            "trace_spreadsheet_formulas": {"path": "file_path", "range": "target"},
+        }
+        domain_arguments = _fold_query_aliases(arguments, alias_maps.get(name, {}))
+        if name == "analyze_spreadsheet" and isinstance(domain_arguments.get("join"), dict):
+            domain_arguments["join"] = _fold_query_aliases(
+                domain_arguments["join"],
+                {"path": "file_path", "sheet_name": "sheet", "leftOn": "left_on", "rightOn": "right_on"},
+            )
         if (
             name in {"analyze_spreadsheet", "split_spreadsheet"}
             and "sheet" in domain_arguments

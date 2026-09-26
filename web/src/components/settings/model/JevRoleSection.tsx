@@ -162,7 +162,7 @@ export function JevRoleSection() {
               </div>
             </div>
 
-            {!configured && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-muted/50 p-3 text-xs"><p className="mr-auto text-muted-foreground">先添加提供商密钥，即可开始使用 Jev。</p><Button size="sm" variant="outline" onClick={() => requestModelSubTab("providers")}>前往配置提供商</Button></div>}
+            {!configured && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl bg-muted/50 p-3 text-xs"><p className="mr-auto text-muted-foreground">先在模型连接中添加供应商凭证，即可开始使用 Jev。</p><Button size="sm" variant="outline" onClick={() => requestModelSubTab("providers")}>前往模型连接</Button></div>}
 
             <div className="mt-3 rounded-lg border border-border/70 overflow-hidden">
               <div className="p-3">
@@ -229,7 +229,7 @@ export function JevRoleSection() {
                     }
                   />
                 </JevFieldRow>
-                <JevFieldRow label="模型名智能匹配" desc="添加或保存模型档案时，自动把 Model ID 匹配到已知模型名（如 gpt-5-6-sol → gpt-5.6-sol），并继承其上下文窗口与能力配置。不会改写发给上游的 Model ID；开启时会为已有档案补绑。">
+                <JevFieldRow label="模型名智能匹配" desc="添加或保存模型档案时，自动把 Model ID 匹配到已知模型名（如 gpt-5-6-sol → gpt-5.6-sol），并仅用作名称提示；实际能力按端点探测与有来源的精确型号记录判断。不会改写发给上游的 Model ID；开启时会为已有档案补绑。">
                   <Switch
                     aria-label="模型名智能匹配"
                     checked={draft.model_canonical_match_enabled}
@@ -242,7 +242,7 @@ export function JevRoleSection() {
             </div>
 
             <p className="text-[11px] text-muted-foreground mt-2">
-              模型列表来自「供应商」里已添加的 TypeSafe、Vercel 或自定义决策提供商。
+              模型列表来自「模型连接」里已添加的 TypeSafe、Vercel 或自定义决策提供商。
             </p>
 
             <JevSaveBar

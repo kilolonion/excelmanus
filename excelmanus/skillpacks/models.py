@@ -31,8 +31,8 @@ class Skillpack:
     extensions: dict[str, Any] = field(default_factory=dict)
     resource_contents: dict[str, str] = field(default_factory=dict)
 
-    def render_context(self) -> str:
-        """渲染技能正文（user-role invocation 或 tool result）。"""
+    def render_context(self, *, include_resources: bool = False) -> str:
+        """Load the instructions once; supporting resources are opt-in reads."""
         lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
@@ -46,10 +46,11 @@ class Skillpack:
             if self.required_mcp_tools:
                 lines.append(f"- tools: {', '.join(self.required_mcp_tools)}")
         if self.resource_contents:
-            lines.append("补充资源：")
+            lines.append("补充资源（按需读取，不在激活时重复展开）：")
             for path, content in self.resource_contents.items():
-                lines.append(f"- {path}:")
-                lines.append(content.strip())
+                lines.append(f'- {path}: introspect_capability(query_type="knowledge_read", query="resource:{self.name}/{path}")')
+                if include_resources:
+                    lines.append(content.strip())
         return "\n".join(lines).strip()
 
     def render_context_instructions_only(self) -> str:
@@ -67,7 +68,7 @@ class Skillpack:
             if self.required_mcp_tools:
                 lines.append(f"- tools: {', '.join(self.required_mcp_tools)}")
         if self.resource_contents:
-            lines.append(f"[补充资源已在激活时返回，共 {len(self.resource_contents)} 个文件]")
+            lines.append(f'[补充资源按需读取：introspect_capability(query_type="knowledge_read", query="resources:{self.name}")]')
         return "\n".join(lines).strip()
 
     def render_context_minimal(self) -> str:

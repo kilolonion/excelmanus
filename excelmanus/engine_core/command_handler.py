@@ -224,6 +224,7 @@ class CommandHandler:
                         e.active_model, client=e._client,
                         base_url=e._active_base_url,
                         canonical_model=getattr(e, "active_canonical_model", ""),
+                        profile_tokens=getattr(e._active_profile, "max_context_tokens", 0),
                     )
                     e._memory.update_context_window(new_tokens)
                     e._compaction_manager.max_context_tokens = new_tokens
@@ -1031,7 +1032,7 @@ class CommandHandler:
         """处理 /probe 命令：模型能力探测。
 
         用法：
-        - /probe context  — 探测当前模型的实际上下文窗口大小
+        - /probe context  — 查询上游声明的上下文窗口
         """
         e = self._engine
         action = parts[1].strip().lower() if len(parts) >= 2 else ""
@@ -1046,14 +1047,14 @@ class CommandHandler:
             base_url=e._active_base_url,
         )
         if result is None:
-            return "探测失败：无法确定模型上下文窗口大小。"
+            return "上游未提供可读取的窗口元数据。当前预算继续使用型号资料或本地设置；不会用填充请求猜测窗口。"
 
         old = e._context_budget.max_tokens
         e._context_budget.set_override(result, adaptive=True)
         e._memory.update_context_window(result)
         e._compaction_manager.max_context_tokens = result
         return (
-            f"探测完成：模型 {e.active_model} 上下文窗口 ≈ {result:,} tokens。\n"
+            f"上游元数据声明：模型 {e.active_model} 上下文窗口 {result:,} tokens。\n"
             f"已更新预算：{old:,} → {result:,} tokens。"
         )
 

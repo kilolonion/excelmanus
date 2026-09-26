@@ -34,7 +34,7 @@ describe("model settings navigation", () => {
     const login = await screen.findByRole("button", { name: "使用 ChatGPT 账号登录" });
     fireEvent.click(login);
     await screen.findByRole("button", { name: "取消登录" });
-    fireEvent.click(screen.getByRole("tab", { name: /供应商/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /模型连接/ }));
     expect(screen.queryByRole("button", { name: "取消登录" })).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: /订阅账号/ }));
     expect(screen.getByRole("button", { name: "取消登录" })).toBeTruthy();

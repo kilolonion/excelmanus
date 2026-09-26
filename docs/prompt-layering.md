@@ -2,7 +2,7 @@
 
 本页描述分层规则。
 
-适用版本：1.8.1 源码 · 当前规则更新日期：2026-09-21。
+适用版本：1.8.1 源码 · 当前规则更新日期：2026-09-25。
 
 [文档导航](README.md) · [Skillpack 协议](skillpack_protocol.md)
 
@@ -26,6 +26,26 @@
 子代理也走此入口：`PromptComposer.fork()` 复用正文素材并创建独立注册表，工具和动态上下文回调绑定子会话。每次请求按子代理的固定权限、当前授权目录和工作簿状态重新组装，热重载不影响父会话的注册表。core 总是保留；非空 `inherit_strategies` 选择具名策略子集，但仍须满足运行时条件，且计划模式保留 `plan:policy`。空列表使用全部符合条件的策略，不授予额外工具权限。
 
 `prompts/subagent/_base.md` 只负责委派边界和结果交付要求，具名文件负责内置角色。用户/项目配置的 `system_prompt` 替换角色正文（包括同名内置角色），保留共享 core 与委派要求。缺失/损坏的内置角色、共享基础、未定义变量或未知继承策略均明确失败；不得退回旧提示词或静默忽略。旧 `base_sections` 不再裁剪共享委派要求。
+
+## 策略条件（`conditions`）
+
+条件键之间是 AND，同一键的列表是 OR；空条件匹配所有上下文。`tool` 的列表表示至少一个可见工具，不表示同时需要全部工具。当前支持：
+
+| 键 | 取值 | 含义 |
+|---|---|---|
+| `catalog_mode` | `read` / `plan` / `write` | 当前目录模式 |
+| `chat_mode` | `read` / `plan` / `write` | 会话模式（激活计划时也匹配 `plan`） |
+| `tool` | 工具名或工具名列表 | 当前可见目录包含其中至少一个名字；不授予权限 |
+| `new_workbook` | 布尔值 | 扫描范围内尚无已识别的工作簿 |
+| `profile` | `xlsx` / `csv` / `docx` | 工作区文件族；未提供 profile 时不匹配，非法值加载时报错 |
+| `full_access` | 布尔值 | 当前上下文的访问等级标记，不提升权限 |
+| `base_sections` | 兼容元数据 | 不参与策略条件匹配 |
+
+`AssembleContext.profile` 来自每轮目录推导，预算场景也传入同一字段。通用子代理继承 `spreadsheet:bootstrap`，仍必须满足其 `catalog_mode: write`、`profile: csv`、`tool: convert_spreadsheet` 条件。
+
+CSV-only 目录只门控需要"已存在工作簿"的能力（当前为 `trace_spreadsheet_formulas`）；`apply_spreadsheet_changes` 不按文件存在性门控——新建工作簿不要求预先存在 xlsx，真实授权仍由 mode / allowed / disallowed 决定。`14_csv_bootstrap.md` 描述该场景的路线：直接用 `workbook_spec` 新建，把第一个 xlsx 放在 `outputs/` 或工作区顶层，下一轮重新推导目录后依赖已有工作簿的能力才可见。
+
+工作区文件族只由内容决定，后缀不构成证据：扫描覆盖顶层及 `uploads/**`、`outputs/**`，不覆盖 `scripts/temp/**`；改后缀、CSV 假扮 XLSX、只有 PK 前缀或通用 ZIP 都不算工作簿。OOXML 候选检查内容类型声明与工作簿根节点，旧 `.xls` 检查可解析工作簿；这只是格式识别，不承诺公式可计算、对象无损或可编辑。
 
 ## 预算口径
 

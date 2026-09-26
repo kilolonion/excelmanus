@@ -57,6 +57,32 @@ def test_assistant_message_to_dict_fallback_for_text_message() -> None:
     assert payload == {"role": "assistant", "content": ""}
 
 
+def test_identical_reasoning_aliases_are_persisted_once() -> None:
+    payload = assistant_message_to_dict({
+        "role": "assistant",
+        "content": "",
+        "thinking": "先核对金额",
+        "reasoning": "先核对金额",
+        "reasoning_content": "先核对金额",
+    })
+
+    assert payload["reasoning_content"] == "先核对金额"
+    assert "thinking" not in payload
+    assert "reasoning" not in payload
+
+
+def test_distinct_reasoning_aliases_are_preserved() -> None:
+    payload = assistant_message_to_dict({
+        "role": "assistant",
+        "content": "",
+        "thinking": "provider metadata",
+        "reasoning_content": "visible summary",
+    })
+
+    assert payload["thinking"] == "provider metadata"
+    assert payload["reasoning_content"] == "visible summary"
+
+
 class TestSanitizeToolCallArguments:
     def test_invalid_json_args_replaced_with_marker(self) -> None:
         calls = [

@@ -16,7 +16,6 @@ from excelmanus.attachments.normalize import (
     NormalizationPolicy,
     assert_admission_limits,
     detect_image,
-    normalize_image,
 )
 from excelmanus.attachments.store import AttachmentStore, get_attachment_store
 from excelmanus.attachments.types import AttachmentError, ImageAttachmentRef, ImageDimensions
@@ -45,22 +44,26 @@ def admit_image_bytes(
     detected = detect_image(data, media_type)
     assert_admission_limits(data, detected)
     source_digest = store.put_source(data)
-    normalized = normalize_image(data, detected)
-    digest = hashlib.sha256(normalized.data).hexdigest()
-    orig = None
-    if normalized.original_width and normalized.original_height:
-        orig = ImageDimensions(normalized.original_width, normalized.original_height)
+    # Keep the source bytes as the durable attachment.  Resizing, colour
+    # conversion and provider-specific encoding belong to request projection;
+    # admission must not silently replace the image the user supplied.
+    digest = hashlib.sha256(data).hexdigest()
     ref = ImageAttachmentRef(
         attachment_id=f"sha256:{digest}",
-        media_type=normalized.media_type,
-        bytes=len(normalized.data),
-        width=normalized.width,
-        height=normalized.height,
+        media_type=detected.media_type,
+        bytes=len(data),
+        width=detected.width,
+        height=detected.height,
         name=_safe_name(name),
-        original_dimensions=orig,
         source_digest=source_digest,
+        source_dimensions=ImageDimensions(detected.width, detected.height),
+        source_media_type=detected.media_type,
+        source_bytes=len(data),
+        source_orientation=detected.orientation,
+        animated=detected.animated,
+        frame_count=detected.frame_count,
     )
-    return store.put(normalized.data, ref)
+    return store.put(data, ref)
 
 
 def admit_image_path(path: str | Path, *, store: AttachmentStore | None = None) -> ImageAttachmentRef:

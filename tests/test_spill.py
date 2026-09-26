@@ -151,3 +151,37 @@ def test_default_thresholds_documented() -> None:
     assert DEFAULT_SPILL_BYTE_THRESHOLD == 24_000
     assert DEFAULT_SPILL_TOKEN_THRESHOLD == 2000
     assert DEFAULT_SPILL_CHAR_THRESHOLD < 12000
+
+
+class TestSpreadsheetProjectionDisclosure:
+    def test_projection_names_omitted_fields_and_unifies_guidance(self, tmp_path: Path) -> None:
+        from excelmanus.engine_core.spill import expose_spreadsheet_value
+        from excelmanus.engine_core.tool_result import from_payload
+
+        cells = {f"{row},1": {"t": "s", "v": "x" * 300} for row in range(1, 101)}
+        payload = {
+            "status": "success", "file_path": "book.xlsx", "content_version": "v1",
+            "receipt": {"operation_id": "op1"},
+            "files": [{"file_path": "book.xlsx"}],
+            "regions": [{"sheet": "Sheet1", "rect": {"r0": 1, "c0": 1, "r1": 100, "c1": 1},
+                         "cells": cells}],
+            "observation": {
+                "verification_requirements": {"formula_count": 1},
+                "cell_checks": [{"sheet": "Sheet1", "cell": f"A{i}", "verified": True}
+                                for i in range(1, 21)],
+            },
+        }
+        result = expose_spreadsheet_value(from_payload(payload), store=SpillStore(tmp_path))
+        envelope = json.loads(result.model_text)
+        assert str(envelope["result_spill"]).startswith("spill:")
+        projection = envelope["result_projection"]
+        assert projection["status"] == "partial"
+        assert projection["full_payload"] == "result_spill"
+        assert "receipt" in projection["omitted_fields"]
+        assert "files" in projection["omitted_fields"]
+        assert any("data_preview" in item for item in projection["partially_projected"])
+        assert any("cell_checks" in item for item in projection["partially_projected"])
+        # 读不读 spill 是确定性决策：缺什么写在投影里，指引只有一种措辞。
+        assert "result_projection" in envelope["read_result"]
+        assert "不必仅为确认成功再读" in envelope["read_result"]
+        assert len(envelope["cell_checks"]) == 8

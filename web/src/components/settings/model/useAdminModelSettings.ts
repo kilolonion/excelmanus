@@ -15,12 +15,13 @@ import { CODEX_MODELS } from "./constants";
 import {
   EMPTY_PROFILE_DRAFT,
   isCodexProfile,
-  isSubscriptionProfile,
+  supportsFastMode,
   subscriptionModelPrefix,
   isMaskedApiKey,
   normalizeFetchedCapabilities,
   siblingDraftFromProfile,
   profileToDraft,
+  profileInputModalities,
   uniqueSiblingProfileName,
 } from "./helpers";
 import type { ModelCapabilities, ProfileEntry, ProbeJobSnapshot } from "./types";
@@ -224,8 +225,10 @@ export function useAdminModelSettings() {
       setThinkingSaved(true);
       setTimeout(() => setThinkingSaved(false), 2000);
       setSaveToast({ msg: "可调思考等级已更新", type: "success" });
+      return true;
     } catch (e) {
       setSaveToast({ msg: e instanceof Error ? e.message : "思考等级保存失败", type: "error" });
+      return false;
     } finally {
       setThinkingSaving(false);
     }
@@ -414,6 +417,27 @@ export function useAdminModelSettings() {
   }, [handleFetchRemoteModels, scrollToForm, resetProfileFormUi]);
 
   const handleCapToggle = useCallback(async (profileName: string, model: string, base_url: string, field: string, value: boolean) => {
+    // 图片输入与模型编辑器使用同一个档案字段，避免探测标记覆盖手动模态。
+    if (field === "supports_vision") {
+      const profile = config?.profiles.find((entry) => entry.name === profileName);
+      if (!profile || mutationPending.current) return;
+      mutationPending.current = true;
+      const withImage = (entry: ProfileEntry) => {
+        const modalities = profileInputModalities(entry).filter((item) => item !== "image");
+        return value ? [...modalities, "image" as const] : modalities;
+      };
+      try {
+        await updateModelProfile(profileName, { ...profileToDraft(profile), input_modalities: withImage(profile) });
+        if (editingProfile === profileName) {
+          setProfileDraft((draft) => ({ ...draft, input_modalities: withImage(draft) }));
+        }
+      } catch (error) {
+        setSaveToast({ msg: error instanceof Error ? error.message : "输入模态保存失败", type: "error" });
+      } finally {
+        mutationPending.current = false;
+      }
+      return;
+    }
     try {
       const data = await apiPut<{ capabilities: ModelCapabilities | null }>("/config/models/capabilities", {
         model,
@@ -430,7 +454,7 @@ export function useAdminModelSettings() {
     } catch {
       // 忽略
     }
-  }, []);
+  }, [config?.profiles, editingProfile]);
 
   useEffect(() => {
     // 强制刷新能力探测结果，避免 Tab 切换/重进设置页时沿用旧的失败提示
@@ -461,7 +485,7 @@ export function useAdminModelSettings() {
   }, []);
 
   const handleToggleFastMode = useCallback(async (profile: ProfileEntry) => {
-    if (mutationPending.current || isSubscriptionProfile(profile)) return;
+    if (mutationPending.current || !supportsFastMode(profile)) return;
     mutationPending.current = true;
     setTogglingFastProfile(profile.name);
     setProfileError(null);
@@ -493,8 +517,10 @@ export function useAdminModelSettings() {
     });
   };
 
-  const saveProfile = async (originalName?: string) => {
-    if (mutationPending.current) return;
+  // keepEditing：统一配置表单保存后保持打开，草稿即已保存内容；
+  // 关闭式保存（连接表单）沿用 finishProfileSave 收起并回到列表。
+  const saveProfile = async (originalName?: string, opts?: { keepEditing?: boolean }): Promise<string | null> => {
+    if (mutationPending.current) return null;
     mutationPending.current = true;
     setAddingProfile(true);
     setProfileError(null);
@@ -517,19 +543,35 @@ export function useAdminModelSettings() {
     try {
       if (originalName) await updateModelProfile(originalName, payload);
       else await createModelProfile(payload);
-      finishProfileSave(name);
+      if (opts?.keepEditing) {
+        // 统一配置表单保持打开：草稿内容即刚保存的内容，仅跟进重命名后的档案名。
+        const previousName = originalName || "";
+        if (previousName && previousName !== name) {
+          setCapsMap((prev) => {
+            if (!prev[previousName] || prev[name]) return prev;
+            return { ...prev, [name]: prev[previousName] };
+          });
+        }
+        setNewProfile(false);
+        setEditingProfile(name);
+        setSiblingSourceName(null);
+      } else {
+        finishProfileSave(name);
+      }
       setSaveToast({ msg: `模型档案「${name}」已${originalName ? "更新" : "添加"}`, type: "success" });
+      return name;
     } catch (error) {
       // Keep the exact draft, credentials and editor open so the user can retry.
       setProfileError(error instanceof Error ? error.message : "保存失败，请重试");
+      return null;
     } finally {
       mutationPending.current = false;
       setAddingProfile(false);
     }
   };
 
-  const handleAddProfile = () => saveProfile();
-  const handleUpdateProfile = (name: string) => saveProfile(name);
+  const handleAddProfile = (opts?: { keepEditing?: boolean }) => saveProfile(undefined, opts);
+  const handleUpdateProfile = (name: string, opts?: { keepEditing?: boolean }) => saveProfile(name, opts);
   const handleDeleteProfile = async (name: string) => {
     if (mutationPending.current) return;
     mutationPending.current = true;

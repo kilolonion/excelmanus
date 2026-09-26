@@ -19,6 +19,20 @@ def test_view_context_is_available_without_jev_or_a_model(tmp_path):
     assert "选区不是修改授权" in rendered
 
 
+def test_example_context_is_rendered_as_optional_route_hint():
+    engine = SimpleNamespace(_workspace_ref=None)
+    rendered = render_workbook_ui_context(engine, {
+        "example_context": {
+            "id": "statistical-regression",
+            "workflow": "statistical-analysis",
+            "sample": "广告与销售数据.csv",
+        },
+    }, "评估广告投入")
+    assert "欢迎页示例线索" in rendered
+    assert "statistical-analysis" in rendered
+    assert "可选" in rendered
+
+
 def test_view_does_not_override_explicit_file_or_range(tmp_path):
     engine, incoming = context(tmp_path)
     assert render_workbook_ui_context(engine, incoming, "分析 @file:other.xlsx") == ""

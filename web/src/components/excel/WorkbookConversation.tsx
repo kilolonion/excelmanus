@@ -43,12 +43,29 @@ export function WorkbookContextChip() {
     () => "");
   if (!target || !sessionId) return null;
   const label = `${fileBaseName(target.file.relative)}${target.sheet ? ` · ${target.sheet}` : ""}`;
-  return <div className="em-composer-tab em-composer-tab--workbook text-xs" data-workbook-context={target.file.relative}>
+  const contextState = editState
+    ? "saving"
+    : view?.status === "error"
+      ? "error"
+      : view?.status === "ready"
+        ? isPreview ? "preview" : "ready"
+        : "loading";
+  const contextStatus = editState || (view?.status === "ready" ? isPreview ? "引用预览" : "当前工作簿" : view?.status === "error" ? "打开失败" : "正在打开");
+
+  return <div
+    className="em-composer-tab em-composer-tab--workbook text-xs"
+    data-workbook-context={target.file.relative}
+    data-context-state={contextState}
+    aria-label={`当前引用：${label}`}
+  >
     <span className="em-composer-tab-icon" aria-hidden="true"><FileSpreadsheet className="h-3.5 w-3.5" /></span>
-    <button type="button" className="em-composer-tab-label truncate text-left min-w-0" title={`本次提问默认引用：${target.file.relative}`} onClick={() => {
-      recordWorkbookChatNavigation("sheet", target.file.relative);
-      useExcelStore.getState().openFullView(target.file.relative, target.sheet, target.layout);
-    }}>{label}</button>
+    <span className="em-composer-tab-copy min-w-0">
+      <span className="em-composer-tab-kind">表格引用</span>
+      <button type="button" className="em-composer-tab-label truncate text-left min-w-0" title={`本次提问默认引用：${target.file.relative}`} onClick={() => {
+        recordWorkbookChatNavigation("sheet", target.file.relative);
+        useExcelStore.getState().openFullView(target.file.relative, target.sheet, target.layout);
+      }}>{label}</button>
+    </span>
     <button type="button" aria-label={isPreview ? "设为主对话文件" : "更换主对话文件"} title={isPreview ? "关闭预览后继续讨论此表格" : "更换主对话文件"}
       className="em-composer-tab-action inline-flex shrink-0 items-center gap-1"
       onClick={() => {
@@ -58,7 +75,7 @@ export function WorkbookContextChip() {
       }}>
       <ArrowLeftRight className="h-3 w-3" /><span className="em-composer-tab-action-label">{isPreview ? "设为主对话" : "更换"}</span>
     </button>
-    <span className="em-composer-tab-status shrink-0">{editState || (view?.status === "ready" ? isPreview ? "本次引用预览" : "" : view?.status === "error" ? "打开失败" : "加载中…")}</span>
+    <span className="em-composer-tab-status shrink-0"><span className="em-composer-tab-status-dot" aria-hidden="true" />{contextStatus}</span>
     <button type="button" aria-label={isPreview ? "关闭当前预览" : "移除当前表格关联"} className="em-composer-tab-dismiss shrink-0" onClick={() => {
       useExcelStore.getState().closePanel();
       useExcelStore.getState().closeFullView();

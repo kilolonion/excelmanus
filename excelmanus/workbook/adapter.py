@@ -53,15 +53,29 @@ _KNOWN_PARTS = {
 _WORKBOOK_PART = "xl/workbook.xml"
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _LO_CALC_URI = "{7626C862-2A13-11E5-B345-FEFF819CDC9F}"
+# LibreOffice records the document formula reference syntax in loext:extCalcPr.
+# ExcelA1 and CalcA1 are both A1-style reference syntaxes; they differ only in
+# the string form used for text-to-reference conversion (Sheet1!A1 vs
+# Sheet1.A1). A CSV or ODS import is written with CalcA1, an xlsx import with
+# ExcelA1. The R1C1 variants describe a different formula language and stay
+# unsupported.
+_A1_STRING_REF_SYNTAX = frozenset({"ExcelA1", "CalcA1"})
 
 
-def _preservable_workbook_extensions(root: ET.Element) -> ET.Element | None:
-    """Allow only the known, reference-free LibreOffice ExcelA1 calc setting.
+def _preservable_workbook_extensions(root: ET.Element) -> tuple[ET.Element, str] | None:
+    """Allow only the known, reference-free LibreOffice A1 calc setting.
 
-    Other extension payloads can own relationships or contain cell/sheet refs
-    that an edit would invalidate. They still require explicit adapter support.
+    Returns the admitted ``extLst`` together with its declared string reference
+    syntax. Other extension payloads can own relationships or contain cell and
+    sheet refs that an edit would invalidate; they still require explicit
+    adapter support. A workbook that declares R1C1 formulas is rejected even
+    when the marker itself looks known, because its formula text is not A1 and
+    an openpyxl round trip would restate the reference style.
     """
     if root.tag != f"{{{_MAIN_NS}}}workbook":
+        return None
+    calc_properties = root.find(f"{{{_MAIN_NS}}}calcPr")
+    if calc_properties is not None and calc_properties.get("refMode", "A1") != "A1":
         return None
     lists = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "extLst"]
     if len(lists) != 1 or lists[0] not in list(root):
@@ -73,12 +87,14 @@ def _preservable_workbook_extensions(root: ET.Element) -> ET.Element | None:
     if extension.tag != f"{{{_MAIN_NS}}}ext" or extension.attrib != {"uri": _LO_CALC_URI} or len(extension) != 1:
         return None
     setting = extension[0]
+    syntax = setting.attrib.get("stringRefSyntax", "")
     if (setting.tag != "{http://schemas.libreoffice.org/}extCalcPr"
-            or setting.attrib != {"stringRefSyntax": "ExcelA1"} or len(setting)):
+            or set(setting.attrib) != {"stringRefSyntax"} or syntax not in _A1_STRING_REF_SYNTAX
+            or len(setting)):
         return None
     if any((node.text or "").strip() or (node.tail or "").strip() for node in extensions.iter()):
         return None
-    return extensions
+    return extensions, syntax
 
 
 def _xml_identity(node: ET.Element) -> tuple:
@@ -99,6 +115,9 @@ def package_inventory(data: bytes) -> dict:
                 "Workbook XML exceeds the 64 MiB parser budget; use streaming analysis or split the workbook",
             )
         unknown, unsupported, preserved = [], [], []
+        limitations = [
+            "openpyxl supported OOXML subset; rendering support is reported separately"
+        ]
         for name in package.namelist():
             if name not in _KNOWN_PARTS and not name.startswith(_KNOWN_PREFIXES):
                 unknown.append(name)
@@ -118,9 +137,28 @@ def package_inventory(data: bytes) -> dict:
                 features = {
                     node.tag.rsplit("}", 1)[-1] for node in root.iter()
                 } & _UNSUPPORTED
-                if name == _WORKBOOK_PART and _preservable_workbook_extensions(root) is not None:
+                admitted = (
+                    _preservable_workbook_extensions(root)
+                    if name == _WORKBOOK_PART
+                    else None
+                )
+                if admitted is not None:
+                    syntax = admitted[1]
                     features.discard("extLst")
-                    preserved.append({"part": name, "feature": "extCalcPr", "uri": _LO_CALC_URI})
+                    preserved.append(
+                        {
+                            "part": name,
+                            "feature": "extCalcPr",
+                            "uri": _LO_CALC_URI,
+                            "string_ref_syntax": syntax,
+                        }
+                    )
+                    if syntax != "ExcelA1":
+                        limitations.append(
+                            "LibreOffice CalcA1 string reference syntax: string-encoded references "
+                            'such as INDIRECT("Sheet1.A1") resolve with Calc conventions; direct cell '
+                            "and sheet references are unaffected"
+                        )
                 unsupported.extend(
                     {"part": name, "feature": feature} for feature in sorted(features)
                 )
@@ -132,9 +170,7 @@ def package_inventory(data: bytes) -> dict:
             "edit_support": "unsupported"
             if unsupported or unknown
             else "supported_subset",
-            "limitations": [
-                "openpyxl supported OOXML subset; rendering support is reported separately"
-            ],
+            "limitations": limitations,
         }
 
 
@@ -158,9 +194,10 @@ def preserve_workbook_extensions(before: bytes | None, after: bytes) -> bytes:
     if before is None:
         return after
     with ZipFile(BytesIO(before)) as source:
-        extension = _preservable_workbook_extensions(ET.fromstring(source.read(_WORKBOOK_PART)))
-    if extension is None:
+        admitted = _preservable_workbook_extensions(ET.fromstring(source.read(_WORKBOOK_PART)))
+    if admitted is None:
         return after
+    extension = admitted[0]
     with ZipFile(BytesIO(after)) as serialized:
         xml = serialized.read(_WORKBOOK_PART)
         root = ET.fromstring(xml)

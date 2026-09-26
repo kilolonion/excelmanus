@@ -1,6 +1,7 @@
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { getProviderDisplayName, PROVIDER_COLORS as PROVIDER_BRAND_COLOR } from "@/lib/provider-brand";
 import type { ModelCapabilities, ProfileEntry } from "./types";
+import type { ModelModality } from "@/lib/model-config";
 
 export const EMPTY_PROFILE_DRAFT: ProfileEntry = {
   name: "",
@@ -15,11 +16,17 @@ export const EMPTY_PROFILE_DRAFT: ProfileEntry = {
   custom_extra_body: "",
   custom_extra_headers: "",
   canonical_model: "",
+  max_context_tokens: 0,
+  vision_mode: "auto",
+  input_modalities: null,
+  max_output_tokens: 0,
 };
 
 export interface ProviderGroup {
   id: string;
   label: string;
+  /** Brand used for the group avatar; custom connection names do not have logos. */
+  logoId: string;
   color: string;
   profiles: ProfileEntry[];
 }
@@ -139,6 +146,16 @@ export function isSubscriptionProfile(profile: Pick<ProfileEntry, "model">): boo
   return isCodexProfile(profile) || isWorkBuddyProfile(profile) || isAntigravityProfile(profile);
 }
 
+/** Fast 仅适用于通过 OpenAI API 协议调用的 GPT 模型。 */
+export function supportsFastMode(profile: Pick<ProfileEntry, "model" | "canonical_model" | "protocol">): boolean {
+  if (isSubscriptionProfile(profile)) return false;
+  const protocol = (profile.protocol || "auto").trim().toLowerCase().replaceAll("-", "_");
+  if (!["auto", "openai", "openai_responses"].includes(protocol)) return false;
+  // 使用规范名识别网关别名；数字版本前缀排除 gpt-oss 等开源模型。
+  const model = (profile.canonical_model || profile.model || "").trim().toLowerCase();
+  return /(?:^|\/)(?:chat)?gpt-\d/.test(model);
+}
+
 /** 返回该档案归属的订阅 provider 模型前缀，非订阅档案返回 null。 */
 export function subscriptionModelPrefix(profile: Pick<ProfileEntry, "model">): string | null {
   if (isCodexProfile(profile)) return "openai-codex/";
@@ -198,7 +215,7 @@ export function isOfficialProviderEndpoint(baseUrl: string, providerId: string):
   return markers.some((marker) => host === marker || host.endsWith(`.${marker}`));
 }
 
-export function getProfileProviderId(profile: ProfileEntry): string {
+export function getProfileProviderId(profile: Pick<ProfileEntry, "name" | "model" | "base_url" | "model_family" | "protocol">): string {
   if (isCodexProfile(profile)) return "openai-codex";
   if (isAntigravityProfile(profile)) return "antigravity";
   const wbPrefix = workbuddyProfilePrefix(profile);
@@ -230,7 +247,8 @@ export function groupProfilesByProvider(profiles: ProfileEntry[]): ProviderGroup
   return Array.from(map.entries()).map(([id, groupProfiles]) => ({
     id,
     label: getProviderGroupLabel(id, groupProfiles[0]?.name),
-    color: getProviderBrandColor(id.startsWith("custom:") ? null : id),
+    logoId: inferProfileProvider(groupProfiles[0]) || (id.startsWith("custom:") ? "unknown" : id),
+    color: getProviderBrandColor(inferProfileProvider(groupProfiles[0]) || (id.startsWith("custom:") ? null : id)),
     profiles: groupProfiles,
   }));
 }
@@ -256,7 +274,23 @@ export function profileToDraft(profile: ProfileEntry): ProfileEntry {
     custom_extra_body: profile.custom_extra_body || "",
     custom_extra_headers: profile.custom_extra_headers || "",
     canonical_model: profile.canonical_model || "",
+    max_context_tokens: profile.max_context_tokens || 0,
+    vision_mode: profile.vision_mode || "auto",
+    input_modalities: profile.input_modalities ?? (profile.vision_mode && profile.vision_mode !== "auto" ? profileInputModalities(profile) : null),
+    default_input_modalities: profile.default_input_modalities,
+    max_output_tokens: profile.max_output_tokens || 0,
   };
+}
+
+export function profileInputModalities(profile: ProfileEntry): ModelModality[] {
+  return profile.input_modalities ?? (profile.vision_mode === "true" ? ["text", "image"]
+    : profile.vision_mode === "false" ? ["text"] : profile.default_input_modalities ?? ["text"]);
+}
+
+export function profileVisionMode(profile: ProfileEntry): "auto" | "true" | "false" {
+  return profile.input_modalities != null
+    ? profile.input_modalities.includes("image") ? "true" : "false"
+    : profile.vision_mode || "auto";
 }
 
 export function findProfileByModelId(

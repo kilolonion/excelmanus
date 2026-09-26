@@ -126,6 +126,8 @@ export const SessionList = memo(function SessionList() {
   const [dropTarget, setDropTarget] = useState<SidebarDrop | null>(null);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [reorderingWorkspace, setReorderingWorkspace] = useState(false);
+  const deletingSessionIdsRef = useRef(new Set<string>());
+  const deletingWorkspaceSessionsRef = useRef(false);
   const dragPreview = useRef<HTMLElement | null>(null);
   const dragBlocked = useRef(false);
   const dragRef = useRef<SidebarDrag | null>(null);
@@ -501,8 +503,13 @@ export const SessionList = memo(function SessionList() {
     });
   }, []);
 
-  const handleDelete = useCallback(async (sessionId: string) => {
-    if (busySessionId) return;
+  const handleDelete = useCallback(async (sessionId: string, fromWorkspaceDelete = false) => {
+    if (
+      deletingSessionIdsRef.current.has(sessionId)
+      || (!fromWorkspaceDelete && busySessionId)
+      || (deletingWorkspaceSessionsRef.current && !fromWorkspaceDelete)
+    ) return;
+    deletingSessionIdsRef.current.add(sessionId);
     setBusySessionId(sessionId);
 
     const chatState = useChatStore.getState();
@@ -514,15 +521,13 @@ export const SessionList = memo(function SessionList() {
     const sessionSnapshot = prevSessions.find((s) => s.id === sessionId) ?? null;
     const nextActive = prevSessions.find((s) => s.id !== sessionId);
 
-    // 若删除的是当前正在流式输出的会话，则同时中止前端 SSE
+    // 若删除的是当前正在流式输出的会话，则同时中止前端 SSE。
     if (isDeletingCurrent && chatState.abortController) {
       stopGeneration();
-    } else {
-      // 对非当前会话，仍通知后端取消任务
-      abortChat(sessionId).catch(() => {});
     }
 
-    // 乐观移除
+    // 先从侧栏乐观移除并写入删除 tombstone；这样重叠的会话轮询不会
+    // 把旧列表重新插回来，取消请求耗时也不会让界面停留在旧状态。
     removeSession(sessionId);
     if (isDeletingActive) {
       if (nextActive) {
@@ -534,9 +539,27 @@ export const SessionList = memo(function SessionList() {
       }
     }
 
+    // 等待后端取消请求完成后再发 DELETE，避免后端仍处于 in_flight
+    // 状态而返回 409，导致乐观移除的会话被回滚。
+    try {
+      await abortChat(sessionId);
+    } catch {
+      // The DELETE below is authoritative; an already-finished task or a
+      // temporarily unavailable abort endpoint must not block it.
+    }
+
     let shouldFinalize = false;
     try {
-      await deleteSession(sessionId);
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          await deleteSession(sessionId);
+          break;
+        } catch (err) {
+          const status = (err as { status?: unknown })?.status;
+          if (status !== 409 || attempt >= 4) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        }
+      }
       shouldFinalize = true;
     } catch (err) {
       if (isNotFoundError(err)) {
@@ -556,6 +579,7 @@ export const SessionList = memo(function SessionList() {
         // 确认删除完成后清理本地消息缓存
         removeSessionCache(sessionId);
       }
+      deletingSessionIdsRef.current.delete(sessionId);
       setBusySessionId((cur) => (cur === sessionId ? null : cur));
     }
   }, [addSession, busySessionId, removeSession, removeSessionCache, setActiveSession, switchSession]);
@@ -578,13 +602,22 @@ export const SessionList = memo(function SessionList() {
   }, [deployMode]);
 
   const handleDeleteWorkspaceSessions = useCallback(async (sessionIds: string[]) => {
-    if (sessionIds.length === 0 || busySessionId) return;
+    if (
+      sessionIds.length === 0
+      || deletingWorkspaceSessionsRef.current
+      || deletingSessionIdsRef.current.size > 0
+    ) return;
+    deletingWorkspaceSessionsRef.current = true;
     // Reuse the existing per-session deletion path so active streams are
     // stopped and local message caches are cleaned up consistently.
-    for (const sessionId of sessionIds) {
-      await handleDelete(sessionId);
+    try {
+      for (const sessionId of sessionIds) {
+        await handleDelete(sessionId, true);
+      }
+    } finally {
+      deletingWorkspaceSessionsRef.current = false;
     }
-  }, [busySessionId, handleDelete]);
+  }, [handleDelete]);
 
   const searchRow = (
     <div className="em-session-tools flex flex-col px-1 pt-3 pb-2 flex-shrink-0">

@@ -12,7 +12,8 @@
 from __future__ import annotations
 
 import pytest
-from hypothesis import given, assume
+import yaml
+from hypothesis import given
 from hypothesis import strategies as st
 
 from excelmanus.skillpacks.loader import SkillpackLoader, SkillpackValidationError
@@ -38,9 +39,8 @@ _fm_key = st.from_regex(r"[a-z][a-z0-9_]{0,15}", fullmatch=True)
 # 字符串值需要避免被 parse_scalar 误解析为 bool/int/引号字符串/列表
 _safe_str_value = st.text(
     alphabet=st.characters(
-        whitelist_categories=("L", "N", "P", "S"),
-        blacklist_characters="'\":|>{}\n\r\x0b\x0c\x1c\x1d\x1e\x85[]#",
-        blacklist_categories=("Cs", "Z"),  # 排除代理字符和分隔符（含换行类字符）
+        categories=("L", "N", "P", "S"),  # 已排除代理字符和分隔符
+        exclude_characters="'\":|>{}\n\r\x0b\x0c\x1c\x1d\x1e\x85[]#",
     ),
     min_size=1,
     max_size=30,
@@ -113,22 +113,20 @@ def test_property_3_single_quoted_string_parsed_correctly(s: str) -> None:
 # **验证：需求 5.3**
 # ---------------------------------------------------------------------------
 
-_invalid_yaml_kind = st.sampled_from(
-    ["unclosed_list", "unclosed_map", "unclosed_dquote", "unclosed_squote"]
-)
-
-# 生成后缀内容（非空）
+# 只允许字母/数字，确保后缀不会闭合引号、列表或映射。不要混用旧版
+# whitelist_categories/blacklist_categories：部分 Hypothesis 版本会以
+# blacklist 的补集覆盖 whitelist，生成 '"' 并把所谓反例变成合法 a: ""。
 _suffix_text = st.text(
-    alphabet=st.characters(
-        whitelist_categories=("L", "N"),
-        blacklist_categories=("Cs",),
-    ),
+    alphabet=st.characters(categories=("L", "N")),
     min_size=1,
     max_size=30,
 )
 
 
-@given(key=_fm_key, kind=_invalid_yaml_kind, suffix=_suffix_text)
+@pytest.mark.parametrize("kind", [
+    "unclosed_list", "unclosed_map", "unclosed_dquote", "unclosed_squote",
+])
+@given(key=_fm_key, suffix=_suffix_text)
 def test_property_4_invalid_yaml_raises_validation_error(
     key: str,
     kind: str,
@@ -139,17 +137,19 @@ def test_property_4_invalid_yaml_raises_validation_error(
 
     **验证：需求 5.3**
     """
+    assert suffix and suffix.isalnum(), f"生成器必须只生成字母/数字后缀: {suffix!r}"
     if kind == "unclosed_list":
         frontmatter_text = f"{key}: [{suffix}"
     elif kind == "unclosed_map":
-        # suffix 中的 } 会意外关闭 map，使 YAML 合法 → 排除
-        assume("}" not in suffix)
         frontmatter_text = f"{key}: {{x: {suffix}"
     elif kind == "unclosed_dquote":
         frontmatter_text = f'{key}: "{suffix}'
     else:
         frontmatter_text = f"{key}: '{suffix}"
 
+    # 单独验证生成器的非法 YAML 前提，不用 assume/filter 隐藏合法输入。
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(frontmatter_text)
     with pytest.raises(SkillpackValidationError):
         SkillpackLoader.parse_frontmatter(frontmatter_text)
 

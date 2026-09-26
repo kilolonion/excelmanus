@@ -27,9 +27,14 @@ export function ChatLiveSelectionChip() {
     <div
       className="em-composer-tab em-composer-tab--selection text-xs"
       data-em-live-selection={`${sheet}!${range}`}
+      data-context-state="selection"
+      aria-label={`当前选区：${sheet} · ${range}`}
     >
       <span className="em-composer-tab-icon" aria-hidden="true"><MousePointerSquareDashed className="h-3.5 w-3.5" /></span>
-      <span className="em-composer-tab-label truncate min-w-0">当前选区 <strong>{sheet}</strong><span aria-hidden="true"> · </span>{range}</span>
+      <span className="em-composer-tab-copy min-w-0">
+        <span className="em-composer-tab-kind">选区引用</span>
+        <span className="em-composer-tab-label truncate min-w-0"><strong>{sheet}</strong><span aria-hidden="true"> · </span>{range}</span>
+      </span>
       <span className="flex shrink-0 items-center gap-1">
         <button
           type="button"
@@ -37,7 +42,7 @@ export function ChatLiveSelectionChip() {
           className="em-composer-tab-action inline-flex items-center"
           onClick={() => useExcelStore.getState().confirmSelection({ filePath: path, sheet, range, contentVersion })}
         >
-          引用
+          引用到对话
         </button>
       </span>
       <button

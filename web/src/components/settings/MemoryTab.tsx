@@ -1,13 +1,14 @@
 "use client";
 
+import { MEMORY_SETTING_GROUPS } from "./settings-catalog";
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Trash2, Loader2, Brain, ChevronRight, Star, Clock, Layers, Sparkles, ToggleLeft } from "lucide-react";
+import { Trash2, Loader2, Brain, ChevronRight, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiGet, apiDelete } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { isSettingsDemoActive, onSettingsDemoChange, DEMO_MEMORIES } from "@/components/onboarding/demo-settings";
-import { RuntimeSettingsPanel, type RuntimeSettingGroup } from "./RuntimeSettingsPanel";
+import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
 interface MemoryEntry {
   id: string;
@@ -35,88 +36,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 const CATEGORIES = ["file_pattern", "user_pref", "error_solution", "general"] as const;
 const CONTENT_PREVIEW_LEN = 100;
 
-const MEMORY_SETTING_GROUPS: RuntimeSettingGroup[] = [
-  {
-    title: "记忆配置",
-    description: "控制跨任务记忆的读写、保留时间和自动维护。已有条目不会因关闭功能而删除。",
-    icon: <Brain className="h-4 w-4" />,
-    items: [
-      {
-        key: "memory_enabled",
-        label: "跨会话记忆",
-        desc: "允许 Agent 在新任务中读取并沉淀长期信息；新开任务后完全生效。",
-        icon: <ToggleLeft className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "memory_expire_days",
-        label: "记忆过期天数",
-        desc: "任务启动时清理超过此天数的记忆；0 表示不过期。",
-        icon: <Clock className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 3650,
-      },
-    ],
-  },
-  {
-    title: "自动维护",
-    description: "在记忆积累到一定规模后自动合并重复内容并清理低价值条目。",
-    icon: <Sparkles className="h-4 w-4" />,
-    defaultOpen: false,
-    items: [
-      {
-        key: "memory_maintenance_enabled",
-        label: "记忆自动维护",
-        desc: "提取新记忆后，按条目数、增量和间隔执行维护。",
-        disabledDesc: "请先开启跨会话记忆。",
-        disabledWhen: (settings) => !settings.memory_enabled,
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "memory_maintenance_min_entries",
-        label: "维护最少条目数",
-        desc: "记忆少于此数时不触发维护。",
-        disabledDesc: "开启记忆自动维护后可调整。",
-        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 200,
-      },
-      {
-        key: "memory_maintenance_new_threshold",
-        label: "维护新增阈值",
-        desc: "新增条目达到此数后才可能触发维护。",
-        disabledDesc: "开启记忆自动维护后可调整。",
-        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 50,
-      },
-      {
-        key: "memory_maintenance_interval_hours",
-        label: "维护最小间隔",
-        desc: "两次维护之间的最短间隔（小时）。",
-        disabledDesc: "开启记忆自动维护后可调整。",
-        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
-        icon: <Clock className="h-4 w-4" />,
-        type: "float",
-      },
-      {
-        key: "memory_maintenance_model",
-        label: "维护模型",
-        desc: "用于记忆维护的模型 ID；留空时使用当前激活模型。",
-        disabledDesc: "开启记忆自动维护后可调整。",
-        disabledWhen: (settings) => !settings.memory_enabled || !settings.memory_maintenance_enabled,
-        icon: <Brain className="h-4 w-4" />,
-        type: "string",
-      },
-    ],
-  },
-];
+
 
 function formatTimestamp(ts: string): string {
   try {

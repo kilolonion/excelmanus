@@ -26,6 +26,7 @@ from excelmanus.system_one.types import ChoiceAnswer, Decision, Evaluation, Noul
 
 def settings(**changes):
     base = JevSettings(
+        experimental_enabled=True,
         enabled="enforce", exposure="enforce", observation="enforce",
         mode_hint=False, ui_hint=True, model="test", api_key="vck_test", timeout_seconds=1.0,
     )

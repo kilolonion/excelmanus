@@ -42,171 +42,44 @@ def test_readme_quick_config_uses_database_settings() -> None:
             assert f"`EXCELMANUS_{key}`" not in text, key
 
 
-def test_frontend_anthropic_presets_use_legacy_sonnet_alias() -> None:
+def test_presets_share_the_sourced_catalog() -> None:
+    from excelmanus.model_catalog import catalog
     presets = _PRESETS.read_text(encoding="utf-8")
     guides = _PROVIDER_GUIDES.read_text(encoding="utf-8")
-
-    assert 'model: "claude-sonnet-4"' in presets
-    assert 'model: "anthropic/claude-sonnet-4"' in presets
-    assert 'model: "claude-sonnet-4-6"' not in presets
-    assert 'model: "anthropic/claude-sonnet-4-6"' not in presets
-
-    assert 'OAUTH_PRESETS = [CODEX_OAUTH_PRESET, WORKBUDDY_CN_OAUTH_PRESET, WORKBUDDY_GLOBAL_OAUTH_PRESET, ANTIGRAVITY_OAUTH_PRESET]' in guides
-    assert 'CANONICAL_PRESETS = [...PROVIDER_PRESETS, ...OAUTH_PRESETS]' in guides
+    for provider in catalog()["providers"]:
+        assert f'...providerDefaults("{provider}")' in presets
     assert 'model: preset.model' in guides
+    assert catalog()["providers"]["anthropic"]["model"] == "claude-sonnet-4-6"
+    assert catalog()["providers"]["deepseek"]["model"] == "deepseek-flash"
+    assert catalog()["providers"]["gemini"]["thinking_mode"] == "auto"
 
 
-def test_frontend_openai_presets_use_legacy_recommended_model() -> None:
-    presets = _PRESETS.read_text(encoding="utf-8")
-    guides = _PROVIDER_GUIDES.read_text(encoding="utf-8")
-
-    assert re.search(r'id:\s*"openai"[\s\S]*?model:\s*"gpt-4o"', presets)
-    assert 'model: preset.model' in guides
+def test_unverified_context_is_a_local_budget_not_a_claim() -> None:
+    assert _DEFAULT_CONTEXT_TOKENS == 32_000
+    assert _infer_context_tokens_for_model("custom-model") == 32_000
+    assert _infer_context_tokens_for_model("gpt-4.10-mystery") == 32_000
 
 
-def test_frontend_openai_presets_use_legacy_gpt_4o() -> None:
-    presets = _PRESETS.read_text(encoding="utf-8")
-    presets_openai = re.search(r'id: "openai",[\s\S]{0,320}?model: "([^"]+)"', presets)
-
-    assert presets_openai is not None
-    assert presets_openai.group(1) == "gpt-4o"
-    assert 'CANONICAL_PRESETS' in _PROVIDER_GUIDES.read_text(encoding="utf-8")
-    assert 'protocol: "openai_responses"' in presets
-
-
-def test_frontend_vendor_presets_use_legacy_models() -> None:
-    presets = _PRESETS.read_text(encoding="utf-8")
-    guides = _PROVIDER_GUIDES.read_text(encoding="utf-8")
-
-    assert 'model: "gemini-2.5-flash"' in presets
-    assert 'model: "deepseek-v3"' in presets
-    assert 'model: "qwen-plus"' in presets
-    assert 'model: "glm-4.5"' in presets
-    assert 'model: "kimi-k2.6"' in presets
-    assert 'model: "MiniMax-M2"' in presets
-    assert 'model: "grok-4"' in presets
-    assert 'model: "doubao-seed-1.6"' in presets
-    assert 'model: "mimo-v2.6-flash"' in presets
-
-    assert '...GUIDE_COPY[preset.id]' in guides
-
-
-def test_anthropic_current_haiku_aliases_resolve_to_200k_context() -> None:
-    assert _infer_context_tokens_for_model("claude-haiku-4-5") == 200_000
-    assert _infer_context_tokens_for_model("claude-haiku-4-5-20251001") == 200_000
-
-
-def test_unknown_models_default_to_256k_context() -> None:
-    assert _DEFAULT_CONTEXT_TOKENS == 256_000
-    assert _infer_context_tokens_for_model("custom-model") == 256_000
-    assert _infer_context_tokens_for_model("self-hosted/custom-model") == 256_000
-
-
-def test_current_flagship_context_windows_match_official_limits() -> None:
+def test_verified_budgets_use_input_and_transport_limits() -> None:
     assert _infer_context_tokens_for_model("gpt-6-astra") == 1_050_000
-    assert _infer_context_tokens_for_model("gpt-5.6-terra") == 1_050_000
-    assert _infer_context_tokens_for_model("claude-sonnet-5") == 1_000_000
-    assert _infer_context_tokens_for_model("claude-opus-5") == 1_000_000
-    assert _infer_context_tokens_for_model("claude-fable-5-1") == 1_000_000
-    assert _infer_context_tokens_for_model("gemini-3.8-flash") == 1_048_576
-    assert _infer_context_tokens_for_model("qwen3.8-max") == 1_000_000
-    assert _infer_context_tokens_for_model("glm-5.3") == 1_000_000
-    assert _infer_context_tokens_for_model("kimi-k3") == 1_000_000
+    assert _infer_context_tokens_for_model("gemini-2.5-flash") == 1_048_576
+    assert _infer_context_tokens_for_model("qwen-max") == 30_720
+    assert _infer_context_tokens_for_model("qwen-turbo") == 98_304
+    assert _infer_context_tokens_for_model("qwen-long") == 1_000_000
+    assert _infer_context_tokens_for_model("claude-sonnet-4.6") == 1_000_000
     assert _infer_context_tokens_for_model("kimi-k2.6") == 256_000
-    assert _infer_context_tokens_for_model("MiniMax-M3") == 1_000_000
-    assert _infer_context_tokens_for_model("deepseek-flash") == 1_000_000
-    assert _infer_context_tokens_for_model("grok-4.6") == 500_000
-    assert _infer_context_tokens_for_model("doubao-seed-2.1-pro") == 256_000
-    # 新纳入已知模型表的型号（仅上下文/匹配元数据，不进用户可选列表）
-    assert _infer_context_tokens_for_model("gpt-6-sol") == 1_050_000
-    assert _infer_context_tokens_for_model("gpt-6-luna") == 1_050_000
-    assert _infer_context_tokens_for_model("claude-opus-5-5") == 1_000_000
-    assert _infer_context_tokens_for_model("claude-mythos-5-1") == 1_000_000
-    assert _infer_context_tokens_for_model("gemini-3.8-live") == 1_048_576
-    assert _infer_context_tokens_for_model("qwen3.8-omni-flash") == 1_000_000
-    assert _infer_context_tokens_for_model("glm-5.3-flashx") == 1_000_000
-    assert _infer_context_tokens_for_model("grok-4.7") == 500_000
-    assert _infer_context_tokens_for_model("mistral-small-4") == 262_144
-    assert _infer_context_tokens_for_model("muse-spark") == 1_000_000
-    assert _infer_context_tokens_for_model("command-a-plus") == 128_000
-    # 小米 MiMo：v2.5/v2.6 对话模型 1M，旧 v2 系列 256K，ASR/TTS 8K
-    assert _infer_context_tokens_for_model("mimo-v2.6-pro") == 1_000_000
-    assert _infer_context_tokens_for_model("mimo-v2.6-flash") == 1_000_000
-    assert _infer_context_tokens_for_model("mimo-v2.5") == 1_000_000
-    assert _infer_context_tokens_for_model("mimo-v2-flash") == 256_000
-    assert _infer_context_tokens_for_model("mimo-v2.5-asr") == 8_192
 
 
-def test_deprecated_haiku_replacement_uses_current_alias() -> None:
-    assert get_deprecated_model_replacement("claude-3-haiku") == (
-        "claude-3-haiku",
-        "claude-haiku-4-5",
-    )
+def test_redirects_are_not_retired_models() -> None:
+    assert get_deprecated_model_replacement("deepseek-v4-flash") is None
+    assert get_deprecated_model_replacement("claude-sonnet-4") == ("claude-sonnet-4", "claude-sonnet-4-6")
+    assert get_deprecated_model_replacement("custom/legacy-model") is None
 
 
-def test_deprecated_openai_turbo_replacements_use_gpt_6_astra() -> None:
-    assert get_deprecated_model_replacement("gpt-4-turbo") == ("gpt-4-turbo", "gpt-6-astra")
-    assert get_deprecated_model_replacement("gpt-4-turbo-preview") == (
-        "gpt-4-turbo-preview",
-        "gpt-6-astra",
-    )
-    assert get_deprecated_model_replacement("gpt-4-0125-preview") == (
-        "gpt-4-0125-preview",
-        "gpt-6-astra",
-    )
-    assert get_deprecated_model_replacement("gpt-4-1106-preview") == (
-        "gpt-4-1106-preview",
-        "gpt-6-astra",
-    )
-
-
-def test_retired_vendor_aliases_point_to_current_flagships() -> None:
-    assert get_deprecated_model_replacement("deepseek-chat") == ("deepseek-chat", "deepseek-flash")
-    assert get_deprecated_model_replacement("moonshot-v1-128k") == ("moonshot-v1", "kimi-k3")
-    assert get_deprecated_model_replacement("kimi-k2.5") == ("kimi-k2.5", "kimi-k3")
-    assert get_deprecated_model_replacement("glm-4-plus") == ("glm-4-plus", "glm-5.3")
-    assert get_deprecated_model_replacement("mimo-v2-flash") == ("mimo-v2-flash", "mimo-v2.6-flash")
-    assert get_deprecated_model_replacement("mimo-v2-pro") == ("mimo-v2-pro", "mimo-v2.6-pro")
-    assert get_deprecated_model_replacement("kimi-k2.6") is None
-    assert get_deprecated_model_replacement("kimi-k3") is None
-    # 在营 MiMo 型号不得命中弃用表
-    assert get_deprecated_model_replacement("mimo-v2.5") is None
-    assert get_deprecated_model_replacement("mimo-v2.6-flash") is None
-
-
-def test_gemini_3_preview_context_windows_match_official_limits() -> None:
-    assert _infer_context_tokens_for_model("gemini-3.0-pro-preview-02-2026") == 1_048_576
-    assert _infer_context_tokens_for_model("gemini-3.0-flash-preview-02-2026") == 1_048_576
-    assert _infer_context_tokens_for_model("gemini-3.0-flash-lite-preview-02-2026") == 1_048_576
-    assert _infer_context_tokens_for_model("gemini-3.0-flash-thinking-preview-02-2026") == 262_144
-
-
-def test_normalized_context_lookup_covers_namespace_and_dotted_ids() -> None:
-    assert _infer_context_tokens_for_model("anthropic.claude-opus-5") == 1_000_000
-    assert _infer_context_tokens_for_model("us.anthropic.claude-sonnet-4-5-20250929-v1:0") == 200_000
-    assert _infer_context_tokens_for_model("grok-4.1-fast-reasoning") == 2_000_000
-    assert _infer_context_tokens_for_model("llama3.1:8b") == 131_072
-    assert _infer_context_tokens_for_model("meta.llama3-1-70b-instruct-v1:0") == 131_072
-    assert _infer_context_tokens_for_model("glm-5.1") == 200_000
-    assert _infer_context_tokens_for_model("glm-4.7") == 200_000
-    assert _infer_context_tokens_for_model("gpt-5.6-cyber") == 400_000
-    assert _infer_context_tokens_for_model("gpt-6-astra-pro") == 1_050_000
-    assert _infer_context_tokens_for_model("gemini-3.1-flash-image") == 128_000
-    assert _infer_context_tokens_for_model("anthropic/claude-sonnet-5:thinking") == 1_000_000
-    assert _infer_context_tokens_for_model("claude-haiku-4-5@20251001") == 200_000
-    # gpt-4.10 不能误命中 gpt-4.1 前缀
-    assert _infer_context_tokens_for_model("gpt-4.10-mystery") == 256_000
-
-
-def test_deprecated_lookup_uses_longest_prefix_with_version_guard() -> None:
-    assert get_deprecated_model_replacement("deepseek-v4-flash") == (
-        "deepseek-v4-flash", "deepseek-flash",
-    )
-    assert get_deprecated_model_replacement("gemini-2.0-flash-lite-001") == (
-        "gemini-2.0-flash-lite", "gemini-3.5-flash-lite",
-    )
-    assert get_deprecated_model_replacement("claude-3.5-sonnet-20241022") == (
-        "claude-3-5-sonnet", "claude-sonnet-5",
-    )
-    assert get_deprecated_model_replacement("kimi-k2-0905") == ("kimi-k2", "kimi-k3")
-    assert get_deprecated_model_replacement("claude-opus-4.7") is None
+def test_codex_catalog_is_shared_and_excludes_unverified_id() -> None:
+    from excelmanus.model_catalog import catalog
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    expected = {m["model"] for m in catalog()["codex_models"]}
+    assert "gpt-5-codex-mini" not in expected
+    assert set(OpenAICodexProvider.list_supported_models()) == expected
+    assert "MODEL_CATALOG.codex_models.map" in _PRESETS.read_text(encoding="utf-8")

@@ -2,6 +2,7 @@
 
 import { CheckCircle2, ChevronsUpDown, CircleStop, Info, Loader2, Repeat, Wrench, XCircle, Zap } from "lucide-react";
 import { isHiddenAssistantChrome } from "@/lib/assistant-chrome";
+import { formatCacheHit } from "@/lib/token-stats";
 import { ThinkingBlock } from "../ThinkingBlock";
 import { ToolCallCard, ToolCallCancelButton } from "../ToolCallCard";
 import { AskUserCard } from "../AskUserCard";
@@ -68,6 +69,7 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
       return <MemoizedMarkdown content={block.content} isStreamingText={isStreamingText} defaultExpanded={defaultExpanded} />;
     }
     case "tool_call": {
+      if (block.taskList?.length && block.status !== "error") return <TaskList items={block.taskList} />;
       if (block.name === "show_workbook" && block.status === "success") return <WorkbookPresentationCard result={block.result} />;
       if (block.name === "ask_user" || block.name === "suggest_mode_switch") {
         return (
@@ -160,11 +162,15 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
       );
     case "token_stats":
       return (
-        <div className="flex items-center gap-x-3 mt-3 pt-2 border-t border-border/30 text-[10px] text-muted-foreground whitespace-nowrap overflow-x-auto">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-3 pt-2 border-t border-border/30 text-[10px] text-muted-foreground">
           <Zap className="h-3 w-3" />
           <span>{block.iterations} 轮迭代</span>
           <span>·</span>
           <span>输入 {block.promptTokens.toLocaleString()}</span>
+          <span>·</span>
+          <span title="缓存命中率 = 本轮所有模型调用的缓存命中 token 总数 ÷ 输入 token 总数；缓存命中已包含在输入中。未提供表示本轮至少一次调用缺少缓存统计。">
+            {formatCacheHit(block)}
+          </span>
           <span>·</span>
           <span>输出 {block.completionTokens.toLocaleString()}</span>
           <span>·</span>

@@ -119,19 +119,9 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
     BROWSER_REDIRECT_URI = "http://localhost:1455/auth/callback"
     # 连接成功后自动暴露给当前用户的 Codex 可用模型（仅用户私有，不写入全局 model_profiles）。
     # model: 真实模型 ID；display_name: 前端展示友好别名。
-    _SUPPORTED_MODELS: tuple[tuple[str, str], ...] = (
-        ("gpt-5.2-codex", "Codex 5.2 (Legacy)"),
-        ("gpt-5.1-codex", "Codex 5.1 (Legacy)"),
-        ("gpt-5.1-codex-mini", "Codex Mini (Legacy)"),
-        ("gpt-5.1-codex-max", "Codex Max (Legacy)"),
-        ("gpt-5-codex-mini", "Codex Mini (GPT-5)"),
-        ("gpt-5-codex", "Codex 5 (Legacy)"),
-        ("gpt-5.2", "GPT-5.2 (Legacy)"),
-        ("gpt-5.1", "GPT-5.1 (Legacy)"),
-        ("gpt-5", "GPT-5 (Legacy)"),
-        ("gpt-5.3-codex", "Codex 5.3 (Legacy)"),
-        ("gpt-5.3-codex-spark", "Codex Spark (Legacy)"),
-    )
+    from excelmanus.model_catalog import catalog as _catalog
+    _SUPPORTED_MODELS = tuple((entry["model"], entry["display_name"]) for entry in _catalog()["codex_models"])
+
 
     # ── Device Code Flow (RFC 8628) ───────────────────────────
     DEVICE_USERCODE_URL = "https://auth.openai.com/api/accounts/deviceauth/usercode"
@@ -504,7 +494,7 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
             "model": self._DEFAULT_PROFILE_NAME,
             "api_key": "",
             "base_url": "https://api.openai.com/v1",
-            "description": "Codex 5.2 - OAuth 登录（无需 API Key）",
+            "description": "OAuth 登录（无需 API Key）",
             "protocol": self.PROTOCOL,
             "thinking_mode": "openai_reasoning",
             "model_family": "gpt",

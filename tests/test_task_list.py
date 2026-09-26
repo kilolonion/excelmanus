@@ -30,11 +30,11 @@ class TestTaskStatusEnum:
 class TestTaskItemTransition:
     """测试 TaskItem 非法状态转换抛出 ValueError。"""
 
-    def test_pending_to_completed_raises(self) -> None:
-        """pending → completed 是非法转换。"""
+    def test_pending_to_completed_is_allowed(self) -> None:
+        """已完成的操作可以将 pending 任务直接标记为 completed。"""
         item = TaskItem(title="测试")
-        with pytest.raises(ValueError, match="非法状态转换"):
-            item.transition(TaskStatus.COMPLETED)
+        item.transition(TaskStatus.COMPLETED)
+        assert item.status == TaskStatus.COMPLETED
 
     def test_pending_to_failed_raises(self) -> None:
         """pending → failed 是非法转换。"""
@@ -142,6 +142,12 @@ class TestGetToolsSchema:
             assert "properties" in schema
             assert "required" in schema
             assert isinstance(schema["required"], list)
+
+    def test_task_update_description_requires_sequential_lifecycle(self) -> None:
+        """工具说明必须明确 direct completion 的例外。"""
+        task_update = next(tool for tool in task_tools.get_tools() if tool.name == "task_update")
+        assert "允许直接从 pending 调用 completed" in task_update.description
+        assert "pending 直接调用 failed 仍不允许" in task_update.description
 
 
 class TestTaskUpdateInvalidStatus:

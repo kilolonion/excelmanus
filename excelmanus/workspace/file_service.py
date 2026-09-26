@@ -1482,7 +1482,7 @@ class WorkspaceFileService:
             "data": content_sha256(spec.data) if spec.data is not None else None,
             "builder": spec.intent if spec.builder is not None else None,
         } for spec in specs]
-        raw = json.dumps({"targets": payload, "dependencies": [d.to_dict() for d in deps or []]}, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        raw = json.dumps({"targets": payload, "dependencies": [d.to_dict() for d in deps or []]}, ensure_ascii=False, sort_keys=True, allow_nan=False, default=str)
         return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _targets_from_intent(self, intent: dict[str, Any], *, load_blobs: bool = True) -> list[_PreparedTarget]:

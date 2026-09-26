@@ -361,8 +361,8 @@ class TestCapabilitiesCacheFreshness:
             setattr(base, key, value)
         return base
 
-    def test_manual_override_always_fresh(self):
-        assert capabilities_cache_is_fresh(self._caps(manual_override=True)) is True
+    def test_manual_override_does_not_refresh_unrelated_observations(self):
+        assert capabilities_cache_is_fresh(self._caps(manual_override=True)) is False
 
     def test_unknown_health_not_fresh(self):
         assert capabilities_cache_is_fresh(self._caps(healthy=None)) is False

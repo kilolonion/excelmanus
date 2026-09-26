@@ -82,6 +82,7 @@ class StreamRenderer:
         handlers = {
             EventType.TOOL_CALL_START: self._render_tool_start,
             EventType.TOOL_CALL_END: self._render_tool_end,
+            EventType.TOOL_CALL_ABORTED: self._render_tool_call_aborted,
             EventType.THINKING: self._render_thinking,
             EventType.ITERATION_START: self._render_iteration,
             EventType.ROUTE_START: self._render_route_start,
@@ -321,6 +322,18 @@ class StreamRenderer:
                 f" [{THEME.RED}]{THEME.FAILURE}[/{THEME.RED}]{elapsed_str}"
                 f" [{THEME.RED}]{error_msg}[/{THEME.RED}]"
             )
+
+    def _render_tool_call_aborted(self, event: ToolCallEvent) -> None:
+        """未执行即被放弃的调用：给出确切状态，不留"进行中"的悬念。"""
+        message = rich_escape(
+            truncate(event.result or event.error or "本次调用未执行", RESULT_MAX_LEN)
+        )
+        self._console.print(
+            f"  {THEME.TREE_END}"
+            f" [{THEME.RED}]{THEME.FAILURE}[/{THEME.RED}]"
+            f" [{THEME.DIM}]{rich_escape(event.tool_name)}[/{THEME.DIM}]"
+            f" [{THEME.RED}]{message}[/{THEME.RED}]"
+        )
 
     # ------------------------------------------------------------------
     # 任务清单
@@ -608,7 +621,13 @@ class StreamRenderer:
     def _format_token_usage(event: ToolCallEvent) -> str:
         if event.total_tokens <= 0:
             return ""
-        return f"{event.prompt_tokens:,} + {event.completion_tokens:,} = {event.total_tokens:,} tokens"
+        usage = f"{event.prompt_tokens:,} + {event.completion_tokens:,} = {event.total_tokens:,} tokens"
+        if event.cached_tokens is None:
+            return f"{usage} · 缓存命中 未提供"
+        cache = f"缓存命中 {event.cached_tokens:,} tokens"
+        if event.prompt_tokens > 0:
+            cache += f" ({event.cached_tokens / event.prompt_tokens:.1%})"
+        return f"{usage} · {cache}"
 
     # ------------------------------------------------------------------
     # Excel 预览与 Diff

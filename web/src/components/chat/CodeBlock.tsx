@@ -5,12 +5,14 @@ import { Check, Copy } from "lucide-react";
 import { ensureHljs, highlightCode } from "@/lib/hljs-utils";
 
 interface CodeBlockProps {
+  label?: string;
   language?: string;
   code: string;
   maxHeightClass?: string;
 }
 
 export const CodeBlock = React.memo(function CodeBlock({
+  label,
   language,
   code,
   maxHeightClass,
@@ -40,17 +42,18 @@ export const CodeBlock = React.memo(function CodeBlock({
   const displayLang = language || "code";
 
   return (
-    <div className="group/code relative my-2 rounded-lg overflow-hidden border border-border/50">
+    <div className="code-block group/code relative my-2 min-w-0 rounded-lg overflow-hidden border border-border/50">
       {/* 标题栏 */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-muted border-b border-border/40">
-        <span className="text-[11px] font-medium text-muted-foreground font-mono select-none">
-          {displayLang}
-        </span>
+      <div className="code-block-header flex items-center justify-between gap-2 px-3 py-1.5 bg-muted border-b border-border/40">
+        <div className="flex min-w-0 items-center gap-2 select-none">
+          {label && <span className="text-[11px] font-medium text-foreground">{label}</span>}
+          <span className={`${label ? "text-[10px]" : "text-[11px]"} font-medium text-muted-foreground font-mono`}>{displayLang}</span>
+        </div>
         <button
           type="button"
           onClick={handleCopy}
           className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors rounded-md px-2 py-1 hover:bg-muted/60 h-8"
-          aria-label={copied ? "已复制" : "复制代码"}
+          aria-label={copied ? "已复制" : label ? `复制${label}` : "复制代码"}
         >
           {copied ? (
             <>
@@ -67,7 +70,7 @@ export const CodeBlock = React.memo(function CodeBlock({
       </div>
 
       {/* 代码主体 */}
-      <div className={`overflow-auto bg-card ${maxHeightClass ?? ""}`}>
+      <div className={`code-block-scroll overflow-auto bg-card ${maxHeightClass ?? ""}`}>
         <pre className="!m-0 !rounded-none !bg-transparent p-3">
           {highlightedHtml ? (
             <code

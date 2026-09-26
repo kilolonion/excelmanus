@@ -81,6 +81,105 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("model configuration lifecycle", () => {
+  it.each(["openai-codex/gpt-6-astra", "workbuddy-cn/claude-sonnet-4.6", "antigravity/gemini-3-pro"])(
+    "edits and restores OAuth model metadata for %s", async (model) => {
+      profiles = [{ ...profile("subscription", model), api_key: "", max_context_tokens: 65536, input_modalities: ["text", "image"], default_input_modalities: ["text", "image"] }];
+      active = "subscription";
+      function ProviderSettings() {
+        const settings = useAdminModelSettings();
+        return <AdminModelContext.Provider value={settings}><ProviderSection /></AdminModelContext.Provider>;
+      }
+      const view = render(<ProviderSettings />);
+      fireEvent.click(await screen.findByTitle("编辑"));
+      expect(screen.getByText("编辑 OAuth 模型")).toBeTruthy();
+      expect(screen.queryByText("API Key")).toBeNull();
+      expect((screen.getByRole("combobox", { name: "Model ID" }) as HTMLInputElement).disabled).toBe(true);
+      expect((screen.getByRole("button", { name: "协议" }) as HTMLButtonElement).disabled).toBe(true);
+      const context = screen.getByRole("spinbutton", { name: "上下文上限（tokens）" });
+      expect((context as HTMLInputElement).value).toBe("65536");
+      fireEvent.change(context, { target: { value: "131072" } });
+      expect((screen.getByRole("checkbox", { name: "文本" }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("checkbox", { name: "图片" }) as HTMLInputElement).checked).toBe(true);
+      fireEvent.click(screen.getByRole("checkbox", { name: "文本" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "图片" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "视频" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "音频" }));
+      fireEvent.click(screen.getByRole("button", { name: /高级配置/ }));
+      fireEvent.change(screen.getByRole("spinbutton", { name: "最大输出长度（tokens）" }), { target: { value: "8192" } });
+      fireEvent.click(screen.getByRole("button", { name: "更新" }));
+      await waitFor(() => expect(screen.queryByText("编辑 OAuth 模型")).toBeNull());
+      expect(apiPut).toHaveBeenCalledWith("/config/models/profiles/subscription", expect.objectContaining({
+        model, max_context_tokens: 131072, input_modalities: ["video", "audio"], max_output_tokens: 8192,
+      }), { direct: true });
+      expect(apiPut.mock.lastCall?.[1]).not.toHaveProperty("api_key");
+      expect(apiPut.mock.lastCall?.[1]).not.toHaveProperty("default_input_modalities");
+      view.unmount();
+      render(<ProviderSettings />);
+      fireEvent.click(await screen.findByTitle("编辑"));
+      expect((screen.getByRole("spinbutton") as HTMLInputElement).value).toBe("131072");
+      expect((screen.getByRole("checkbox", { name: "文本" }) as HTMLInputElement).checked).toBe(false);
+      expect((screen.getByRole("checkbox", { name: "图片" }) as HTMLInputElement).checked).toBe(false);
+      expect((screen.getByRole("checkbox", { name: "视频" }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("checkbox", { name: "音频" }) as HTMLInputElement).checked).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: /高级配置/ }));
+      expect((screen.getByRole("spinbutton", { name: "最大输出长度（tokens）" }) as HTMLInputElement).value).toBe("8192");
+      fireEvent.click(screen.getByRole("button", { name: "恢复自动" }));
+      expect((screen.getByRole("checkbox", { name: "文本" }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("checkbox", { name: "图片" }) as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByRole("checkbox", { name: "视频" }) as HTMLInputElement).checked).toBe(false);
+      expect((screen.getByRole("checkbox", { name: "音频" }) as HTMLInputElement).checked).toBe(false);
+      fireEvent.change(screen.getByRole("spinbutton", { name: "最大输出长度（tokens）" }), { target: { value: "" } });
+      fireEvent.click(screen.getByRole("button", { name: "更新" }));
+      await waitFor(() => expect(screen.queryByText("编辑 OAuth 模型")).toBeNull());
+      expect(apiPut.mock.lastCall?.[1]).toMatchObject({ input_modalities: null, max_output_tokens: 0 });
+    },
+  );
+
+  it("validates context limits and preserves the OAuth draft after a failed save", async () => {
+    profiles = [{ ...profile("subscription", "antigravity/gemini-3-pro"), api_key: "" }];
+    active = "subscription";
+    function ProviderSettings() {
+      const settings = useAdminModelSettings();
+      return <AdminModelContext.Provider value={settings}><ProviderSection /></AdminModelContext.Provider>;
+    }
+    render(<ProviderSettings />);
+    fireEvent.click(await screen.findByTitle("编辑"));
+    const context = screen.getByRole("spinbutton");
+    fireEvent.change(context, { target: { value: "-1" } });
+    expect((screen.getByRole("button", { name: "更新" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(apiPut).not.toHaveBeenCalled();
+    fireEvent.change(context, { target: { value: "32768" } });
+    fireEvent.click(screen.getByRole("button", { name: /高级配置/ }));
+    const output = screen.getByRole("spinbutton", { name: "最大输出长度（tokens）" });
+    fireEvent.change(output, { target: { value: "1.5" } });
+    expect((screen.getByRole("button", { name: "更新" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(output, { target: { value: "4096" } });
+    apiPut.mockRejectedValueOnce(new Error("写入失败"));
+    fireEvent.click(screen.getByRole("button", { name: "更新" }));
+    await screen.findByText("写入失败");
+    expect(screen.getByText("编辑 OAuth 模型")).toBeTruthy();
+    expect((context as HTMLInputElement).value).toBe("32768");
+    expect((output as HTMLInputElement).value).toBe("4096");
+    fireEvent.click(screen.getByRole("button", { name: "更新" }));
+    await waitFor(() => expect(screen.queryByText("编辑 OAuth 模型")).toBeNull());
+    expect(profiles[0].max_context_tokens).toBe(32768);
+    expect(profiles[0].max_output_tokens).toBe(4096);
+  });
+
+  it("keeps the diagnostics vision toggle consistent with profile modality", async () => {
+    profiles = [{ ...profile("subscription", "openai-codex/gpt-6-astra"), api_key: "", max_context_tokens: 65536, input_modalities: ["text", "image", "audio", "video"] }];
+    const { result } = renderHook(useAdminModelSettings);
+    await waitFor(() => expect(result.current.config?.profiles).toHaveLength(1));
+    act(() => result.current.beginEditProfile(profiles[0]));
+    act(() => result.current.setProfileDraft((draft) => ({ ...draft, description: "未保存备注" })));
+    await act(() => result.current.handleCapToggle("subscription", profiles[0].model, profiles[0].base_url, "supports_vision", false));
+    expect(profiles[0].input_modalities).toEqual(["text", "audio", "video"]);
+    expect(profiles[0].max_context_tokens).toBe(65536);
+    expect(result.current.profileDraft.input_modalities).toEqual(["text", "audio", "video"]);
+    expect(result.current.profileDraft.description).toBe("未保存备注");
+    expect(apiPut.mock.lastCall?.[1]).not.toHaveProperty("api_key");
+  });
+
   it("toggles Fast from the model row, persists both states and preserves connection settings", async () => {
     profiles = [{ ...profile("codex proxy", "gpt-6-astra"), protocol: "openai-responses", canonical_model: "gpt-6-astra", custom_extra_body: '{"temperature":0.5}' }];
     active = "codex proxy";
@@ -111,6 +210,7 @@ describe("model configuration lifecycle", () => {
   });
 
   it("serializes Fast toggles and keeps the saved mode unchanged on failure", async () => {
+    profiles = [profile("original", "gpt-6-astra")];
     const pending = deferred<object>();
     apiPut.mockReturnValueOnce(pending.promise);
     const { result } = renderHook(useAdminModelSettings);
@@ -133,6 +233,7 @@ describe("model configuration lifecycle", () => {
   });
 
   it("keeps an open editor's Fast setting in sync without overwriting its unsaved fields", async () => {
+    profiles = [profile("original", "gpt-6-astra")];
     const { result } = renderHook(useAdminModelSettings);
     await waitFor(() => expect(result.current.config?.profiles).toHaveLength(1));
     act(() => result.current.beginEditProfile(result.current.config!.profiles[0]));
@@ -197,7 +298,7 @@ describe("model configuration lifecycle", () => {
     await waitFor(() => expect(result.current.config).not.toBeNull());
     act(() => { result.current.setNewProfile(true); result.current.setProfileDraft(profile("new")); });
     apiPost.mockReturnValueOnce(pending.promise);
-    let save!: Promise<void>;
+    let save!: Promise<string | null>;
     act(() => { save = result.current.handleAddProfile(); void result.current.handleAddProfile(); });
     expect(apiPost).toHaveBeenCalledTimes(1);
     expect(result.current.addingProfile).toBe(true);

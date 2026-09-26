@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import {
   codexOAuthStart,
   codexOAuthExchange,
@@ -238,7 +239,7 @@ export function CodexOAuthCard({
                         <p>1. 运行 <code className="px-0.5 rounded bg-background font-mono">codex login</code></p>
                         <p>2. 复制 <code className="px-0.5 rounded bg-background font-mono">~/.codex/auth.json</code></p>
                       </div>
-                      <textarea aria-label="已有账号凭证 JSON" autoComplete="off" spellCheck={false} disabled={busy} value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} className="w-full h-14 rounded-md border border-input bg-background px-2 py-1 text-[11px] font-mono resize-none" placeholder='{"token":"...","refresh_token":"..."}' />
+                      <Textarea aria-label="已有账号凭证 JSON" autoComplete="off" spellCheck={false} disabled={busy} value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} className="h-14 min-h-[3.5rem] resize-none rounded-lg px-2 py-1 text-[11px] font-mono" placeholder='{"token":"...","refresh_token":"..."}' />
                       <Button size="sm" variant="outline" className="h-8 text-[11px]" onClick={handleManualConnect} disabled={busy || !tokenInput.trim()}>
                         {connecting ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}导入并连接
                       </Button>

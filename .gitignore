@@ -97,6 +97,12 @@ docs/research/
 # 保留 docs/ 下的对外文档（README 导航、配置参考、运维手册、Skillpack 协议、
 # 隐私政策、用户服务协议、提示词分层、服务器登录保护、技能装载）及其 _en 版本。
 docs/design/
+analysis/
+docs/diagnostics/
+docs/task-retro-*.md
+docs/field_naming_audit.md
+docs/settings-design.md
+docs/tool-call-state.md
 docs/agent-*.md
 docs/architecture-*.md
 docs/audit_*.md

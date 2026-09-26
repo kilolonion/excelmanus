@@ -47,11 +47,13 @@ import {
   type NativeRibbonTab,
 } from "@/lib/excel-ribbon-actions";
 import { getUniverModules } from "@/lib/univer-modules";
+import { workbookLoadFailure, workbookLoadRetryDelay, shouldRetryWorkbookLoad, type WorkbookLoadFailure } from "@/lib/workbook-load-error";
 import type { WorkbookViewState } from "@/stores/workbook-conversation-store";
 import { registerAgentContextMenu, type AgentMenuSelection } from "@/lib/excel-agent-menu";
 import { useWorkbookWorkflowStore } from "@/stores/workbook-workflow-store";
 import { captureWorkbookParameters, workbookCommandRange, workbookOperationKind } from "@/lib/workbook-handoff";
 import { WorkbookLoadingState } from "./WorkbookLoadingState";
+import { WorkbookDrawingOverlay } from "./WorkbookDrawingOverlay";
 
 export { prefetchUniverModules, warmUniverModules } from "@/lib/univer-modules";
 
@@ -207,6 +209,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   const onViewStateRef = useRef(onViewState);
   onViewStateRef.current = onViewState;
   const containerRef = useRef<HTMLDivElement>(null);
+  const overlayRootRef = useRef<HTMLDivElement>(null);
   const univerRef = useRef<FUniver | null>(null);
   const highlightRegistryRef = useRef<WorkbookHighlightRegistry | null>(null);
   const workbookIdRef = useRef<string>(createPreviewWorkbookId());
@@ -240,6 +243,9 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   const sheetNamesRef = useRef(new Map<string, string>());
   const filePathRef = useRef("");
   const initialSheetRef = useRef(initialSheet);
+  // 自动重试预算按“文件身份”记账：换文件从零开始，成功后清零。
+  const loadRetryRef = useRef<{ key: string; attempt: number }>({ key: "", attempt: 0 });
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const change = useExcelStore((s) => fileRef ? s.workbookChanges[versionStoreKey(fileRef.relative, fileRef.workspaceKey)] : undefined);
   onCellEditRef.current = onCellEdit;
   readOnlyRef.current = readOnly;
@@ -834,8 +840,10 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
 
         if (loadVersion !== loadVersionRef.current) return;
 
+        loadRetryRef.current = { key: filePath, attempt: 0 };
         setLoading(false);
         setSyncing(false);
+        setWindowStatus(null);
         reportView?.({ status: "ready", sheet: nextSheet?.getSheetName?.() || view.active_sheet || view.regions[0]?.sheet, version: view.content_version });
         if (fileRef && isWorkbookEditPaused(fileRef)) {
           setError("此文件仍有未保存的编辑草稿，可先导出草稿，再重新加载核对。");
@@ -852,8 +860,34 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
           return;
         }
         console.error("Error loading Excel data:", err);
-        reportView?.({ status: "error", error: err instanceof Error ? err.message : "加载失败" });
-        setError(err instanceof Error ? err.message : "加载失败");
+        const failure: WorkbookLoadFailure = workbookLoadFailure(err);
+        // 服务重启、写入竞争、版本失效都能自愈：先按预算自动重读，
+        // 而不是把一个可恢复的故障永久钉成面板错误。
+        const attempt = loadRetryRef.current.key === filePath ? loadRetryRef.current.attempt : 0;
+        // 隐藏的面板不排队重试：留在加载态会让它永远不显示结果。
+        if (activeRef.current && univerRef.current && shouldRetryWorkbookLoad(failure.kind, attempt)) {
+          loadRetryRef.current = { key: filePath, attempt: attempt + 1 };
+          setError(null);
+          setWindowStatus(failure.kind === "missing" ? "文件暂时不可读，正在重试…" : "正在重新连接表格服务…");
+          if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+          retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = null;
+            if (loadVersion === loadVersionRef.current) void loadDataRef.current(providedApi);
+          }, workbookLoadRetryDelay(attempt));
+          return;
+        }
+        setWindowStatus(null);
+        if (failure.confirmedMissing && fileRef) {
+          // 后端确认路径不可读：退役这个目标（关闭陈旧标签、清最近打开与视图缓存），
+          // 让面板回到空状态，而不是继续渲染一个永远读不出来的表格。
+          reportView?.({ status: "error", error: failure.message });
+          setLoading(false);
+          setSyncing(false);
+          useExcelStore.getState().dropMissingWorkbook(fileRef.relative, fileRef.workspaceKey);
+          return;
+        }
+        reportView?.({ status: "error", error: failure.message });
+        setError(failure.message);
         setLoading(false);
         setSyncing(false);
       } finally {
@@ -1092,11 +1126,15 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
     viewRef.current = null;
     setViewContentVersion(null);
     needsRefreshRef.current = false;
+    // 换文件/换工作区即重置自动重试预算，避免上一份文件的失败预算漏到下一份。
+    loadRetryRef.current = { key: "", attempt: 0 };
+    if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
     if (activeRef.current) void loadData();
     return () => {
       requestRef.current?.abort();
       windowRequestRef.current?.abort();
       loadVersionRef.current += 1;
+      if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
       if (boundFile) void flushWorkbookEdits(boundFile);
     };
   }, [filePath, fileRef?.workspaceKey, fileRef?.workspaceId, sessionId, viewGeneration, engineAttempt, loadData]);
@@ -1403,7 +1441,7 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
   });
 
   return (
-    <div className={`relative isolate w-full h-full ${fitContainer ? "min-h-0" : "min-h-[400px]"} bg-white dark:bg-gray-800`} data-workbook-loading={loading || undefined} aria-busy={loading}>
+    <div ref={overlayRootRef} className={`relative isolate w-full h-full ${fitContainer ? "min-h-0" : "min-h-[400px]"} bg-white dark:bg-gray-800`} data-workbook-loading={loading || undefined} aria-busy={loading}>
       <div
         ref={containerRef}
         className="w-full h-full bg-white dark:bg-gray-800"
@@ -1411,6 +1449,11 @@ export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highl
         style={{ position: "relative", visibility: (viewRef.current && (isDemoPath(filePath) || !fileRef || viewMatchesLease(viewRef.current, fileRef))) || loadingShellKey === loadingFileKey(fileRef, filePath) ? "visible" : "hidden" }}
         {...(isMobile && selectionMode ? touchGestureHandlers : {})}
       />
+      {!loading && !error && viewRef.current && univerRef.current && (
+        <div className="pointer-events-none absolute inset-0 z-[11] overflow-hidden" aria-hidden="true">
+          <WorkbookDrawingOverlay api={univerRef.current} view={viewRef.current} container={overlayRootRef.current} fileRef={identityRef.current.fileRef} sessionId={identityRef.current.sessionId} />
+        </div>
+      )}
       {!loading && !error && presentationNotice(viewRef.current) && (
         <div role="status" className="absolute bottom-10 left-3 right-3 z-20 rounded border bg-background/95 px-3 py-1 text-xs text-muted-foreground">
           {presentationNotice(viewRef.current)}

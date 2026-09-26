@@ -168,8 +168,81 @@ ChildProcess(['echo', 'must-not-run'])
         """回归测试：matplotlib.pyplot 依赖 socket，确保 GREEN 沙盒不拦截。"""
         code = "import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt; print('pyplot_ok')"
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
+        assert result.returncode == 0, result.stderr
         assert "pyplot_ok" in result.stdout
+
+    @pytest.mark.parametrize("tier", ["GREEN", "YELLOW"])
+    def test_matplotlib_cold_cache_saves_png_without_subprocess(
+        self, workspace: Path, tier: str,
+    ) -> None:
+        """冷/热缓存均能出图；字体探测降级不放行任何外部命令。"""
+        cache = workspace / ".tmp" / "matplotlib"
+        cache.mkdir(parents=True)
+        assert list(cache.iterdir()) == []
+        output = workspace / "plot.png"
+        code = f'''import sys, subprocess
+from pathlib import Path
+
+def reject_process_audit(event, args):
+    if event in ('subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.exec', 'os.fork'):
+        raise AssertionError('A process launch reached the audit hook: ' + event)
+
+sys.addaudithook(reject_process_audit)
+blocked_functions = ('Popen', 'run', 'call', 'check_call', 'check_output')
+commands = (
+    [sys.executable, '-c', "raise SystemExit('must-not-run')"],
+    ['fc-list', '--help'],
+    ['fc-list', '--format=%{{file}}'],
+    ['system_profiler', '-xml', 'SPFontsDataType'],
+)
+
+def assert_processes_blocked():
+    for name in blocked_functions:
+        for command in commands:
+            try:
+                getattr(subprocess, name)(command)
+            except RuntimeError as exc:
+                assert 'subprocess.' + name + '() 被安全策略禁止' in str(exc)
+            else:
+                raise AssertionError('Subprocess guard relaxed: ' + name)
+
+assert_processes_blocked()
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
+assert Path(matplotlib.get_cachedir()) == Path({str(cache)!r})
+# Exercise both optional probe paths on every platform, including warm caches.
+for name in ('_get_fontconfig_fonts', '_get_macos_fonts'):
+    probe = getattr(font_manager, name)
+    probe.cache_clear()
+    assert probe() == []
+font = font_manager.findfont('DejaVu Sans', fallback_to_default=False)
+assert Path(font).is_file()
+fig, ax = plt.subplots()
+ax.plot([0, 1, 2], [1, 3, 2])
+ax.set_title('Cold cache PNG')
+fig.savefig({str(output)!r}, format='png')
+plt.close(fig)
+assert Path({str(output)!r}).read_bytes().startswith(bytes([137, 80, 78, 71, 13, 10, 26, 10]))
+assert_processes_blocked()
+print('png_and_process_guards_ok')
+'''
+        env = {
+            "MPLCONFIGDIR": str(cache),
+            "XDG_CACHE_HOME": str(workspace / ".tmp" / "xdg-cache"),
+            # Do not let an inherited setting skip the probes under test.
+            "MPL_IGNORE_SYSTEM_FONTS": "",
+        }
+        for _ in range(2):
+            result = _run_in_sandbox(workspace, code, tier, env_override=env)
+            assert result.returncode == 0, result.stderr
+            assert "png_and_process_guards_ok" in result.stdout
+            assert list(cache.glob("fontlist-v*.json")), result.stderr
+            assert not output.exists(), "PNG writes must still use pending storage"
+            pending = list((workspace / ".excelmanus" / "pending").rglob("*_plot.png"))
+            assert len(pending) == 1
+            assert pending[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
     def test_safe_import_allowed(self, workspace: Path) -> None:
         result = _run_in_sandbox(workspace, "import json\nprint(json.dumps({'ok': True}))", "GREEN")
@@ -544,7 +617,7 @@ class TestSaveContentVersion:
             },
         )
         assert result.returncode != 0
-        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
+        assert "工作区表格禁止直接保存" in result.stderr
         from openpyxl import load_workbook
         wb2 = load_workbook(str(target))
         assert wb2.active["A1"].value == "external"
@@ -563,7 +636,7 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
+        assert "工作区表格禁止直接保存" in result.stderr
         assert not xlsx.exists()
         assert _parse_pending_writes(result.stderr) == []
 
@@ -587,7 +660,7 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
+        assert "工作区表格禁止直接保存" in result.stderr
         from openpyxl import load_workbook
         orig = load_workbook(str(target))
         assert orig.active["A1"].value == "initial"
@@ -639,7 +712,7 @@ class TestSaveContentVersion:
             env_override={"EXCELMANUS_SAVE_VERSIONS_LOG": str(log)},
         )
         assert result.returncode != 0
-        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
+        assert "工作区表格禁止直接保存" in result.stderr
         assert not log.exists()
         assert not xlsx.exists()
 
@@ -681,7 +754,7 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
+        assert "工作区表格禁止直接保存" in result.stderr
         assert not target.exists()
 
 
@@ -699,7 +772,7 @@ class TestYellowIoWrappers:
         )
         result = _run_in_sandbox(workspace, code, "YELLOW")
         assert result.returncode != 0
-        assert "em.apply_spreadsheet_changes" in result.stderr or "em.apply_spreadsheet_changes" in result.stderr
+        assert "工作区表格禁止直接保存" in result.stderr
         assert target.read_bytes() == b"original-xlsx"
 
     def test_os_replace_xlsx_does_not_replace_original(self, workspace: Path) -> None:
@@ -908,3 +981,128 @@ class TestRealpathLstatNoRecursion:
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode == 0, result.stderr
         assert "DONE" in result.stdout
+
+
+def _write_fake_sdk(workspace: Path, tool_names: list[str]) -> Path:
+    """写一个最小 em SDK：只有列出的函数名，用于验证文案按真实 API 生成。"""
+    sdk = workspace / "em_sdk_probe.py"
+    body = ["def _stub(*args, **kwargs):", "    return None", ""]
+    body.extend(f"{name} = _stub" for name in tool_names)
+    sdk.write_text("\n".join(body) + "\n", encoding="utf-8")
+    return sdk
+
+
+def _save_xlsx_code(target: Path) -> str:
+    return (
+        "from openpyxl import Workbook\n"
+        "wb = Workbook()\n"
+        "wb.active['A1'] = 'x'\n"
+        f"wb.save(r'{target}')\n"
+    )
+
+
+class TestWorkbookBypassMessage:
+    """拒绝文案必须依据本次 run_code 真实可用的 em API 生成。
+
+    回归：真实会话里 em 没有 apply_spreadsheet_changes（csv-only 目录门控），
+    但文案却让模型去调用它，导致约 20 轮无效探索。
+    """
+
+    def test_recommends_writer_only_when_sdk_provides_it(self, workspace: Path) -> None:
+        out = workspace / "outputs"
+        out.mkdir()
+        target = out / "writer.xlsx"
+        sdk = _write_fake_sdk(
+            workspace,
+            ["apply_spreadsheet_changes", "split_spreadsheet", "convert_spreadsheet"],
+        )
+        result = _run_in_sandbox(
+            workspace,
+            _save_xlsx_code(target),
+            "GREEN",
+            env_override={"EXCELMANUS_CODE_MODE_SDK": str(sdk)},
+        )
+        assert result.returncode != 0
+        assert "工作区表格禁止直接保存" in result.stderr
+        assert "请用 em.apply_spreadsheet_changes" in result.stderr
+        # 写工具已可用时不再引导 bootstrap 流程
+        assert "确定性解锁" not in result.stderr
+        assert not target.exists()
+
+    def test_csv_only_workspace_explains_gate_and_bootstrap(self, workspace: Path) -> None:
+        uploads = workspace / "uploads"
+        uploads.mkdir()
+        (uploads / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        out = workspace / "outputs"
+        out.mkdir()
+        target = out / "csv_only.xlsx"
+        sdk = _write_fake_sdk(
+            workspace, ["convert_spreadsheet", "query_spreadsheet", "split_spreadsheet"]
+        )
+        result = _run_in_sandbox(
+            workspace,
+            _save_xlsx_code(target),
+            "GREEN",
+            env_override={"EXCELMANUS_CODE_MODE_SDK": str(sdk)},
+        )
+        assert result.returncode != 0
+        stderr = result.stderr
+        assert "工作区表格禁止直接保存" in stderr
+        # 明确否定，不再把不存在的 API 当推荐
+        assert "em.apply_spreadsheet_changes 不在本次 em API 中" in stderr
+        assert "请用 em.apply_spreadsheet_changes" not in stderr
+        assert "csv-only profile 门控" in stderr
+        # 只提真实存在的替代工具 + 落盘位置 + 下一轮解锁
+        assert "em.convert_spreadsheet(file_path=" in stderr
+        assert "em.query_spreadsheet(sources=" in stderr
+        assert "outputs/" in stderr
+        assert "下一轮" in stderr
+        assert not target.exists()
+
+    def test_never_invents_tools_absent_from_sdk(self, workspace: Path) -> None:
+        out = workspace / "outputs"
+        out.mkdir()
+        target = out / "phantom.xlsx"
+        # SDK 只有 convert_spreadsheet：文案不得推荐 apply/split/query
+        sdk = _write_fake_sdk(workspace, ["convert_spreadsheet"])
+        result = _run_in_sandbox(
+            workspace,
+            _save_xlsx_code(target),
+            "GREEN",
+            env_override={"EXCELMANUS_CODE_MODE_SDK": str(sdk)},
+        )
+        assert result.returncode != 0
+        stderr = result.stderr
+        assert "请用 em.apply_spreadsheet_changes" not in stderr
+        assert "em.split_spreadsheet" not in stderr
+        assert "em.query_spreadsheet" not in stderr
+        assert "em.convert_spreadsheet" in stderr
+        assert not target.exists()
+
+    def test_without_sdk_message_stays_generic(self, workspace: Path) -> None:
+        out = workspace / "outputs"
+        out.mkdir()
+        target = out / "no_sdk.xlsx"
+        result = _run_in_sandbox(workspace, _save_xlsx_code(target), "GREEN")
+        assert result.returncode != 0
+        stderr = result.stderr
+        assert "工作区表格禁止直接保存" in stderr
+        assert "未注入 em SDK" in stderr
+        # 没有 em 时不得推荐任何 em.* 调用
+        assert "请用 em." not in stderr
+        assert not target.exists()
+
+    def test_csv_only_without_sdk_still_explains_bootstrap(self, workspace: Path) -> None:
+        uploads = workspace / "uploads"
+        uploads.mkdir()
+        (uploads / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        out = workspace / "outputs"
+        out.mkdir()
+        target = out / "no_sdk_csv.xlsx"
+        result = _run_in_sandbox(workspace, _save_xlsx_code(target), "GREEN")
+        assert result.returncode != 0
+        stderr = result.stderr
+        assert "csv-only profile 门控" in stderr
+        assert "确定性解锁" in stderr
+        assert "outputs/" in stderr
+        assert not target.exists()

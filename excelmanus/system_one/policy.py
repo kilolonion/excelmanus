@@ -73,6 +73,11 @@ class JevSettings:
     verification: GateLevel = "enforce"
     recovery: GateLevel = "enforce"
     provider_id: str = ""
+    # The experimental switch is the product-level kill switch for the whole
+    # Jev decision plane. Keep it separate from ``jev_enabled`` so disabling
+    # the UI also stops backend evaluations while preserving the saved Jev
+    # provider/gate configuration for a later re-enable.
+    experimental_enabled: bool = False
 
 
 def noul_of(answer: Answer | None, default: float = 0.5) -> float:
@@ -126,6 +131,7 @@ def settings_from(config: Any | None = None) -> JevSettings:
         observation = str(getattr(config, "jev_observation", "enforce") or "enforce")
         verification = str(getattr(config, "jev_verification", "enforce") or "enforce")
         return JevSettings(
+            experimental_enabled=bool(getattr(config, "jev_experimental_enabled", False)),
             enabled=_as_gate(enabled),
             exposure=_as_gate(exposure),
             mode_hint=bool(getattr(config, "jev_mode_hint", True)),
@@ -160,6 +166,11 @@ def settings_from(config: Any | None = None) -> JevSettings:
         model_override=get_setting("EXCELMANUS_JEV_MODEL"),
     )
     return JevSettings(
+        experimental_enabled=_parse_bool(
+            get_setting("EXCELMANUS_JEV_EXPERIMENTAL_ENABLED"),
+            "EXCELMANUS_JEV_EXPERIMENTAL_ENABLED",
+            False,
+        ),
         enabled=_parse_jev_gate(get_setting("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "enforce"),  # type: ignore[arg-type]
         exposure=_parse_jev_gate(get_setting("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "enforce"),  # type: ignore[arg-type]
         mode_hint=_parse_bool(get_setting("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", True),
@@ -211,8 +222,8 @@ def jev_key_configured(settings: JevSettings) -> bool:
 
 
 def jev_is_active(settings: JevSettings) -> bool:
-    """对话与 loop 是否接入 Jev：总闸开且密钥已配。"""
-    return settings.enabled != "off" and jev_key_configured(settings)
+    """对话与 loop 是否接入 Jev：实验性开关、总闸和密钥都必须满足。"""
+    return settings.experimental_enabled and settings.enabled != "off" and jev_key_configured(settings)
 
 
 def live_jev_config(config: Any | None = None) -> Any:
@@ -240,6 +251,11 @@ def effective_flag(master: GateLevel, enabled: bool) -> GateLevel:
 
 
 def gate_for_pack(pack_id: str, settings: JevSettings) -> GateLevel:
+    # The experimental switch is the outermost gate.  This keeps every pack
+    # quiet (including direct ``evaluate`` callers) while retaining the saved
+    # Jev configuration for when the feature is enabled again.
+    if not settings.experimental_enabled:
+        return "off"
     spec = get_pack(pack_id)
     if spec.gate == "master":
         return settings.enabled

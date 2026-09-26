@@ -130,6 +130,7 @@ def test_pbt_property_2_new_task_list_all_pending(
 # 合法转换集合
 _LEGAL_TRANSITIONS = {
     (TaskStatus.PENDING, TaskStatus.IN_PROGRESS),
+    (TaskStatus.PENDING, TaskStatus.COMPLETED),
     (TaskStatus.IN_PROGRESS, TaskStatus.COMPLETED),
     (TaskStatus.IN_PROGRESS, TaskStatus.FAILED),
 }

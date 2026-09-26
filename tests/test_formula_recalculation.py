@@ -45,20 +45,23 @@ def converted_output(conversion, data):
 
 
 def workbook_bytes():
-    wb = Workbook()
-    wb.active["A1"] = "# customer reference"
-    wb.active["A2"] = "=1+1"
+    import xlsxwriter
     stream = io.BytesIO()
-    wb.save(stream)
-    wb.close()
+    with xlsxwriter.Workbook(stream) as wb:
+        ws = wb.add_worksheet("Sheet")
+        ws.write("A1", "# customer reference")
+        ws.write_formula("A2", "=1+1", None, 2)
     return stream.getvalue()
 
 
 def test_conversion_uses_isolated_registered_process(conversion):
     output = workbook_bytes()
     converted_output(conversion, output)
-    data, result = workbook_commit.recalculate_workbook_bytes(b"original")
-    assert data == output
+    data, result = workbook_commit.recalculate_workbook_bytes(output)
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), data_only=True)
+    assert wb.active["A2"].value == 2
+    wb.close()
     assert result["status"] == "recalculated"
     assert result["formula_count"] == 1
     assert result["error_count"] == 0  # '# customer reference' is normal text.
@@ -121,7 +124,7 @@ def test_formula_error_cells_are_reported(conversion):
     wb.save(stream)
     wb.close()
     converted_output(conversion, stream.getvalue())
-    _, result = workbook_commit.recalculate_workbook_bytes(b"original")
+    _, result = workbook_commit.recalculate_workbook_bytes(stream.getvalue())
     assert result["status"] == "recalculated"
     assert result["errors"] == ["Sheet!A1:#DIV/0!"]
 

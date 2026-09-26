@@ -15,7 +15,7 @@ describe("workbook controls in system settings", () => {
     preferences.getState().setAutoReturnToChat(true);
     preferences.getState().setLearnFromNavigation(true);
     render(<RuntimeTab />);
-    await screen.findByText("无法获取系统配置");
+    await screen.findByRole("button", { name: "重新加载" });
     const autoReturn = screen.getByRole("switch", { name: "发送后返回对话" });
     expect(autoReturn.getAttribute("aria-checked")).toBe("true");
     fireEvent.click(autoReturn);

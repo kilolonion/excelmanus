@@ -223,6 +223,7 @@ ExcelManus 是单用户软件。多个工作区和会话共用进程级模型凭
 
 | 技能 | 用途 |
 | --- | --- |
+| `spreadsheet_workflow` | ExcelManus V2 表格任务的观察、分析、变更、重算、校验、预览与交付闭环 |
 | `data_basic` | 数据读取、分析、筛选与转换 |
 | `chart_basic` | 工作簿图表与图片导出 |
 | `format_basic` | 样式、条件格式与排版 |

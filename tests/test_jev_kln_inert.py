@@ -34,6 +34,7 @@ def _config(**overrides: object) -> ExcelManusConfig:
         max_consecutive_failures=3,
         workspace_root=str(Path(__file__).resolve().parent),
         ai_gateway_api_key="vck_test",
+        jev_experimental_enabled=True,
         **overrides,
     )
 

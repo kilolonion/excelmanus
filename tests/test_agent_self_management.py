@@ -22,7 +22,7 @@ SYSTEM_SKILLS = Path(__file__).resolve().parents[1] / "excelmanus/skillpacks/sys
 
 @pytest.fixture
 def make_engine(tmp_path):
-    def make(*, enabled=True, config=None):
+    def make(*, enabled=True, config=None, tools=()):
         config = config or ExcelManusConfig(
             api_key="DO-NOT-EXPOSE-PRIMARY-SECRET", base_url="https://example.test/v1", model="test-model",
             workspace_root=str(tmp_path), memory_enabled=False,
@@ -36,6 +36,8 @@ def make_engine(tmp_path):
             name="list_directory", description="test reader", func=lambda: "ok",
             input_schema={"type": "object", "properties": {}}, write_effect="none",
         ))
+        for extra in tools:
+            registry.register_tool(extra)
         loader = SkillpackLoader(config, registry)
         loader.load_all()
         engine = AgentEngine(config, registry, skill_router=SkillRouter(config, loader))
@@ -45,6 +47,15 @@ def make_engine(tmp_path):
             engine._active_skills = [skill]
         return engine
     return make
+
+
+# CSV-only 目录里真正被文件族门控的工具已变为 trace_spreadsheet_formulas：
+# 工作簿写工具不再被门控（新建工作簿不依赖已有 xlsx，见 tests/test_effective_catalog.py）。
+PROFILE_GATED_TOOL = ToolDef(
+    name="trace_spreadsheet_formulas", description="test formula tracer",
+    func=lambda **kwargs: "ok", input_schema={"type": "object", "properties": {"file_path": {"type": "string"}}},
+    write_effect="none",
+)
 
 
 def call(engine, name="inspect_agent", *, actor="host", mode=None, session_id=None, **arguments):
@@ -187,13 +198,16 @@ def test_changes_apply_to_real_consumers_and_are_session_local(make_engine):
 
 def test_tool_disable_updates_all_catalogs_and_can_be_reversed(make_engine):
     engine = make_engine()
-    assert call(engine, "configure_agent", disable_tools=["list_directory"], reason="暂停").success
+    disabled = call(engine, "configure_agent", disable_tools=["list_directory"], reason="暂停")
+    assert disabled.success
+    assert disabled.value["name_reasons"]["list_directory"]["reason"] == "disabled"
     assert "list_directory" not in execution_catalog_from_engine(engine).names()
     assert "list_directory" not in catalog_from_engine(engine).names()
     assert "list_directory" not in engine._registry.effective_catalog().names()
     assert "list_directory" in call(engine).value["capabilities"]["disabled_tools"]
     result = call(engine, "configure_agent", enable_tools=["list_directory"], reason="恢复")
     assert result.success
+    assert result.value["name_reasons"]["list_directory"]["reason"] == "enabled"
     assert "list_directory" in result.value["enabled_tools"]
     assert "list_directory" in execution_catalog_from_engine(engine).names()
 
@@ -203,9 +217,82 @@ def test_reenable_cannot_expand_host_scope(make_engine):
     engine._fixed_capability = replace(binding_from_engine(engine).capability,
                                        disallowed_tools=frozenset({"list_directory"}))
     result = call(engine, "configure_agent", enable_tools=["list_directory"], reason="恢复")
-    assert result.success
-    assert result.value["enabled_tools"] == []
+    # 宿主授权排除该工具时"启用"不可能生效：必须是非成功回执 + 逐名原因，
+    # 而不是 enabled_tools 为空的 success 误导性回执。
+    assert not result.success
+    assert result.value["status"] != "success"
+    assert result.value["outcome"] == "no_op"
+    row = result.value["name_reasons"]["list_directory"]
+    assert row["reason"] == "unauthorized" and row["effective"] is False
     assert "list_directory" not in execution_catalog_from_engine(engine).names()
+    assert not getattr(engine, "_self_disabled_tools", set())
+
+
+def test_enable_profile_gated_tool_is_no_op_with_actionable_reason(make_engine, tmp_path):
+    """真实会话复现：CSV-only 目录里 enable 被门控工具曾返回空 changes 的 success。
+
+    门控对象现为 trace_spreadsheet_formulas（写工具不再按 CSV profile 门控）。
+    """
+    (tmp_path / "广告与销售数据.csv").write_text("投入,销售额\n2.5,18.2\n", encoding="utf-8")
+    engine = make_engine(tools=[PROFILE_GATED_TOOL])
+    original = engine.config
+    assert "trace_spreadsheet_formulas" not in execution_catalog_from_engine(engine).names()
+    result = call(engine, "configure_agent", enable_tools=["trace_spreadsheet_formulas"],
+                  reason="任务需要追踪公式依赖")
+    assert not result.success
+    assert result.value["status"] != "success"
+    assert result.value["outcome"] == "no_op" and result.value["error_code"] == "NOOP"
+    assert result.value["changes"] == {}
+    row = result.value["name_reasons"]["trace_spreadsheet_formulas"]
+    assert row["reason"] == "gated_by_profile" and row["effective"] is False
+    assert "xlsx" in row["alternative"]
+    # 请求没有生效，也没有留下任何状态变化
+    assert engine.config is original
+    assert not getattr(engine, "_self_disabled_tools", set())
+    assert "trace_spreadsheet_formulas" not in execution_catalog_from_engine(engine).names()
+
+
+def test_unknown_and_not_paused_names_never_return_empty_success(make_engine):
+    engine = make_engine()
+    original = engine.config
+    unknown = call(engine, "configure_agent", changes={"parallel_tool_max": 2}, reason="test",
+                   enable_tools=["apply_spreadsheet_changes"])
+    assert not unknown.success
+    assert unknown.value["status"] != "success"
+    assert unknown.value["error_code"] == "INVALID_ARGS"
+    assert unknown.value["unknown_tools"] == ["apply_spreadsheet_changes"]
+    assert unknown.value["name_reasons"]["apply_spreadsheet_changes"]["reason"] == "unknown"
+    not_paused = call(engine, "configure_agent", changes={"parallel_tool_max": 2}, reason="并发+恢复",
+                      enable_tools=["list_directory"])
+    assert not not_paused.success
+    assert not_paused.value["outcome"] == "no_op"
+    row = not_paused.value["name_reasons"]["list_directory"]
+    assert row["reason"] == "not_paused" and row["effective"] is False
+    # 只要有一个工具名不生效，整条请求都不生效（不做部分生效）
+    assert engine.config is original
+    assert engine._config.parallel_tool_max == 4
+    assert "list_directory" in execution_catalog_from_engine(engine).names()
+
+
+def test_disable_already_unavailable_tool_is_no_op(make_engine, tmp_path):
+    (tmp_path / "data.csv").write_text("a\n1\n", encoding="utf-8")
+    engine = make_engine(tools=[PROFILE_GATED_TOOL])
+    result = call(engine, "configure_agent", disable_tools=["trace_spreadsheet_formulas"], reason="确保关闭")
+    assert not result.success
+    assert result.value["outcome"] == "no_op"
+    row = result.value["name_reasons"]["trace_spreadsheet_formulas"]
+    assert row["reason"] == "already_unavailable" and row["effective"] is False
+    assert not getattr(engine, "_self_disabled_tools", set())
+
+
+def test_unchanged_settings_are_reported_as_no_op(make_engine):
+    engine = make_engine()
+    original = engine.config
+    result = call(engine, "configure_agent", changes={"parallel_tool_max": 4}, reason="确保并发上限")
+    assert not result.success
+    assert result.value["outcome"] == "no_op" and result.value["unchanged_settings"] == ["parallel_tool_max"]
+    assert result.value["changed_settings"] == []
+    assert engine.config is original  # 无变更时连 config 对象都不替换
 
 
 def test_hot_disable_revokes_stale_tool_and_skill(make_engine):

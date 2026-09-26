@@ -117,7 +117,7 @@ export function useSubscriptionProvider(provider: string, profiles: ProfileEntry
       name, model: entry.public_model_id || `${provider}/${entry.model}`,
       base_url: preset.base_url, protocol: preset.protocol,
       thinking_mode: preset.thinking_mode, model_family: preset.model_family,
-      description: `${entry.display_name || entry.model} — ${preset.label} 订阅登录（无需 API Key）`,
+      description: `${preset.label} 订阅登录（无需 API Key）`,
     }));
   };
   const handleRemoveModel = (name: string) => perform(`remove:${name}`, () => deleteModelProfile(name));

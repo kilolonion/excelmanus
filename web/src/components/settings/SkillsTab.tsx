@@ -1,5 +1,6 @@
 "use client";
 
+import { SKILL_SETTING_GROUPS } from "./settings-catalog";
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import {
@@ -17,10 +18,6 @@ import {
   Download,
   CheckCircle2,
   Sparkles,
-  Bot,
-  Gauge,
-  Terminal,
-  Timer,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,7 +27,7 @@ import { settingsCache } from "@/lib/settings-cache";
 import { MiniCheckbox } from "@/components/ui/MiniCheckbox";
 import { isSettingsDemoActive, onSettingsDemoChange, DEMO_SKILLS } from "@/components/onboarding/demo-settings";
 import { SettingsEntityCard } from "@/components/settings/SettingsEntityCard";
-import { RuntimeSettingsPanel, type RuntimeSettingGroup } from "./RuntimeSettingsPanel";
+import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
 /* ── Types ── */
 
@@ -78,95 +75,7 @@ const SOURCE_LABELS: Record<string, string> = {
   project: "项目",
 };
 
-const SKILL_SETTING_GROUPS: RuntimeSettingGroup[] = [
-  {
-    title: "技能发现",
-    description: "选择 Agent 会从哪些兼容目录加载技能，以及每次激活技能时可注入的内容上限。",
-    icon: <Sparkles className="h-4 w-4" />,
-    items: [
-      {
-        key: "skills_discovery_enabled",
-        label: "自动发现兼容目录",
-        desc: "除内置和用户 / 项目目录外，还扫描其他工具常用的技能目录。",
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_discovery_include_agents",
-        label: "加载 .agents/skills",
-        desc: "扫描项目里的 .agents/skills 文件夹；此设置与子代理无关。",
-        disabledDesc: "开启自动发现兼容目录后可使用。",
-        disabledWhen: (settings) => !settings.skills_discovery_enabled,
-        icon: <Bot className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_discovery_scan_workspace_ancestors",
-        label: "扫描工作区上级目录",
-        desc: "从当前目录到项目根，逐层查找 .agents/skills。",
-        disabledDesc: "开启自动发现兼容目录后可使用。",
-        disabledWhen: (settings) => !settings.skills_discovery_enabled,
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_discovery_scan_external_tool_dirs",
-        label: "兼容 Claude 与 OpenClaw",
-        desc: "从用户目录与项目中的 Claude、OpenClaw 技能文件夹加载技能。",
-        disabledDesc: "开启自动发现兼容目录后可使用。",
-        disabledWhen: (settings) => !settings.skills_discovery_enabled,
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_context_char_budget",
-        label: "技能注入长度上限",
-        desc: "激活技能时注入对话的正文总字符上限；0 表示不限制。",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 100000,
-      },
-    ],
-  },
-  {
-    title: "技能 Hook",
-    description: "控制技能包是否可在任务事件中运行外部命令，以及命令的资源边界。",
-    icon: <Terminal className="h-4 w-4" />,
-    defaultOpen: false,
-    items: [
-      {
-        key: "hooks_command_enabled",
-        label: "允许 Hook 外部命令",
-        desc: "允许技能包在任务开始、用户提交、工具前后及子代理起止时运行已授权命令。",
-        icon: <Terminal className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "hooks_command_timeout_seconds",
-        label: "Hook 命令超时",
-        desc: "外部命令最长执行时间（秒）；超时会跳过且不影响主流程。",
-        disabledDesc: "允许 Hook 外部命令后可调整。",
-        disabledWhen: (settings) => !settings.hooks_command_enabled,
-        icon: <Timer className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 300,
-      },
-      {
-        key: "hooks_output_max_chars",
-        label: "Hook 输出上限",
-        desc: "外部命令返回内容可注入任务的最大字符数。",
-        disabledDesc: "允许 Hook 外部命令后可调整。",
-        disabledWhen: (settings) => !settings.hooks_command_enabled,
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 1000,
-        max: 100000,
-      },
-    ],
-  },
-];
+
 
 function DemoSkillsBanner() {
   const [active, setActive] = useState(isSettingsDemoActive);

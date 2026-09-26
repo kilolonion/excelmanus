@@ -6,6 +6,7 @@ UserConfigStore（进程级偏好，如 active_model）。
 from __future__ import annotations
 
 import logging
+import json
 import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
     from excelmanus.db_adapter import ConnectionAdapter
 
 logger = logging.getLogger(__name__)
+_UNSET = object()
 
 # 模块级单例，避免每次操作都重新派生密钥
 _api_key_cipher = TokenCipher()
@@ -89,12 +91,14 @@ class GlobalConfigStore:
         raw = d.get("api_key")
         if raw:
             d["api_key"] = _api_key_cipher.decrypt_or_passthrough(raw)
+        modalities = d.get("input_modalities")
+        d["input_modalities"] = json.loads(modalities) if modalities is not None else None
         return d
 
     _PROFILE_COLUMNS = (
         "name, model, api_key, base_url, description, protocol, "
         "thinking_mode, service_tier, model_family, custom_extra_body, custom_extra_headers, "
-        "canonical_model"
+        "canonical_model, max_context_tokens, vision_mode, input_modalities, max_output_tokens"
     )
 
     def list_profiles(self) -> list[dict[str, Any]]:
@@ -126,7 +130,15 @@ class GlobalConfigStore:
         custom_extra_body: str = "",
         custom_extra_headers: str = "",
         canonical_model: str = "",
+        max_context_tokens: int = 0,
+        vision_mode: str = "auto",
+        input_modalities: Any = _UNSET,
+        max_output_tokens: int = 0,
     ) -> bool:
+        if input_modalities is _UNSET:
+            input_modalities = None if vision_mode == "auto" else ["text", "image"] if vision_mode == "true" else ["text"]
+        else:
+            vision_mode = "auto" if input_modalities is None else "true" if "image" in input_modalities else "false"
         now = _now_iso()
         try:
             enc_api_key = _api_key_cipher.encrypt(api_key) if api_key else api_key
@@ -134,11 +146,13 @@ class GlobalConfigStore:
                 "INSERT INTO model_profiles "
                 "(name, model, api_key, base_url, description, protocol, "
                 "thinking_mode, service_tier, model_family, custom_extra_body, custom_extra_headers, "
-                "canonical_model, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "canonical_model, max_context_tokens, vision_mode, input_modalities, max_output_tokens, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (name, model, enc_api_key, base_url, _profile_description(description), protocol,
                  thinking_mode, service_tier, model_family, custom_extra_body, custom_extra_headers,
-                 canonical_model, now, now),
+                 canonical_model, max_context_tokens, vision_mode,
+                 json.dumps(input_modalities) if input_modalities is not None else None,
+                 max_output_tokens, now, now),
             )
             self._conn.commit()
             return True
@@ -162,7 +176,22 @@ class GlobalConfigStore:
         custom_extra_body: str | None = None,
         custom_extra_headers: str | None = None,
         canonical_model: str | None = None,
+        max_context_tokens: int | None = None,
+        vision_mode: str | None = None,
+        input_modalities: Any = _UNSET,
+        max_output_tokens: int | None = None,
     ) -> bool:
+        # 新字段为准；旧客户端仍可用 vision_mode 更新图片能力，保留其它模态。
+        if input_modalities is not _UNSET:
+            vision_mode = "auto" if input_modalities is None else "true" if "image" in input_modalities else "false"
+        elif vision_mode is not None:
+            if vision_mode == "auto":
+                input_modalities = None
+            else:
+                current = (self.get_profile(name) or {}).get("input_modalities")
+                input_modalities = [item for item in (current if current is not None else ["text"]) if item != "image"]
+                if vision_mode == "true":
+                    input_modalities.append("image")
         sets: list[str] = []
         params: list[Any] = []
         if new_name is not None:
@@ -205,6 +234,18 @@ class GlobalConfigStore:
         if canonical_model is not None:
             sets.append("canonical_model = ?")
             params.append(canonical_model)
+        if max_context_tokens is not None:
+            sets.append("max_context_tokens = ?")
+            params.append(max_context_tokens)
+        if vision_mode is not None:
+            sets.append("vision_mode = ?")
+            params.append(vision_mode)
+        if input_modalities is not _UNSET:
+            sets.append("input_modalities = ?")
+            params.append(json.dumps(input_modalities) if input_modalities is not None else None)
+        if max_output_tokens is not None:
+            sets.append("max_output_tokens = ?")
+            params.append(max_output_tokens)
         if not sets:
             return False
         sets.append("updated_at = ?")

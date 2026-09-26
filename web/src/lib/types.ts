@@ -4,6 +4,12 @@ export interface FileAttachment {
   size: number;
 }
 
+export interface ExampleContext {
+  id: string;
+  workflow?: string;
+  sample?: string;
+}
+
 /** 输入框中附件的上传追踪状态 */
 export interface AttachedFile {
   id: string;
@@ -134,8 +140,15 @@ export interface SessionTaskList {
   plan_file_path?: string;
 }
 
-export type AssistantBlock =
-  | { type: "thinking"; content: string; duration?: number; startedAt?: number }
+export type AssistantBlock = { historyKey?: string } & (
+  | {
+      type: "thinking";
+      content: string;
+      duration?: number;
+      startedAt?: number;
+      /** Iteration that produced this block; used to collapse replay aliases. */
+      iteration?: number;
+    }
   | { type: "text"; content: string; iteration?: number }
   | {
       type: "tool_call";
@@ -147,8 +160,12 @@ export type AssistantBlock =
       status: "running" | "success" | "error" | "pending" | "streaming";
       result?: string;
       error?: string;
+      /** 未执行即被放弃时的机器可读原因（llm_retry / retry_exhausted / turn_failure …）。 */
+      abortReason?: string;
       iteration?: number;
       parentCallId?: string;
+      /** Task progress immediately after this operation (durable history or SSE). */
+      taskList?: TaskItem[];
     }
   | {
       type: "subagent";
@@ -187,6 +204,7 @@ export type AssistantBlock =
   | {
       type: "token_stats";
       promptTokens: number;
+      cachedTokens?: number | null;
       completionTokens: number;
       totalTokens: number;
       iterations: number;
@@ -265,7 +283,7 @@ export type AssistantBlock =
       type: "reasoning_notice";
       content: string;
       iteration?: number;
-    };
+    });
 
 export interface TaskItem {
   content: string;
@@ -326,6 +344,8 @@ export interface ModelInfo {
   active: boolean;
   base_url?: string;
   provider?: string;
+  protocol?: string;
+  model_family?: string;
   user_scoped?: boolean;
   supports_vision?: boolean | null;
 }

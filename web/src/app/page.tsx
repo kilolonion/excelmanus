@@ -11,7 +11,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { ensureLandingSession } from "@/lib/session-actions";
-import type { AttachedFile, FileAttachment, MessageDispatchMode } from "@/lib/types";
+import type { AttachedFile, ExampleContext, FileAttachment, MessageDispatchMode } from "@/lib/types";
 import { OpenWorkbookDialog } from "@/components/excel/OpenWorkbookDialog";
 import { WorkbookConversationWelcome, useWorkbookConversation } from "@/components/excel/WorkbookConversation";
 import { ChatHistoryStatus } from "@/components/chat/ChatHistoryStatus";
@@ -26,9 +26,9 @@ export default function Home() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const { target: workbookTarget } = useWorkbookConversation();
   const cmdResult = useCommandResult();
-  const [composerDraft, setComposerDraft] = useState<{ seq: number; text: string; files: File[] } | null>(null);
+  const [composerDraft, setComposerDraft] = useState<{ seq: number; text: string; files: File[]; example?: ExampleContext } | null>(null);
 
-  const handleSend = async (text: string, files?: AttachedFile[], capturedSessionId?: string | null, mode?: MessageDispatchMode) => {
+  const handleSend = async (text: string, files?: AttachedFile[], capturedSessionId?: string | null, mode?: MessageDispatchMode, exampleContext?: ExampleContext) => {
     if (capturedSessionId && capturedSessionId !== useSessionStore.getState().activeSessionId) return false;
     setComposerDraft(null);
     let sid = useSessionStore.getState().activeSessionId;
@@ -42,11 +42,11 @@ export default function Home() {
         return false;
       }
     }
-    return sendMessage(text, files, sid, undefined, undefined, mode ?? dispatchDefault);
+    return sendMessage(text, files, sid, undefined, undefined, mode ?? dispatchDefault, exampleContext);
   };
 
-  const handleSuggestionClick = useCallback((text: string, files?: File[]) => {
-    setComposerDraft({ seq: Date.now(), text, files: files ?? [] });
+  const handleSuggestionClick = useCallback((text: string, files?: File[], example?: ExampleContext) => {
+    setComposerDraft({ seq: Date.now(), text, files: files ?? [], example });
   }, []);
 
   const handleStop = () => {

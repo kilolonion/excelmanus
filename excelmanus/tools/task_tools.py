@@ -50,7 +50,12 @@ def task_update(
     *,
     store: TaskStore | None = None,
 ) -> ToolResult:
-    """更新任务项状态（支持显式 store 注入）。"""
+    """更新任务项状态（支持显式 store 注入）。
+
+    任务状态通常按 ``pending → in_progress → completed/failed`` 顺序推进。
+    如果业务操作已经完成但还没登记开始，也允许直接从 ``pending`` 设置
+    ``completed``；``failed`` 仍需先进入 ``in_progress``。
+    """
     active_store = _resolve_store(store)
     try:
         new_status = TaskStatus(status)
@@ -160,10 +165,14 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
         ToolDef(
             name="task_update",
             description=(
-                "更新任务项状态（pending → in_progress → completed/failed）。"
+                "更新任务项状态。通常按 pending → in_progress → completed/failed 顺序调用："
+                "创建任务后，开始处理该项前可调用 status=in_progress；"
+                "业务操作完成后调用 status=completed（失败则 status=failed）。"
+                "如果操作已完成但尚未登记开始，允许直接从 pending 调用 completed；"
+                "pending 直接调用 failed 仍不允许，也不要在同一批次发送两次 task_update。"
                 "规则："
-                "(1) task_update 应与实际操作工具（如 run_code）在同一次调用中并行发出，避免单独占用一次迭代；"
-                "(2) 完成后立即标记为 completed；"
+                "(1) in_progress 可与实际操作工具（如 run_code）在同一轮按顺序执行；"
+                "(2) 操作完成后立即在下一次调用中标记为 completed；"
                 "(3) 同一时间只有一个任务处于 in_progress；"
                 "(4) 遇到阻塞或错误时保持 in_progress，不要标记为 completed；"
                 "(5) 任务未完全完成（部分实现、存在错误）时禁止标记 completed。"

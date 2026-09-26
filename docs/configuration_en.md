@@ -58,7 +58,7 @@ Model-profile API keys are encrypted in the main database. The Fernet key lives 
 | `EXCELMANUS_WORKSPACE_ROOT` | File access whitelist root directory | `~/.excelmanus/data` |
 | `EXCELMANUS_LOG_LEVEL` | Log level | `INFO` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS allowed origins (comma-separated). Runtime also adds `localhost` / `127.0.0.1` / `[::1]` plus the frontend port | `http://localhost:3000,http://127.0.0.1:3000` |
-| `EXCELMANUS_MAX_CONTEXT_TOKENS` | Explicit override for the inferred model context limit | Inferred from the model; `256000` fallback |
+| `EXCELMANUS_MAX_CONTEXT_TOKENS` | Explicit override for the inferred model context limit | Sourced model/input/transport limits; `32000` local fallback for unverified models (not an official limit) |
 | `EXCELMANUS_PROMPT_CACHE_KEY_ENABLED` | Send prompt_cache_key to API to improve cache hit rate | `true` |
 | `EXCELMANUS_PROMPT_CACHE_RETENTION` | Prompt cache retention policy (`default`/`extended`). `extended` applies only to first-party endpoints: Anthropic (`api.anthropic.com`) adds `ttl=1h` to every `cache_control` breakpoint and sends `anthropic-beta: extended-cache-ttl-2025-04-11`; OpenAI (`api.openai.com`, Chat and Responses) sends top-level `prompt_cache_retention=24h`. Compatible gateways and self-hosted endpoints never receive these fields | `default` |
 
@@ -191,6 +191,8 @@ Connection and capability probes can be started in model settings. They call the
 ## Vision
 
 Images go to the active model only. If it has no vision, attachments are rejected. If it does, `read_image` or workbench attachments inject the picture; the model writes a `WorkbookSpec` and calls `apply_spreadsheet_changes(workbook_spec=)`. There is no separate vision pipeline and no auxiliary VLM description.
+
+Admission keeps the source bytes immutable. Request-time projection creates the provider-sized derivative and exposes source dimensions, request dimensions, and the transform to the model. Animated images are reduced to a first-frame static request and disclosed as such. Within one task, an identical attachment/detail/crop is injected only once; use `read_image(crop={x,y,width,height,zoom})` with `zoom=1..8` for one enlarged local observation when small text needs review.
 
 | Setting key | Description | Default |
 |---|---|---|
@@ -386,12 +388,12 @@ followup returns when its own turn finishes, independently of later queued turns
 
 ## System One / Jev
 
-Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Vercel, and custom decision providers live under Settings → Model → Providers; Jev model choice and gates live under Settings → Model → Model roles. Both write `config_kv`.
+Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Vercel, and custom decision providers live under Settings → Model → Model connections; Jev model choice and gates live under Settings → Model → Model configuration. Both write `config_kv`.
 
 | Setting key | Description | Default |
 |---|---|---|
 | `EXCELMANUS_JEV_ENABLED` | Master gate: `off` disables all packs, `enforce` fully enables them | `enforce` |
-| `EXCELMANUS_JEV_EXPERIMENTAL_ENABLED` | Frontend experimental Jev entry gate; when off, provider settings, timeline button, inline records, and sidebar are hidden without deleting saved configuration | `false` |
+| `EXCELMANUS_JEV_EXPERIMENTAL_ENABLED` | Jev experimental feature gate; when off, backend evaluations stop and provider settings, timeline button, inline records, and sidebar are hidden without deleting saved configuration | `false` |
 | `EXCELMANUS_JEV_EXPOSURE` | Tool exposure and workspace/spreadsheet context suggestions: `off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_OBSERVATION` | Observation policy: `off` / `enforce` | `enforce` |
 | `EXCELMANUS_JEV_VERIFICATION` | Post-mutation check suggestions: `off` / `enforce` | `enforce` |
@@ -405,9 +407,9 @@ Jev is not a chat model and does not belong in `model_profiles`. TypeSafe, Verce
 | `EXCELMANUS_JEV_CALIBRATED` | Calibration switch for high-risk approval auto-allow; the approval pack must also have signed calibration provenance | `false` |
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe direct key (synced with the provider list) | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway key (synced with the provider list) | — |
-| `EXCELMANUS_MODEL_CANONICAL_MATCH` | Model-name matching under Model → Model roles: saving a profile binds the Model ID to a known canonical name when confidence is high enough, inheriting its context window and capability settings; the upstream Model ID is never rewritten, and enabling it back-fills existing profiles | `true` |
+| `EXCELMANUS_MODEL_CANONICAL_MATCH` | Model-name matching under Model → Model configuration: saving a profile binds the Model ID to a known canonical name when confidence is high enough; the upstream Model ID is never rewritten, and enabling it back-fills existing profiles | `true` |
 
-This optional feature requires the `system-one` extra. `off` disables the master gate or the selected pack; `enforce` applies enabled packs directly, with no observation-only runtime. Enabling the master gate fills omitted pack switches as enabled, while an explicitly disabled child switch still stops that pack. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. High-risk approval has a separate safety layer: Jev can change a high-risk call from human approval to automatic execution only when `EXCELMANUS_JEV_CALIBRATED=true` and the approval pack has signed calibration provenance; deny and ordinary advisory decisions are unaffected. Legacy `shadow` values are migrated to `enforce` when read.
+This optional feature requires the `system-one` extra. When the experimental feature gate is off, the backend does not send Jev evaluations, write Jev decision logs, or emit Jev events; saved provider and pack settings remain available when the gate is enabled again. `off` disables the master gate or the selected pack; `enforce` applies enabled packs directly, with no observation-only runtime. Enabling the master gate fills omitted pack switches as enabled, while an explicitly disabled child switch still stops that pack. The advisory-only `context.resolve` pack supplies workspace, spreadsheet/range and clarification suggestions to the main model when both the master and exposure gates are `enforce`. It waits at most one additional second and never creates/switches workspaces or edits files. High-risk approval has a separate safety layer: Jev can change a high-risk call from human approval to automatic execution only when `EXCELMANUS_JEV_CALIBRATED=true` and the approval pack has signed calibration provenance; deny and ordinary advisory decisions are unaffected. Legacy `shadow` values are migrated to `enforce` when read.
 
 ## Encryption Configuration
 
@@ -461,5 +463,5 @@ Do not auto-merge multiple `users/{id}` trees. If old isolation directories rema
 
 - 2026-09-19: Updated desktop locators, the 4096-token compaction budget, tool disclosure, capability probes, Jev verification/recovery settings, OAuth, and encryption-key migration.
 
-- 2026-09-19: Jev settings moved from Runtime to Model → Providers / Model roles. TypeSafe and Vercel are separate presets; custom decision providers are supported.
+- 2026-09-19: Jev settings moved from Runtime to Model → Model connections / Model configuration. TypeSafe and Vercel are separate presets; custom decision providers are supported.
 - 2026-09-18: Product settings live only in `config_kv` / `model_profiles` plus the in-process overlay. Jev gates and keys use that same chain (Web Settings runtime fields). Locators (`HOME` / `DB_PATH` / `DATA_ROOT` / `DEPLOY_MODE` / ports / `MANAGE_TOKEN`) still come from the start process. `deploy/.env.deploy` and `web/.env.local` are the ops-host inventory and the Next.js runtime origin. MCP `mcp.json` `$VAR` expands only for MCP child processes.

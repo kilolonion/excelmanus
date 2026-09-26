@@ -6,17 +6,14 @@ import {
   normalizeExcelPath,
   fetchOperations,
   undoOperation as apiUndoOperation,
-  fetchFileGroups,
-  createFileGroup as apiCreateFileGroup,
-  deleteFileGroup as apiDeleteFileGroup,
   type ExcelFileListItem,
   type OperationRecord,
-  type FileGroup,
 } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
 import {
   activeSession,
   isScopedWorkspaceKey,
+  normalizeRelativePath,
   sanitizeRecentFiles,
   versionStoreKey,
   workspaceKeyFromSession,
@@ -39,7 +36,6 @@ interface WorkspaceFilesRequest {
 // Keep one request per scope/version. A single global slot allowed an old
 // session scan to cancel out a newer one even though both can run safely.
 const workspaceFilesRequests = new Map<string, WorkspaceFilesRequest>();
-let fileGroupsRequest: { scope: string; promise: Promise<void> } | null = null;
 let operationHistoryRequest = 0;
 const undoRequests = new Set<string>();
 
@@ -293,12 +289,6 @@ interface ExcelState {
   panelTab: ExcelPanelTab;
   historySubview: HistorySubview;
 
-  // 文件组
-  fileGroups: FileGroup[];
-  fileGroupsLoaded: boolean;
-  fileGroupsScope: string | null;
-  activeGroupId: string | null;
-  groupViewMode: boolean;
 
   // 跨文件对比模式
   compareMode: boolean;
@@ -343,6 +333,18 @@ interface ExcelState {
   ) => void;
   /** Evict a cached entry the backend reported missing. 不写 dismissedPaths，文件重建后仍可重新出现。 */
   evictRecentFile: (path: string, workspaceKey?: string | null) => void;
+  /**
+   * 后端已确认路径不再可读时退役该表格目标：关闭陈旧标签、清掉最近打开与视图
+   * 缓存，并在面板/全屏视图正指向它时回到空状态。不写 dismissedPaths，
+   * 文件重新出现后仍可再次打开。
+   */
+  dropMissingWorkbook: (path: string, workspaceKey?: string | null) => void;
+  /**
+   * 文件（或文件夹）删除后的统一清理，所有删除入口共用：
+   * 侧边栏文件面板、最近打开、已打开的表格标签、全屏视图、对比视图、
+   * 对话绑定与视图缓存同步剔除，保证各入口口径一致。
+   */
+  handleFilesDeleted: (paths: string[], workspaceKey?: string | null) => void;
   openFullView: (path: string, sheet?: string, layout?: WorkbookViewLayout) => void;
   closeFullView: () => void;
   focusWorkbook: (path: string) => void;
@@ -369,11 +371,6 @@ interface ExcelState {
   fetchOperationHistory: (sessionId: string) => Promise<void>;
   undoOperationById: (sessionId: string, approvalId: string) => Promise<boolean>;
   appendOperation: (op: OperationRecord) => void;
-  loadFileGroups: (options?: { force?: boolean }) => Promise<void>;
-  createGroupFromSelected: (name: string, fileIds: string[]) => Promise<string | null>;
-  deleteGroup: (groupId: string) => Promise<void>;
-  setActiveGroup: (groupId: string | null) => void;
-  toggleGroupViewMode: () => void;
   /** 打开跨文件对比视图 */
   openCompare: (fileA: string, fileB: string, relationship?: FileRelationship) => void;
   closeCompare: () => void;
@@ -436,11 +433,6 @@ export const useExcelStore = create<ExcelState>()(
   panelTab: "sheet",
   historySubview: "revisions",
 
-  fileGroups: [],
-  fileGroupsLoaded: false,
-  fileGroupsScope: null,
-  activeGroupId: null,
-  groupViewMode: false,
 
   compareMode: false,
   compareFileA: null,
@@ -551,9 +543,6 @@ export const useExcelStore = create<ExcelState>()(
         workspaceFilesLoadedAt: 0,
         workspaceFilesError: null,
         workspaceFilesTruncated: false,
-        fileGroups: [],
-        fileGroupsLoaded: false,
-        fileGroupsScope: null,
         workbookChanges: {},
         contentVersions,
         fullViewPath: null,
@@ -748,6 +737,231 @@ export const useExcelStore = create<ExcelState>()(
       if (filtered.length === state.recentFiles.length) return {};
       return { recentFiles: filtered };
     }),
+
+  dropMissingWorkbook: (path, workspaceKey) => {
+    if (!isSpreadsheetFile(path)) return;
+    const norm = normalizeRelativePath(path);
+    if (!norm) return;
+    const wsKey = workspaceKey ?? get().activeWorkspaceKey;
+    // 1. 关闭已打开标签：任何仍指向该路径的面板都会在挂载时重新发起 observe，
+    //    留着标签只会让同一个 404 反复把面板钉在加载壳上。
+    const workspaceStore = useWorkbookWorkspaceStore.getState();
+    for (const [groupKey, workspace] of Object.entries(workspaceStore.workspaces)) {
+      let scope: unknown = null;
+      try { scope = JSON.parse(groupKey); } catch { continue; }
+      const groupWorkspaceKey = Array.isArray(scope) && scope.length > 1 ? String(scope[1]) : "";
+      if (wsKey != null && groupWorkspaceKey !== wsKey) continue;
+      if (!workspace.files.some((file) => normalizeRelativePath(file.path) === norm)) continue;
+      workspaceStore.close(groupKey, norm);
+    }
+    // 2. 对话绑定不能继续指向读不出来的文件：改绑本组剩余主表，没有剩余就解绑。
+    const conversation = useWorkbookConversationStore.getState();
+    for (const [targetSessionId, target] of Object.entries(conversation.targets)) {
+      if (!target?.file?.relative || normalizeRelativePath(target.file.relative) !== norm) continue;
+      if (wsKey != null && target.file.workspaceKey !== wsKey) continue;
+      const targetSession = useSessionStore.getState().sessions?.find((item) => item.id === targetSessionId);
+      const remaining = useWorkbookWorkspaceStore.getState().workspaces[
+        workbookWorkspaceKey(targetSessionId, wsKey ?? workspaceKeyFromSession(targetSession))
+      ]?.files[0];
+      if (remaining && targetSession) {
+        conversation.bind(targetSessionId, fileRefFromSession(remaining.path, targetSession), remaining.sheet, get().fullViewLayout);
+      } else {
+        conversation.detach(targetSessionId);
+      }
+    }
+    // 3. 视图缓存按同一身份清理，避免下一次打开命中失效快照。
+    invalidateWorkbookCaches(wsKey == null ? { relative: norm } : { workspaceKey: wsKey, relative: norm });
+    set((state) => {
+      const samePath = (candidate: string | null | undefined) =>
+        Boolean(candidate) && normalizeRelativePath(candidate as string) === norm;
+      const contentVersions = { ...state.contentVersions };
+      const workbookChanges = { ...state.workbookChanges };
+      delete contentVersions[versionStoreKey(norm, wsKey ?? "_")];
+      delete workbookChanges[versionStoreKey(norm, wsKey ?? "_")];
+      return {
+        recentFiles: state.recentFiles.filter((file) => !(normalizeRelativePath(file.path) === norm
+          && (wsKey == null || file.workspaceKey === wsKey))),
+        contentVersions,
+        workbookChanges,
+        // 面板与全屏视图正指向这个文件时回到空状态，而不是继续渲染死表格。
+        ...(samePath(state.activeFilePath)
+          ? { activeFilePath: null, activeSheet: null, selectionMode: false, draftRange: null, liveSelection: null }
+          : {}),
+        ...(samePath(state.fullViewPath) ? { fullViewPath: null, fullViewSheet: null } : {}),
+      };
+    });
+  },
+
+  handleFilesDeleted: (paths, workspaceKey) => {
+    const targets = [...new Set(
+      paths.map((path) => normalizeExcelPath(path)).filter((path) => path.length > 0),
+    )];
+    if (targets.length === 0) return;
+    const wsKey = workspaceKey ?? get().activeWorkspaceKey;
+    // 删除目标可能是文件夹：其全部后代一并视为已删除。
+    const isDeletedPath = (candidate: string | null | undefined): boolean => {
+      if (!candidate) return false;
+      const normalized = normalizeExcelPath(candidate);
+      return targets.some((target) => normalized === target || normalized.startsWith(`${target}/`));
+    };
+    const scopedBy = (entryKey: string): boolean => {
+      if (wsKey == null) return true;
+      const separator = entryKey.indexOf("|");
+      const keyWs = separator >= 0 ? entryKey.slice(0, separator) : "_";
+      return keyWs === wsKey;
+    };
+
+    const state = get();
+    const session = activeSession();
+    const sessionKey = workspaceKeyFromSession(session);
+
+    // 1. 收集所有会失效的具体路径（含文件夹后代），先清视图缓存，
+    //    避免任何面板继续命中已删除文件的旧快照。
+    const doomed = new Set<string>();
+    for (const file of state.workspaceFiles) {
+      if (isDeletedPath(file.path)) doomed.add(normalizeExcelPath(file.path));
+    }
+    for (const file of state.recentFiles) {
+      if (isDeletedPath(file.path) && (wsKey == null || file.workspaceKey === wsKey)) {
+        doomed.add(normalizeExcelPath(file.path));
+      }
+    }
+    const workbookStore = useWorkbookWorkspaceStore.getState();
+    const currentGroupKey = workbookWorkspaceKey(session?.id, sessionKey);
+    const affectedGroups: string[] = [];
+    for (const [key, workspace] of Object.entries(workbookStore.workspaces)) {
+      let scope: unknown = null;
+      try { scope = JSON.parse(key); } catch { continue; }
+      const groupWorkspaceKey = Array.isArray(scope) && scope.length > 1 ? String(scope[1]) : "";
+      if (wsKey != null && groupWorkspaceKey !== wsKey) continue;
+      let groupAffected = false;
+      for (const file of workspace.files) {
+        if (!isDeletedPath(file.path)) continue;
+        doomed.add(normalizeExcelPath(file.path));
+        // 2. 关闭已打开的表格标签：表格处不再保留已删除文件的标签。
+        workbookStore.close(key, file.path);
+        groupAffected = true;
+      }
+      if (groupAffected) affectedGroups.push(key);
+    }
+    for (const target of targets) doomed.add(target);
+    for (const relative of doomed) {
+      invalidateWorkbookCaches(wsKey == null ? { relative } : { workspaceKey: wsKey, relative });
+    }
+
+    // 3. 对话绑定：主文件被删的会话改绑本组剩余主表；没有剩余则解绑。
+    //    覆盖所有受影响会话（含未激活会话的持久化绑定），不只是当前会话。
+    const replacementBySession = new Map<string, { path: string; sheet?: string }>();
+    for (const key of affectedGroups) {
+      let scope: unknown = null;
+      try { scope = JSON.parse(key); } catch { continue; }
+      const groupSessionId = Array.isArray(scope) ? String(scope[0] ?? "") : "";
+      if (!groupSessionId) continue;
+      const nextPrimary = useWorkbookWorkspaceStore.getState().workspaces[key]?.files[0] ?? null;
+      const previous = replacementBySession.get(groupSessionId);
+      if (!previous || (!previous.path && nextPrimary)) {
+        if (nextPrimary) replacementBySession.set(groupSessionId, { path: nextPrimary.path, sheet: nextPrimary.sheet });
+        else if (!previous) replacementBySession.set(groupSessionId, { path: "" });
+      }
+    }
+    const conversation = useWorkbookConversationStore.getState();
+    for (const [targetSessionId, target] of Object.entries(conversation.targets)) {
+      if (!target?.file?.relative || !isDeletedPath(target.file.relative)) continue;
+      if (wsKey != null && target.file.workspaceKey !== wsKey) continue;
+      const replacement = replacementBySession.get(targetSessionId);
+      const targetSession = useSessionStore.getState().sessions?.find((item) => item.id === targetSessionId);
+      if (replacement?.path && targetSession) {
+        useWorkbookConversationStore.getState().bind(
+          targetSessionId,
+          fileRefFromSession(replacement.path, targetSession),
+          replacement.sheet,
+          get().fullViewLayout,
+        );
+      } else {
+        useWorkbookConversationStore.getState().detach(targetSessionId);
+      }
+    }
+    const activeGroup = useWorkbookWorkspaceStore.getState().workspaces[currentGroupKey];
+    const primary = activeGroup?.files[0] ?? null;
+    const focused = activeGroup?.files.find((file) => file.path === activeGroup?.focused) ?? primary;
+
+    // 4. 本 store：文件列表、最近打开（写 dismissed 防 mutation 回声重新加入）、
+    //    版本/变更记录、当前面板、全屏视图、对比视图与选区。
+    set((current) => {
+      const filesScopeKey = current.workspaceFilesWorkspaceId
+        ? `id:${current.workspaceFilesWorkspaceId}`
+        : workspaceKeyForSessionId(current.workspaceFilesSessionId);
+      const touchesFilesScope = wsKey == null || wsKey === filesScopeKey;
+      const touchesActiveScope = wsKey == null || wsKey === (current.activeWorkspaceKey ?? sessionKey);
+      const recentFiles = sanitizeRecentFiles(current.recentFiles)
+        .filter((file) => !(isDeletedPath(file.path) && (wsKey == null || file.workspaceKey === wsKey)));
+      const dismissedPaths = new Set(current.dismissedPaths);
+      const dismiss = (path: string) => {
+        const normalized = normalizeExcelPath(path);
+        if (normalized.length === 0) return;
+        dismissedPaths.add(wsKey == null ? normalized : `${wsKey}|${normalized}`);
+      };
+      for (const target of targets) dismiss(target);
+      // 文件夹删除：已知的每个后代也补 dismissal 键，否则 SSE 回声以
+      // 子路径（./a/one.xlsx）形式到达时会被重新加回最近列表。
+      for (const file of current.workspaceFiles) {
+        if (isDeletedPath(file.path)) dismiss(file.path);
+      }
+      for (const file of current.recentFiles) {
+        if (isDeletedPath(file.path) && (wsKey == null || file.workspaceKey === wsKey)) dismiss(file.path);
+      }
+      const contentVersions: Record<string, string> = {};
+      for (const [key, value] of Object.entries(current.contentVersions)) {
+        const path = key.slice(key.indexOf("|") + 1);
+        if (isDeletedPath(path) && scopedBy(key)) continue;
+        contentVersions[key] = value;
+      }
+      const workbookChanges: Record<string, WorkbookChange> = {};
+      for (const [key, value] of Object.entries(current.workbookChanges)) {
+        const path = key.slice(key.indexOf("|") + 1);
+        if (isDeletedPath(path) && scopedBy(key)) continue;
+        workbookChanges[key] = value;
+      }
+      const activeDeleted = touchesActiveScope && isDeletedPath(current.activeFilePath);
+      const fullViewDeleted = touchesActiveScope && isDeletedPath(current.fullViewPath);
+      const compareDeleted = touchesActiveScope && current.compareMode
+        && (isDeletedPath(current.compareFileA) || isDeletedPath(current.compareFileB));
+      return {
+        workspaceFiles: touchesFilesScope
+          ? current.workspaceFiles.filter((file) => !isDeletedPath(file.path))
+          : current.workspaceFiles,
+        recentFiles,
+        dismissedPaths,
+        contentVersions,
+        workbookChanges,
+        ...(activeDeleted ? {
+          activeFilePath: focused?.path ?? null,
+          activeSheet: focused?.sheet ?? null,
+          panelOpen: focused ? current.panelOpen : false,
+        } : {}),
+        ...(fullViewDeleted ? {
+          fullViewPath: primary?.path ?? null,
+          fullViewSheet: primary?.sheet ?? null,
+        } : {}),
+        ...(compareDeleted ? {
+          compareMode: false,
+          compareFileA: null,
+          compareFileB: null,
+          compareSheetA: null,
+          compareSheetB: null,
+          compareRelationship: null,
+          compareReturnPath: null,
+        } : {}),
+        liveSelection: current.liveSelection && isDeletedPath(current.liveSelection.path)
+          ? null : current.liveSelection,
+        draftRange: current.draftRange?.path && isDeletedPath(current.draftRange.path)
+          ? null : current.draftRange,
+        pendingSelection: current.pendingSelection && isDeletedPath(current.pendingSelection.filePath)
+          ? null : current.pendingSelection,
+        workspaceFilesVersion: current.workspaceFilesVersion + 1,
+      };
+    });
+  },
 
   mergeRecentFiles: (files, explicitWorkspaceKey, options) =>
     set((state) => {
@@ -966,7 +1180,7 @@ export const useExcelStore = create<ExcelState>()(
       const seeded = state.workspaceFiles.length > 0;
       set({ workspaceFiles: seeded ? state.workspaceFiles : [], wsFilesLoaded: seeded, workspaceFilesSessionId: sid, workspaceFilesWorkspaceId: wid,
         workspaceFilesLoadedVersion: -1, workspaceFilesLoadedAt: 0, workspaceFilesLoading: false,
-        fileGroups: [], fileGroupsLoaded: false, fileGroupsScope: null, workspaceFilesTruncated: false });
+        workspaceFilesTruncated: false });
     }
     const requestKey = `${sid ?? "_"}|${wid ?? "_"}|${version}`;
     const existingRequest = workspaceFilesRequests.get(requestKey);
@@ -1106,73 +1320,6 @@ export const useExcelStore = create<ExcelState>()(
       return { operations: [op, ...state.operations] };
     }),
 
-  loadFileGroups: async (options) => {
-    const sessionId = activeSessionId();
-    const session = sessionId == null
-      ? undefined
-      : useSessionStore.getState().sessions?.find((item) => item.id === sessionId);
-    const scope = `${sessionId ?? "_"}|${session?.workspaceId ?? ""}`;
-    if (fileGroupsRequest?.scope === scope) return fileGroupsRequest.promise;
-    if (get().fileGroupsLoaded && get().fileGroupsScope === scope && !options?.force) return;
-
-    const request = { scope, promise: Promise.resolve() };
-    fileGroupsRequest = request;
-    request.promise = (async () => {
-      try {
-        const data = await fetchFileGroups(sessionId);
-        const currentSessionId = activeSessionId();
-        const currentSession = currentSessionId == null
-          ? undefined
-          : useSessionStore.getState().sessions?.find((item) => item.id === currentSessionId);
-        const currentScope = `${currentSessionId ?? "_"}|${currentSession?.workspaceId ?? ""}`;
-        if (fileGroupsRequest === request && currentScope === scope) {
-          set({ fileGroups: data.groups, fileGroupsLoaded: true, fileGroupsScope: scope });
-        }
-      } catch {
-        if (fileGroupsRequest === request && activeSessionId() === sessionId) {
-          set({ fileGroupsLoaded: true, fileGroupsScope: scope });
-        }
-      } finally {
-        if (fileGroupsRequest === request) fileGroupsRequest = null;
-      }
-    })();
-    return request.promise;
-  },
-
-  createGroupFromSelected: async (name, fileIds) => {
-    try {
-      const group = await apiCreateFileGroup({
-        name,
-        file_ids: fileIds.map((id) => ({ id })),
-        sessionId: activeSessionId(),
-      });
-      set((state) => ({
-        fileGroups: [...state.fileGroups, group],
-      }));
-      return group.id;
-    } catch {
-      return null;
-    }
-  },
-
-  deleteGroup: async (groupId) => {
-    const snapshot = get().fileGroups;
-    set((state) => ({
-      fileGroups: state.fileGroups.filter((g) => g.id !== groupId),
-      activeGroupId: state.activeGroupId === groupId ? null : state.activeGroupId,
-    }));
-    try {
-      await apiDeleteFileGroup(groupId, activeSessionId());
-    } catch {
-      set({ fileGroups: snapshot });
-    }
-  },
-
-  setActiveGroup: (groupId) => set({ activeGroupId: groupId }),
-
-  toggleGroupViewMode: () =>
-    set((state) => ({ groupViewMode: !state.groupViewMode })),
-
   openCompare: (fileA, fileB, relationship) => {
     if (!isSpreadsheetFile(fileA) || !isSpreadsheetFile(fileB)) return;
     set({
@@ -1256,10 +1403,6 @@ export const useExcelStore = create<ExcelState>()(
       operationsError: null,
       panelTab: "sheet",
       historySubview: "revisions",
-      fileGroups: [],
-      fileGroupsLoaded: false,
-      fileGroupsScope: null,
-      activeGroupId: null,
       compareMode: false,
       compareReturnPath: null,
       compareFileA: null,
@@ -1276,7 +1419,6 @@ export const useExcelStore = create<ExcelState>()(
         recentFiles: sanitizeRecentFiles(state.recentFiles),
         dismissedPaths: Array.from(state.dismissedPaths),
         showSystemFiles: state.showSystemFiles,
-        groupViewMode: state.groupViewMode,
       }),
       merge: (persisted, current) => {
         const p = persisted as Record<string, unknown> | undefined;

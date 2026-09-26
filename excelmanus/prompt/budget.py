@@ -144,8 +144,14 @@ def _prepare_workspace(root: Path, *, profile: str, has_workbook: bool) -> None:
     csv_path = root / "sales.csv"
     docx_path = root / "notes.docx"
     if has_workbook:
-        if not book.exists():
-            book.write_bytes(b"PK\x03\x04")
+        from excelmanus.workbook.file_format import is_workbook_file
+
+        if not is_workbook_file(book):
+            from openpyxl import Workbook
+
+            workbook = Workbook()
+            workbook.save(book)
+            workbook.close()
     elif book.exists():
         book.unlink()
     if profile == "csv":
@@ -301,6 +307,7 @@ def measure_scenario(
         chat_mode=chat_mode,
         visible_tools=visible_names,
         new_workbook=bool(getattr(engine, "_catalog_new_workbook", True)),
+        profile=getattr(engine, "_catalog_profile", None),
     )
     principle_tokens, section_names = _principle_tokens(loaded, assemble_ctx)
     over = tuple(

@@ -394,6 +394,8 @@ def _build_font(config: dict[str, Any]) -> Font:
     """从配置字典构建 openpyxl Font 对象。"""
     if isinstance(config, str):
         return Font(name=config)
+    if "strike" in config and "strikethrough" in config and config["strike"] != config["strikethrough"]:
+        raise ValueError("font 别名冲突: strike 与 strikethrough 值不同")
     return Font(
         name=config.get("name"),
         size=config.get("size"),
@@ -414,6 +416,8 @@ def _patch_font(existing: Any, config: dict[str, Any] | str) -> Font:
     allowed = {"name", "size", "bold", "italic", "color", "underline", "strike", "strikethrough", "vertAlign"}
     if not isinstance(config, dict) or set(config) - allowed:
         raise ValueError(f"font 支持的字段: {sorted(allowed)}")
+    if "strike" in config and "strikethrough" in config and config["strike"] != config["strikethrough"]:
+        raise ValueError("font 别名冲突: strike 与 strikethrough 值不同")
     font = copy(existing) if existing is not None else Font()
     for key, value in config.items():
         key = "strike" if key == "strikethrough" else key
@@ -423,19 +427,16 @@ def _patch_font(existing: Any, config: dict[str, Any] | str) -> Font:
 
 def _build_fill(config: dict[str, Any]) -> PatternFill:
     """从配置字典构建 openpyxl PatternFill 对象。不接受笼统的 type=pattern。"""
-    color = _resolve_color(
-        config.get("color")
-        or config.get("fgColor")
-        or config.get("start_color")
-        or config.get("fg_color")
-    ) or "FFFFFF"
-    fill_type = (
-        config.get("fill_type")
-        or config.get("type")
-        or config.get("pattern")
-        or config.get("patternType")
-        or "solid"
-    )
+    color_keys = ("color", "fgColor", "start_color", "fg_color")
+    color_values = [config[key] for key in color_keys if config.get(key) not in (None, "")]
+    if len({str(_resolve_color(value)) for value in color_values}) > 1:
+        raise ValueError("fill 别名冲突：color/fgColor/start_color/fg_color 值不同")
+    color = _resolve_color(color_values[0] if color_values else None) or "FFFFFF"
+    type_keys = ("type", "fill_type", "patternType", "pattern")
+    type_values = [config[key] for key in type_keys if config.get(key) not in (None, "")]
+    if len({str(value) for value in type_values}) > 1:
+        raise ValueError("fill 别名冲突：type/fill_type/patternType/pattern 值不同")
+    fill_type = (type_values[0] if type_values else "solid")
     fill_type = str(fill_type)
     if fill_type == "pattern":
         raise ValueError(
@@ -483,13 +484,22 @@ def _build_border(config: dict[str, Any]) -> Border:
 
 def _build_alignment(config: dict[str, Any]) -> Alignment:
     """从配置字典构建 openpyxl Alignment 对象。"""
-    wrap = config.get("wrap_text")
-    if wrap is None:
-        wrap = config.get("wrapText")
+    aliases = {
+        "horizontal": ("horizontal", "horizontalAlignment"),
+        "vertical": ("vertical", "verticalAlignment"),
+        "wrap_text": ("wrap_text", "wrapText"),
+    }
+    normalized: dict[str, Any] = {}
+    for canonical, keys in aliases.items():
+        values = [config[key] for key in keys if key in config and config[key] is not None]
+        if len(values) > 1 and values[0] != values[1]:
+            raise ValueError(f"alignment 别名冲突: {keys[0]} 与 {keys[1]} 值不同")
+        if values:
+            normalized[canonical] = values[0]
     return Alignment(
-        horizontal=config.get("horizontal") or config.get("horizontalAlignment"),
-        vertical=config.get("vertical") or config.get("verticalAlignment"),
-        wrap_text=wrap,
+        horizontal=normalized.get("horizontal"),
+        vertical=normalized.get("vertical"),
+        wrap_text=normalized.get("wrap_text"),
     )
 
 

@@ -46,6 +46,87 @@ async def test_fast_model_profile_sets_service_tier_on_wire(protocol):
 
 
 @pytest.mark.asyncio
+async def test_mimo_request_uses_only_mimo_supported_extensions():
+    engine = engine_for("openai")
+    engine._active_model = "mimo-v2.6-pro-ultraspeed"
+    engine._active_base_url = "https://api.xiaomimimo.com/v1"
+    engine._active_profile = ModelProfile(
+        name="mimo",
+        model=engine._active_model,
+        api_key="offline-only",
+        base_url=engine._active_base_url,
+        thinking_mode="glm_thinking",
+        service_tier="fast",
+    )
+    engine._thinking_config = SimpleNamespace(
+        is_disabled=False,
+        effective_budget=lambda: 2048,
+        effort="medium",
+        openai_effort="medium",
+    )
+    engine._model_capabilities = SimpleNamespace(
+        supports_thinking=True,
+        thinking_type="glm_thinking",
+    )
+
+    prepared, error = await compile_request(engine)
+    assert error is None
+    body = prepared.provider_body
+    assert "prompt_cache_key" not in body
+    assert "service_tier" not in body
+    assert body["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert prepared.route.capabilities["prompt_cache_key"] is False
+    assert prepared.route.capabilities["files"] is False
+
+
+@pytest.mark.asyncio
+async def test_mimo_multiturn_tool_history_keeps_reasoning_content():
+    engine = engine_for("openai")
+    engine._active_model = "mimo-v2.6-pro-ultraspeed"
+    engine._active_base_url = "https://api.xiaomimimo.com/v1"
+    engine._active_profile = ModelProfile(
+        name="mimo",
+        model=engine._active_model,
+        api_key="offline-only",
+        base_url=engine._active_base_url,
+        thinking_mode="glm_thinking",
+    )
+    engine._thinking_config = SimpleNamespace(
+        is_disabled=False,
+        effective_budget=lambda: 2048,
+        effort="medium",
+        openai_effort="medium",
+    )
+    engine._model_capabilities = SimpleNamespace(
+        supports_thinking=True,
+        thinking_type="glm_thinking",
+    )
+    engine.memory.add_assistant_tool_message(
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "MiMo reasoning",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "observe_spreadsheet", "arguments": "{}"},
+                }
+            ],
+        }
+    )
+    engine.memory.add_tool_result("call_1", "sheet data")
+
+    prepared, error = await compile_request(engine)
+    assert error is None
+    assistant = next(
+        message for message in prepared.provider_body["messages"]
+        if message.get("role") == "assistant"
+    )
+    assert assistant["reasoning_content"] == "MiMo reasoning"
+
+
+@pytest.mark.asyncio
 async def test_fast_mode_does_not_reach_non_openai_or_codex_routes():
     for protocol, model in [
         ("anthropic", "offline-model"),

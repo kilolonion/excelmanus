@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Message, Session } from "@/lib/types";
+import type { AssistantBlock, Message, Session } from "@/lib/types";
 
 vi.mock("@/lib/idb-cache", () => ({
   loadCachedMessages: vi.fn(), saveCachedMessages: vi.fn().mockResolvedValue(undefined),
@@ -84,6 +84,85 @@ describe("session loading lifecycle", () => {
     cache.resolve([user("stale")]);
     await flush();
     expect(useChatStore.getState().messageOrder).toEqual(["authoritative"]);
+  });
+
+  const richHistory = [
+    { role: "user", message_id: "u-rich", content: "还原收据" },
+    { role: "assistant", message_id: "a-rich", content: "", reasoning_content: "读取图片并制定计划", tool_calls: [
+      { id: "create", function: { name: "task_create", arguments: JSON.stringify({ subtasks: ["读取图片", "核对金额"] }) } },
+    ] },
+    { role: "tool", tool_call_id: "create", content: "已创建任务清单" },
+    { role: "assistant", message_id: "a-update", content: "", thinking: "核对合计", tool_calls: [
+      { id: "update", function: { name: "task_update", arguments: { task_index: 0, status: "completed" } } },
+    ] },
+    { role: "tool", tool_call_id: "update", content: "任务已完成" },
+    { role: "assistant", message_id: "a-final", content: "完成了", reasoning_content: "确认结果" },
+  ];
+  const richPage = { messages: richHistory, total: richHistory.length, offset: 0, limit: 50, hasMore: false };
+  const blocks = () => useChatStore.getState().messages.flatMap((message) => message.role === "assistant" ? message.blocks : []);
+
+  it("restores thinking and rich task cards on a cold page entry", async () => {
+    vi.mocked(fetchSessionMessages).mockResolvedValue(richPage);
+    select("cold-rich");
+    await flush();
+    expect(blocks().filter((block) => block.type === "thinking").map((block) => block.content))
+      .toEqual(["读取图片并制定计划", "核对合计", "确认结果"]);
+    expect(blocks().find((block) => block.type === "tool_call" && block.toolCallId === "create"))
+      .toMatchObject({ taskList: [{ status: "pending" }, { status: "pending" }] });
+    expect(blocks().find((block) => block.type === "tool_call" && block.toolCallId === "update"))
+      .toMatchObject({ taskList: [{ content: "读取图片", status: "completed" }, { content: "核对金额", status: "pending" }] });
+    expect(blocks().map((block) => block.type)).toEqual([
+      "thinking", "tool_call", "thinking", "tool_call", "thinking", "text",
+    ]);
+  });
+
+  it("restores a paged task update from its server snapshot before loading the creation", async () => {
+    const snapshot = { items: [{ title: "读取图片", status: "completed" }, { title: "核对金额", status: "pending" }] };
+    const tail = { ...richPage, offset: 3, hasMore: true, messages: [
+      { ...richHistory[3], tool_calls: [{ id: "update", task_list: snapshot,
+        function: { name: "task_update", arguments: JSON.stringify({ task_index: 0, status: "completed" }) } }] },
+      ...richHistory.slice(4),
+    ] };
+    vi.mocked(fetchSessionMessages).mockResolvedValueOnce(tail).mockResolvedValueOnce(richPage);
+    select("paged-rich");
+    await flush();
+    expect(blocks().find((block) => block.type === "tool_call" && block.toolCallId === "update"))
+      .toMatchObject({ taskList: [{ content: "读取图片", status: "completed" }, { content: "核对金额", status: "pending" }] });
+    await useChatStore.getState().loadOlderMessages();
+    expect(blocks().filter((block) => block.type === "tool_call" && block.taskList?.length)).toHaveLength(2);
+    expect(blocks().filter((block) => block.type === "thinking")).toHaveLength(3);
+  });
+
+  it.each(["cache-first", "http-first"])("keeps rich cards and measured timing without duplicates (%s)", async (order) => {
+    const cache = deferred<Message[] | null>();
+    const network = deferred<typeof richPage>();
+    vi.mocked(loadCachedMessages).mockReturnValue(cache.promise);
+    vi.mocked(fetchSessionMessages).mockReturnValue(network.promise);
+    const cachedBlocks: AssistantBlock[] = [
+      { type: "thinking", content: "读取图片并制定计划", duration: 24 },
+      { type: "tool_call", toolCallId: "create", name: "task_create", args: {}, status: "success" },
+      { type: "task_list", items: [{ index: 0, content: "读取图片", status: "pending" }] },
+      { type: "subagent", name: "explorer", reason: "核验", status: "done", iterations: 1, toolCalls: 1, tools: [] },
+    ];
+    const cachedMessages: Message[] = [user("u-rich", "还原收据"), { id: "local-rich", role: "assistant", blocks: cachedBlocks }];
+    select(`rich-${order}`);
+    if (order === "cache-first") { cache.resolve(cachedMessages); await flush(); network.resolve(richPage); }
+    else { network.resolve(richPage); await flush(); cache.resolve(cachedMessages); }
+    await flush();
+    expect(blocks().filter((block) => block.type === "thinking")).toHaveLength(3);
+    expect(blocks()[0]).toMatchObject({ type: "thinking", duration: 24 });
+    expect(blocks().filter((block) => block.type === "tool_call" && block.taskList?.length)).toHaveLength(2);
+    expect(blocks().find((block) => block.type === "tool_call" && block.toolCallId === "update"))
+      .toMatchObject({ taskList: [{ status: "completed" }, { status: "pending" }] });
+    expect(blocks().filter((block) => block.type === "task_list")).toHaveLength(0);
+    expect(blocks().filter((block) => block.type === "subagent")).toHaveLength(1);
+    for (let i = 0; i < 2; i++) {
+      vi.mocked(fetchSessionMessages).mockResolvedValue(richPage);
+      await refreshSessionMessagesFromBackend(`rich-${order}`);
+    }
+    expect(blocks().filter((block) => block.type === "thinking")).toHaveLength(3);
+    expect(blocks().filter((block) => block.type === "tool_call" && block.taskList?.length)).toHaveLength(2);
+    expect(blocks().filter((block) => block.type === "subagent")).toHaveLength(1);
   });
 
   it("aborts old requests and does not let an A→B→A response overwrite the latest visit", async () => {

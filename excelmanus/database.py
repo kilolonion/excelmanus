@@ -546,6 +546,16 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
     11: [
         "ALTER TABLE model_profiles ADD COLUMN service_tier TEXT DEFAULT ''",
     ],
+    12: [
+        "ALTER TABLE model_profiles ADD COLUMN max_context_tokens INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE model_profiles ADD COLUMN vision_mode TEXT NOT NULL DEFAULT 'auto'",
+    ],
+    13: [
+        "ALTER TABLE model_profiles ADD COLUMN input_modalities TEXT",
+        "ALTER TABLE model_profiles ADD COLUMN max_output_tokens INTEGER NOT NULL DEFAULT 0",
+        "UPDATE model_profiles SET input_modalities = '[\"text\",\"image\"]' WHERE vision_mode = 'true'",
+        "UPDATE model_profiles SET input_modalities = '[\"text\"]' WHERE vision_mode = 'false'",
+    ],
 }
 
 _LATEST_VERSION = max(_SQLITE_MIGRATIONS.keys())

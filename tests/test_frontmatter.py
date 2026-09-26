@@ -64,3 +64,33 @@ def test_loader_public_frontmatter_helpers_round_trip() -> None:
 def test_loader_public_frontmatter_api_keeps_validation_error_type() -> None:
     with pytest.raises(SkillpackValidationError):
         SkillpackLoader.parse_frontmatter("bad line without colon")
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ('a: ""', {"a": ""}),
+    ("a: ''", {"a": ""}),
+    ("a: []", {"a": []}),
+    ("a: {}", {"a": {}}),
+    ('a: "suffix"', {"a": "suffix"}),
+    ("a: 'suffix'", {"a": "suffix"}),
+    ("a: [suffix]", {"a": ["suffix"]}),
+    ("a: {x: suffix}", {"a": {"x": "suffix"}}),
+])
+def test_closed_yaml_values_are_valid(raw: str, expected: dict) -> None:
+    # Regression: the invalid-YAML generator used to allow suffix='"',
+    # producing the legal a: "". Fix the generator, not the parser.
+    assert parse_frontmatter(raw) == expected
+    assert SkillpackLoader.parse_frontmatter(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    'a: "', 'a: "suffix',
+    "a: '", "a: 'suffix",
+    "a: [", "a: [suffix",
+    "a: {", "a: {x: suffix",
+])
+def test_unclosed_yaml_values_raise_validation_errors(raw: str) -> None:
+    with pytest.raises(FrontmatterError):
+        parse_frontmatter(raw)
+    with pytest.raises(SkillpackValidationError):
+        SkillpackLoader.parse_frontmatter(raw)

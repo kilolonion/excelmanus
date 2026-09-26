@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import contextlib
+from pathlib import Path
+
 import pytest
 
 from excelmanus.tools.introspection_tools import (
@@ -155,6 +158,7 @@ class TestRegistration:
             "related_tools", "system_status",
             "knowledge_index", "knowledge_search", "knowledge_read",
             "knowledge_toc", "knowledge_find", "knowledge_related", "knowledge_spec", "knowledge_examples",
+            "knowledge_workflow",
         }
 
     def test_in_read_only_safe_tools(self) -> None:
@@ -469,3 +473,322 @@ class TestRegistryNotInitialized:
         """未初始化时应返回错误提示。"""
         result = introspect_capability("tool_detail", "observe_spreadsheet")
         assert "工具注册表尚未初始化" in result
+
+
+# ── 能力检索：意图路由 / 门控区分（回归 session #12 / #23）──────
+
+_ROUTE_FIXTURE_TOOLS = (
+    "observe_spreadsheet", "analyze_spreadsheet", "validate_spreadsheet",
+    "apply_spreadsheet_changes", "write_text_file", "task_create", "read_word",
+)
+
+
+@contextlib.contextmanager
+def _bound_catalog(
+    registry: ToolRegistry,
+    *,
+    mode: str = "write",
+    disallowed: tuple[str, ...] = (),
+    families: frozenset[str] | None = None,
+):
+    """把 registry 的绑定参数与 introspect 调用级目录设成同一份投影。"""
+    import excelmanus.tools.introspection_tools as mod
+    from excelmanus.tools.catalog import derive_effective_catalog
+
+    registry.bind_catalog(mode=mode, disallowed=disallowed, families=families)
+    catalog = derive_effective_catalog(
+        tools=registry.get_all_tools(), mode=mode, disallowed=disallowed, families=families,
+    )
+    token = mod._call_catalog.set(catalog)
+    try:
+        yield catalog
+    finally:
+        mod._call_catalog.reset(token)
+
+
+def _route_registry(names: tuple[str, ...] = _ROUTE_FIXTURE_TOOLS) -> ToolRegistry:
+    registry = ToolRegistry()
+    for name in names:
+        registry.register_tool(ToolDef(
+            name=name,
+            description=TOOL_SHORT_DESCRIPTIONS.get(name, f"desc of {name}"),
+            input_schema={"type": "object", "properties": {"file_path": {"type": "string"}}},
+            func=lambda **_: None,
+        ))
+    register_introspection_tools(registry)
+    return registry
+
+
+@pytest.fixture()
+def routed_registry() -> ToolRegistry:
+    import excelmanus.tools.introspection_tools as mod
+
+    registry = _route_registry()
+    yield registry
+    mod._registry = None
+
+
+class TestCanIDoIntentRouting:
+    """can_i_do 只回答语义相关的工具，并区分"产品无此工具"与"被门控"。"""
+
+    def test_create_chart_does_not_return_task_create(self, routed_registry: ToolRegistry) -> None:
+        """回归 #23：create chart 曾命中 task_create（任务清单工具）。"""
+        with _bound_catalog(routed_registry):
+            result = introspect_capability("can_i_do", "create chart")
+        assert "task_create" not in result
+        assert "apply_spreadsheet_changes" in result
+        assert "available" in result
+
+    def test_apply_spreadsheet_changes_query_never_falls_back_to_write_text_file(
+        self, routed_registry: ToolRegistry,
+    ) -> None:
+        """回归 #23：点名被门控的工具时不能再推荐 write_text_file（描述明确不适用）。"""
+        with _bound_catalog(routed_registry, disallowed=("apply_spreadsheet_changes",)):
+            result = introspect_capability("can_i_do", "apply_spreadsheet_changes")
+        assert "apply_spreadsheet_changes" in result
+        assert "被门控" in result
+        assert "disallowed_tools" in result
+        assert "write_text_file" not in result
+
+    def test_named_tool_available_answers_the_tool_itself(self, routed_registry: ToolRegistry) -> None:
+        with _bound_catalog(routed_registry):
+            result = introspect_capability("can_i_do", "apply_spreadsheet_changes")
+        assert "available" in result
+        assert "apply_spreadsheet_changes" in result
+        assert "被门控" not in result
+
+    def test_gated_intent_reports_reason_not_readonly_validator(
+        self, routed_registry: ToolRegistry,
+    ) -> None:
+        """回归 #23：写入/图表意图不能只给 validate_spreadsheet。"""
+        with _bound_catalog(routed_registry, disallowed=("apply_spreadsheet_changes",)):
+            result = introspect_capability("can_i_do", "写入单元格 修改工作簿 创建图表")
+        assert "validate_spreadsheet" not in result
+        assert "apply_spreadsheet_changes" in result
+        assert "gated" in result and "被门控" in result
+        assert "解锁" in result
+
+    def test_available_intent_returns_routed_tool_only(self, routed_registry: ToolRegistry) -> None:
+        with _bound_catalog(routed_registry):
+            result = introspect_capability("can_i_do", "写入单元格 修改工作簿 创建图表")
+        assert "apply_spreadsheet_changes" in result
+        assert "validate_spreadsheet" not in result
+        assert "task_create" not in result
+
+    def test_chart_query_without_write_tool_returns_no_unrelated_tool(self) -> None:
+        """create chart 不能退化成词面相近的任意工具。"""
+        import excelmanus.tools.introspection_tools as mod
+
+        registry = _route_registry(("task_create", "write_text_file"))
+        try:
+            with _bound_catalog(registry):
+                result = introspect_capability("can_i_do", "create chart")
+        finally:
+            mod._registry = None
+        assert "task_create" not in result
+        assert "write_text_file" not in result
+        assert "unknown" in result
+
+    def test_read_mode_discovery_does_not_name_write_tools(self, routed_registry: ToolRegistry) -> None:
+        """只读会话的发现类回答不点名写工具（与既有目录投影约定一致）。"""
+        with _bound_catalog(routed_registry, mode="read"):
+            result = introspect_capability("can_i_do", "写入")
+        assert "apply_spreadsheet_changes" not in result
+        assert "write_text_file" not in result
+        assert "unknown" in result
+
+    def test_tool_detail_distinguishes_gated_from_absent(self, routed_registry: ToolRegistry) -> None:
+        with _bound_catalog(routed_registry, disallowed=("apply_spreadsheet_changes",)):
+            gated = introspect_capability("tool_detail", "apply_spreadsheet_changes")
+            absent = introspect_capability("tool_detail", "no_such_tool_xyz")
+        assert "工具不可用" in gated
+        assert "apply_spreadsheet_changes" in gated
+        assert "被门控" in gated and "解锁" in gated
+        assert "工具不存在于当前目录" not in gated
+        assert "工具不存在于当前目录" in absent
+
+    def test_category_tools_explains_gated_members(self, routed_registry: ToolRegistry) -> None:
+        with _bound_catalog(routed_registry, disallowed=("apply_spreadsheet_changes",)):
+            result = introspect_capability("category_tools", "edit")
+        assert "apply_spreadsheet_changes" in result
+        assert "被门控" in result
+        assert "解锁" in result
+
+    def test_category_tools_accepts_keyword_query(self, routed_registry: ToolRegistry) -> None:
+        """回归 #12：category_tools 收到关键词而不是分类名时给出能力路由。"""
+        with _bound_catalog(routed_registry):
+            result = introspect_capability("category_tools", "workbook write create chart")
+        assert "分类不存在" in result
+        assert "apply_spreadsheet_changes" in result
+
+    def test_family_gated_word_tool_reports_docx_unlock(self, routed_registry: ToolRegistry) -> None:
+        """工作区没有 .docx 时，Word 工具的不可用原因是文件族而不是"不存在"。"""
+        with _bound_catalog(routed_registry, families=frozenset({"xlsx"})):
+            result = introspect_capability("tool_detail", "read_word")
+        assert "read_word" in result
+        assert "被门控" in result
+        assert ".docx" in result
+        assert "工具不存在于当前目录" not in result
+
+    def test_related_tools_explains_gated_tool(self, routed_registry: ToolRegistry) -> None:
+        with _bound_catalog(routed_registry, disallowed=("apply_spreadsheet_changes",)):
+            result = introspect_capability("related_tools", "apply_spreadsheet_changes")
+        assert "无相关工具推荐" in result
+        assert "被门控" in result
+        assert "disallowed_tools" in result
+
+
+class TestCanIDoCSVProfileGate:
+    """回归 #12/#23（真实会话）：CSV-only 工作区的写工具是"被门控可解锁"，不是"不存在"。"""
+
+    @pytest.fixture()
+    def csv_engine(self, tmp_path: Path):
+        import excelmanus.tools.introspection_tools as mod
+        from excelmanus.config import ExcelManusConfig
+        from excelmanus.engine import AgentEngine
+        from excelmanus.tools.catalog import catalog_from_engine
+
+        (tmp_path / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        registry = ToolRegistry()
+        registry.register_builtin_tools(str(tmp_path))
+        engine = AgentEngine(ExcelManusConfig(
+            api_key="test", base_url="https://test.invalid/v1", model="test",
+            workspace_root=str(tmp_path), jev_enabled="off",
+        ), registry)
+        catalog = catalog_from_engine(engine)
+        if "apply_spreadsheet_changes" in catalog.name_set():
+            pytest.skip("CSV-only profile 已不再门控工作簿写工具")
+        previous = mod._registry
+        mod._registry = registry
+        yield engine
+        mod._registry = previous
+
+    def _query(self, engine, query_type: str, query: str) -> str:
+        result = engine.registry.call_tool(
+            "introspect_capability", {"query_type": query_type, "query": query},
+        )
+        assert result.success, result.model_text
+        return result.model_text
+
+    def test_named_gated_tool_reports_gate_and_unlock(self, csv_engine) -> None:
+        text = self._query(csv_engine, "can_i_do", "apply_spreadsheet_changes")
+        assert "apply_spreadsheet_changes" in text
+        assert "门控" in text
+        assert "解锁" in text
+        assert "write_text_file" not in text
+
+    def test_create_chart_reports_gate_not_task_create(self, csv_engine) -> None:
+        text = self._query(csv_engine, "can_i_do", "create chart")
+        assert "task_create" not in text
+        assert "apply_spreadsheet_changes" in text
+        assert "门控" in text
+
+    def test_write_intent_does_not_answer_with_readonly_validator(self, csv_engine) -> None:
+        text = self._query(csv_engine, "can_i_do", "写入单元格 修改工作簿 创建图表")
+        assert "validate_spreadsheet" not in text
+        assert "apply_spreadsheet_changes" in text
+
+    def test_tool_detail_gated_message_mentions_unlock(self, csv_engine) -> None:
+        text = self._query(csv_engine, "tool_detail", "apply_spreadsheet_changes")
+        assert "工具不可用" in text
+        assert "门控" in text
+        assert "工具不存在于当前目录" not in text
+
+    def test_system_status_still_lists_current_directory(self, csv_engine) -> None:
+        text = self._query(csv_engine, "system_status", "")
+        assert "系统状态概览" in text
+
+    def test_system_status_explains_gated_tools(self, csv_engine) -> None:
+        """回归 #12：查"完整目录"时要能看出"工具仍在、被 CSV profile 门控、产出 xlsx 即解锁"。"""
+        text = self._query(csv_engine, "system_status", "")
+        header = "被门控（工具仍在，可解锁）"
+        assert header in text
+        section = text.split(header, 1)[1]
+        assert "apply_spreadsheet_changes" in section
+        assert "门控" in section  # 是门控，不是"不存在"
+        assert "csv" in section.lower()  # gate 原因：CSV-only profile
+        assert "解锁" in section  # 给出下一步
+        assert "xlsx" in section  # 解锁条件：工作区产出第一个 xlsx
+        # 解锁后由下一轮目录推导生效（两种文案之一）
+        assert "下一轮" in section or "工作区出现" in section
+
+    def test_category_tools_explains_gated_edit_category(self, csv_engine) -> None:
+        text = self._query(csv_engine, "category_tools", "edit")
+        assert "apply_spreadsheet_changes" in text
+        assert "被门控" in text
+
+
+# ── 文本文件版本契约（回归 session #61）────────────────────────
+
+
+class TestTextFileVersionConflict:
+    """write/edit 同族工具的 VERSION_CONFLICT 必须给出可直接执行的下一次调用。"""
+
+    @pytest.fixture(autouse=True)
+    def _workspace(self, tmp_path: Path) -> Path:
+        from excelmanus.tools import code_tools
+        from excelmanus.workbook_commit import seed_seen_versions
+
+        code_tools.init_guard(str(tmp_path))
+        (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
+        seed_seen_versions({})
+        self.root = tmp_path
+        return tmp_path
+
+    def test_edit_conflict_next_call_is_executable(self) -> None:
+        from excelmanus.tools import code_tools
+        from excelmanus.workbook_commit import content_version_of_file
+
+        target = self.root / "scripts" / "build.py"
+        target.write_text("print('old')\n", encoding="utf-8")
+
+        conflict = code_tools.edit_text_file("scripts/build.py", "print('old')", "print('new')")
+        assert not conflict.success
+        payload = dict(conflict.value or {})
+        assert payload["error_code"] == "VERSION_CONFLICT"
+        assert "content_version" in payload["message"]
+        assert "expected_version" in payload["message"]
+        assert payload["needed_args"] == ["expected_version"]
+        assert payload["content_version"] == content_version_of_file(target)
+
+        call = payload["next_call"]
+        assert call["tool"] == "edit_text_file"
+        assert call["arguments"]["expected_version"] == payload["content_version"]
+        assert target.read_text(encoding="utf-8") == "print('old')\n"  # 冲突未落盘
+
+        retry = code_tools.edit_text_file(
+            "scripts/build.py", "print('old')", "print('new')",
+            expected_version=call["arguments"]["expected_version"],
+        )
+        assert retry.success, retry.model_text
+        assert target.read_text(encoding="utf-8") == "print('new')\n"
+
+    def test_write_then_edit_uses_receipt_version(self) -> None:
+        """#59 写入回执的 content_version 就是 #61 需要的 expected_version。"""
+        from excelmanus.tools import code_tools
+        from excelmanus.workbook_commit import seed_seen_versions
+
+        receipt = code_tools.write_text_file("scripts/build_regression_xlsx.py", "print(1)\n")
+        assert receipt.success, receipt.model_text
+        version = receipt.value["content_version"]
+        seed_seen_versions({})  # 下一轮：peek_seen 已清空，与 #61 的真实时序一致
+
+        conflict = code_tools.edit_text_file(
+            "scripts/build_regression_xlsx.py", "print(1)", "print(2)",
+        )
+        payload = dict(conflict.value or {})
+        assert payload["error_code"] == "VERSION_CONFLICT"
+        assert payload["next_call"]["arguments"]["expected_version"] == version
+
+    def test_write_conflict_points_back_at_write_text_file(self) -> None:
+        from excelmanus.tools import code_tools
+        from excelmanus.workbook_commit import seed_seen_versions
+
+        assert code_tools.write_text_file("scripts/job.py", "old\n").success
+        seed_seen_versions({})
+        conflict = code_tools.write_text_file("scripts/job.py", "new\n")
+        payload = dict(conflict.value or {})
+        assert payload["error_code"] == "VERSION_CONFLICT"
+        assert payload["next_call"]["tool"] == "write_text_file"
+        assert payload["next_call"]["arguments"]["expected_version"] == payload["content_version"]
+        assert payload["needed_args"] == ["expected_version"]

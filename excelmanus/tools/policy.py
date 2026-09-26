@@ -13,7 +13,7 @@ from __future__ import annotations
 # 其余内置/MCP 能力通过 introspect_capability 按需披露；执行目录不裁剪。
 DEFAULT_DISCLOSURE_CORE_TOOLS: frozenset[str] = frozenset({
     "observe_spreadsheet", "preview_spreadsheet", "analyze_spreadsheet", "apply_spreadsheet_changes",
-    "calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet",
+    "calculate_spreadsheet", "render_spreadsheet", "convert_spreadsheet", "convert_image",
     "validate_spreadsheet", "query_spreadsheet",
     "list_directory", "read_text_file", "read_image", "run_code", "introspect_capability",
     "ask_user", "show_workbook", "offer_download", "task_create", "task_update", "sleep", "skill",
@@ -290,7 +290,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
         "read_text_file", "list_directory", "copy_file", "rename_file", "delete_file",
     ),
     "code": ("write_text_file", "edit_text_file", "run_code", "run_shell"),
-    "vision": ("read_image",),
+    "vision": ("read_image", "convert_image"),
     "interaction": ("ask_user", "show_workbook", "offer_download"),
     "skills": ("skill", "manage_skills"),
     "tasks": ("task_create", "task_update", "sleep", "write_plan", "exit_plan_mode"),
@@ -318,7 +318,7 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
     "图表": ("apply_spreadsheet_changes",),
     "计算/重算/公式错误": ("calculate_spreadsheet",),
     "预览/渲染/PDF/PNG": ("render_spreadsheet",),
-    "转换/xls/xlsb": ("convert_spreadsheet",),
+    "转换/xls/xlsb/CSV/HTML/ODS/PDF/PNG": ("convert_spreadsheet",),
     "校验/验收/主键/合计": ("validate_spreadsheet",),
     "SQL/多表查询/大数据": ("query_spreadsheet",),
     "公式依赖/影响面": ("trace_spreadsheet_formulas",),
@@ -326,7 +326,7 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
     "目录/查找文件": ("list_directory",),
     "文本文件/日志": ("read_text_file",),
     "Word文档/文档表格": ("read_word", "inspect_word", "write_word"),
-    "图片/看图": ("read_image",),
+    "图片/看图/图片转换": ("read_image", "convert_image"),
     "尺寸/比例/胖/瘦/扁/横向/纵向/行高/列宽/复刻/版式": ("observe_spreadsheet", "preview_spreadsheet", "apply_spreadsheet_changes"),
     "批量计算/代码": ("run_code",),
     "能力/参数/工具详情": ("introspect_capability",),
@@ -337,7 +337,7 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
 # ── 工具简短描述（用于未激活工具索引，帮助 LLM 判断是否需要激活） ──
 
 TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
-    "observe_spreadsheet": "版本绑定的结构、数据、版式、几何、对象和公式观察",
+    "observe_spreadsheet": "版本绑定的结构、数据、版式、几何、对象和公式观察；CSV 无几何面（geometry 返回 unsupported），单元格带 inferred_type、列级 type_summary",
     "preview_spreadsheet": "只读工作台/打印图像观察，直接注入当前视觉上下文",
     "analyze_spreadsheet": "只读分析：profile/quality 全貌，filter 筛选，aggregate 汇总，pivot 透视，relationships 跨文件关联，files 扫目录",
     "compare_spreadsheets": "只读表格数据对比（diff）；两个工作簿或两个工作表；未指定 sheet 时只比较第一张表；position 按坐标，key 按关键列",
@@ -345,7 +345,7 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "apply_spreadsheet_changes": "富对象：图表、Table、名称、批注、超链接、图片和原生透视表",
     "calculate_spreadsheet": "显式调用计算引擎重算公式，检查错误后原子发布",
     "render_spreadsheet": "将工作表或打印区域渲染为 PDF/分页 PNG，返回页数和引擎状态",
-    "convert_spreadsheet": "将 xls/xlsb 等转换为 xlsx，并返回转换前后对象损失报告",
+    "convert_spreadsheet": "将 Excel 转为 xlsx、CSV、HTML、ODS、PDF 或 PNG，并返回对象损失报告",
     "validate_spreadsheet": "按唯一性、主键、逐行公式、合计和公式错误规则确定性校验工作簿",
     "query_spreadsheet": "把多个 Excel/CSV 源流入临时 SQLite，执行只读 SQL 并可导出完整结果",
     "trace_spreadsheet_formulas": "只读公式分析：map 全景、trace 单元格、impact 影响面",
@@ -363,7 +363,8 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "edit_text_file": "精准编辑文本文件：查找替换指定片段，无需重写整个文件",
     "run_code": "组合已注册 SDK 或处理领域工具盖不住的批量变换；不要用它默认写 Excel",
     "run_shell": "执行受限 shell 命令（仅当前主机实际可用的白名单只读命令）。文件浏览优先使用 list_directory；不要假设 PowerShell 别名或 Unix 命令存在",
-    "read_image": "把工作区图片加载到当前视觉上下文。不要做 OCR，不要另开视觉模型。",
+    "read_image": "把工作区图片加载到当前视觉上下文；同一附件同一 detail/crop 在本轮只读取一次，需要小字证据时使用 crop={x,y,width,height,zoom}（zoom 1–8）一次裁剪放大；视觉复刻可传 analyze_layout=true 一次性取得行列线候选、墨迹边界和 layout_reference 候选，布局提示可结合当前视觉上下文判断。",
+    "convert_image": "转换工作区图片格式并按尺寸缩放，原子写出到新文件。",
 }
 
 

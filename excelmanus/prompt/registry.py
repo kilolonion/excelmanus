@@ -48,6 +48,8 @@ class AssembleContext:
     full_access: bool = False
     visible_tools: frozenset[str] | None = None
     new_workbook: bool = True
+    # 目录 profile（xlsx/csv/docx）；None 表示未判定，按不匹配处理。
+    profile: str | None = None
     # 子代理可选择策略子集；core 和 plan 安全约束始终保留。
     strategy_names: frozenset[str] | None = None
 

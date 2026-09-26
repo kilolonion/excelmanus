@@ -131,6 +131,8 @@ def _openai_messages_to_gemini(
 
     返回 (system_instruction, contents)。
     """
+    from excelmanus.providers.thinking import reject_unsupported_media
+    reject_unsupported_media(messages)
     system_parts: list[str] = []
     contents: list[dict[str, Any]] = []
 
@@ -628,6 +630,7 @@ class _GeminiChatCompletions:
         thinking_level = kwargs.pop("_thinking_level", "")
         extra_body = kwargs.pop("extra_body", None)
         prepared_body = kwargs.pop("_prepared_body", None)
+        extra_headers = kwargs.pop("extra_headers", None)
         if stream:
             return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
@@ -636,6 +639,7 @@ class _GeminiChatCompletions:
                 thinking_level=thinking_level,
                 extra_body=extra_body,
                 prepared_body=prepared_body,
+                extra_headers=extra_headers,
             )
         return await self._client._generate(
             model=model,
@@ -646,6 +650,7 @@ class _GeminiChatCompletions:
             thinking_level=thinking_level,
             extra_body=extra_body,
                 prepared_body=prepared_body,
+                extra_headers=extra_headers,
         )
 
 
@@ -686,6 +691,7 @@ class GeminiClient:
         thinking_level: str = "",
         extra_body: dict[str, Any] | None = None,
         prepared_body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> _ChatCompletion:
         """执行 Gemini generateContent 请求。"""
         # 如果 URL 中包含模型名，优先使用（允许用户只填完整 URL 不配 MODEL）
@@ -711,6 +717,7 @@ class GeminiClient:
         else:
             params = {"key": self._api_key}
 
+        headers.update(extra_headers or {})
         logger.debug(
             "Gemini 请求: model=%s, contents=%d条, tools=%d个",
             effective_model,
@@ -766,6 +773,7 @@ class GeminiClient:
         thinking_level: str = "",
         extra_body: dict[str, Any] | None = None,
         prepared_body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> Any:
         """流式执行 Gemini generateContent 请求，返回异步生成器 yield StreamDelta。"""
         effective_model = self._default_model or model
@@ -786,6 +794,7 @@ class GeminiClient:
         else:
             params = {"key": self._api_key}
 
+        headers.update(extra_headers or {})
         async def _stream_generator():
             async with self._http.stream("POST", url, json=body, headers=headers, params=params) as resp:
                 if resp.status_code != 200:

@@ -1047,85 +1047,6 @@ export async function fetchFileRegistry(opts?: {
   return apiGet(`/files/registry${qs ? `?${qs}` : ""}`);
 }
 
-// ── File Groups API ──────────────────────────────────────
-
-export interface FileGroupMember {
-  file_id: string;
-  canonical_path: string;
-  original_name: string;
-  file_type: string;
-  role: string;
-  added_at: string;
-}
-
-export interface FileGroup {
-  id: string;
-  workspace: string;
-  name: string;
-  description: string;
-  members: FileGroupMember[];
-  created_at: string;
-  updated_at: string;
-}
-
-export async function fetchFileGroups(sessionId?: string | null): Promise<{ groups: FileGroup[] }> {
-  try {
-    const params = new URLSearchParams();
-    if (sessionId) params.set("session_id", sessionId);
-    const qs = params.toString();
-    return await apiGet<{ groups: FileGroup[] }>(`/files/groups${qs ? `?${qs}` : ""}`);
-  } catch {
-    return { groups: [] };
-  }
-}
-
-export async function createFileGroup(opts: {
-  name: string;
-  description?: string;
-  file_ids?: { id: string; role?: string }[];
-  sessionId?: string | null;
-}): Promise<FileGroup> {
-  return apiPost<FileGroup>("/files/groups", {
-    name: opts.name,
-    description: opts.description,
-    file_ids: opts.file_ids,
-    session_id: opts.sessionId || undefined,
-  });
-}
-
-export async function updateFileGroup(
-  groupId: string,
-  opts: { name?: string; description?: string; sessionId?: string | null },
-): Promise<FileGroup> {
-  const params = new URLSearchParams();
-  if (opts.sessionId) params.set("session_id", opts.sessionId);
-  const qs = params.toString();
-  return apiPut<FileGroup>(
-    `/files/groups/${encodeURIComponent(groupId)}${qs ? `?${qs}` : ""}`,
-    { name: opts.name, description: opts.description },
-  );
-}
-
-export async function deleteFileGroup(groupId: string, sessionId?: string | null): Promise<void> {
-  const params = new URLSearchParams();
-  if (sessionId) params.set("session_id", sessionId);
-  const qs = params.toString();
-  await apiDelete(`/files/groups/${encodeURIComponent(groupId)}${qs ? `?${qs}` : ""}`);
-}
-
-export async function updateFileGroupMembers(
-  groupId: string,
-  opts: { add?: { file_id: string; role?: string }[]; remove?: string[]; sessionId?: string | null },
-): Promise<FileGroup> {
-  const params = new URLSearchParams();
-  if (opts.sessionId) params.set("session_id", opts.sessionId);
-  const qs = params.toString();
-  return apiPut<FileGroup>(
-    `/files/groups/${encodeURIComponent(groupId)}/members${qs ? `?${qs}` : ""}`,
-    { add: opts.add, remove: opts.remove },
-  );
-}
-
 // ── Cross-file Compare APIs ──────────────────────────────
 
 export interface SharedColumnAPI {
@@ -1283,6 +1204,29 @@ function dropCacheKeys(
 }
 
 export type WorkbookViewResponse = import("@/lib/workbook-observation").WorkbookObservation;
+
+/** Version-bound URL for a binary image embedded in an xlsx drawing. */
+export function buildWorkbookObjectImageUrl(opts: {
+  path: string;
+  workspaceKey: string;
+  workspaceId?: string | null;
+  sessionId?: string | null;
+  sheet: string;
+  index: number;
+  expectedVersion?: string | null;
+}): string {
+  const params = new URLSearchParams({
+    path: normalizeExcelPath(opts.path),
+    workspace_key: opts.workspaceKey,
+    sheet: opts.sheet,
+    index: String(opts.index),
+    kind: "image",
+  });
+  if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
+  if (opts.sessionId) params.set("session_id", opts.sessionId);
+  if (opts.expectedVersion) params.set("expected_version", opts.expectedVersion);
+  return buildApiUrl(`/workbooks/object-image?${params.toString()}`);
+}
 
 const _viewCache = new Map<string, { data: WorkbookViewResponse; ts: number }>();
 type ViewFlight = {

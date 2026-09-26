@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useId } from "react";
 import { ChevronDown } from "lucide-react";
 import { toolIcon, toolStatusIconClass } from "@/lib/tool-icons";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -148,6 +148,8 @@ export const ToolCallCard = React.memo(function ToolCallCard({
 }: ToolCallCardProps) {
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
+  const detailsId = useId();
 
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -220,6 +222,12 @@ export const ToolCallCard = React.memo(function ToolCallCard({
 
   const elapsedLabel = isRunning && elapsed > 0 ? `${elapsed}s` : null;
   const showApprovalCta = isPending && isWriteTool(name);
+  const hasArgs = Object.keys(args).length > 0;
+
+  function toggleDetails() {
+    setHasOpened(true);
+    setOpen((value) => !value);
+  }
 
   return (
     <div
@@ -229,19 +237,21 @@ export const ToolCallCard = React.memo(function ToolCallCard({
       data-nested-tool={nested ? "true" : undefined}
     >
       <div className="flex w-4 flex-col items-center flex-shrink-0">
-        <div className="mt-0.5">{node}</div>
+        <div className="mt-2">{node}</div>
         {!isLast && <div className="mt-1 w-px flex-1 bg-[#C9D1CB] dark:bg-muted-foreground/30 min-h-[12px]" />}
       </div>
 
-      <div className={`min-w-0 flex-1 ${isLast ? "pb-1" : "pb-3"}`}>
+      <div className="tool-call-card-content min-w-0 flex-1 pb-1">
         <button
           type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-start gap-2 text-left group/step"
+          onClick={toggleDetails}
+          aria-expanded={open}
+          aria-controls={detailsId}
+          className="tool-call-toggle group/step flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary-alpha-30)]"
         >
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-[13px] font-medium text-foreground leading-5">{title}</span>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span className="min-w-0 break-words text-[13px] font-medium text-foreground leading-5">{title}</span>
               {nested && (
                 <span className="text-[10px] font-medium text-muted-foreground">子调用</span>
               )}
@@ -255,19 +265,26 @@ export const ToolCallCard = React.memo(function ToolCallCard({
               )}
             </div>
             {contextLine && (
-              <p className="text-[12px] text-muted-foreground mt-0.5 leading-4 break-words">
+              <p className="text-[12px] text-muted-foreground mt-0.5 leading-4 [overflow-wrap:anywhere]">
                 {contextLine}
               </p>
             )}
             {isRunning && toolProgress?.message && (
               <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{toolProgress.message}</p>
             )}
+            {isError && error && (
+              <p className="mt-1 line-clamp-2 text-[12px] text-red-600 dark:text-red-400 leading-5 [overflow-wrap:anywhere]">
+                {error}
+              </p>
+            )}
           </div>
-          <span className="flex items-center gap-1 flex-shrink-0 pt-0.5">
+          <span className="flex items-center gap-1.5 flex-shrink-0 -my-0.5">
             {elapsedLabel && (
               <span className="text-[11px] tabular-nums text-muted-foreground">{elapsedLabel}</span>
             )}
-            <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground/40 transition-transform ${open ? "rotate-180" : ""}`} />
+            <span className="tool-call-chevron-wrap flex h-6 w-6 items-center justify-center rounded-md">
+              <ChevronDown aria-hidden="true" className="tool-call-chevron h-3.5 w-3.5" />
+            </span>
           </span>
         </button>
 
@@ -299,53 +316,59 @@ export const ToolCallCard = React.memo(function ToolCallCard({
           </div>
         )}
 
-        {isError && error && !open && (
-          <p className="mt-1.5 text-[12px] text-red-600 dark:text-red-400 leading-5 break-words">
-            {error}
-          </p>
-        )}
-
-        {open && (
-          <div className="mt-2 rounded-xl border border-[var(--em-hairline)] bg-[var(--em-fill)] dark:bg-muted/20 px-3 py-2.5 space-y-2">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] font-medium text-muted-foreground">执行详情</p>
-              <code className="font-mono text-[10px] text-muted-foreground">{name}</code>
-            </div>
-            {Object.keys(args).length > 0 && (
-              <div>
-                <p className="text-[11px] font-medium text-muted-foreground mb-1">参数</p>
-                <CodeBlock
-                  language="json"
-                  code={JSON.stringify(args, null, isMobile ? 1 : 2)}
-                  maxHeightClass="max-h-48"
-                />
-              </div>
-            )}
-            {result && (() => {
-              const lang = detectResultLanguage(name, result);
-              return (
-                <div>
-                  <p className="text-[11px] font-medium text-muted-foreground mb-1">结果</p>
-                  {lang ? (
-                    <CodeBlock language={lang} code={result} maxHeightClass="max-h-48" />
-                  ) : (
-                    <pre className="bg-background/70 rounded p-2 overflow-auto whitespace-pre-wrap max-h-48 text-[11px]">
-                      {result}
-                    </pre>
+        {/* Keep the zero-height shell mounted so the first click transitions too.
+            Only the clipping wrapper participates in the grid animation. */}
+        <div
+          id={detailsId}
+          role="region"
+          aria-label={`${title}执行详情`}
+          aria-hidden={!open}
+          inert={!open}
+          className={`tool-call-details ${open ? "tool-call-details-open" : ""}`}
+        >
+          <div className="tool-call-details-clip">
+            {hasOpened && (
+              <div className="tool-call-details-panel">
+                <div className="flex min-w-0 items-center justify-between gap-3 border-b border-[var(--em-hairline)] pb-3">
+                  <p className="shrink-0 text-[11px] font-medium text-muted-foreground">执行详情</p>
+                  <code title={name} className="min-w-0 truncate rounded-md bg-[var(--em-fill)] px-2 py-1 font-mono text-[10px] text-muted-foreground">{name}</code>
+                </div>
+                <div className="grid min-w-0 gap-3 pt-3">
+                  {hasArgs && (
+                    <CodeBlock
+                      label="输入参数"
+                      language="json"
+                      code={JSON.stringify(args, null, isMobile ? 1 : 2)}
+                      maxHeightClass="max-h-56"
+                    />
+                  )}
+                  {result && (() => {
+                    const lang = detectResultLanguage(name, result);
+                    return lang ? (
+                      <CodeBlock label="执行结果" language={lang} code={result} maxHeightClass="max-h-64" />
+                    ) : (
+                      <div className="tool-call-output">
+                        <p className="tool-call-output-label">执行结果</p>
+                        <pre className="tool-call-plain-result max-h-64">{result}</pre>
+                      </div>
+                    );
+                  })()}
+                  {error && (
+                    <div className="tool-call-output tool-call-output-error">
+                      <p className="tool-call-output-label">错误信息</p>
+                      <pre className="tool-call-plain-result max-h-56">{error}</pre>
+                    </div>
+                  )}
+                  {!hasArgs && !result && !error && (
+                    <p className="px-1 py-2 text-[12px] leading-5 text-muted-foreground">
+                      {isRunning ? "正在执行，结果将在完成后显示。" : status === "pending" ? "等待执行，暂时没有详情。" : "本次操作没有返回详细内容。"}
+                    </p>
                   )}
                 </div>
-              );
-            })()}
-            {error && (
-              <div>
-                <p className="text-[11px] font-medium text-red-600 mb-1">错误</p>
-                <pre className="bg-red-50/80 dark:bg-red-950/20 rounded-md p-2 overflow-auto whitespace-pre-wrap max-h-48 text-red-700 dark:text-red-300 text-[11px]">
-                  {error}
-                </pre>
               </div>
             )}
           </div>
-        )}
+        </div>
 
         {streamingRawArgs && textDiffs.length === 0 && (
           <StreamingTextPreview toolName={name} rawArgs={streamingRawArgs} />

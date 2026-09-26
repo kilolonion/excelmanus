@@ -192,7 +192,14 @@ class InteractionHandler:
             if record.get("phase") == "executing":
                 # 已开始执行时只能依据已有回执恢复，不能把已批准工具再执行一遍。
                 applied = e._approval.get_applied(approval_id)
-                text = applied.result_preview if applied is not None else "执行曾开始，但结果未完整记录；请先核对实际结果再继续。"
+                if applied is not None:
+                    text = applied.result_preview
+                else:
+                    # 没有回执：按工具效果给确切状态（写入/未知副作用=结果未确认的
+                    # 失败，命令=可能仍在后台运行），不留"结果未完整记录"这种模糊说法。
+                    from excelmanus.engine_core.aborted_calls import dangling_call_placeholder
+
+                    text = dangling_call_placeholder(str(saved.get("tool_name") or ""))
                 self.finish_approval(approval_id, text, bool(applied and applied.execution_status == "success"))
             else:
                 e._approval.restore_pending(saved)

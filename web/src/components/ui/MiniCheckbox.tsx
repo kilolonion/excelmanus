@@ -1,33 +1,26 @@
 "use client";
 
-import { Check } from "lucide-react";
+import { Checkbox } from "./checkbox";
 
 interface MiniCheckboxProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
   label: string;
   className?: string;
+  disabled?: boolean;
 }
 
-export function MiniCheckbox({ checked, onChange, label, className = "" }: MiniCheckboxProps) {
+export function MiniCheckbox({ checked, onChange, label, className = "", disabled }: MiniCheckboxProps) {
   return (
     <label
-      className={`flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none ${className}`}
-      onClick={(e) => { e.preventDefault(); onChange(!checked); }}
+      className={`flex items-center gap-1.5 text-xs text-muted-foreground select-none ${disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"} ${className}`}
     >
-      <span
-        role="checkbox"
-        aria-checked={checked}
-        className={[
-          "inline-flex items-center justify-center shrink-0 rounded-[3px] border transition-colors",
-          "h-[14px] w-[14px]",
-          checked
-            ? "bg-primary border-primary text-primary-foreground"
-            : "border-muted-foreground/40 bg-transparent",
-        ].join(" ")}
-      >
-        {checked && <Check className="h-[10px] w-[10px]" strokeWidth={2.5} />}
-      </span>
+      <Checkbox
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={(next) => onChange(next === true)}
+        aria-label={label}
+      />
       {label}
     </label>
   );

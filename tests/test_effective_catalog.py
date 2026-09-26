@@ -553,3 +553,258 @@ def test_exposure_does_not_change_catalog_digest(tmp_path) -> None:
     assert epoch_changed(before_id, after_id) is False
     assert before_id.tools_digest == after_id.tools_digest
     assert digest_tools(before_schemas) == digest_tools(after_schemas)
+
+
+# ── csv-only 工作区：门控可见化 + 确定性解锁路径 ──────────────────
+
+
+def _builtin_engine(tmp_path, *, chat_mode: str = "write") -> SimpleNamespace:
+    registry = ToolRegistry()
+    registry.register_builtin_tools(str(tmp_path))
+    return SimpleNamespace(
+        _registry=registry,
+        registry=registry,
+        _current_chat_mode=chat_mode,
+        _fixed_capability=None,
+        _skill_router=None,
+        _skill_resolver=None,
+        _subagent_config=None,
+        _active_skills=[],
+        _tools_cache=None,
+        config=SimpleNamespace(workspace_root=str(tmp_path)),
+    )
+
+
+def _seed_csv_workspace(tmp_path) -> None:
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(exist_ok=True)
+    (uploads / "sales.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+
+class TestCsvProfileGateAndBootstrap:
+    """csv-only 不能变成死锁：门控要可解释，解锁路径要确定。"""
+
+    def test_csv_profile_gates_trace_but_keeps_write_tools(self, tmp_path) -> None:
+        from excelmanus.tools.catalog import (
+            execution_catalog_from_engine,
+            gated_tool_reason,
+            workspace_catalog_profile,
+        )
+
+        _seed_csv_workspace(tmp_path)
+        engine = _builtin_engine(tmp_path)
+        catalog = execution_catalog_from_engine(engine)
+        assert catalog is not None
+        assert workspace_catalog_profile(engine) == "csv"
+        # 新契约：新建工作簿不依赖已有 xlsx，写工具在 CSV-only 下仍可见、可 introspect
+        assert "apply_spreadsheet_changes" in catalog.name_set()
+        assert "apply_spreadsheet_changes" in catalog.introspection_source()
+        # 仍被门控的是依赖已有工作簿的公式追踪：不进可见集，也不可 introspect
+        assert "trace_spreadsheet_formulas" not in catalog.name_set()
+        assert "trace_spreadsheet_formulas" not in catalog.introspection_source()
+        # 解锁路径可达：CSV → xlsx 的产出工具仍在目录里
+        assert {"convert_spreadsheet", "query_spreadsheet"} <= catalog.name_set()
+        # prompt 侧：单行指路，含门控事实与 outputs 解锁方向
+        note = catalog.gated_reason("trace_spreadsheet_formulas")
+        assert note == catalog.gate_notes[0]
+        assert "被 profile 门控" in note and "工具仍注册" in note
+        assert "trace_spreadsheet_formulas" in note
+        assert "outputs/" in note and "下一轮" in note
+        assert "\n" not in note
+        assert "被门控" in catalog.capability_map_text()
+        # 按需查询（introspect 侧）：同一门控事实 + 可执行细节
+        reason = gated_tool_reason(engine, "trace_spreadsheet_formulas", catalog=catalog)
+        assert reason.startswith(note)
+        assert "file_path=" in reason
+        # 目录内可见的工具不产生门控说明（写工具不再被门控）
+        assert gated_tool_reason(engine, "observe_spreadsheet", catalog=catalog) == ""
+        assert gated_tool_reason(engine, "apply_spreadsheet_changes", catalog=catalog) == ""
+
+    def test_csv_profile_still_honours_explicit_disallowed_and_read_mode(
+        self, tmp_path
+    ) -> None:
+        """安全边界不变：显式授权 disallowed / 只读模式仍能收紧可见集。"""
+        from excelmanus.tools.catalog import execution_catalog_from_engine
+
+        _seed_csv_workspace(tmp_path)
+        locked_registry = ToolRegistry()
+        locked_registry.register_builtin_tools(str(tmp_path))
+        locked_engine = SimpleNamespace(
+            _registry=locked_registry,
+            registry=locked_registry,
+            _current_chat_mode="write",
+            _fixed_capability=SimpleNamespace(
+                tool_access="may_write",
+                catalog_mode="write",
+                allowed_tools=None,
+                disallowed_tools=("apply_spreadsheet_changes",),
+            ),
+            _skill_router=None,
+            _skill_resolver=None,
+            _subagent_config=None,
+            _active_skills=[],
+            _tools_cache=None,
+            config=SimpleNamespace(workspace_root=str(tmp_path)),
+        )
+        locked = execution_catalog_from_engine(locked_engine)
+        assert locked is not None
+        assert "apply_spreadsheet_changes" not in locked.name_set()
+
+        read_catalog = execution_catalog_from_engine(
+            _builtin_engine(tmp_path, chat_mode="read")
+        )
+        assert read_catalog is not None
+        assert "apply_spreadsheet_changes" not in read_catalog.name_set()
+
+    def test_gate_note_stays_single_line_pointer(self, tmp_path) -> None:
+        """门控说明是 prompt 用的一句话指针，调用示例留给 14_csv_bootstrap 段。"""
+        from excelmanus.tools.catalog import (
+            csv_profile_bootstrap_hint,
+            execution_catalog_from_engine,
+        )
+
+        _seed_csv_workspace(tmp_path)
+        catalog = execution_catalog_from_engine(_builtin_engine(tmp_path))
+        assert catalog is not None
+        note = catalog.gate_notes[0]
+        assert len(note) <= 200
+        assert "file_path=" not in note and "sql=" not in note
+        # 细节没有被删除：按需提示仍然给可执行调用
+        detail = csv_profile_bootstrap_hint(catalog.name_set())
+        assert "convert_spreadsheet(file_path=" in detail
+        assert "outputs/" in detail
+
+    def test_csv_profile_gate_note_names_no_unavailable_tool(self, tmp_path) -> None:
+        from excelmanus.tools.catalog import (
+            execution_catalog_from_engine,
+            gated_tool_reason,
+        )
+
+        _seed_csv_workspace(tmp_path)
+        registry = ToolRegistry()
+        registry.register_tools(
+            [
+                _tool("trace_spreadsheet_formulas", effect="none"),
+                _tool("apply_spreadsheet_changes", effect="workspace_write"),
+                _tool("write_text_file", effect="workspace_write"),
+            ]
+        )
+        engine = SimpleNamespace(
+            _registry=registry,
+            registry=registry,
+            _current_chat_mode="write",
+            _fixed_capability=None,
+            _skill_router=None,
+            _skill_resolver=None,
+            _subagent_config=None,
+            _active_skills=[],
+            _tools_cache=None,
+            config=SimpleNamespace(workspace_root=str(tmp_path)),
+        )
+        catalog = execution_catalog_from_engine(engine)
+        assert catalog is not None
+        # 新契约：写工具可见，不再产生门控说明
+        assert "apply_spreadsheet_changes" in catalog.name_set()
+        assert gated_tool_reason(engine, "apply_spreadsheet_changes", catalog=catalog) == ""
+        # 只有依赖已有工作簿的 trace 工具被门控，说明只点名真实注册的工具
+        assert len(catalog.gate_notes) == 1
+        assert "trace_spreadsheet_formulas" in catalog.gate_notes[0]
+        reason = gated_tool_reason(engine, "trace_spreadsheet_formulas", catalog=catalog)
+        assert "门控" in reason
+        # 注册表里没有 convert/query/split：不得把它们写进解锁提示
+        for absent in ("convert_spreadsheet", "query_spreadsheet", "split_spreadsheet"):
+            assert absent not in reason
+
+    def test_first_xlsx_in_outputs_unlocks_trace_tool(self, tmp_path) -> None:
+        from openpyxl import Workbook
+
+        from excelmanus.tools.catalog import (
+            execution_catalog_from_engine,
+            gated_tool_reason,
+            workspace_catalog_profile,
+        )
+
+        _seed_csv_workspace(tmp_path)
+        engine = _builtin_engine(tmp_path)
+        before = execution_catalog_from_engine(engine)
+        assert before is not None
+        # 新契约：写工具本来就能直接新建工作簿，不需要先转换
+        assert "apply_spreadsheet_changes" in before.name_set()
+        # 依赖已有工作簿的 trace 工具在 CSV-only 下仍被门控
+        assert "trace_spreadsheet_formulas" not in before.name_set()
+        assert before.gate_notes
+        digest_before = before.digest()
+
+        # 直接新建/转换的落盘效果：第一个 xlsx 出现在 outputs/（目录扫描覆盖处）
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        wb = Workbook()
+        wb.active["A1"] = "seed"
+        wb.save(str(outputs / "first.xlsx"))
+        wb.close()
+
+        after = execution_catalog_from_engine(engine)
+        assert after is not None
+        assert workspace_catalog_profile(engine) == "xlsx"
+        assert "apply_spreadsheet_changes" in after.name_set()
+        # outputs 下的 xlsx 让目录翻到 xlsx：trace 工具解锁，门控说明清空
+        assert "trace_spreadsheet_formulas" in after.name_set()
+        assert after.gate_notes == ()
+        assert gated_tool_reason(engine, "trace_spreadsheet_formulas", catalog=after) == ""
+        assert after.digest() != digest_before
+
+    def test_bootstrap_outside_scanned_dirs_does_not_unlock(self, tmp_path) -> None:
+        """落盘位置是解锁条件的一部分：scripts/temp 不被目录扫描覆盖。"""
+        from openpyxl import Workbook
+
+        from excelmanus.tools.catalog import (
+            execution_catalog_from_engine,
+            workspace_catalog_profile,
+        )
+
+        _seed_csv_workspace(tmp_path)
+        engine = _builtin_engine(tmp_path)
+        stash = tmp_path / "scripts" / "temp"
+        stash.mkdir(parents=True)
+        wb = Workbook()
+        wb.save(str(stash / "unseen.xlsx"))
+        wb.close()
+        assert workspace_catalog_profile(engine) == "csv"
+        catalog = execution_catalog_from_engine(engine)
+        assert catalog is not None
+        # 写工具在 CSV-only 下本就可见：新建不需要先有 xlsx
+        assert "apply_spreadsheet_changes" in catalog.name_set()
+        # 但目录扫描没看到工作簿，依赖已有 xlsx 的 trace 仍被门控
+        assert "trace_spreadsheet_formulas" not in catalog.name_set()
+        assert catalog.gate_notes
+
+    def test_gate_notes_do_not_break_registry_digest_invariant(self, tmp_path) -> None:
+        """门控说明只影响文案：执行目录 digest 仍与 registry 绑定投影一致。"""
+        from excelmanus.tools.catalog import catalog_from_engine
+
+        _seed_csv_workspace(tmp_path)
+        engine = _builtin_engine(tmp_path)
+        catalog = catalog_from_engine(engine)
+        assert catalog is not None
+        assert catalog.gate_notes
+        assert catalog.digest() == engine._registry.catalog_digest()
+
+    def test_read_mode_has_no_csv_gate_notes(self, tmp_path) -> None:
+        from excelmanus.tools.catalog import execution_catalog_from_engine
+
+        _seed_csv_workspace(tmp_path)
+        engine = _builtin_engine(tmp_path, chat_mode="read")
+        catalog = execution_catalog_from_engine(engine)
+        assert catalog is not None
+        assert catalog.mode == "read"
+        assert catalog.gate_notes == ()
+
+    def test_bootstrap_hint_filters_by_visible_names(self) -> None:
+        from excelmanus.tools.catalog import csv_profile_bootstrap_hint
+
+        hint = csv_profile_bootstrap_hint({"query_spreadsheet"})
+        assert "query_spreadsheet" in hint
+        assert "convert_spreadsheet" not in hint
+        assert "outputs/" in hint
+        bare = csv_profile_bootstrap_hint(set())
+        assert "convert_spreadsheet" not in bare and "query_spreadsheet" not in bare

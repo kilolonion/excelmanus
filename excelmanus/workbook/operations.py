@@ -42,6 +42,13 @@ def _bounds(ws, raw):
     return target
 
 
+def _assign(target, value):
+    """按“空串 = 清空单元格”语义写入：openpyxl 落盘后回读不到字面空串。"""
+    from excelmanus.workbook.cells import coerce_cell_value
+
+    target.value = coerce_cell_value(value)
+
+
 def _paste(source, target, mode="all", *, transpose=False):
     if mode in {"all", "formulas"}:
         value = source.value
@@ -96,7 +103,7 @@ def apply_range_operation(wb, op):
             raise ValueError("追加目标已有内容")
         for r, row in enumerate(rows, start_row):
             for c, value in enumerate(row, start_col):
-                ws.cell(r,c).value = value; changed += 1
+                _assign(ws.cell(r,c), value); changed += 1
         if table:
             table.ref = f"{get_column_letter(region.min_col)}{region.min_row}:{get_column_letter(region.max_col)}{start_row+len(rows)-1}"
             if table.autoFilter:
@@ -120,7 +127,7 @@ def apply_range_operation(wb, op):
             for c, cell in enumerate(row):
                 target = ws.cell(anchor.row + (c if op.get("transpose") else r), anchor.column + (r if op.get("transpose") else c))
                 if mode == "values":
-                    target.value = cache[cell.row-1][cell.column-1]
+                    _assign(target, cache[cell.row-1][cell.column-1])
                     if isinstance(target.value, str): target.data_type = "s"
                 else:
                     _paste(cell, target, mode)
@@ -170,7 +177,7 @@ def apply_range_operation(wb, op):
                     _paste(seed[r%len(seed)][c%len(seed[0])],cell)
                 elif mode=="series":
                     cell.value = op.get("start",0)+changed*op.get("step",1)
-                else: cell.value=op.get("value")
+                else: _assign(cell, op.get("value"))
                 changed += 1
     elif kind == "clear":
         mode = op.get("mode","values")
@@ -192,5 +199,5 @@ def apply_range_operation(wb, op):
                 if isinstance(old,str):
                     new=pattern.sub(str(replacement or ""),old) if op.get("regex") else pattern.sub(lambda m: str(replacement if replacement is not None else ""),old)
                 else: new=replacement if old==find else old
-                if new!=old: cell.value=new; changed+=1
+                if new!=old: _assign(cell, new); changed+=1
     return f"{kind}:{ws.title}:{changed}"

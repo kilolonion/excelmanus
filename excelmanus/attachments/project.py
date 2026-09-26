@@ -68,22 +68,36 @@ def _image_identity(ref: ImageAttachmentRef) -> str:
     return ref.attachment_id
 
 
-def _extension(media_type: str) -> str:
-    return {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/webp": ".webp",
-        "image/gif": ".gif",
-    }.get(media_type, ".bin")
-
-
 def _attachment_descriptor(ref: ImageAttachmentRef) -> str:
-    """投影可见描述：只暴露 content-addressed id + 媒体类型，不含宿主路径。"""
+    """投影可见描述：披露源图身份与可见坐标系，不泄露宿主路径。"""
+    source_dims = ref.source_dimensions or ref.original_dimensions
+    source_width = source_dims.width if source_dims is not None else ref.width
+    source_height = source_dims.height if source_dims is not None else ref.height
+    legacy_source = ref.source_digest is not None and ref.source_dimensions is None and ref.original_dimensions is not None
+    source_media = ref.source_media_type or ("unknown" if legacy_source else ref.media_type)
+    source_bytes = ref.source_bytes if ref.source_bytes is not None else ("unknown" if legacy_source else ref.bytes)
+    animation = (
+        f" animated={ref.frame_count}frames(first-frame request)"
+        if ref.animated or ref.frame_count > 1
+        else ""
+    )
+    crop = (
+        f" crop_in_parent={ref.crop_in_parent} crop_zoom={ref.crop_zoom}"
+        if ref.parent_attachment_id and ref.crop_in_parent
+        else ""
+    )
+    orientation = (
+        f" exif_orientation={ref.source_orientation} applied"
+        if ref.source_orientation != 1
+        else ""
+    )
     return (
-        f" attachment_id={ref.attachment_id} media_type={ref.media_type}"
-        f" ({ref.width}x{ref.height}px)."
-        " Source dimensions, format, and byte size may differ."
-        f" Copy to a writable path ending in {_extension(ref.media_type)} before editing."
+        f" attachment_id={ref.attachment_id} source={source_width}x{source_height}px"
+        f" source_media_type={source_media} source_bytes={source_bytes}"
+        f" attachment={ref.width}x{ref.height}px{animation}{orientation}{crop}."
+        " A vision request uses a derived request variant; its dimensions and"
+        " encoded bytes are reported separately. Attachment ids are read-only;"
+        " use crop/zoom for a new visual observation."
     )
 
 
@@ -96,7 +110,15 @@ def request_image_handle_text(
     ref: ImageAttachmentRef,
     version: RequestImageAttachment,
 ) -> str:
-    preview = f"Image {_image_identity(ref)}; request preview {version.width}x{version.height}px; attachment-to-request scale=({version.width / ref.width:.8g},{version.height / ref.height:.8g}), origin=(0,0)."
+    source_dimensions = ref.source_dimensions or ref.original_dimensions
+    source_width = max(1, source_dimensions.width if source_dimensions is not None else ref.width)
+    source_height = max(1, source_dimensions.height if source_dimensions is not None else ref.height)
+    preview = (
+        f"Image {_image_identity(ref)}; request preview {version.width}x{version.height}px"
+        f" ({version.bytes} bytes, {version.media_type});"
+        f" source-to-request scale=({version.width / source_width:.8g},"
+        f"{version.height / source_height:.8g}), origin=(0,0)."
+    )
     return preview + _attachment_descriptor(ref)
 
 
@@ -192,6 +214,12 @@ def _materialize_images(
                     out.append({"type": "text", "text": text})
                     continue
                 handle = request_image_handle_text(ref, version)
+                requested_detail = str(block.get("detail", "auto") or "auto")
+                handle += (
+                    f" requested_detail={requested_detail}; effective_request_pixels="
+                    f"{version.width * version.height}; detail is a provider hint and"
+                    " cannot restore pixels removed by this request projection."
+                )
                 data_uri = (
                     f"data:{version.media_type};base64,"
                     f"{base64.b64encode(version.data).decode('ascii')}"
@@ -253,7 +281,20 @@ def assemble_model_request(
     def conservative_len(ref: ImageAttachmentRef) -> int:
         if conservative_byte_length is not None:
             return conservative_byte_length(ref)
-        return min(ref.bytes, policy.max_bytes)
+        # Admission now preserves source bytes, which can be much larger than
+        # the request variant (a PNG screenshot is the common case).  Use a
+        # conservative pixel-ratio estimate for the first offload pass; the
+        # second pass replaces it with the exact encoded variant length.
+        source_dimensions = ref.source_dimensions or ref.original_dimensions
+        source_pixels = (
+            source_dimensions.width * source_dimensions.height
+            if source_dimensions is not None
+            else ref.width * ref.height
+        )
+        target_pixels = min(source_pixels, policy.max_pixels) if source_pixels > 0 else policy.max_pixels
+        ratio = target_pixels / max(1, source_pixels)
+        estimate = max(64 * 1024, int(ref.bytes * ratio * 1.5))
+        return min(ref.bytes, policy.max_bytes, estimate)
 
     def _remaining_pins(
         n_original: int,

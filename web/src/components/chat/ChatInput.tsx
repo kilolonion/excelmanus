@@ -23,10 +23,10 @@ import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { apiFetch, buildApiUrl, apiGet, getAuthHeaders } from "@/lib/api";
-import { formatModelIdForDisplay } from "@/lib/model-display";
+import { cleanModelDescription, formatModelIdForDisplay } from "@/lib/model-display";
 import { applyVisionFromModel } from "@/lib/vision-capability";
 import { UndoPanel } from "@/components/modals/UndoPanel";
-import type { ModelInfo, AttachedFile, MessageDispatchMode } from "@/lib/types";
+import type { ExampleContext, ModelInfo, AttachedFile, MessageDispatchMode } from "@/lib/types";
 import {
   SLASH_COMMANDS,
   DISPLAY_COMMANDS,
@@ -68,12 +68,12 @@ import { findLastRetryableFailure, needsContinuationOffer } from "@/lib/failure-
 import { DispatchQueue } from "./DispatchQueue";
 
 interface ChatInputProps {
-  onSend: (text: string, files?: AttachedFile[], sessionId?: string | null, dispatchMode?: MessageDispatchMode) => void | boolean | Promise<void | boolean>;
+  onSend: (text: string, files?: AttachedFile[], sessionId?: string | null, dispatchMode?: MessageDispatchMode, exampleContext?: ExampleContext) => void | boolean | Promise<void | boolean>;
   onCommandResult?: (command: string, result: string, format: "markdown" | "text") => void;
   disabled?: boolean;
   isStreaming?: boolean;
   onStop?: () => void;
-  composerDraft?: { seq: number; text: string; files: File[] } | null;
+  composerDraft?: { seq: number; text: string; files: File[]; example?: ExampleContext } | null;
 }
 
 export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: streamingProp, onStop, composerDraft }: ChatInputProps) {
@@ -106,6 +106,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
   const [confirmedTokens, setConfirmedTokens] = useState<Set<string>>(new Set());
   const [undoPanelOpen, setUndoPanelOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [exampleContext, setExampleContext] = useState<ExampleContext | undefined>();
   useEffect(() => {
     const controller = new AbortController();
     const before = useUIStore.getState().messageDispatchDefault;
@@ -314,6 +315,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
   useEffect(() => {
     if (!composerDraft) return;
     applySuggestionDraft(composerDraft.text, composerDraft.files);
+    setExampleContext(composerDraft.example);
     setDraftHighlight(true);
     const highlightTimer = window.setTimeout(() => setDraftHighlight(false), 900);
     requestAnimationFrame(() => {
@@ -378,7 +380,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
         if (!filter || label.toLowerCase().includes(filter) || (m.description || "").toLowerCase().includes(filter)) {
           items.push({
             command: m.name,
-            description: m.description || displayModel,
+            description: cleanModelDescription(m.description, [m.name, displayModel]),
             icon: m.name === currentModel
               ? <Check className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
               : <Cpu className="h-3.5 w-3.5" />,
@@ -602,7 +604,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
         }
       } catch { /* 回退到作为聊天发送 */ }
     }
-    onSend(trimmed);
+    onSend(trimmed, undefined, undefined, undefined, exampleContext);
   };
 
   const configBlocked = configReady !== true || !!configError;
@@ -772,7 +774,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
       }
       if (useSessionStore.getState().activeSessionId !== sessionId) throw new Error("已切换对话，草稿已保留，请确认后重新发送");
       const validFiles = files.filter((af) => af.status === "success");
-      const sent = await onSend(finalText, validFiles.length > 0 ? validFiles : undefined, sessionId, messageDispatchDefault);
+      const sent = await onSend(finalText, validFiles.length > 0 ? validFiles : undefined, sessionId, messageDispatchDefault, exampleContext);
       if (sent === false) return;
       if (useSessionStore.getState().activeSessionId !== sessionId) return;
       setText((current) => current === draftText ? "" : current);
@@ -895,7 +897,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming: stre
           onRetryWithModel={handleRetryLastFailedWithModel}
         />
       )}
-    <div className="em-composer-tabs">
+    <div className="em-composer-tabs" aria-label="当前引用">
       {showWorkbookContext && <WorkbookContextChip />}
       <ChatLiveSelectionChip />
     </div>

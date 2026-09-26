@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any, AsyncIterator, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -30,6 +31,8 @@ from excelmanus.api_app_state import (
     set_restart_reason,
 )
 from excelmanus.api_sse import sse_format as _sse_format
+from excelmanus.capability_identity import json_object
+from excelmanus.model_catalog import capability_metadata
 from excelmanus.config import (
     CANONICAL_MATCH_THRESHOLD,
     THINKING_EFFORT_ORDER,
@@ -49,25 +52,29 @@ logger = get_logger("api.config")
 router = APIRouter()
 
 
-def _supports_vision_for(model: str, base_url: str, canonical_model: str = "") -> bool:
+def _supports_vision_for(
+    model: str, base_url: str, canonical_model: str = "", vision_mode: str = "auto", scope: str = "",
+) -> bool:
     """给模型列表带上与引擎一致的视觉推断，供新对话在 engine 创建前使用。"""
     from excelmanus.vision_capability import infer_vision_capable
 
     probe: bool | None = None
     config = get_config()
     override = getattr(config, "main_model_vision", "auto") if config is not None else "auto"
+    if vision_mode != "auto":
+        override = vision_mode
     sm = get_session_manager()
     db = sm.database if sm is not None else None
-    if db is not None:
+    if db is not None and scope:
         try:
             from excelmanus.model_probe import load_capabilities
-            caps = load_capabilities(db, model, base_url, canonical_model=canonical_model)
+            caps = load_capabilities(db, model, base_url, scope=scope)
             if caps is not None:
                 probe = caps.supports_vision
         except Exception:
             logger.debug("模型列表视觉推断加载 probe 失败", exc_info=True)
     return infer_vision_capable(
-        model, override=override, probe=probe, canonical_model=canonical_model,
+        model, override=override, probe=probe, canonical_model=canonical_model, base_url=base_url,
     )
 
 
@@ -94,6 +101,7 @@ async def list_models(request: Request) -> JSONResponse:
         ):
             continue
         canonical = profile_canonical(p)
+        _cache_model, _cache_url, _cache_scope = _capability_coordinates(request, p["name"], p["model"], p.get("base_url"))
         models.append({
             "name": p["name"],
             "model": p["model"],
@@ -101,9 +109,14 @@ async def list_models(request: Request) -> JSONResponse:
             "description": p.get("description", ""),
             "active": p["name"] == active_name,
             "base_url": p.get("base_url", ""),
+            "protocol": p.get("protocol", "auto"),
+            "model_family": p.get("model_family", ""),
             "canonical_model": canonical,
+            "capability_metadata": capability_metadata(p["model"], p.get("base_url") or ""),
             "supports_vision": _supports_vision_for(
-                p["model"], p.get("base_url") or "", canonical,
+                p["model"], _cache_url, canonical,
+                p.get("vision_mode", "auto"),
+                _cache_scope,
             ),
         })
     if models and not any(m["active"] for m in models):
@@ -126,6 +139,7 @@ async def _activate_named_profile(name: str) -> JSONResponse | None:
         )
     deprecated = _deprecated_model_error_response(
         profile.get("model", ""),
+        base_url=profile.get("base_url", ""),
         prefix=f"模型 {name!r} 使用了已弃用 Model ID。",
     )
     if deprecated is not None:
@@ -169,7 +183,7 @@ async def _activate_named_profile(name: str) -> JSONResponse | None:
                 if engine is not None:
                     caps = load_capabilities(
                         db, engine.current_model, engine.active_base_url,
-                        canonical_model=getattr(engine, "active_canonical_model", ""),
+                        scope=engine.capability_scope,
                     )
                     if caps is not None:
                         engine.set_model_capabilities(caps)
@@ -202,9 +216,25 @@ class ThinkingConfigRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     effort: str | None = None  # none|minimal|low|medium|high|xhigh|max
     budget: int | None = None  # 精确 token 预算（0 = 使用 effort 换算）
+    session_id: str | None = None
     allowed_efforts: list[
         Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
     ] | None = None
+
+
+def _thinking_controls_for_config(engine: Any = None) -> dict:
+    from excelmanus.providers.thinking import thinking_controls
+    config = get_config()
+    profile = getattr(engine, "_active_profile", None) if engine else None
+    return thinking_controls(
+        getattr(engine, "current_model", None) or config.model,
+        getattr(engine, "active_base_url", None) or config.base_url,
+        getattr(engine, "_active_protocol", None) or config.protocol,
+        getattr(profile, "thinking_mode", "auto"),
+        getattr(engine, "_model_capabilities", None),
+        getattr(getattr(engine, "thinking_config", None), "effort", config.thinking_effort),
+        list(config.thinking_effort_options),
+    )
 
 
 @router.get("/api/v1/thinking")
@@ -214,24 +244,22 @@ async def get_thinking_config(raw_request: Request) -> JSONResponse:
         raise HTTPException(status_code=503, detail="服务未初始化")
     assert get_config() is not None
     allowed_efforts = list(get_config().thinking_effort_options)
-    sessions = await get_session_manager().list_sessions()
-    # 取第一个活跃 session 的 thinking_config
-    for s in sessions:
-        engine = get_session_manager().get_engine(s["id"])
-        if engine is not None:
-            tc = engine.thinking_config
-            return JSONResponse(content={
-                "effort": tc.effort,
-                "budget": tc.budget_tokens,
-                "effective_budget": tc.effective_budget(),
-                "allowed_efforts": allowed_efforts,
-            })
+    session_id = raw_request.query_params.get("session_id")
+    engine = get_session_manager().get_engine(session_id) if session_id else None
+    if engine is not None:
+        tc = engine.thinking_config
+        return JSONResponse(content={
+            "effort": tc.effort, "budget": tc.budget_tokens,
+            "effective_budget": tc.effective_budget(), "allowed_efforts": allowed_efforts,
+            **_thinking_controls_for_config(engine),
+        })
     # 回退到全局配置
     return JSONResponse(content={
         "effort": get_config().thinking_effort,
         "budget": get_config().thinking_budget,
         "effective_budget": 0,
         "allowed_efforts": allowed_efforts,
+        **_thinking_controls_for_config(),
     })
 
 
@@ -252,6 +280,22 @@ async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Reque
         if not allowed_efforts:
             return _error_json_response(400, "至少保留一个可调思考等级。")
 
+    target_engine = get_session_manager().get_engine(request.session_id) if request.session_id else None
+    controls = _thinking_controls_for_config(target_engine)
+    if request.effort is not None:
+        options = controls["model_allowed_efforts"]
+        if options and request.effort not in options:
+            return _error_json_response(400, f"当前模型不支持此思考等级，可选：{', '.join(options)}")
+        if request.effort == "none" and controls["can_disable"] is False:
+            return _error_json_response(400, "当前模型不支持关闭思考")
+    if request.session_id:
+        if target_engine is None:
+            return _error_json_response(404, "当前会话尚未建立，无法更新会话思考配置")
+        target_engine.set_thinking_config(effort=request.effort, budget=request.budget)
+        tc = target_engine.thinking_config
+        return JSONResponse(content={"effort": tc.effort, "budget": tc.budget_tokens,
+            "effective_budget": tc.effective_budget(), "allowed_efforts": list(get_config().thinking_effort_options),
+            "sessions_updated": 1, **_thinking_controls_for_config(target_engine)})
     persisted: dict[str, str] = {}
     global_effort = request.effort
     if global_effort is None and allowed_efforts is not None:
@@ -338,7 +382,28 @@ class ModelProfileCreate(BaseModel):
     custom_extra_body: str = ""
     custom_extra_headers: str = ""
     canonical_model: str = ""
+    max_context_tokens: int = Field(default=0, ge=0, le=2**31 - 1, strict=True)
+    vision_mode: Literal["auto", "true", "false"] = "auto"
+    input_modalities: list[Literal["text", "image", "video", "audio"]] | None = None
+    max_output_tokens: int = Field(default=0, ge=0, le=2**31 - 1, strict=True)
     clone_from: str = ""
+
+    @field_validator("input_modalities")
+    @classmethod
+    def unique_modalities(cls, value: list[str] | None) -> list[str] | None:
+        return list(dict.fromkeys(value)) if value is not None else None
+
+    @field_validator("custom_extra_body", "custom_extra_headers")
+    @classmethod
+    def valid_custom_json(cls, value: str, info) -> str:
+        if not value.strip():
+            return value
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError("额外参数和请求头必须是 JSON 对象")
+        if info.field_name == "custom_extra_headers" and any(not isinstance(v, str) for v in parsed.values()):
+            raise ValueError("额外请求头的值必须是字符串")
+        return value
 
     @field_validator("name", "model")
     @classmethod
@@ -389,13 +454,12 @@ def _canonical_for_profile_coords(
     return ""
 
 
-def _deprecated_model_error_response(model: str, *, prefix: str = "") -> JSONResponse | None:
-    """Return unified 422 response when model id is deprecated."""
-    message = format_deprecated_model_message(model)
-    if not message:
-        return None
-    content = f"{prefix}{message}" if prefix else message
-    return _error_json_response(422, content)
+def _deprecated_model_error_response(model: str, *, prefix: str = "", base_url: str = "") -> JSONResponse | None:
+    from excelmanus.model_catalog import model_spec
+    spec = model_spec(model, base_url, route_only=True)
+    if spec and spec["status"] == "retired":
+        return _error_json_response(422, f"{prefix}该供应商已停用 {model}；建议使用 {spec.get('replacement', '当前模型目录中的型号')}")
+    return None
 
 
 @router.get("/api/v1/config/models")
@@ -418,6 +482,13 @@ async def get_model_config(request: Request) -> JSONResponse:
                 "custom_extra_body": p.get("custom_extra_body", ""),
                 "custom_extra_headers": p.get("custom_extra_headers", ""),
                 "canonical_model": p.get("canonical_model", ""),
+                "max_context_tokens": p.get("max_context_tokens", 0),
+                "vision_mode": p.get("vision_mode", "auto"),
+                "input_modalities": p.get("input_modalities"),
+                "default_input_modalities": capability_metadata(p["model"], p.get("base_url") or "")["effective_input_modalities"],
+                "capability_metadata": capability_metadata(p["model"], p.get("base_url") or ""),
+                "effective_input_modalities": [m for m in (p.get("input_modalities") if p.get("input_modalities") is not None else capability_metadata(p["model"], p.get("base_url") or "")["effective_input_modalities"]) if m in {"text", "image"}],
+                "max_output_tokens": p.get("max_output_tokens", 0),
             }
             for p in (get_config_store().list_profiles() if get_config_store() else [])
         ],
@@ -509,6 +580,7 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
 
     deprecated = _deprecated_model_error_response(
         request.model,
+        base_url=request.base_url or "",
         prefix=f"模型档案 {request.name!r} 不可保存。",
     )
     if deprecated is not None:
@@ -544,6 +616,10 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
         custom_extra_body=request.custom_extra_body or "",
         custom_extra_headers=request.custom_extra_headers or "",
         canonical_model=canonical,
+        max_context_tokens=request.max_context_tokens,
+        vision_mode=request.vision_mode,
+        max_output_tokens=request.max_output_tokens,
+        **({"input_modalities": request.input_modalities} if "input_modalities" in request.model_fields_set else {}),
     )
     if not created:
         return _error_json_response(500, f"保存模型档案失败: {request.name}")
@@ -615,6 +691,7 @@ async def update_model_profile(
 
     deprecated = _deprecated_model_error_response(
         request.model,
+        base_url=request.base_url or "",
         prefix=f"模型档案 {name!r} 不可更新。",
     )
     if deprecated is not None:
@@ -649,6 +726,10 @@ async def update_model_profile(
         custom_extra_body=request.custom_extra_body,
         custom_extra_headers=request.custom_extra_headers,
         canonical_model=canonical_update,
+        max_context_tokens=request.max_context_tokens if "max_context_tokens" in request.model_fields_set else None,
+        vision_mode=request.vision_mode if "vision_mode" in request.model_fields_set else None,
+        max_output_tokens=request.max_output_tokens if "max_output_tokens" in request.model_fields_set else None,
+        **({"input_modalities": request.input_modalities} if "input_modalities" in request.model_fields_set else {}),
     )
     if not updated:
         return _error_json_response(500, f"保存模型档案失败: {request.name}")
@@ -750,10 +831,13 @@ async def import_model_config(
                 return _error_json_response(422, "模型档案字段无效。")
             if is_placeholder_model_profile(profile.name, profile.model, profile.base_url):
                 return _error_json_response(400, "不能导入测试占位模型。")
-            deprecated = _deprecated_model_error_response(profile.model)
+            deprecated = _deprecated_model_error_response(profile.model, base_url=profile.base_url)
             if deprecated is not None:
                 return deprecated
-            validated_profiles.append(profile.model_dump())
+            fields = profile.model_dump()
+            if "input_modalities" not in profile.model_fields_set:
+                fields.pop("input_modalities")
+            validated_profiles.append(fields)
 
         profile_names: list[str] = []
         failed_name: str | None = None
@@ -884,6 +968,26 @@ def _resolve_model_info(
     return model, base_url, api_key, _default_protocol
 
 
+def _capability_coordinates(request: Request, name: str | None, model: str | None, base_url: str | None) -> tuple[str, str, str]:
+    from excelmanus.capability_identity import capability_scope
+    from excelmanus.auth.providers.registry import managed_provider_for
+    model, base_url, key, protocol = _resolve_model_info(name, model, base_url)
+    profile = _profile_for_list_remote(name or "", base_url) or {}
+    headers = json_object(profile.get("custom_extra_headers"))
+    resolver = getattr(request.app.state, "credential_resolver", None)
+    if resolver is not None and managed_provider_for(model) is not None:
+        try:
+            credential = resolver.resolve_sync(model)
+        except Exception:
+            credential = None
+        if credential is not None:
+            key, base_url, protocol = credential.api_key, credential.base_url or base_url, credential.protocol or protocol
+            headers = {**headers, **(credential.extra_headers or {})}
+    scope = capability_scope(protocol, key, headers, base_url=base_url, model=model,
+                             thinking_mode=profile.get("thinking_mode", "auto"), extra_body=profile.get("custom_extra_body", ""))
+    return model, base_url, scope
+
+
 @router.get("/api/v1/config/models/capabilities")
 async def get_model_capabilities(request: Request) -> JSONResponse:
     """获取模型能力探测结果。支持 ?model=xxx 查询指定模型，否则返回当前活跃模型。"""
@@ -899,11 +1003,11 @@ async def get_model_capabilities(request: Request) -> JSONResponse:
     req_name = request.query_params.get("name")
     req_model = request.query_params.get("model")
     req_base_url = request.query_params.get("base_url")
-    model, base_url, _, _protocol = _resolve_model_info(req_name, req_model, req_base_url)
+    model, base_url, scope = _capability_coordinates(request, req_name, req_model, req_base_url)
 
     caps = load_capabilities(
         db, model, base_url,
-        canonical_model=_canonical_for_profile_coords(req_name, model, base_url),
+        scope=scope,
     )
     return JSONResponse(content={
         "capabilities": caps.to_dict() if caps else None,
@@ -928,9 +1032,9 @@ async def get_all_model_capabilities(request: Request) -> JSONResponse:
 
     profiles = get_config_store().list_profiles() if get_config_store() else []
     for p in profiles:
-        p_model, p_base_url, _, _ = _profile_connection(p)
+        p_model, p_base_url, scope = _capability_coordinates(request, p["name"], p["model"], p.get("base_url"))
         caps = load_capabilities(
-            db, p_model, p_base_url, canonical_model=profile_canonical(p),
+            db, p_model, p_base_url, scope=scope,
         )
         result.append({
             "name": p["name"],
@@ -994,6 +1098,9 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     if body.get("api_key"):
         api_key = body["api_key"]
 
+    _probe_profile = (get_config_store().get_profile(req_name) if get_config_store() and req_name else {}) or {}
+    _extra_headers = {**json_object(_probe_profile.get("custom_extra_headers")), **(_extra_headers or {})}
+    _custom_body = body.get("custom_extra_body", _probe_profile.get("custom_extra_body", ""))
     # 解析 thinking_mode（来自请求体或 profile 配置）
     req_thinking_mode = body.get("thinking_mode", "auto")
     if req_thinking_mode == "auto" and get_config_store() and req_name:
@@ -1026,7 +1133,8 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
             model=api_model,
             base_url=base_url,
             skip_if_cached=False,
-            db=None,  # 先不自动存，下面用 profile 坐标手动存
+            db=db,
+            custom_extra_body=_custom_body,
             thinking_mode=req_thinking_mode,
             canonical_model=_canonical_for_profile_coords(
                 req_name, cache_model, cache_base_url,
@@ -1034,12 +1142,9 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
         )
     except Exception as exc:
         return _error_json_response(500, f"探测失败: {exc}")
-
-    # 用 profile 级坐标缓存（与 GET /capabilities/all 读取一致）
-    if db is not None:
-        caps.model = cache_model
-        caps.base_url = cache_base_url
-        save_capabilities(db, caps)
+    finally:
+        from excelmanus.model_probe import close_probe_client
+        await close_probe_client(client)
 
     # 同步到所有活跃会话的引擎
     if get_session_manager() is not None:
@@ -1084,12 +1189,14 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
     for name, model, base_url, api_key, protocol in targets:
         if db is not None:
             delete_capabilities(db, model, base_url)
-        client = create_client(api_key=api_key, base_url=base_url, protocol=protocol)
+        _profile = next((p for p in profiles if p["name"] == name), {})
+        client = create_client(api_key=api_key, base_url=base_url, protocol=protocol, default_headers=json_object(_profile.get("custom_extra_headers")))
         _tm = _thinking_mode_map.get(name, "auto")
         try:
             caps = await run_full_probe(
                 client=client, model=model, base_url=base_url,
                 skip_if_cached=False, db=db, thinking_mode=_tm,
+                custom_extra_body=_profile.get("custom_extra_body", ""),
                 canonical_model=_canonical_map.get(name, ""),
             )
             results.append({
@@ -1103,6 +1210,9 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
                 "name": name, "model": model,
                 "error": _err_text(exc),
             })
+        finally:
+            from excelmanus.model_probe import close_probe_client
+            await close_probe_client(client)
 
     return JSONResponse(content={"results": results})
 
@@ -1152,7 +1262,7 @@ def _build_probe_targets(
         else:
             continue
 
-        extra_headers: dict[str, str] | None = None
+        extra_headers = json_object(p.get("custom_extra_headers"))
         if managed_provider_for(model) is not None:
             # 订阅档案没有静态 API Key；使用当前登录凭据，不能直接跳过，
             # 也不能借用其它模型的 Key 探测。
@@ -1168,12 +1278,13 @@ def _build_probe_targets(
             api_key = credential.api_key
             base_url = credential.base_url or base_url
             protocol = credential.protocol or protocol
-            extra_headers = credential.extra_headers
+            extra_headers = {**extra_headers, **(credential.extra_headers or {})}
 
         cache_model = model
         api_model = strip_managed_prefix(model)
 
-        dedup_key = f"{cache_model}|{base_url}"
+        from excelmanus.capability_identity import capability_scope
+        dedup_key = f"{cache_model}|{base_url}|" + capability_scope(protocol, api_key, extra_headers, base_url=base_url, model=model, thinking_mode=thinking_map.get(name, "auto"), extra_body=p.get("custom_extra_body", ""))
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
@@ -1186,7 +1297,8 @@ def _build_probe_targets(
             api_key=api_key,
             protocol=protocol,
             thinking_mode=thinking_map.get(name, "auto"),
-            extra_headers=extra_headers,
+            extra_headers=extra_headers or None,
+            custom_extra_body=p.get("custom_extra_body", ""),
         ))
 
     return targets
@@ -1421,14 +1533,19 @@ async def test_model_connection(request: Request) -> JSONResponse:
             _test_model_id = _tp.get("model", "")
     from excelmanus.auth.providers.registry import managed_provider_for as _managed_for
     _sub_prov = _managed_for(_test_model_id)
-    if _sub_prov is not None:
-        return JSONResponse(content={
-            "ok": True,
-            "model": _test_model_id,
-            "note": "订阅 OAuth 模型使用用户订阅凭据，无需通用 API Key 测试",
-        })
-
     model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
+    connection_headers = None
+    if _sub_prov is not None:
+        resolver = getattr(request.app.state, "credential_resolver", None)
+        credential = resolver.resolve_sync(_test_model_id) if resolver is not None else None
+        if credential is None or not credential.api_key:
+            return JSONResponse(content={"ok": False, "model": _test_model_id, "error": "订阅凭据不可用，请先登录；尚未验证连接"})
+        from excelmanus.auth.providers.registry import strip_managed_prefix
+        model = strip_managed_prefix(_test_model_id)
+        api_key, base_url = credential.api_key, credential.base_url or base_url
+        resolved_protocol = credential.protocol or resolved_protocol
+        connection_headers = credential.extra_headers
+
     override_key = _usable_api_key(body.get("api_key"))
     if override_key:
         api_key = override_key
@@ -1469,13 +1586,16 @@ async def test_model_connection(request: Request) -> JSONResponse:
             })
 
     req_protocol = body.get("protocol") or resolved_protocol
-    client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol)
+    client = create_client(api_key=api_key, base_url=base_url, protocol=req_protocol, model=model, default_headers=connection_headers)
     try:
         healthy, health_err = await probe_health(client, model, timeout=15.0)
     except Exception as exc:
         err_str = _err_text(exc)
         hint = _diagnose_connection_error(err_str, base_url, model)
         return JSONResponse(content={"ok": False, "error": f"连通测试异常: {err_str}", "hint": hint, "model": model})
+    finally:
+        from excelmanus.model_probe import close_probe_client
+        await close_probe_client(client)
 
     result: dict = {
         "ok": healthy,
@@ -1492,95 +1612,12 @@ async def test_model_connection(request: Request) -> JSONResponse:
 
 # Provider fallback model lists used when /models endpoint returns 404.
 # Each entry: (base_url keyword, model list, user hint)
-_PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
-    (
-        "minimax",
-        [
-            {"id": "MiniMax-M2"},
-            {"id": "M2-her"},
-        ],
-        "MiniMax \u901a\u5e38\u4e0d\u652f\u6301 /models \u679a\u4e3e\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002"
-        "\u82e5\u4ecd\u5f02\u5e38\uff0c\u8bf7\u786e\u8ba4 Base URL\uff08\u5efa\u8bae https://api.minimax.io/v1\uff09\u548c API Key\u3002",
-    ),
-    (
-        "generativelanguage.googleapis.com",
-        [
-            {"id": "gemini-2.5-pro"},
-            {"id": "gemini-2.5-flash"},
-            {"id": "gemini-2.5-flash-lite"},
-        ],
-        "Gemini OpenAI \u517c\u5bb9\u7aef\u70b9\u4e0d\u652f\u6301\u6807\u51c6 /models \u679a\u4e3e\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
-    ),
-    (
-        "bigmodel.cn",
-        [
-            {"id": "glm-4.7"},
-            {"id": "glm-4.6v"},
-            {"id": "glm-4.5"},
-        ],
-        "\u667a\u8c31 GLM /models \u7aef\u70b9\u8def\u5f84\u4e0e\u6807\u51c6 OpenAI \u4e0d\u540c\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
-    ),
-    (
-        "dashscope.aliyuncs.com",
-        [
-            {"id": "qwen-max"},
-            {"id": "qwen-plus"},
-            {"id": "qwen-flash"},
-            {"id": "qwen-turbo"},
-            {"id": "qwen-long"},
-            {"id": "qwen-coder-plus"},
-        ],
-        "\u963f\u91cc\u4e91\u767e\u70bc DashScope /models \u679a\u4e3e\u901a\u5e38\u9700\u8981\u7279\u5b9a\u6743\u9650\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
-    ),
-    (
-        "moonshot.cn",
-        [
-            {"id": "kimi-k2.6"},
-        ],
-        "Kimi (Moonshot) /models \u7aef\u70b9\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
-    ),
-    (
-        "deepseek.com",
-        [
-            {"id": "deepseek-v3"},
-            {"id": "deepseek-r1"},
-            {"id": "deepseek-v3.2"},
-        ],
-        "DeepSeek /models \u7aef\u70b9\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
-    ),
-    (
-        "volces.com",
-        [
-            {"id": "doubao-seed-1.6"},
-        ],
-        "\u706b\u5c71\u65b9\u821f /models \u679a\u4e3e\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002\u82e5\u4f7f\u7528\u63a5\u5165\u70b9\uff0c\u8bf7\u586b\u5199 ep- \u5f00\u5934\u7684 Model ID\u3002",
-    ),
-    (
-        "api.x.ai",
-        [
-            {"id": "grok-4"},
-            {"id": "grok-code-fast-1"},
-        ],
-        "xAI /models \u679a\u4e3e\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
-    ),
-    (
-        "xiaomimimo.com",
-        [
-            {"id": "mimo-v2.6-flash"},
-            {"id": "mimo-v2.6-pro"},
-        ],
-        "小米 MiMo /models 枚举不可用时，已回退为推荐模型列表。",
-    ),
-]
-
-
 def _get_provider_fallback(base_url: str) -> tuple[list[dict], str] | None:
-    """Return curated model list for a known provider when /models returns 404."""
-    url_lower = base_url.lower()
-    for pattern, models, hint in _PROVIDER_FALLBACK_MODELS:
-        if pattern in url_lower:
-            return models, hint
-    return None
+    from excelmanus.model_catalog import recommended_models
+    models = recommended_models(base_url)
+    if not models:
+        return None
+    return models, "上游模型目录不可用；以下为有官方来源的工具模型候选，当前账户可用性尚未实测。"
 
 
 def _profile_for_list_remote(name: str, base_url: str) -> dict[str, Any] | None:
@@ -1687,14 +1724,13 @@ async def list_remote_models(request: Request) -> JSONResponse:
                 _entries = await _sub_prov.list_model_entries(_record)
             except Exception:
                 _entries = []
+            from excelmanus.model_catalog import model_list_entry
+            entries = [model_list_entry(e.get("public_model_id") or e.get("profile_name") or e["model"], base_url,
+                         {"owned_by": e.get("display_name") or e["model"]}) for e in _entries]
             return JSONResponse(content={
-                "models": [
-                    {
-                        "id": e.get("public_model_id") or e.get("profile_name") or e["model"],
-                        "owned_by": e.get("display_name") or e["model"],
-                    }
-                    for e in _entries
-                ],
+                "models": [e for e in entries if e["agent_eligible"]],
+                "excluded_models": [e for e in entries if not e["agent_eligible"]],
+                "hint": "订阅目录或静态候选项；当前账户的调用能力需单独探测。",
             })
 
     api_key = _resolve_list_remote_api_key(
@@ -1722,6 +1758,9 @@ async def list_remote_models(request: Request) -> JSONResponse:
 
     headers: dict[str, str] = {"Authorization": f"Bearer {api_key}"}
     # Anthropic native API uses x-api-key header
+    if protocol == "gemini":
+        url = base_url.rstrip("/") + "/models"
+        headers = {"x-goog-api-key": api_key}
     if protocol == "anthropic" or "anthropic" in base_url.lower():
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
         url = base_url.rstrip("/").rstrip("/v1").rstrip("/") + "/v1/models"
@@ -1749,26 +1788,20 @@ async def list_remote_models(request: Request) -> JSONResponse:
     except Exception as exc:
         return JSONResponse(content={"models": [], "error": f"请求失败: {_err_text(exc)}"})
 
-    # 解析模型列表（兼容 OpenAI / Anthropic / 各类代理格式）
-    models_raw: list = []
-    if isinstance(data, dict):
-        models_raw = data.get("data") or data.get("models") or []
-    elif isinstance(data, list):
-        models_raw = data
-
-    models_out: list[dict] = []
-    for m in models_raw:
-        if isinstance(m, str):
-            models_out.append({"id": m})
-        elif isinstance(m, dict):
-            mid = m.get("id") or m.get("name") or m.get("model") or ""
-            if mid:
-                models_out.append({"id": mid, "owned_by": m.get("owned_by", "")})
-
-    # 按 id 排序
+    from excelmanus.model_catalog import model_list_entry
+    models_raw = (data.get("data") or data.get("models") or []) if isinstance(data, dict) else data if isinstance(data, list) else []
+    models_out, excluded = [], []
+    for item in models_raw:
+        remote = item if isinstance(item, dict) else {}
+        mid = item if isinstance(item, str) else remote.get("id") or remote.get("name") or remote.get("model")
+        if not isinstance(mid, str) or not mid:
+            continue
+        mid = mid.removeprefix("models/")
+        entry = model_list_entry(mid, base_url, remote)
+        (models_out if entry["agent_eligible"] else excluded).append(entry)
     models_out.sort(key=lambda x: x["id"])
-
-    return JSONResponse(content={"models": models_out})
+    return JSONResponse(content={"models": models_out, "excluded_models": excluded,
+        "hint": "目录可见不等于调用已验证；专用生成模型和已知无工具能力模型已单独列出。"})
 
 
 @router.get("/api/v1/config/models/check-placeholder")
@@ -1827,9 +1860,9 @@ async def update_model_capabilities(request: Request) -> JSONResponse:
     req_name = body.get("name")
     req_model = body.get("model")
     req_base_url = body.get("base_url")
-    model, base_url, _, _protocol = _resolve_model_info(req_name, req_model, req_base_url)
+    model, base_url, scope = _capability_coordinates(request, req_name, req_model, req_base_url)
 
-    caps = update_capabilities_override(db, model, base_url, overrides)
+    caps = update_capabilities_override(db, model, base_url, overrides, scope=scope)
 
     if caps is not None and get_session_manager() is not None:
         await get_session_manager().broadcast_model_capabilities(model, caps)
@@ -1922,6 +1955,7 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     "compaction_keep_recent_turns": "EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS",
     "compaction_max_summary_tokens": "EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS",
     "prompt_cache_key_enabled": "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
+    "prompt_cache_retention": "EXCELMANUS_PROMPT_CACHE_RETENTION",
     # ── 推理配置 ──
     "thinking_effort": "EXCELMANUS_THINKING_EFFORT",
     "thinking_budget": "EXCELMANUS_THINKING_BUDGET",
@@ -1944,6 +1978,7 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     "parallel_readonly_tools": "EXCELMANUS_PARALLEL_READONLY_TOOLS",
     "parallel_tool_max": "EXCELMANUS_PARALLEL_TOOL_MAX",
     "hooks_command_enabled": "EXCELMANUS_HOOKS_COMMAND_ENABLED",
+    "hooks_command_allowlist": "EXCELMANUS_HOOKS_COMMAND_ALLOWLIST",
     "hooks_command_timeout_seconds": "EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS",
     "hooks_output_max_chars": "EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS",
     "log_level": "EXCELMANUS_LOG_LEVEL",
@@ -1957,6 +1992,7 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     # ── 技能发现 ──
     "skills_context_char_budget": "EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET",
     "skills_discovery_enabled": "EXCELMANUS_SKILLS_DISCOVERY_ENABLED",
+    "skills_discovery_extra_dirs": "EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS",
     "skills_discovery_scan_workspace_ancestors": "EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS",
     "skills_discovery_include_agents": "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS",
     "skills_discovery_scan_external_tool_dirs": "EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS",
@@ -1989,7 +2025,11 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
 async def get_runtime_config(request: Request) -> JSONResponse:
     """读取运行时行为配置。"""
     assert get_config() is not None, "服务未初始化"
+    from excelmanus.settings_runtime import get_setting
+
+    context_override = get_setting("EXCELMANUS_MAX_CONTEXT_TOKENS")
     return JSONResponse(content={
+        "max_context_tokens_override": get_config().max_context_tokens if context_override else 0,
         # ── 会话 ──
         "session_ttl_seconds": get_config().session_ttl_seconds,
         "max_sessions": get_config().max_sessions,
@@ -2024,6 +2064,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "compaction_keep_recent_turns": get_config().compaction_keep_recent_turns,
         "compaction_max_summary_tokens": get_config().compaction_max_summary_tokens,
         "prompt_cache_key_enabled": get_config().prompt_cache_key_enabled,
+        "prompt_cache_retention": get_config().prompt_cache_retention,
         # ── 推理配置 ──
         "thinking_effort": get_config().thinking_effort,
         "agent_self_management_enabled": get_config().agent_self_management_enabled,
@@ -2047,6 +2088,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "parallel_readonly_tools": get_config().parallel_readonly_tools,
         "parallel_tool_max": get_config().parallel_tool_max,
         "hooks_command_enabled": get_config().hooks_command_enabled,
+        "hooks_command_allowlist": ", ".join(get_config().hooks_command_allowlist),
         "hooks_command_timeout_seconds": get_config().hooks_command_timeout_seconds,
         "hooks_output_max_chars": get_config().hooks_output_max_chars,
         "log_level": get_config().log_level,
@@ -2060,6 +2102,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         # ── 技能发现 ──
         "skills_context_char_budget": get_config().skills_context_char_budget,
         "skills_discovery_enabled": get_config().skills_discovery_enabled,
+        "skills_discovery_extra_dirs": ", ".join(get_config().skills_discovery_extra_dirs),
         "skills_discovery_scan_workspace_ancestors": get_config().skills_discovery_scan_workspace_ancestors,
         "skills_discovery_include_agents": get_config().skills_discovery_include_agents,
         "skills_discovery_scan_external_tool_dirs": get_config().skills_discovery_scan_external_tool_dirs,
@@ -2089,7 +2132,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
 
 
 class RuntimeConfigUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     # ── 会话 ──
     session_ttl_seconds: int | None = Field(default=None, gt=0)
     max_sessions: int | None = Field(default=None, gt=0)
@@ -2108,6 +2151,7 @@ class RuntimeConfigUpdate(BaseModel):
     friendly_error_messages: bool | None = None
     # ── 上下文与记忆 ──
     max_context_tokens: int | None = Field(default=None, gt=0)
+    max_context_tokens_override: int | None = Field(default=None, ge=0)
     memory_enabled: bool | None = None
     memory_auto_load_lines: int | None = Field(default=None, gt=0)
     memory_expire_days: int | None = Field(default=None, ge=0)
@@ -2124,6 +2168,7 @@ class RuntimeConfigUpdate(BaseModel):
     compaction_keep_recent_turns: int | None = Field(default=None, gt=0)
     compaction_max_summary_tokens: int | None = Field(default=None, gt=0)
     prompt_cache_key_enabled: bool | None = None
+    prompt_cache_retention: Literal["default", "extended"] | None = None
     # ── 推理配置 ──
     thinking_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
     agent_self_management_enabled: bool | None = None
@@ -2147,6 +2192,7 @@ class RuntimeConfigUpdate(BaseModel):
     parallel_readonly_tools: bool | None = None
     parallel_tool_max: int | None = Field(default=None, ge=1, le=32)
     hooks_command_enabled: bool | None = None
+    hooks_command_allowlist: str | None = None
     hooks_command_timeout_seconds: int | None = Field(default=None, gt=0)
     hooks_output_max_chars: int | None = Field(default=None, gt=0)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] | None = None
@@ -2160,6 +2206,7 @@ class RuntimeConfigUpdate(BaseModel):
     # ── 技能发现 ──
     skills_context_char_budget: int | None = Field(default=None, ge=0)
     skills_discovery_enabled: bool | None = None
+    skills_discovery_extra_dirs: str | None = None
     skills_discovery_scan_workspace_ancestors: bool | None = None
     skills_discovery_include_agents: bool | None = None
     skills_discovery_scan_external_tool_dirs: bool | None = None
@@ -2191,6 +2238,18 @@ class RuntimeConfigUpdate(BaseModel):
     # ── Jev 智能匹配 ──
     model_canonical_match_enabled: bool | None = None
 
+    @field_validator("image_pixel_budget")
+    @classmethod
+    def validate_image_pixel_budget(cls, value: int | str | None) -> int | str | None:
+        if value is None:
+            return None
+        raw = str(value).strip().lower()
+        if raw == "low":
+            return raw
+        if not raw.isdigit() or int(raw) <= 0:
+            raise ValueError("图片像素上限必须是正整数或 low")
+        return int(raw)
+
 
 @router.put("/api/v1/config/runtime")
 async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Request) -> JSONResponse:
@@ -2199,6 +2258,14 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
     updates: dict[str, str] = {}
 
     payload = request.model_dump(exclude_none=True)
+    if "max_context_tokens_override" in payload:
+        if "max_context_tokens" in payload:
+            return _error_json_response(400, "请勿同时设置自动容量和旧版上下文容量字段")
+        payload["max_context_tokens"] = payload.pop("max_context_tokens_override")
+    base_delay = payload.get("llm_retry_base_delay_seconds", get_config().llm_retry_base_delay_seconds)
+    max_delay = payload.get("llm_retry_max_delay_seconds", get_config().llm_retry_max_delay_seconds)
+    if payload.keys() & {"llm_retry_base_delay_seconds", "llm_retry_max_delay_seconds"} and base_delay > max_delay:
+        return _error_json_response(400, "最长重试等待不能小于首次重试等待")
     # Enabling the master gate is an explicit request for the full JEV
     # integration.  Fill omitted child switches with their enabled state while
     # preserving an explicitly disabled child switch.
@@ -2266,6 +2333,8 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
             str_val = "true" if value else "false"
         else:
             str_val = str(value)
+        if field == "max_context_tokens" and value == 0:
+            str_val = ""  # Remove the persisted override; load_config resumes model inference.
         updates[setting_key] = str_val
         updated_fields.append(field)
 
@@ -2275,6 +2344,11 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
     # 同步更新内存中的 config 实例
     for field, value in payload.items():
         if hasattr(get_config(), field):
+            if field == "max_context_tokens" and value == 0:
+                from excelmanus.config import _infer_context_tokens_for_model
+                value = _infer_context_tokens_for_model(get_config().model)
+            if field in {"hooks_command_allowlist", "skills_discovery_extra_dirs"}:
+                value = tuple(item.strip() for item in str(value).split(",") if item.strip())
             if field == "image_pixel_budget":
                 raw = str(value).strip().lower()
                 if raw == "low":

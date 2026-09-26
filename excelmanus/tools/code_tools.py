@@ -559,6 +559,7 @@ def _ensure_isolated_python(command: list[str]) -> tuple[list[str], bool]:
 
 def _build_unix_limits_preexec(
     timeout_seconds: int,
+    *, allow_subprocess: bool = False,
 ) -> tuple[Callable[[], None] | None, bool, list[str]]:
     """构建 Unix 平台资源限制 preexec_fn。"""
     warnings: list[str] = []
@@ -577,8 +578,13 @@ def _build_unix_limits_preexec(
         ("RLIMIT_CPU", max(1, min(timeout_seconds, 300))),
         ("RLIMIT_AS", 512 * 1024 * 1024),
         ("RLIMIT_NOFILE", 64),
-        ("RLIMIT_NPROC", 32),
     ]
+    # NPROC counts every process owned by the OS user, not just this runner.
+    # On a desktop that user commonly already owns >32 processes. Full-access
+    # calls explicitly permit subprocesses, so inherit the host process limit
+    # instead of making all authorized forks fail with EAGAIN.
+    if not allow_subprocess:
+        limit_plan.append(("RLIMIT_NPROC", 32))
     for name, value in limit_plan:
         if hasattr(resource, name):
             candidates.append((getattr(resource, name), value, name))
@@ -715,6 +721,66 @@ def _pack_run_code_result(payload: dict[str, Any]) -> ToolResult:
     return ok_result(payload, ui_meta=ui, model_text=model_text)
 
 
+def _text_write_conflict_result(
+    exc: Any,
+    *,
+    tool_name: str,
+    rel_path: str,
+    safe_path: Path,
+) -> ToolResult:
+    """VERSION_CONFLICT（已有文件缺 expected_version）的机器可读下一步。
+
+    write_text_file / edit_text_file 的版本参数来自最近一次读写回执；把回执里的
+    content_version 直接填成 expected_version 就能继续，不必额外猜参数名。
+    """
+    from excelmanus.workbook_commit import content_version_of_file
+
+    fields = dict(getattr(exc, "fields", None) or {})
+    path = str(fields.get("path") or rel_path or safe_path.name)
+    current = str(fields.get("content_version") or "")
+    if not current:
+        try:
+            current = str(content_version_of_file(safe_path) or "")
+        except OSError:
+            current = ""
+    message = (
+        f"{path} 已存在，缺少 expected_version：把你上一次写入回执里的 content_version "
+        f"原样传成 expected_version（见 next_call.arguments.expected_version）再调用 {tool_name}。"
+    )
+    if current:
+        fields.update({
+            "path": path,
+            "content_version": current,
+            "expected_version": current,
+            "needed_args": ["expected_version"],
+            "next_call": {
+                "tool": tool_name,
+                "arguments": {"file_path": path, "expected_version": current},
+            },
+            "next_call_note": "其余参数沿用上一次调用；只补 expected_version。",
+        })
+        remediation = (
+            f"把上一次写 {path} 的回执里的 content_version 作为 expected_version 传进 {tool_name}"
+            "（见 next_call）；无法确认文件仍是那次写入的内容时，先 read_text_file 重新观察再改。"
+        )
+    else:
+        fields.update({
+            "path": path,
+            "needed_args": ["expected_version"],
+            "next_call": {"tool": "read_text_file", "arguments": {"file_path": path}},
+            "next_call_note": (
+                f"先用 read_text_file 取回执里的 content_version，再作为 expected_version "
+                f"传进 {tool_name}。"
+            ),
+        })
+        message += " 当前版本读取失败，next_call 先用 read_text_file 取回执。"
+        remediation = (
+            "先 read_text_file 重新观察文件并拿到 content_version，再把它作为 expected_version "
+            "重试；不要不带版本直接覆盖。"
+        )
+    return error_result(message, code=VERSION_CONFLICT, fields=fields, remediation=remediation)
+
+
 def write_text_file(
     file_path: str,
     content: str,
@@ -752,6 +818,10 @@ def write_text_file(
     try:
         seen = resolve_expected_version(rel_path, expected_version, exists=existed_before, abs_path=safe_path)
     except CommitError as exc:
+        if str(getattr(exc, "code", "")) == VERSION_CONFLICT and not str(expected_version or "").strip():
+            return _text_write_conflict_result(
+                exc, tool_name="write_text_file", rel_path=rel_path, safe_path=safe_path,
+            )
         return commit_error_result(exc)
 
     old_text = ""
@@ -827,6 +897,10 @@ def edit_text_file(
     try:
         seen = resolve_expected_version(rel_path, expected_version, exists=True, abs_path=safe_path)
     except CommitError as exc:
+        if str(getattr(exc, "code", "")) == VERSION_CONFLICT and not str(expected_version or "").strip():
+            return _text_write_conflict_result(
+                exc, tool_name="edit_text_file", rel_path=rel_path, safe_path=safe_path,
+            )
         return commit_error_result(exc)
 
     try:
@@ -1055,7 +1129,7 @@ def _execute_script(
     sandbox_python_cmd, isolated_python = _ensure_isolated_python(python_cmd)
     sandbox_env, env_warnings = _build_sandbox_env(allow_network=allow_network)
     preexec_fn, limits_applied, limit_warnings = _build_unix_limits_preexec(
-        timeout_seconds
+        timeout_seconds, allow_subprocess=allow_network and allow_external_files
     )
     _sandbox_warnings = [*env_warnings, *limit_warnings]  # noqa: F841 — reserved for future logging
     safe_args = [str(item) for item in (args or [])]

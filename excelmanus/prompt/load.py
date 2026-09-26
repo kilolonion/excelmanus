@@ -53,6 +53,7 @@ class PromptContext:
 #   chat_mode:     write | read | plan          # 标量或列表；plan_active 额外匹配 plan
 #   tool:          工具名（可见目录含该名才注入；未传 visible_tools 时不过滤）
 #   new_workbook:  bool                        # 工作区尚无表格文件
+#   profile:       csv | xlsx | docx           # 目录 profile（csv 表示只有 CSV；仅依赖已有工作簿的工具被门控）
 #   full_access:   bool
 # 空 / {} 表示无门控。base_sections 只给子代理，不参与门控。未知键忽略。
 
@@ -118,6 +119,13 @@ def strategy_conditions_match(
         if bool(getattr(ctx, "new_workbook", True)) != want:
             return False
 
+    if "profile" in cond:
+        allowed = _condition_values(cond["profile"])
+        current = str(getattr(ctx, "profile", None) or "").strip()
+        # 未判定 profile（None/空）不匹配任何 profile 段，避免误注入。
+        if current not in allowed:
+            return False
+
     return True
 
 
@@ -132,9 +140,12 @@ _ALLOWED_CONDITION_KEYS = frozenset({
     "chat_mode",
     "tool",
     "new_workbook",
+    "profile",
     "full_access",
     "base_sections",
 })
+# 与 tools/catalog.py 的 inspect_workspace_catalog 输出保持一致。
+_CATALOG_PROFILES = frozenset({"xlsx", "csv", "docx"})
 _NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 
 
@@ -185,6 +196,12 @@ def parse_prompt_file(path: Path) -> PromptSegment:
             modes = _condition_values(conditions[mode_key])
             if not modes or not modes <= {"read", "plan", "write"}:
                 raise ValueError(f"提示词 {mode_key} 必须是 read/plan/write: {path}")
+    if "profile" in conditions:
+        profiles = _condition_values(conditions["profile"])
+        if not profiles or not profiles <= _CATALOG_PROFILES:
+            raise ValueError(
+                f"提示词 profile 必须是 {'/'.join(sorted(_CATALOG_PROFILES))}: {path}"
+            )
     complete = bool(meta.get("complete", False))
     content = raw[m.end():].strip()
     if not content:
@@ -336,6 +353,7 @@ class PromptComposer:
         visible_tools: frozenset[str] | None = None,
         new_workbook: bool = True,
         full_access: bool = False,
+        profile: str | None = None,
     ) -> str:
         """稳定 system 前缀：identity + persona + 按目录模式门控的策略段。"""
         assembly = self.registry.assemble(
@@ -346,6 +364,7 @@ class PromptComposer:
                 visible_tools=visible_tools,
                 new_workbook=new_workbook,
                 full_access=full_access,
+                profile=profile,
             )
         )
         return self.registry.render_system(assembly)

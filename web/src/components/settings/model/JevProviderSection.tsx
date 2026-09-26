@@ -160,10 +160,10 @@ export function JevProviderSection() {
           <div className="flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-border/80 bg-muted/20 p-4">
             <FlaskConical className="h-4 w-4 shrink-0 text-muted-foreground" />
             <p className="min-w-0 flex-1 text-xs leading-5 text-muted-foreground">
-              Jev 仍处于实验阶段。请先在模型设置的高级设置中开启，之后这里才会显示决策提供商和相关配置。
+              Jev 仍处于实验阶段。请先在「模型配置」中开启，之后这里才会显示决策提供商和相关配置。
             </p>
-            <Button size="sm" variant="outline" onClick={() => requestModelSubTab("diagnostics")}>
-              前往高级设置
+            <Button size="sm" variant="outline" onClick={() => requestModelSubTab("roles")}>
+              前往模型配置
             </Button>
           </div>
         ) : (

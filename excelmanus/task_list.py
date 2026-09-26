@@ -19,7 +19,8 @@ class TaskStatus(Enum):
 
 # 合法的状态转换映射
 VALID_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
-    TaskStatus.PENDING: {TaskStatus.IN_PROGRESS},
+    # 已完成的业务操作可能晚于任务清单创建才补记状态，因此允许直接完成。
+    TaskStatus.PENDING: {TaskStatus.IN_PROGRESS, TaskStatus.COMPLETED},
     TaskStatus.IN_PROGRESS: {TaskStatus.COMPLETED, TaskStatus.FAILED},
     TaskStatus.COMPLETED: set(),
     TaskStatus.FAILED: set(),
@@ -112,8 +113,14 @@ class TaskItem:
     def transition(self, new_status: TaskStatus) -> None:
         """执行状态转换，非法转换抛出 ValueError。"""
         if new_status not in VALID_TRANSITIONS[self.status]:
+            hint = ""
+            if self.status == TaskStatus.PENDING and new_status in {
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+            }:
+                hint = "请先将任务更新为 in_progress，再更新为 completed 或 failed。"
             raise ValueError(
-                f"非法状态转换: {self.status.value} → {new_status.value}"
+                f"非法状态转换: {self.status.value} → {new_status.value}。{hint}"
             )
         self.status = new_status
 

@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { motion, AnimatePresence, useDragControls, useReducedMotion, type PanInfo } from "framer-motion";
 import { Loader2, RefreshCw, X } from "lucide-react";
 import { displayModelLabel } from "@/lib/model-display";
-import { getProviderColor, inferModelBrand } from "@/lib/provider-brand";
+import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
 import { ProviderAvatar } from "@/components/settings/model/ProviderLogo";
 import type { ModelInfo } from "@/lib/types";
 import { Dialog } from "radix-ui";
@@ -27,10 +27,6 @@ function BottomSheetPortal({ children }: { children: React.ReactNode }) {
 /* ------------------------------------------------------------------ */
 
 const displayLabel = (m: ModelInfo) => displayModelLabel(m);
-
-function providerOf(m: ModelInfo): string {
-  return inferModelBrand(m);
-}
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -148,8 +144,8 @@ function CompactRetrySheet({
             >
               {models.map((m) => {
                 const isCurrent = m.name === currentModel;
-                const provider = providerOf(m);
-                const providerColor = getProviderColor(provider);
+                const brand = inferModelBrand(m);
+                const providerColor = getProviderColor(brand);
                 return (
                   <button
                     key={m.name}
@@ -164,8 +160,8 @@ function CompactRetrySheet({
                     ].join(" ")}
                   >
                     <ProviderAvatar
-                      id={provider}
-                      label={displayLabel(m)}
+                      id={brand}
+                      label={getProviderDisplayName(brand)}
                       color={providerColor}
                       className="h-8 w-8"
                       iconClassName="h-4 w-4"

@@ -65,7 +65,7 @@ class TestMatchCanonicalModel:
     def test_bedrock_namespace(self) -> None:
         hit = match_canonical_model("us.anthropic.claude-sonnet-4-5")
         assert hit is not None
-        assert hit.canonical == "claude-sonnet-4.5"
+        assert hit.canonical == "claude-sonnet-4-5"
         assert hit.confidence >= CANONICAL_MATCH_THRESHOLD
 
     def test_cosmetic_suffix_still_binds(self) -> None:
@@ -163,16 +163,16 @@ class TestCanonicalContextWindow:
 
 
 class TestContextBudgetCanonical:
-    """ContextBudget 优先使用 canonical_model 推断窗口。"""
+    """Canonical 名称提示不再冒充端点能力证据。"""
 
     def test_update_for_model_prefers_canonical(self) -> None:
         from excelmanus.context_budget import ContextBudget
 
         budget = ContextBudget(model="my-proxy-model")
-        assert budget.max_tokens == 256_000  # 未知模型回退默认
+        assert budget.max_tokens == 32_000  # 未知模型回退默认
 
         budget.update_for_model("my-proxy-model", canonical_model="gpt-5.6-sol")
-        assert budget.max_tokens == 1_050_000
+        assert budget.max_tokens == 32_000
 
     def test_init_with_canonical(self) -> None:
         from excelmanus.context_budget import ContextBudget
@@ -180,7 +180,7 @@ class TestContextBudgetCanonical:
         budget = ContextBudget(
             model="my-proxy-model", canonical_model="gpt-5.6-sol",
         )
-        assert budget.max_tokens == 1_050_000
+        assert budget.max_tokens == 32_000
 
 
 class TestProfileStoreCanonical:

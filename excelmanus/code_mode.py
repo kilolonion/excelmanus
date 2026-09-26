@@ -112,6 +112,24 @@ class SdkCallRecord:
     tool: str
     success: bool
     content_version: str | None = None
+    request_id: str = ""
+    retry_of: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
+    publications: list[dict[str, Any]] = field(default_factory=list)
+    error_code: str = ""
+    message: str = ""
+
+
+def _recovered_requests(calls: list[SdkCallRecord]) -> set[str]:
+    by_id = {rec.request_id: rec for rec in calls if rec.request_id}
+    recovered: set[str] = set()
+    for rec in calls:
+        if rec.success:
+            parent = rec.retry_of
+            while parent and parent in by_id and parent not in recovered:
+                recovered.add(parent)
+                parent = by_id[parent].retry_of
+    return recovered
 
 
 class CodeModeUnavailable(RuntimeError):
@@ -317,16 +335,19 @@ class CodeModeSession:
     def summary(self) -> dict[str, Any]:
         with self._lock:
             calls = list(self._calls)
-        writes = [
-            {"tool": rec.tool, "content_version": rec.content_version}
-            for rec in calls
-            if rec.content_version
-        ]
+        recovered = _recovered_requests(calls)
+        failures = [rec for rec in calls if not rec.success and rec.request_id not in recovered]
+        writes = [{"tool": rec.tool, **target} for rec in calls for target in rec.publications]
         return {
             "count": len(calls),
             "succeeded": sum(1 for rec in calls if rec.success),
             "failed": sum(1 for rec in calls if not rec.success),
             "writes": writes,
+            "recovered": len(recovered),
+            "unresolved": [{"request_id": rec.request_id, "tool": rec.tool,
+                            "error_code": rec.error_code, "message": rec.message[:500]}
+                           for rec in failures],
+            "outcome": "failed" if failures else "success",
         }
 
     def allocate_subcall_id(self, tool: str, root_call_id: str) -> str:
@@ -414,6 +435,21 @@ class CodeModeSession:
             self._record(SdkCallRecord(tool=tool, success=False))
             return
         arguments = _revive_typed_args(arguments)
+        request_id = str(payload.get("id") or resp_path.stem)
+        retry_of = str(payload.get("retry_of") or "")
+        if retry_of:
+            previous = next((rec for rec in self._calls if rec.request_id == retry_of), None)
+            from excelmanus.engine_core.error_payload import failure_class_for_error_code
+            identity_fields = ("file_path", "output_path", "source", "destination")
+            if (previous is None or previous.success or previous.tool != tool or previous.publications
+                    or failure_class_for_error_code(previous.error_code) not in {"invalid_args", "conflict", "not_found"}
+                    or retry_of in _recovered_requests(self._calls)
+                    or any(previous.arguments.get(k) not in (None, "") and previous.arguments.get(k) != arguments.get(k) for k in identity_fields)):
+                self._record(SdkCallRecord(tool=tool, success=False, request_id=request_id,
+                                          error_code="SDK_RETRY_UNSAFE", message="重试必须对应同目标、未提交的失败调用"))
+                self._write_resp(resp_path, {"ok": False, "error": {"code": "SDK_RETRY_UNSAFE",
+                                 "message": "只可直接重试同目标、明确未提交的参数/版本/查找失败；已提交、取消、超时或结果不确定时先检查回执。"}})
+                return
         if tool == "run_code":
             self._write_resp(
                 resp_path,
@@ -469,8 +505,16 @@ class CodeModeSession:
         if not payload.get("ok"):
             # 返回合同违约：工具虽 success 但对 SDK 是集成失败，如实记账。
             success = False
+        from excelmanus.engine_core.execution_facts import tool_publications
+
         self._record(
-            SdkCallRecord(tool=tool, success=success, content_version=version),
+            SdkCallRecord(
+                tool=tool, success=success, content_version=version,
+                request_id=request_id, retry_of=retry_of, arguments=arguments,
+                publications=tool_publications(tool, result.value, success=success),
+                error_code=str((payload.get("error") or {}).get("code") or ""),
+                message=str((payload.get("error") or {}).get("message") or ""),
+            ),
         )
         self._write_resp(resp_path, payload)
 
@@ -728,9 +772,8 @@ def apply_sdk_calls_summary(result_json: str, session: CodeModeSession) -> str:
         return result_json
     if not isinstance(data, dict):
         return result_json
-    data["sdk_calls"] = session.summary()
-    data["sandbox_note"] = getattr(session, "sandbox_note", LOCAL_SANDBOX_DISCLAIMER)
-    return json.dumps(data, ensure_ascii=False, indent=2)
+    from excelmanus.engine_core.tool_result import from_payload
+    return attach_sdk_calls(from_payload(data), session).model_text
 
 
 def attach_sdk_calls(result: Any, session: CodeModeSession) -> Any:
@@ -753,11 +796,23 @@ def attach_sdk_calls(result: Any, session: CodeModeSession) -> Any:
             payload = parsed
     payload["sdk_calls"] = session.summary()
     payload["sandbox_note"] = getattr(session, "sandbox_note", LOCAL_SANDBOX_DISCLAIMER)
-    return replace(
+    if result.success and payload["sdk_calls"]["unresolved"]:
+        from excelmanus.engine_core.tool_result import error_result
+        payload["process_status"] = payload.get("status", "success")
+        payload.pop("status", None)
+        failed = error_result(
+            "脚本退出正常，但存在未恢复的 SDK 子调用失败；已提交的文件仍然保留。",
+            code="SDK_SUBCALL_FAILED", fields=payload,
+            remediation="检查 sdk_calls.unresolved 和 writes；不要重放已提交操作。可对未提交失败使用捕获异常的 retry(**修正参数)，或在下一轮按当前版本修复。",
+        )
+        result = replace(failed, ui_meta=result.ui_meta)
+        payload = result.value
+    from excelmanus.engine_core.execution_facts import project_publications
+    return project_publications(replace(
         result,
         value=payload,
         model_text=json.dumps(payload, ensure_ascii=False, indent=2),
-    )
+    ), "run_code")
 
 
 def render_sdk_section(tool_defs: list[ToolDef]) -> str:
@@ -779,6 +834,7 @@ def render_sdk_section(tool_defs: list[ToolDef]) -> str:
         lines.append("已有文件的 expected_version 取自 observe_spreadsheet 返回的 content_version 字段；核对读到的目标内容后再写入。")
     lines.append("大结果中间数据可写 scripts/temp/*.json 供后续 run_code 复用；不要为同一数据反复全量拉取。")
     lines.append("读取 `spill:` 句柄返回原始 payload：JSON 对象→dict，数组→list，其余→原始 str；按返回类型分支处理，不要假设必是 dict。")
+    lines.append("捕获 SDK 异常不代表成功。对同目标且未提交的失败，可用 exc.retry(**修正参数) 重试；成功后登记恢复。已提交部分先检查 sdk_calls.writes，不重放。")
     return "\n".join(lines)
 
 
@@ -1056,19 +1112,25 @@ def _payload_from_tool_result(
     return {"ok": True, "value": result_value(result)}
 
 
-# schema 为同一参数声明的双别名：签名只保留规范名，
-# 但宿主 _op_get 同时接受别名，故 SDK 需把别名 kwargs 归一为规范名再分发。
+# Share the host's alias folds even when only the canonical field is exposed
+# in its schema. SDK callers must not fail earlier than equivalent native calls.
 from excelmanus.tools.registry import _ALIAS_FOLDS
 
 _SDK_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (*_ALIAS_FOLDS, ("max_rows", "max_lines"))
 
 
 def _sdk_aliases(properties: dict[str, Any]) -> dict[str, str]:
-    return {
-        alias: canonical
-        for alias, canonical in _SDK_ALIAS_PAIRS
-        if alias in properties and canonical in properties
-    }
+    aliases = {}
+    for alias, canonical in _SDK_ALIAS_PAIRS:
+        if canonical in properties:
+            aliases.setdefault(alias, canonical)
+    for alias, target in list(aliases.items()):
+        seen = {alias}
+        while target in aliases and target not in seen:
+            seen.add(target)
+            target = aliases[target]
+        aliases[alias] = target
+    return aliases
 
 
 def _sdk_skip_property(name: str, properties: dict[str, Any]) -> bool:
@@ -1126,6 +1188,10 @@ def _render_tool_function(tool: ToolDef) -> str:
             nullable_names.append(str(name))
         if name in required and not aliased_required:
             params.append(py_name)
+        elif name in aliases.values() and "default" in spec:
+            # Let the host apply omitted defaults. Otherwise an alias such as
+            # max_rows=20 falsely conflicts with max_lines' implicit 500.
+            params.append(f"{py_name}=_EM_UNSET")
         elif nullable and "default" not in spec:
             params.append(f"{py_name}=_EM_UNSET")
         else:
@@ -1196,10 +1262,18 @@ def __getattr__(name):
 
 
 class HostToolError(Exception):
-    def __init__(self, message, code="TOOL_ERROR", details=None):
+    def __init__(self, message, code="TOOL_ERROR", details=None, request=None):
         super().__init__(message)
         self.code = code
         self.details = details or {}
+        self._request = request
+
+    def retry(self, **corrected_arguments):
+        """Retry this uncommitted call; successful recovery is host-recorded."""
+        if not self._request:
+            raise TypeError("此异常没有可重试的宿主调用")
+        tool, arguments, request_id = self._request
+        return _call_host(tool, {**arguments, **corrected_arguments}, retry_of=request_id)
 
     def __str__(self):
         if not self.details:
@@ -1223,9 +1297,9 @@ def _with_alias(args, extra, aliases, nullable_names=()):
         canon = aliases.get(key)
         if canon is None:
             raise TypeError(
-                "未知参数 %r；可用参数以工具 schema 为准（introspect_capability 可查）" % key
+                "unexpected keyword argument %r；可用参数以工具 schema 为准（introspect_capability 可查）" % key
             )
-        current = args.get(canon)
+        current = args.get(canon, _EM_UNSET)
         if current is not _EM_UNSET and current != val:
             raise TypeError("参数 %r 与其别名 %r 同时给出且值不同" % (canon, key))
         args[canon] = _EM_UNSET if val is None and canon not in nullable_names else val
@@ -1256,7 +1330,7 @@ def _em_json_default(o):
     return str(o)
 
 
-def _call_host(tool, arguments):
+def _call_host(tool, arguments, *, retry_of=None):
     global _SEQ
     bridge = os.environ.get("EXCELMANUS_CODE_MODE_BRIDGE")
     if not bridge:
@@ -1270,6 +1344,7 @@ def _call_host(tool, arguments):
         "tool": tool,
         "arguments": {k: v for k, v in arguments.items() if v is not _EM_UNSET},
         "root_call_id": os.environ.get("EXCELMANUS_CODE_MODE_ROOT_CALL_ID") or "",
+        "retry_of": retry_of,
     }
     tmp_path = req_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as _rf:
@@ -1299,6 +1374,7 @@ def _call_host(tool, arguments):
                     err.get("message") or "tool failed",
                     err.get("code") or "TOOL_ERROR",
                     details,
+                    (tool, arguments, str(seq)),
                 )
             return resp.get("value")
         time.sleep(0.02)

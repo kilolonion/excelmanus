@@ -158,6 +158,120 @@ def inspect_agent(engine: Any, section: str = "all"):
     return ok_result(data)
 
 
+_PROFILE_ALTERNATIVES = {
+    "csv": "当前工作目录是 CSV-only profile（还没有 xlsx）：可直接用 apply_spreadsheet_changes(workbook_spec=...) "
+           "新建 outputs/ 下的 xlsx（新建不依赖已有工作簿），或用 convert_spreadsheet 做真正的格式转换；"
+           "依赖已有工作簿的工具要等 outputs/ 出现 xlsx 后下一轮才生效。",
+    "docx": "当前工作目录是 docx-only profile：先在工作区生成/放入 xlsx 后再重试。",
+}
+_DEFAULT_PROFILE_ALTERNATIVE = ("先在工作区生成/放入该工具支持的文件族（例如 outputs/ 下的 xlsx）后重试，"
+                                "或改用当前目录内已可用的工具。")
+_NO_OP_REMEDIATION = {
+    "not_paused": "该工具并未被暂停，已经在执行目录中：直接调用它即可；若模型可见目录里没有它，"
+                  "先用 inspect_agent(section='capabilities') 核对，不要重复 configure_agent。",
+    "gated_by_profile": "该工具被当前工作目录 profile 门控：用 apply_spreadsheet_changes(workbook_spec=...) 新建，"
+                        "或用 convert_spreadsheet 在 outputs/ 生成 xlsx（或放入对应文件族）后重试，"
+                        "或改用本目录内已可用的工具。",
+    "unauthorized": "该工具被宿主授权排除：需要它请让用户在设置中放开授权；自我管理不能提升权限。",
+    "already_disabled": "该工具已被本会话暂停，无需重复暂停；要恢复请用 enable_tools。",
+    "already_unavailable": "该工具当前不在执行目录中（被 profile 或授权门控），暂停它不会改变现状。",
+}
+
+
+def _workspace_profile(engine: Any) -> str:
+    """当前工作目录 profile（xlsx/csv/docx）。绑定过的引擎直接读缓存。"""
+    profile = str(getattr(engine, "_catalog_profile", "") or "")
+    if profile:
+        return profile
+    root = getattr(getattr(engine, "_config", None), "workspace_root", None)
+    if not root:
+        return ""
+    try:
+        from excelmanus.tools.catalog import inspect_workspace_catalog
+        return str(inspect_workspace_catalog(str(root)).get("profile") or "")
+    except Exception:  # 目录不可读时按"未知 profile"降级，不影响主判定
+        return ""
+
+
+def _name_reasons(engine: Any, *, disable: set[str], enable: set[str]) -> dict[str, dict[str, Any]]:
+    """逐名说明每个工具请求为什么生效或不生效；只读，不改任何状态。"""
+    from excelmanus.tools.catalog import execution_catalog_from_engine
+
+    registered = set(engine._registry.get_tool_names())
+    catalog = execution_catalog_from_engine(engine)
+    available = set(catalog.names()) if catalog else set()
+    paused = set(getattr(engine, "_self_disabled_tools", ()))
+    # 只有宿主冻结的能力（_fixed_capability）才是授权口径；动态派生的
+    # capability.disallowed_tools 就是本会话的暂停集合，用它会把"暂停"误报成"越权"。
+    fixed = getattr(engine, "_fixed_capability", None)
+    denied = set(getattr(fixed, "disallowed_tools", ()) or ())
+    allowed = getattr(fixed, "allowed_tools", None)
+    profile = _workspace_profile(engine)
+    rows: dict[str, dict[str, Any]] = {}
+    for name in sorted(disable | enable):
+        wants_enable = name in enable
+        row: dict[str, Any] = {"request": "enable" if wants_enable else "disable",
+                               "registered": name in registered, "available_in_catalog": name in available,
+                               "effective": False, "reason": "", "detail": "", "alternative": ""}
+        if name not in registered:
+            row.update(reason="unknown",
+                       detail="该名不在本会话注册表中；此入口只调整已注册工具，不能安装新工具。",
+                       alternative="用 inspect_agent(section='capabilities') 查看本会话真实可用的工具名，改用其中的工具。")
+        elif name in denied or (allowed is not None and name not in allowed):
+            row.update(reason="unauthorized", detail="宿主授权范围排除了该工具；自我管理不能提升权限。",
+                       alternative=_NO_OP_REMEDIATION["unauthorized"])
+        elif wants_enable and name in paused:
+            row.update(reason="enabled", effective=True, detail="该工具此前被本会话暂停，本次恢复。")
+        elif wants_enable and name in available:
+            row.update(reason="not_paused",
+                       detail="该工具并未被暂停，已经在当前执行目录中；enable_tools 不会改变任何状态。",
+                       alternative=_NO_OP_REMEDIATION["not_paused"])
+        elif wants_enable:
+            row.update(reason="gated_by_profile",
+                       detail=f"该工具已注册，但被当前工作目录 profile（{profile or '未知'}）门控，不在本会话执行目录中；自我管理不能绕过 profile。",
+                       alternative=_PROFILE_ALTERNATIVES.get(profile, _DEFAULT_PROFILE_ALTERNATIVE))
+        elif name in paused:
+            row.update(reason="already_disabled",
+                       detail="该工具此前已被本会话暂停；disable_tools 不会改变任何状态。",
+                       alternative=_NO_OP_REMEDIATION["already_disabled"])
+        elif name in available:
+            row.update(reason="disabled", effective=True, detail="该工具将从本会话执行目录中移除。")
+        else:
+            row.update(reason="already_unavailable",
+                       detail="该工具当前既未被暂停也不在执行目录中（被 profile 或授权门控），暂停它不会改变现状。",
+                       alternative=_NO_OP_REMEDIATION["already_unavailable"])
+        rows[name] = row
+    return rows
+
+
+def _no_op_result(engine: Any, *, reason: str, name_reasons: dict[str, dict[str, Any]],
+                  unchanged_settings: list[str] | None = None) -> Any:
+    """请求不会生效时的非成功回执：逐名原因 + 可执行替代，绝不伪装成 success。"""
+    if name_reasons:
+        summary = "、".join(f"{name}（{row['reason']}）" for name, row in list(name_reasons.items())[:10])
+        message = f"configure_agent 未生效，请求未做任何改动：{summary}。"
+        skipped = [row["reason"] for row in name_reasons.values() if not row["effective"]]
+    else:
+        message = ("configure_agent 未生效，请求未做任何改动：指定配置与当前值相同（"
+                   + "、".join(unchanged_settings or []) + "）。")
+        skipped = ["unchanged"]
+    for key in ("gated_by_profile", "unauthorized", "not_paused", "already_unavailable", "already_disabled"):
+        if key in skipped:
+            remediation = _NO_OP_REMEDIATION[key]
+            break
+    else:
+        remediation = "先用 inspect_agent 确认当前配置与可用工具，再决定是否还需要修改。"
+    return error_result(
+        message, code="NOOP", remediation=remediation,
+        fields={"outcome": "no_op", "scope": "session", "persisted": False, "reason": reason.strip(),
+                "changes": {}, "changed_settings": [], "unchanged_settings": list(unchanged_settings or []),
+                "enabled_tools": [],
+                "disabled_tools": sorted(getattr(engine, "_self_disabled_tools", ())),
+                "name_reasons": name_reasons,
+                "detail": "该回执表示没有产生任何有效变更；不要原样重试，请按 alternative 更换工具、参数或路径。"},
+    )
+
+
 def configure_agent(engine: Any, *, changes: dict | None = None,
                     disable_tools: list[str] | None = None,
                     enable_tools: list[str] | None = None, reason: str = ""):
@@ -180,15 +294,29 @@ def configure_agent(engine: Any, *, changes: dict | None = None,
         return error_result("至少提供一个配置或工具变更。", code="INVALID_ARGS")
     if disable & enable or disable & _PROTECTED_TOOLS:
         return error_result("不可同时启停同一工具，也不可禁用自我管理、技能或用户交互入口。", code="INVALID_ARGS")
-    registered = set(engine._registry.get_tool_names())
-    if (disable | enable) - registered:
-        return error_result("只能调整当前会话已注册的工具；此入口不能安装新工具。", code="INVALID_ARGS")
+    name_reasons = _name_reasons(engine, disable=disable, enable=enable)
+    unknown = sorted(name for name, row in name_reasons.items() if row["reason"] == "unknown")
+    if unknown:
+        return error_result(
+            "以下工具不在当前会话注册表中：" + "、".join(unknown[:10])
+            + "。此入口只调整已注册工具，不能安装新工具；请求未做任何改动。",
+            code="INVALID_ARGS",
+            fields={"scope": "session", "persisted": False, "reason": reason.strip(),
+                    "unknown_tools": unknown[:10], "name_reasons": name_reasons,
+                    "disabled_tools": sorted(getattr(engine, "_self_disabled_tools", ())),
+                    "enabled_tools": []},
+        )
     if "thinking_effort" in changes and changes["thinking_effort"] not in engine._config.thinking_effort_options:
         return error_result("推理等级不在用户允许的选项中。", code="INVALID_ARGS")
+    if any(not row["effective"] for row in name_reasons.values()):
+        # 只要有一个工具名不会生效，整条请求就不生效：不做部分生效，也不返回
+        # "成功但没有效果"的误导性回执（真实会话里 agent 正是这样误判的）。
+        return _no_op_result(engine, reason=reason, name_reasons=name_reasons)
 
     # All validation precedes mutation. Copy the immutable config so engines
     # constructed with the same config never change one another's defaults.
     before = _values(engine)
+    original_config = engine._config
     old_disabled = set(getattr(engine, "_self_disabled_tools", ()))
     engine._config = replace(engine._config, **changes)
     engine.set_thinking_config(effort=changes.get("thinking_effort"), budget=changes.get("thinking_budget"))
@@ -204,13 +332,24 @@ def configure_agent(engine: Any, *, changes: dict | None = None,
     from excelmanus.tools.catalog import bind_engine_catalog
     catalog = bind_engine_catalog(engine)
     after = _values(engine)
+    changed_settings = [key for key in changes if before[key] != after[key]]
+    if not changed_settings and not name_reasons:
+        # 设置值与现值相同，且没有任何工具变更：还原 config 对象，保证无副作用。
+        engine._config = original_config
+        if router is not None:
+            router._config = engine._config
+            router._loader._config = engine._config
+        return _no_op_result(engine, reason=reason, name_reasons={},
+                             unchanged_settings=sorted(changes))
     return ok_result({
         "scope": "session", "persisted": False, "reason": reason.strip(),
         "changes": {key: {"before": before[key], "after": after[key],
                            "effective": "next_turn" if key == "max_iterations" else "next_call"}
                     for key in changes},
+        "changed_settings": sorted(changed_settings),
         "disabled_tools": sorted(engine._self_disabled_tools),
         "enabled_tools": sorted(enable & set(catalog.names()) if catalog else set()),
+        "name_reasons": name_reasons,
         "note": "仅当前内存会话生效，重建会话后恢复默认；启用工具仍受当前模式、工作区及宿主授权限制。",
     })
 

@@ -210,6 +210,7 @@ class TestProbeAllCodexOAuth:
     def _make_request(self, body: dict | None = None):
         request = AsyncMock()
         request.app = MagicMock()
+        request.app.state.credential_resolver = None
         request.json = AsyncMock(return_value=body or {})
         return request
 
@@ -245,16 +246,17 @@ class TestProbeAllCodexOAuth:
 
 
 class TestConnectionCodexOAuth:
-    """test_model_connection 对 Codex 返回订阅说明，不探测通用 API Key。"""
+    """test_model_connection 不再把订阅身份当成连接成功。"""
 
     def _make_request(self, body: dict):
         request = AsyncMock()
         request.app = MagicMock()
+        request.app.state.credential_resolver = None
         request.json = AsyncMock(return_value=body)
         return request
 
     @pytest.mark.asyncio
-    async def test_codex_connection_returns_oauth_note(self):
+    async def test_codex_connection_requires_runtime_credentials(self):
         request = self._make_request({"model": "openai-codex/gpt-5.1-codex"})
         mock_config = MagicMock()
         with patch.object(api_runtime(), "config", mock_config), \
@@ -263,5 +265,5 @@ class TestConnectionCodexOAuth:
             response = await test_model_connection(request)
             import json
             body = json.loads(response.body)
-            assert body["ok"] is True
-            assert "订阅" in (body.get("note") or "")
+            assert body["ok"] is False
+            assert "订阅" in (body.get("error") or "")

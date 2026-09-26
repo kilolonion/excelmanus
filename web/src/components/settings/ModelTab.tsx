@@ -1,15 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Loader2, CheckCircle2, AlertTriangle, X, Database, Settings2, Crown, SlidersHorizontal } from "lucide-react";
+import { Loader2, CheckCircle2, AlertTriangle, X, Database, Settings2, Crown } from "lucide-react";
 import { AdminModelContext } from "./model/admin-model-context";
 import { useAdminModelSettings } from "./model/useAdminModelSettings";
 import { ProviderSection } from "./model/ProviderSection";
 import { JevProviderSection } from "./model/JevProviderSection";
 import { RoleModelSection } from "./model/RoleModelSection";
-import { JevRoleSection } from "./model/JevRoleSection";
 import { SubscriptionOAuthPanel } from "./model/SubscriptionOAuthPanel";
-import { AdvancedDiagnosticsPanel } from "./model/AdvancedDiagnosticsPanel";
 import { SettingsPageLayout, SettingsPageSubnav } from "./SettingsPageLayout";
 import {
   subscribeModelSubTab,
@@ -18,26 +16,30 @@ import {
 } from "./model/model-subtab";
 
 const SUB_TABS: { key: ModelSubTab; label: string; icon: ReactNode; coachId: string }[] = [
-  { key: "providers", label: "供应商", icon: <Database className="h-3 w-3" />, coachId: "coach-settings-subtab-providers" },
+  { key: "providers", label: "模型连接", icon: <Database className="h-3 w-3" />, coachId: "coach-settings-subtab-providers" },
   { key: "roles", label: "模型配置", icon: <Settings2 className="h-3 w-3" />, coachId: "coach-settings-subtab-roles" },
   { key: "subscription", label: "订阅账号", icon: <Crown className="h-3 w-3" />, coachId: "coach-settings-subtab-subscription" },
-  { key: "diagnostics", label: "高级设置", icon: <SlidersHorizontal className="h-3 w-3" />, coachId: "coach-settings-subtab-diagnostics" },
 ];
 
 const SUB_TAB_DESCRIPTIONS: Record<ModelSubTab, string> = {
-  providers: "添加 API 或订阅连接，管理可用模型与默认模型。",
-  roles: "为聊天和记忆等任务分配最合适的模型。",
+  providers: "添加 API 或订阅连接，管理可用模型。",
+  roles: "选择默认模型，并集中调整能力、推理和请求行为。",
   subscription: "连接已有订阅，免去重复填写 API Key。",
-  diagnostics: "调整能力、推理、预算与请求行为。",
+  diagnostics: "模型配置已统一到模型配置页。",
 };
+
+function normalizeModelSubTab(tab: ModelSubTab): Exclude<ModelSubTab, "diagnostics"> {
+  return tab === "diagnostics" ? "roles" : tab;
+}
 
 export function ModelTab() {
   const ctx = useAdminModelSettings();
-  const [subTab, setSubTab] = useState<ModelSubTab>(() => takePendingModelSubTab() ?? "providers");
+  const [subTab, setSubTab] = useState<Exclude<ModelSubTab, "diagnostics">>(() => normalizeModelSubTab(takePendingModelSubTab() ?? "providers"));
   const [subscriptionVisited, setSubscriptionVisited] = useState(subTab === "subscription");
   const navigate = useCallback((tab: ModelSubTab) => {
-    setSubTab(tab);
-    if (tab === "subscription") setSubscriptionVisited(true);
+    const next = normalizeModelSubTab(tab);
+    setSubTab(next);
+    if (next === "subscription") setSubscriptionVisited(true);
   }, []);
 
   useEffect(() => subscribeModelSubTab(navigate), [navigate]);
@@ -90,11 +92,9 @@ export function ModelTab() {
             {subTab === "roles" && (
               <div className="flex flex-col gap-3">
                 <RoleModelSection />
-                <JevRoleSection />
               </div>
             )}
             {subscriptionVisited && <div hidden={subTab !== "subscription"}><SubscriptionOAuthPanel /></div>}
-            {subTab === "diagnostics" && <AdvancedDiagnosticsPanel />}
         </main>
       </SettingsPageLayout>
     </AdminModelContext.Provider>

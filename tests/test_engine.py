@@ -418,7 +418,7 @@ class TestTaskUpdateFailureSemantics:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._task_store.create('测试任务', ['子任务A'])
-        tc = SimpleNamespace(id='call_task_update_1', function=SimpleNamespace(name='task_update', arguments=json.dumps({'task_index': 0, 'status': 'completed'})))
+        tc = SimpleNamespace(id='call_task_update_1', function=SimpleNamespace(name='task_update', arguments=json.dumps({'task_index': 0, 'status': 'failed'})))
         events: list = []
         result = await engine._execute_tool_call(tc=tc, tool_scope=['task_update'], on_event=events.append, iteration=1, route_result=None)
         assert result.success is False

@@ -16,6 +16,8 @@ knowledge_toc 返回标题层级、章节锚点和读取调用。knowledge_read 
 
 知识目录中的 tools 对应当前可调用工具清单。knowledge_spec 的 query 填准确工具名，返回完整输入 schema、输出合同、写效应与适用示例。language 可选 python/json/all；examples_only=true 时只返回示例。这里是函数工具合同，不把它称为 HTTP OpenAPI，也不假定出现于产品文档的工具已获授权。
 
+多步骤任务先查[任务工作流](knowledge:workflows)，例如[汇总同比与图表看板](knowledge:workflow:spreadsheet-report)。knowledge_workflow 提供当前合同校验过的组合示例、版本绑定和核验步骤。knowledge_spec 也接受工具名.字段，或只有唯一归属的字段名；局部规范附带其引用的类型定义，不必逐个追查每个 $ref。
+
 knowledge_examples 可按工具名或关键词找到示例，随后读取 example:引用。示例的 JSON 调用步骤和 Python em 代码来自同一份维护内容，并按当前 schema 校验。路径、表名和业务值需要替换；版本绑定必须来自前一步真实结果。获取示例不执行工具，schema 校验通过也不等于业务执行成功。
 
 可查询[创建示例](knowledge:example:create-workbook)、[观察后修改](knowledge:example:observe-edit)与[调用示例目录](knowledge:examples)。如果当前模式缺少所需工具或示例不符合当前 schema，会明确返回 unavailable，不提供失效调用。

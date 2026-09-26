@@ -8,6 +8,7 @@ from excelmanus.system_one.policy import decision_is_applied, gate_for_pack, set
 
 def _config(**overrides: object) -> SimpleNamespace:
     values: dict[str, object] = {
+        "jev_experimental_enabled": True,
         "jev_enabled": "enforce",
         "jev_exposure": "enforce",
         "jev_observation": "enforce",

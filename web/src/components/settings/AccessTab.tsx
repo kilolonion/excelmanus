@@ -1,81 +1,17 @@
 "use client";
 
+import { SECURITY_SETTING_GROUPS } from "./settings-catalog";
 import { useEffect, useState, type FormEvent } from "react";
-import { Gauge, Loader2, LogOut, Shield, ShieldCheck } from "lucide-react";
+import { Loader2, LogOut, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { fetchAccessSettings, logoutFromInstance, saveAccessSettings, type AccessSettings } from "@/lib/access-api";
 import { setManageToken } from "@/lib/api";
-import { RuntimeSettingsPanel, type RuntimeSettingGroup } from "./RuntimeSettingsPanel";
+import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 import { SettingsPageLayout, SettingsPagePanel } from "./SettingsPageLayout";
 
-const SECURITY_SETTING_GROUPS: RuntimeSettingGroup[] = [
-  {
-    title: "代码执行与工具校验",
-    description: "设置 Agent 执行代码和调用工具时的风险分级、自动放行范围与参数检查。",
-    icon: <Shield className="h-4 w-4" />,
-    items: [
-      {
-        key: "code_policy_enabled",
-        label: "代码风险分级",
-        desc: "按绿 / 黄 / 红等级判断代码是自动运行还是先请求确认；新任务生效。",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "code_policy_green_auto_approve",
-        label: "绿区自动执行",
-        desc: "自动执行低风险代码，并继续限制网络、子进程和工作区外写入。",
-        disabledDesc: "开启代码风险分级后可设置。",
-        disabledWhen: (settings) => !settings.code_policy_enabled,
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "code_policy_yellow_auto_approve",
-        label: "黄区自动执行",
-        desc: "自动执行中风险代码；仍不会自动批准文件系统写入。",
-        disabledDesc: "开启代码风险分级后可设置。",
-        disabledWhen: (settings) => !settings.code_policy_enabled,
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "tool_schema_validation_mode",
-        label: "工具参数校验",
-        desc: "影子模式只记录问题；强制模式会拒绝不合规参数。新任务生效。",
-        icon: <Shield className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "off", label: "关闭" },
-          { value: "shadow", label: "仅记录" },
-          { value: "enforce", label: "强制" },
-        ],
-      },
-      {
-        key: "tool_schema_validation_canary_percent",
-        label: "强制校验比例",
-        desc: "强制模式下实际拦截的请求比例；其他请求按仅记录处理。",
-        disabledDesc: "选择强制校验后可调整。",
-        disabledWhen: (settings) => settings.tool_schema_validation_mode !== "enforce",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 100,
-      },
-      {
-        key: "tool_schema_strict_path",
-        label: "严格路径校验",
-        desc: "拒绝工具参数中的绝对路径和上级目录穿越。",
-        disabledDesc: "开启工具参数校验后可设置。",
-        disabledWhen: (settings) => settings.tool_schema_validation_mode === "off",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-    ],
-  },
-];
+
 
 export function AccessTab() {
   const [settings, setSettings] = useState<AccessSettings | null>(null);

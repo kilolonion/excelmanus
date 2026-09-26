@@ -241,17 +241,12 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
         errors: list[str] = []
         formula_count = 0
         try:
+            from io import BytesIO
             from openpyxl import load_workbook
-            formula_wb = load_workbook(converted, data_only=False, read_only=True)
-            try:
-                for ws in formula_wb.worksheets:
-                    for row in ws.iter_rows():
-                        for cell in row:
-                            if isinstance(cell.value, str) and cell.value.startswith("="):
-                                formula_count += 1
-            finally:
-                formula_wb.close()
-            wb = load_workbook(converted, data_only=True, read_only=True)
+            from excelmanus.workbook.ooxml import merge_formula_caches
+
+            result, formula_count = merge_formula_caches(data, result)
+            wb = load_workbook(BytesIO(result), data_only=True, read_only=True)
             try:
                 for ws in wb.worksheets:
                     for row in ws.iter_rows():
@@ -282,6 +277,7 @@ def recalculate_workbook_bytes(data: bytes, *, suffix: str = ".xlsx") -> tuple[b
             "errors": errors,
             "error_count": len(errors),
             "formula_count": formula_count,
+            "preservation": "source_package_with_updated_formula_caches",
             "duration_seconds": round(time.monotonic() - started, 3),
         }
 

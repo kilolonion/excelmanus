@@ -15,6 +15,7 @@ import { duration } from "@/lib/sidebar-motion";
 import { isImageFile } from "@/lib/file-kind";
 import styles from "./WelcomePage.module.css";
 import { WorkbookStart } from "./WorkbookStart";
+import type { ExampleContext } from "@/lib/types";
 
 const smoothEase: [number, number, number, number] = [0.4, 0, 0.2, 1];
 
@@ -24,46 +25,56 @@ interface SampleFileRef {
 }
 
 interface Suggestion {
+  id: string;
   label: string;
   summary: string;
   text: string;
   icon: LucideIcon;
   samples?: SampleFileRef[];
+  workflow?: string;
 }
 
 const SUGGESTIONS: Suggestion[] = [
   {
+    id: "sales-dashboard",
     label: "经营分析",
     summary: "按区域汇总销售、计算同比，生成趋势图与经营结论。",
     text: "把月度销售数据做成经营看板：按区域汇总、计算同比、生成趋势图，并写出关键结论",
     icon: TrendingUp,
     samples: [{ path: "/samples/月度销售报表.csv", name: "月度销售报表.csv" }],
+    workflow: "spreadsheet-report",
   },
   {
+    id: "cross-workbook-match",
     label: "跨表自动化",
     summary: "匹配产品信息、补齐订单金额，保留公式并标记异常。",
     text: "补齐订单工作表：从产品目录匹配产品名称和单价，计算金额，保留公式并标记未匹配项",
     icon: TableProperties,
     samples: [{ path: "/samples/订单与产品.xlsx", name: "订单与产品.xlsx" }],
+    workflow: "cross-workbook-automation",
   },
   {
+    id: "receipt-visual-replica",
     label: "图片转 Excel",
     summary: "提取收据明细、核对合计，还原为可编辑的 Excel。",
     text: "把这张收款收据还原成可编辑 Excel：提取客户、明细、数量和金额，核对合计并保留原有布局",
     icon: ScanLine,
     samples: [{ path: "/samples/收款收据.jpg", name: "收款收据.jpg" }],
+    workflow: "receipt-visual-replica",
   },
   {
+    id: "statistical-regression",
     label: "高级分析",
     summary: "分析广告与销售的关系，生成回归图表和预测公式。",
     text: "评估广告投入是否带来销售增长：用 Python 做回归分析，生成散点图和预测公式，把结果写回 Excel",
     icon: Code2,
     samples: [{ path: "/samples/广告与销售数据.csv", name: "广告与销售数据.csv" }],
+    workflow: "statistical-analysis",
   },
 ];
 
 interface WelcomePageProps {
-  onSuggestionClick: (text: string, files?: File[]) => void;
+  onSuggestionClick: (text: string, files?: File[], example?: ExampleContext) => void;
 }
 
 const containerVariants = {
@@ -163,7 +174,7 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
           return;
         }
 
-        onSuggestionClick(suggestion.text, files);
+          onSuggestionClick(suggestion.text, files, { id: suggestion.id, workflow: suggestion.workflow, sample: suggestion.samples?.[0]?.name });
       } finally {
         setLoadingKey(null);
         clickLockRef.current = false;
@@ -255,9 +266,6 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
                       ))
                     )}
                   </span>
-                  {hasError && (
-                    <span className={styles.compactError} role="status">加载失败，点击重试</span>
-                  )}
                 </span>
               </motion.button>
             );

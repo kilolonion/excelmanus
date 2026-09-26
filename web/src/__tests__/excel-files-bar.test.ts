@@ -28,9 +28,6 @@ const excelStoreState = {
   showSystemFiles: false,
   toggleShowSystemFiles: vi.fn(),
   demoFile: null,
-  groupViewMode: false,
-  toggleGroupViewMode: vi.fn(),
-  createGroupFromSelected: vi.fn(),
 };
 
 vi.mock("@/stores/excel-store", () => ({
@@ -91,10 +88,6 @@ vi.mock("@/components/sidebar/FlatFileListView", () => ({
   FlatFileListView: () => React.createElement("div", null, "No files yet, click + upload above"),
 }));
 
-vi.mock("@/components/sidebar/FileGroupListView", () => ({
-  FileGroupListView: () => null,
-}));
-
 vi.mock("@/components/sidebar/ExcelFilesDialogs", () => ({
   ExcelFilesDialog: () => null,
   RemoveConfirmDialog: () => null,
@@ -107,7 +100,6 @@ describe("ExcelFilesBar", () => {
     vi.clearAllMocks();
     excelStoreState.workspaceFiles = [];
     excelStoreState.wsFilesLoaded = true;
-    excelStoreState.groupViewMode = false;
   });
 
   it("renders the empty embedded state only once", () => {

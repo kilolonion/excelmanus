@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 from zipfile import ZipFile
+import csv
+import html
 
 from openpyxl import load_workbook, Workbook
 
@@ -94,7 +96,17 @@ def calculate_spreadsheet(file_path, expected_version=None, output_path=None, ex
         if info["status"]!="recalculated":
             return error_result("公式重算未完成",code="CALCULATION_UNAVAILABLE" if info["status"] in {"unavailable","unsupported_format","disabled"} else "CALCULATION_FAILED",fields={"formula_recalculation":info,"source_version":version,"committed":False})
         if info.get("errors") and not allow_formula_errors:
-            return error_result("重算发现公式错误，未发布结果",code="FORMULA_ERRORS",fields={"formula_recalculation":info,"source_version":version,"committed":False})
+            return error_result(
+                "重算发现单元格公式错误，验收未通过，未发布结果",
+                code="FORMULA_ERRORS",
+                fields={
+                    "file_path": file_path,
+                    "formula_recalculation": info,
+                    "source_version": version,
+                    "validation_status": "failed",
+                    "committed": False,
+                },
+            )
         receipt=_publish(source,version,[(output_path or file_path,output)],expected_output_version=expected_output_version)
         return from_payload({"status":"success","file_path":receipt["published_paths"][0],"content_version":receipt["targets"][0]["after_version"],"source_version":version,"formula_recalculation":info,"receipt":receipt})
     except (ValueError,OSError,CommitError) as exc: return _failure(exc)
@@ -110,17 +122,8 @@ def render_spreadsheet(file_path, output_path, sheet=None, range=None, format="p
         with tempfile.TemporaryDirectory(prefix="excelmanus-render-") as raw:
             root=Path(raw); src=root/"input.xlsx"; out=root/"converted"; out.mkdir()
             if sheet or range:
-                wb=load_workbook(BytesIO(data),keep_vba=False)
-                try:
-                    if not sheet and len(wb.worksheets)>1: raise ValueError("range 渲染需要明确 sheet")
-                    chosen=wb[sheet] if sheet else wb.active
-                    for ws in wb.worksheets: ws.sheet_state="visible" if ws is chosen else "hidden"
-                    wb.active=wb.index(chosen)
-                    if range:
-                        from openpyxl.worksheet.cell_range import CellRange
-                        chosen.print_area=CellRange(range).coord
-                    wb.save(src)
-                finally: wb.close()
+                from excelmanus.workbook.ooxml import render_selection
+                src.write_bytes(render_selection(data, sheet, range))
             else: src.write_bytes(data)
             pdf,engine=_office_convert(src,out,"pdf:calc_pdf_Export")
             page_count=None
@@ -128,7 +131,19 @@ def render_spreadsheet(file_path, output_path, sheet=None, range=None, format="p
             if info_bin:
                 match=re.search(r"Pages:\s*(\d+)",_run([info_bin,str(pdf)],30))
                 if match: page_count=int(match[1])
-            if page_count is not None and page_count>max_pages: raise ValueError(f"共 {page_count} 页，超过 max_pages={max_pages}")
+            if page_count is not None and page_count > max_pages:
+                raise CommitError(
+                    "LIMIT_EXCEEDED",
+                    f"共 {page_count} 页，超过 max_pages={max_pages}；请将 max_pages 调整为至少 {page_count}，或缩小 range。",
+                    fields={
+                        "page_count": page_count,
+                        "max_pages": max_pages,
+                        "suggested_max_pages": page_count,
+                        "format": format,
+                        "committed": False,
+                        "remediation": "缩小 range，或在 1–200 范围内将 max_pages 提高到实际页数；只检查单页可用 preview_spreadsheet(surface='print', page=...)。",
+                    },
+                )
             if format=="pdf": outputs=[(output_path,pdf.read_bytes())]
             else:
                 executable=shutil.which("pdftoppm")
@@ -153,11 +168,72 @@ def _inventory(data):
     except Exception: return None
 
 
-def convert_spreadsheet(file_path, output_path, mode="preserve", expected_version=None, expected_output_version=None):
+def _export_values(data: bytes, output_path: str, *, sheet: str | None, source: Path, version: str, expected_output_version: str | None, data_only: bool = False):
+    """Export a single worksheet as CSV or self-contained HTML."""
+    book = load_workbook(BytesIO(data), data_only=data_only, read_only=False)
+    try:
+        selected = sheet or book.active.title
+        if selected not in book.sheetnames:
+            raise ValueError(f"工作表不存在: {selected}")
+        ws = book[selected]
+        rows = [[cell.value for cell in row] for row in ws.iter_rows(min_row=1, max_row=ws.max_row or 1, min_col=1, max_col=ws.max_column or 1)]
+        ext = Path(output_path).suffix.lower()
+        if ext == ".csv":
+            stream = BytesIO()
+            import io
+            text = io.StringIO(newline="")
+            writer = csv.writer(text)
+            writer.writerows(rows)
+            payload = text.getvalue().encode("utf-8-sig")
+        else:
+            cells = []
+            for row in rows:
+                cells.append("<tr>" + "".join(f"<td>{html.escape('' if value is None else str(value))}</td>" for value in row) + "</tr>")
+            drawings = []
+            import base64
+            import mimetypes
+            for image in getattr(ws, "_images", []) or []:
+                raw = image._data() if callable(getattr(image, "_data", None)) else b""
+                if raw:
+                    fmt = str(getattr(image, "format", "png") or "png").lower()
+                    media = {"jpg": "image/jpeg", "jpeg": "image/jpeg"}.get(fmt, f"image/{fmt}")
+                    anchor = getattr(image, "anchor", None)
+                    target = getattr(getattr(anchor, "_from", None), "row", 0) + 1
+                    col = getattr(getattr(anchor, "_from", None), "col", 0) + 1
+                    drawings.append(f"<figure data-cell='{target},{col}'><img alt='embedded image' src='data:{media};base64,{base64.b64encode(raw).decode()}' style='max-width:{int(getattr(image, 'width', 240) or 240)}px;max-height:{int(getattr(image, 'height', 160) or 160)}px'></figure>")
+            for chart in getattr(ws, "_charts", []) or []:
+                anchor = getattr(chart, "anchor", None)
+                target = getattr(getattr(anchor, "_from", None), "row", 0) + 1
+                col = getattr(getattr(anchor, "_from", None), "col", 0) + 1
+                drawings.append(f"<figure data-chart-cell='{target},{col}'><figcaption>{html.escape(type(chart).__name__)}</figcaption><div class='chart-placeholder'>Embedded Excel chart ({len(getattr(chart, 'series', []) or [])} series)</div></figure>")
+            payload = ("<!doctype html><meta charset='utf-8'><title>" + html.escape(selected) + "</title>"
+                       + "<style>table{border-collapse:collapse;font:13px sans-serif}td{border:1px solid #d1d5db;padding:4px 8px;white-space:nowrap}</style>"
+                       + "<style>figure{display:inline-block;vertical-align:top;margin:12px}.chart-placeholder{border:1px solid #94a3b8;padding:28px;color:#475569}</style>"
+                       + "<table data-sheet='" + html.escape(selected, quote=True) + "'>" + "".join(cells) + "</table>" + "".join(drawings)).encode("utf-8")
+    finally:
+        book.close()
+    receipt = _publish(source, version, [(output_path, payload)], expected_output_version=expected_output_version)
+    return from_payload({"status": "success", "file_path": receipt["published_paths"][0], "source_version": version, "format": Path(output_path).suffix.lower().lstrip("."), "sheet": selected, "receipt": receipt})
+
+
+def convert_spreadsheet(file_path, output_path, mode="preserve", expected_version=None, expected_output_version=None, sheet=None):
     try:
         if mode not in {"preserve","data_only"}: raise ValueError("mode 必须为 preserve 或 data_only")
         source,data,version=_source(file_path,expected_version)
-        if Path(output_path).suffix.lower()!=".xlsx": raise ValueError("转换输出必须为 .xlsx")
+        target_ext = Path(output_path).suffix.lower()
+        if target_ext in {".pdf", ".png"}:
+            return render_spreadsheet(file_path, output_path, sheet=sheet, format=target_ext.lstrip("."), expected_version=expected_version, expected_output_version=expected_output_version)
+        if target_ext in {".csv", ".html", ".htm"}:
+            if target_ext == ".htm":
+                output_path = str(Path(output_path).with_suffix(".html"))
+            return _export_values(data, output_path, sheet=sheet, source=source, version=version, expected_output_version=expected_output_version, data_only=mode == "data_only")
+        if target_ext == ".ods":
+            with tempfile.TemporaryDirectory(prefix="excelmanus-ods-") as raw:
+                root = Path(raw); src = root / ("input" + source.suffix); src.write_bytes(data); out = root / "out"; out.mkdir()
+                converted, engine = _office_convert(src, out, "ods")
+                receipt = _publish(source, version, [(output_path, converted.read_bytes())], expected_output_version=expected_output_version)
+            return from_payload({"status": "success", "file_path": receipt["published_paths"][0], "source_version": version, "format": "ods", "engine": engine, "receipt": receipt})
+        if target_ext != ".xlsx": raise ValueError("转换输出支持 .xlsx、.csv、.html、.ods、.pdf 或 .png")
         if require_guard().resolve_and_validate(output_path)==source: raise ValueError("转换须输出到新文件以保留源文件")
         warnings=[]; before=_inventory(data)
         with tempfile.TemporaryDirectory(prefix="excelmanus-convert-") as raw:
@@ -217,4 +293,4 @@ def get_tools():
         return ToolDef(name=name,description=description,func=func,write_effect="workspace_write",input_schema={"type":"object","additionalProperties":False,"properties":{**common,**extra},"required":required},max_result_chars=6000)
     return [make("calculate_spreadsheet","显式重算并检查公式错误；需要可用 LibreOffice。失败不发布，返回计算引擎、缓存结果与源版本。",calculate_spreadsheet,{"allow_formula_errors":{"type":"boolean"}},["file_path"]),
             make("render_spreadsheet","渲染指定工作表/区域为 PDF 或分页 PNG，返回实际页数、引擎和源版本；需要 soffice，PNG 另需 Poppler。",render_spreadsheet,{"sheet":{"type":"string"},"range":{"type":"string"},"format":{"type":"string","enum":["pdf","png"]},"dpi":{"type":"integer","minimum":72,"maximum":300},"max_pages":{"type":"integer","minimum":1,"maximum":200}},["file_path","output_path"]),
-            make("convert_spreadsheet","将 xls/xlsb/xlsx 等转换为 xlsx；preserve 使用 LibreOffice，data_only 仅迁移值；保留原文件并返回对象损失报告。",convert_spreadsheet,{"mode":{"type":"string","enum":["preserve","data_only"]}},["file_path","output_path"])]
+            make("convert_spreadsheet","将 Excel 转为 xlsx、CSV、HTML、ODS、PDF 或 PNG；xlsx preserve 使用 LibreOffice，data_only 仅迁移值；返回图片/图表对象损失报告。",convert_spreadsheet,{"mode":{"type":"string","enum":["preserve","data_only"]},"sheet":{"type":"string"}},["file_path","output_path"])]

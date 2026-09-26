@@ -21,6 +21,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+import shutil
+import subprocess
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,13 @@ def convert_to_xlsx(
 
     dst.parent.mkdir(parents=True, exist_ok=True)
 
+    # LibreOffice understands the legacy drawing parts and is the only
+    # conversion path here that can carry images/charts across formats.  Keep
+    # the xlrd/pyxlsb adapters as a deterministic fallback for minimal hosts.
+    office = _convert_with_libreoffice(src, dst, source_bytes=None, workspace_root=workspace_root)
+    if office is not None:
+        return office
+
     if ext == ".xls":
         return _convert_xls(src, dst, workspace_root=workspace_root)
     elif ext == ".xlsb":
@@ -92,6 +102,42 @@ def convert_to_xlsx(
 class ConversionError(Exception):
     """转换过程中的错误。"""
     pass
+
+
+def _convert_with_libreoffice(
+    src: Path,
+    dst: Path | None,
+    *,
+    source_bytes: bytes | None,
+    workspace_root: str | Path | None = None,
+) -> Path | bytes | None:
+    """Best-effort legacy conversion retaining drawing objects."""
+    engine = shutil.which("soffice") or shutil.which("libreoffice")
+    if not engine:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="excelmanus-legacy-convert-") as raw:
+            root = Path(raw)
+            source = root / (src.name if src.suffix else f"source{src.suffix}")
+            source.write_bytes(source_bytes if source_bytes is not None else src.read_bytes())
+            out = root / "out"
+            out.mkdir()
+            profile = root / "profile"
+            command = [engine, "--headless", "--nolockcheck", "--nodefault", "--nologo", "--nofirststartwizard",
+                       f"-env:UserInstallation={profile.as_uri()}", "--convert-to", "xlsx", "--outdir", str(out), str(source)]
+            completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, check=False)
+            converted = out / f"{source.stem}.xlsx"
+            if completed.returncode != 0 or not converted.is_file() or converted.stat().st_size == 0:
+                return None
+            data = converted.read_bytes()
+            if dst is None:
+                return data
+            _commit_converted_xlsx(dst, data, workspace_root=workspace_root)
+            logger.info("LibreOffice legacy conversion retained drawing objects: %s -> %s", src, dst)
+            return dst
+    except (OSError, subprocess.SubprocessError, ConversionError):
+        logger.debug("LibreOffice legacy conversion unavailable; falling back", exc_info=True)
+        return None
 
 
 def _commit_converted_xlsx(
@@ -434,6 +480,9 @@ def convert_preview_bytes(data: bytes, suffix: str) -> bytes:
     converter = {".xls": _convert_xls, ".xlsb": _convert_xlsb}.get(source.suffix)
     if converter is None:
         raise ValueError(f"不需要转换的格式: {suffix}")
+    office = _convert_with_libreoffice(source, None, source_bytes=data)
+    if isinstance(office, bytes):
+        return office
     result = converter(source, None, source_bytes=data)
     assert isinstance(result, bytes)
     return result

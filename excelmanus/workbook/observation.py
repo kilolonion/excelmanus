@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from typing import Any
 from datetime import date, datetime, time
@@ -30,6 +31,123 @@ from excelmanus.tools._style_extract import extract_cell_style
 from excelmanus.workbook.protocol import SCHEMA_VERSION, FACETS, ObservationRequest
 
 MAX_CELLS = 20_000
+
+# ── CSV 观测的推断类型（advisory，不改变 t 的字面语义） ──────────────
+# CSV 没有存储类型：每个字段都以文本到达。为了让模型不把数值列当成文本列，
+# CSV 观测在既有字段之外追加 inferred_type（单元格级）与 type_summary（列级）。
+# t/v/raw_value 仍然是原文，下游 openpyxl 适配器与 validate/analyze 不受影响。
+CSV_CELL_TYPES = ("number", "text", "date", "empty")
+CSV_COLUMN_TYPES = ("number", "text", "date", "empty", "mixed")
+CSV_NO_GEOMETRY_REASON = (
+    "CSV 无几何信息：没有列宽、行高、隐藏状态或像素尺寸；geometry 永远不可用"
+)
+
+_CSV_NUMBER_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
+_CSV_GROUPED_NUMBER_RE = re.compile(
+    r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:[eE][+-]?\d+)?\Z"
+)
+_CSV_DATE_RE = re.compile(
+    r"(?P<date>\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})"
+    r"(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\Z"
+)
+
+
+def _csv_is_number(text: str) -> bool:
+    return bool(_CSV_NUMBER_RE.match(text) or _CSV_GROUPED_NUMBER_RE.match(text))
+
+
+def _csv_is_date(text: str) -> bool:
+    match = _CSV_DATE_RE.match(text)
+    if match is None:
+        return False
+    parts = match.group("date").replace("/", "-").split("-")
+    try:
+        if len(parts[0]) == 4:
+            year, month, day = (int(part) for part in parts)
+        else:
+            day, month, year = (int(part) for part in parts)
+        date(year, month, day)
+    except ValueError:
+        return False
+    return True
+
+
+def _csv_inferred_type(value: str) -> str:
+    """CSV 字面量的语义类型；只读推断，绝不改写原值。"""
+    text = value.strip()
+    if not text:
+        return "empty"
+    if _csv_is_number(text):
+        return "number"
+    if _csv_is_date(text):
+        return "date"
+    return "text"
+
+
+def _csv_dominant_type(counts: dict[str, int]) -> str:
+    """列级主导类型：空值不参与占比，单类型占比不足 90% 记为 mixed。"""
+    populated = {kind: count for kind, count in counts.items() if kind != "empty" and count}
+    if not populated:
+        return "empty"
+    total = sum(populated.values())
+    dominant = max(
+        populated,
+        key=lambda kind: (populated[kind], -CSV_COLUMN_TYPES.index(kind)),
+    )
+    return dominant if populated[dominant] / total >= 0.9 else "mixed"
+
+
+def _csv_type_summary(
+    observed: dict[int, list[tuple[int, str, str]]],
+    address: str,
+    rows_observed: int,
+) -> dict[str, Any]:
+    """观测窗口内逐列的推断类型分布（列级摘要，供模型一眼识别数值列）。"""
+    columns: list[dict[str, Any]] = []
+    empty_cells = 0
+    header_row: int | None = None
+    for col in sorted(observed):
+        entries = observed[col]
+        counts = {kind: 0 for kind in CSV_CELL_TYPES}
+        for _, _, kind in entries:
+            counts[kind] += 1
+        empty_cells += counts["empty"]
+        header: str | None = None
+        # 首行是文本、其余行是同一数值/日期块时，首行即表头：表头不计入列类型占比，
+        # 否则两行窗口会把「表头 + 1 个数值」误判成 mixed。
+        first_value = entries[0][1].strip()
+        if first_value and _csv_inferred_type(first_value) == "text" and len(entries) > 1:
+            body_counts = {kind: 0 for kind in CSV_CELL_TYPES}
+            for _, _, kind in entries[1:]:
+                body_counts[kind] += 1
+            if _csv_dominant_type(body_counts) in {"number", "date"}:
+                header, counts = first_value, body_counts
+                header_row = entries[0][0]
+        non_empty = sum(count for kind, count in counts.items() if kind != "empty")
+        columns.append(
+            {
+                "column": get_column_letter(col),
+                "index": col,
+                "header": header,
+                "inferred_type": _csv_dominant_type(counts),
+                "type_counts": dict(counts),
+                "non_empty": non_empty,
+                "empty": counts["empty"],
+                "numeric_ratio": round(counts["number"] / non_empty, 4)
+                if non_empty
+                else 0.0,
+            }
+        )
+    return {
+        "applies_to": address,
+        "rows_observed": rows_observed,
+        "header_row": header_row,
+        "empty_cells": empty_cells,
+        "columns": columns,
+        "note": (
+            "CSV 无存储类型；inferred_type 是只读推断，t/v/raw_value 仍是原始文本"
+        ),
+    }
 
 
 def observation_schema() -> dict[str, Any]:
@@ -68,6 +186,14 @@ def observation_schema() -> dict[str, Any]:
             "t": {"type": "string"},
             "cached": {"type": "string", "enum": ["yes", "no", "unknown"]},
             "value_source": {"type": "string"},
+            "inferred_type": {
+                "type": "string",
+                "enum": list(CSV_CELL_TYPES),
+                "description": (
+                    "csv adapter only: 字面量推断类型 number/text/date（空单元格不入 cells，"
+                    "空值计数见 region.type_summary）。t/v/raw_value 保持原文"
+                ),
+            },
             "s": {"type": "object", "description": "展开的工作台显示样式"},
             "display": {"type": "object"},
             "cached_value": {},
@@ -93,7 +219,26 @@ def observation_schema() -> dict[str, Any]:
                 "type": "object",
                 "description": "按 facet 报告 complete/partial/not_requested/unsupported",
             },
+            "type_summary": {
+                "type": "object",
+                "description": (
+                    "csv adapter only: 观测窗口内每列的推断类型分布"
+                    "（number/text/date/empty/mixed），用于判断某列是否数值列"
+                ),
+                "properties": {
+                    "applies_to": {"type": "string"},
+                    "rows_observed": {
+                        "type": "integer",
+                        "description": "窗口内实际解析到的行数（小于窗口高度说明已到文件末尾）",
+                    },
+                    "header_row": {"type": ["integer", "null"]},
+                    "empty_cells": {"type": "integer"},
+                    "columns": {"type": "array", "items": {"type": "object"}},
+                    "note": {"type": "string"},
+                },
+            },
             "objects": {"type": "array", "items": {"type": "object"}},
+            "cell_images": {"type": "array", "items": {"type": "object"}, "description": "Excel IMAGE() cell formulas with safe absolute URLs"},
             "selection": {"type": "object"},
             "merges": {"type": "array", "items": {"type": "object"}},
             "merge_anchors": {"type": "object"},
@@ -276,6 +421,14 @@ def _objects(wb: Any, ws: Any) -> list[dict[str, Any]]:
         if obj["kind"] == "image":
             obj["source_size_px"] = {"width": item.width, "height": item.height}
             obj["format"] = item.format
+            # The binary payload is served through the version-bound object
+            # endpoint.  Keep the observation JSON small and make the client
+            # able to render the real embedded image lazily.
+            obj["asset"] = {
+                "kind": "embedded-image",
+                "media_type": _image_media_type(item),
+                "index": obj.get("index", 0),
+            }
         else:
             obj["chart_type"] = type(item).__name__
             obj["series"] = [
@@ -292,7 +445,121 @@ def _objects(wb: Any, ws: Any) -> list[dict[str, Any]]:
                 }
                 for i, series in enumerate(item.series)
             ]
+            chart_data = _chart_render_data(ws, item)
+            if chart_data:
+                obj["chart_data"] = chart_data
     return items
+
+
+def _image_media_type(image: Any) -> str:
+    fmt = str(getattr(image, "format", "") or "").lower().lstrip(".")
+    return {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+        "gif": "image/gif", "bmp": "image/bmp", "webp": "image/webp",
+        "tif": "image/tiff", "tiff": "image/tiff",
+    }.get(fmt, "application/octet-stream")
+
+
+def _chart_ref_values(ws: Any, ref: Any) -> list[Any]:
+    """Resolve the common A1 chart-reference shape without evaluating formulas."""
+    formula = getattr(ref, "f", None) if ref is not None else None
+    if not formula:
+        return []
+    text = str(formula).replace("$", "")
+    # A chart formula can be qualified with a quoted sheet name.  The chart
+    # already belongs to ws, so the local sheet is the safe fallback.
+    target_ws = ws
+    if "!" in text:
+        sheet_text, text = text.rsplit("!", 1)
+        sheet_text = sheet_text.strip().strip("'")
+        try:
+            target_ws = ws.parent[sheet_text]
+        except Exception:
+            target_ws = ws
+    text = text.strip().strip("'")
+    try:
+        from openpyxl.worksheet.cell_range import CellRange
+        area = CellRange(text)
+    except Exception:
+        return []
+    out: list[Any] = []
+    for row in target_ws.iter_rows(min_row=area.min_row, max_row=area.max_row,
+                            min_col=area.min_col, max_col=area.max_col):
+        for cell in row:
+            value = cell.value
+            if value is not None:
+                out.append(_scalar(value))
+    return out
+
+
+def _chart_render_data(ws: Any, chart: Any) -> dict[str, Any] | None:
+    """Return bounded data for a client-side SVG fallback for native charts."""
+    series_payload: list[dict[str, Any]] = []
+    for index, series in enumerate(getattr(chart, "series", []) or []):
+        val_ref = getattr(getattr(series, "val", None), "numRef", None)
+        if val_ref is None:
+            val_ref = getattr(getattr(series, "yVal", None), "numRef", None)
+        cat_ref = getattr(getattr(series, "cat", None), "strRef", None)
+        if cat_ref is None:
+            cat_ref = getattr(getattr(series, "cat", None), "numRef", None)
+        if cat_ref is None:
+            cat_ref = getattr(getattr(series, "xVal", None), "numRef", None)
+        values = _chart_ref_values(ws, val_ref)[:200]
+        categories = _chart_ref_values(ws, cat_ref)[: len(values)] if cat_ref else []
+        if not values:
+            continue
+        title = getattr(getattr(series, "tx", None), "v", None)
+        series_payload.append({
+            "index": index,
+            "name": str(title) if title is not None else f"系列 {index + 1}",
+            "categories": categories,
+            "values": values,
+        })
+    if not series_payload:
+        return None
+    title = getattr(chart, "title", None)
+    title_text = None
+    if isinstance(title, str):
+        title_text = title
+    elif title is not None:
+        rich = getattr(getattr(title, "text", None), "rich", None)
+        if rich is not None:
+            title_text = "".join(
+                str(run.t) for paragraph in (getattr(rich, "p", None) or [])
+                for run in (getattr(paragraph, "r", None) or [])
+                if getattr(run, "t", None)
+            ) or None
+    return {"title": title_text, "series": series_payload}
+
+
+def _collect_cell_images(ws: Any, rect: Any) -> list[dict[str, Any]]:
+    """Find Excel 365 IMAGE() formulas in the requested region.
+
+    IMAGE formulas are cell content rather than OOXML drawing objects.  We only
+    expose safe absolute URLs; relative/file URLs stay as formula facts and are
+    never fetched by the server.
+    """
+    import re
+
+    result: list[dict[str, Any]] = []
+    pattern = re.compile(r"^\s*=\s*IMAGE\s*\(\s*([\"'])(.*?)\1", re.IGNORECASE)
+    for row in range(rect.min_row, rect.max_row + 1):
+        for col in range(rect.min_col, rect.max_col + 1):
+            cell = ws._cells.get((row, col))
+            formula = getattr(cell, "value", None) if cell is not None else None
+            if not isinstance(formula, str):
+                continue
+            match = pattern.match(formula)
+            if not match or not match.group(2).lower().startswith(("https://", "http://")):
+                continue
+            from openpyxl.utils import get_column_letter
+            result.append({
+                "kind": "image", "source": "cell-formula",
+                "target_cell": f"{get_column_letter(col)}{row}",
+                "asset": {"kind": "external-image", "url": match.group(2)},
+                "bounds": {"x": None, "y": None, "width": None, "height": None, "unit": "cell"},
+            })
+    return result
 
 
 def observe_snapshot(
@@ -696,6 +963,7 @@ def observe_snapshot(
             if "objects" in chosen:
                 objects = _objects(wb, ws)
                 region["objects"] = objects[offset : offset + limit]
+                region["cell_images"] = _collect_cell_images(ws, rect)
                 if "geometry" in region:
                     boxes = [
                         obj["bounds"]
@@ -776,31 +1044,58 @@ def _observe_csv(snapshot: WorkbookSnapshot, result: dict, request: dict) -> dic
             "CSV observation requires a bounded region of at most 20000 cells"
         )
     cells = {}
+    observed: dict[int, list[tuple[int, str, str]]] = {}
+    rows_observed = 0
     for row, values in enumerate(
         index.window(rect.min_row, rect.max_row) if "data" in request["facets"] else [],
         rect.min_row,
     ):
-        for col in __builtins_range(rect.min_col, min(rect.max_col, len(values)) + 1):
-            value = values[col - 1]
+        rows_observed += 1
+        width = min(rect.max_col, len(values))
+        for col in __builtins_range(rect.min_col, rect.max_col + 1):
+            value = values[col - 1] if col <= width else ""
+            if value == "" and col > index.columns:
+                continue  # 默认窗口补齐的列：既不是单元格，也不是真实空列
+            kind = _csv_inferred_type(value)
+            if col <= index.columns:
+                # 只统计文件真实宽度内的列，避免 A1:L20 默认窗口把补齐列算成空列。
+                observed.setdefault(col, []).append((row, value, kind))
             if value != "":
                 # CSV has no stored types; preserve identifiers and leading zeros.
+                # inferred_type is advisory; t/v/raw_value stay literal text.
                 cells[f"{row},{col}"] = {
                     "t": "s",
                     "v": value,
                     "raw_value": value,
                     "cached": "yes",
                     "value_source": "literal",
+                    "inferred_type": kind,
                 }
-    coverage = {
-        f: {
-            "status": "not_requested"
-            if f not in request["facets"]
-            else "complete"
-            if f == "data"
-            else "unsupported"
-        }
-        for f in FACETS
+    requested = set(request["facets"])
+    csv_facet_notes = {
+        "presentation": {
+            "status": "unsupported",
+            "reason": "CSV 无版式/样式信息（无单元格样式、合并、打印设置）",
+        },
+        "geometry": {
+            "status": "unsupported",
+            "reason": CSV_NO_GEOMETRY_REASON,
+        },
+        "objects": {"status": "unsupported", "reason": "CSV 无图形对象（图片/图表）"},
+        "dependencies": {"status": "unsupported", "reason": "CSV 无公式与依赖关系"},
     }
+    coverage: dict[str, dict[str, Any]] = {}
+    for facet in FACETS:
+        if facet not in requested:
+            coverage[facet] = {"status": "not_requested"}
+        elif facet == "data":
+            coverage[facet] = {
+                "status": "complete",
+                "type_summary": "region.type_summary",
+                "note": "CSV 无存储类型；inferred_type/type_summary 是只读推断",
+            }
+        else:
+            coverage[facet] = dict(csv_facet_notes[facet])
     result["active_sheet"] = "Sheet1"
     result["sheets"] = [
         {
@@ -819,6 +1114,14 @@ def _observe_csv(snapshot: WorkbookSnapshot, result: dict, request: dict) -> dic
             "coverage": coverage,
         }
     ]
+    summary = (
+        _csv_type_summary(observed, address, rows_observed)
+        if "data" in requested
+        else None
+    )
+    if summary is not None:
+        # 列级推断摘要：让模型一眼看出「这列是数值列」，又不改 cells 的稀疏语义。
+        result["regions"][0]["type_summary"] = summary
     if "data" in request["facets"]:
         result["regions"][0]["selection"] = selection_from_rows(
             snapshot,
@@ -827,10 +1130,48 @@ def _observe_csv(snapshot: WorkbookSnapshot, result: dict, request: dict) -> dic
             cols=list(__builtins_range(rect.min_col, rect.max_col + 1)),
             origin="observe",
         ).to_json()
-    return _finish_coverage(result, request["facets"])
+    data_override: dict[str, Any] = {
+        "status": "region_scoped",
+        "inferred_types": True,
+        "note": (
+            "CSV 无存储类型（t 恒为 s）；columns 给出每列 inferred_type/numeric_ratio，"
+            "明细见 region.type_summary"
+        ),
+    }
+    if summary is not None:
+        # coverage 在结果外置(spill)时仍原样保留，摘要放这里即使明细被裁剪也不丢类型信息。
+        data_override["columns"] = [
+            {
+                "column": column["column"],
+                "inferred_type": column["inferred_type"],
+                "numeric_ratio": column["numeric_ratio"],
+                "empty": column["empty"],
+                "header": column["header"],
+            }
+            for column in summary["columns"]
+        ]
+    return _finish_coverage(
+        result,
+        request["facets"],
+        facet_overrides={
+            "data": data_override,
+            "geometry": {"status": "unsupported", "reason": CSV_NO_GEOMETRY_REASON},
+            "presentation": {
+                "status": "unsupported",
+                "reason": "CSV 无版式/样式信息",
+            },
+            "objects": {"status": "unsupported", "reason": "CSV 无图形对象"},
+            "dependencies": {"status": "unsupported", "reason": "CSV 无公式依赖"},
+        },
+    )
 
 
-def _finish_coverage(result: dict, chosen: list[str]) -> dict:
+def _finish_coverage(
+    result: dict,
+    chosen: list[str],
+    *,
+    facet_overrides: dict[str, dict] | None = None,
+) -> dict:
     """Exact rectangle subtraction, including holes between disjoint windows."""
     unloaded = []
     for meta in result["sheets"]:
@@ -864,7 +1205,11 @@ def _finish_coverage(result: dict, chosen: list[str]) -> dict:
         scope="requested regions; manifest covers workbook",
         has_more=bool(unloaded) or bool(result["coverage"].get("next_offset")),
         facets={
-            f: {"status": "region_scoped" if f in chosen else "not_requested"}
+            f: (
+                dict(facet_overrides[f])
+                if f in chosen and facet_overrides and f in facet_overrides
+                else {"status": "region_scoped" if f in chosen else "not_requested"}
+            )
             for f in FACETS
         },
     )
@@ -928,18 +1273,21 @@ def _search_snapshot(snapshot, result, request):
         returned=len(matches),
         truncated=offset + limit < total,
     )
+    facets: dict[str, dict[str, Any]] = {}
+    for facet in FACETS:
+        entry: dict[str, Any] = {
+            "status": "complete"
+            if facet == "data"
+            else "unsupported"
+            if facet in request["facets"]
+            else "not_requested"
+        }
+        if facet == "geometry" and facet in request["facets"] and snapshot.is_csv():
+            entry["reason"] = CSV_NO_GEOMETRY_REASON
+        facets[facet] = entry
     result["coverage"] = {
         "scope": "literal values and formula text",
-        "facets": {
-            f: {
-                "status": "complete"
-                if f == "data"
-                else "unsupported"
-                if f in request["facets"]
-                else "not_requested"
-            }
-            for f in FACETS
-        },
+        "facets": facets,
         "next_offset": offset + limit if offset + limit < total else None,
         "has_more": offset + limit < total,
         "offset": offset,

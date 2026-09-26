@@ -6,6 +6,8 @@ import { apiGet, apiPut } from "@/lib/api";
 import { MemoryTab } from "@/components/settings/MemoryTab";
 import { RuntimeTab } from "@/components/settings/RuntimeTab";
 import { SkillsTab } from "@/components/settings/SkillsTab";
+import { useSettingsNavigationStore } from "@/stores/settings-navigation-store";
+import { useSettingsDraftStore } from "@/stores/settings-draft-store";
 import { AccessTab } from "@/components/settings/AccessTab";
 
 vi.mock("@/lib/api", () => ({
@@ -79,6 +81,8 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  useSettingsDraftStore.setState({ drafts: {} });
+  useSettingsNavigationStore.setState({ runtimeCategory: "conversation", targetKey: null });
   vi.mocked(apiGet).mockImplementation(async (url: string) => {
     if (url === "/config/runtime") return runtimeConfig;
     if (url === "/memory") return [];
@@ -112,7 +116,7 @@ describe("settings organization", () => {
   it("does not repeat memory maintenance controls in system settings", async () => {
     render(<RuntimeTab />);
 
-    expect(await screen.findByText("对话与上下文")).toBeTruthy();
+    expect(await screen.findByText("消息与助手")).toBeTruthy();
     expect(screen.queryByText("记忆自动维护")).toBeNull();
     expect(screen.queryByText("跨会话记忆")).toBeNull();
     expect(screen.queryByText("技能发现")).toBeNull();

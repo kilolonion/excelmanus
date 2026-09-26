@@ -138,7 +138,8 @@ def normalize_protocol(*, protocol: str = "", base_url: str = "", model: str = "
     proto = (protocol or "").strip().lower()
     endpoint = _canonical_endpoint(base_url)
     if proto in {"", "auto"}:
-        proto = _infer_protocol(endpoint, model)
+        from excelmanus.model_catalog import model_spec
+        proto = (model_spec(model, base_url, route_only=True) or {}).get("recommended_protocol") or _infer_protocol(endpoint, model)
     if endpoint:
         return f"{proto}|{endpoint}"
     return proto or "unknown"

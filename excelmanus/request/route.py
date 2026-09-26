@@ -12,6 +12,7 @@ from excelmanus.prompt.envelope import (
     normalize_protocol,
 )
 from excelmanus.request.types import ResolvedRoute
+from excelmanus.providers.mimo import is_mimo_base_url
 
 
 def credential_scope(endpoint: str, api_key: str | None) -> str:
@@ -49,7 +50,11 @@ def resolve_route(engine: Any) -> ResolvedRoute:
     protocol = _protocol_name(label)
     host = (urlparse(endpoint).hostname or "").lower()
     stateless_responses = host == "api.deepseek.com" or host.endswith(".deepseek.com")
-    files_ok = protocol in {"openai", "openai_responses"}
+    mimo = is_mimo_base_url(endpoint)
+    # MiMo accepts inline multimodal parts but does not expose OpenAI Files or
+    # prompt_cache_key endpoints.  Keep these capabilities off at the route
+    # layer; the transport adapter also strips the fields defensively.
+    files_ok = protocol in {"openai", "openai_responses"} and not mimo
     purpose = None
     if files_ok:
         purpose = "user_data" if "deepseek" in (endpoint or "").lower() else "assistants"
@@ -91,9 +96,11 @@ def resolve_route(engine: Any) -> ResolvedRoute:
         capabilities={
             "vision": bool(getattr(engine, "_is_vision_capable", True)),
             "files": files_ok,
-            "prompt_cache_key": bool(getattr(config, "prompt_cache_key_enabled", True))
-            if config is not None
-            else True,
+            "prompt_cache_key": (
+                bool(getattr(config, "prompt_cache_key_enabled", True)) and not mimo
+                if config is not None
+                else not mimo
+            ),
             "mid_history_system": protocol in {"openai"},
             "stored_responses": protocol == "openai_responses" and not stateless_responses,
         },

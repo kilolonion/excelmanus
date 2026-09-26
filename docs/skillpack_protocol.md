@@ -63,11 +63,13 @@ user-invocable: true
 - `read` / `plan` 不提供纯写工具；含只读 action 的工具仍可能被发现，写入 action 在执行时受限。
 - `write` 中直接工具与 `run_code` 共存。常用工具直接提供，其他能力经 `introspect_capability` 查询后按需加载；代码内的 `em.*` 绑定完整授权目录。
 - 技能调用不切换执行模式，不绕过路径、内容版本、审批或写入约束。
+- 激活仅返回技能正文和资源索引，资源正文通过 `introspect_capability(query_type="knowledge_read", query="resource:技能名/路径")` 按需读取；不再默认把全部参考文件追加到上下文。组合任务可用 `knowledge_workflow` 获取当前 schema 校验过的路线与版本依赖。
 
 ## 5. 内置 system Skillpacks
 
 | 技能 | 主要用途 |
 | --- | --- |
+| `spreadsheet_workflow` | ExcelManus V2 表格任务的观察、分析、变更、重算、校验、预览与交付闭环 |
 | `data_basic` | 读取、分析、筛选与转换 |
 | `chart_basic` | 工作簿图表与图片导出 |
 | `format_basic` | 样式、条件格式与排版 |

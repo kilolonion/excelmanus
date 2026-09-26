@@ -90,6 +90,7 @@ class ProbeTargetSpec:
     thinking_mode: str = "auto"
     # 订阅上游要求的额外请求头（如 WorkBuddy X-User-Id 等）
     extra_headers: dict[str, str] | None = None
+    custom_extra_body: str = ""
 
 
 @dataclass(slots=True)
@@ -372,7 +373,9 @@ class CapabilityProbeJobManager:
         snapshot.started_at = _utc_now_iso()
         await self._emit(job)
 
-        key = _target_cache_key(spec.cache_model, spec.base_url)
+        from excelmanus.capability_identity import capability_scope
+        scope = capability_scope(spec.protocol, spec.api_key, spec.extra_headers, base_url=spec.base_url, model=spec.api_model, thinking_mode=spec.thinking_mode, extra_body=spec.custom_extra_body)
+        key = _target_cache_key(spec.cache_model, spec.base_url) + "|" + scope
         owner = False
         async with self._target_inflight_lock:
             inflight = self._target_inflight.get(key)
@@ -406,6 +409,7 @@ class CapabilityProbeJobManager:
             provider_sem = asyncio.Semaphore(self._provider_concurrency)
             self._provider_sems[provider] = provider_sem
 
+        client = None
         try:
             async with self._global_sem:
                 async with provider_sem:
@@ -447,6 +451,7 @@ class CapabilityProbeJobManager:
                         skip_if_cached=False,
                         db=db,
                         thinking_mode=spec.thinking_mode,
+                        custom_extra_body=spec.custom_extra_body,
                         health_timeout=self._health_timeout,
                         tool_timeout=self._tool_timeout,
                         vision_timeout=self._vision_timeout,
@@ -486,6 +491,9 @@ class CapabilityProbeJobManager:
                 inflight.set_exception(exc)
             await self._emit(job)
         finally:
+            if client is not None:
+                from excelmanus.model_probe import close_probe_client
+                await close_probe_client(client)
             async with self._target_inflight_lock:
                 current = self._target_inflight.get(key)
                 if current is inflight:

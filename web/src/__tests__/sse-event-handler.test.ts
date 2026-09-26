@@ -244,6 +244,28 @@ function makeEvent(event: string, data: Record<string, unknown> = {}): SSEEvent 
 // ---------------------------------------------------------------------------
 
 describe("sse-event-handler", () => {
+  it("attaches each task snapshot to its own call without overwriting earlier progress", () => {
+    resetChatState();
+    const message: Extract<Message, { role: "assistant" }> = { id: "a1", role: "assistant", blocks: [
+      { type: "tool_call", toolCallId: "create", name: "task_create", args: {}, status: "success" },
+      { type: "tool_call", toolCallId: "update", name: "task_update", args: {}, status: "running" },
+    ] };
+    mockChatState.messages = [message];
+    mockChatState.messagesById = { a1: message };
+    chatActions.updateToolCallBlock.mockImplementation((_id, callId, update) => {
+      message.blocks = message.blocks.map((block) => block.type === "tool_call" && block.toolCallId === callId ? update(block) : block);
+    });
+    for (const [tool_call_id, status] of [["create", "pending"], ["update", "completed"]]) {
+      dispatchSSEEvent(makeEvent("task_update", { tool_call_id, task_list: { items: [{ title: "核对", status }] } }), makeCtx());
+    }
+    expect(message.blocks).toMatchObject([
+      { toolCallId: "create", taskList: [{ content: "核对", status: "pending" }] },
+      { toolCallId: "update", taskList: [{ content: "核对", status: "completed" }] },
+    ]);
+    expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    chatActions.updateToolCallBlock.mockReset();
+  });
+
   it("replaces restored failures across categories and collapses duplicate replays", () => {
     const restored = hydrateFailureGuidanceFromText("⚠️ 模型认证失败\n认证失败\n诊断 ID: auth-1")!;
     let message: Extract<Message, { role: "assistant" }> = {
@@ -646,6 +668,21 @@ describe("sse-event-handler", () => {
       // text_delta 不触发 flush
       expect(ctx.batcher.flush).not.toHaveBeenCalled();
     });
+
+    it("重复回放事件在 preDispatch 阶段也不收尾当前 thinking", () => {
+      mockChatState.activeStreamId = "stream-1";
+      mockChatState.latestSeq = 4;
+      const ctx = makeCtx({ thinkingInProgress: true });
+      preDispatch(makeEvent("tool_call_start", {
+        stream_id: "stream-1",
+        seq: 4,
+        replayed: true,
+      }), ctx);
+
+      expect(ctx.thinkingInProgress).toBe(true);
+      expect(ctx.batcher.flush).not.toHaveBeenCalled();
+      expect(chatActions.updateBlockByType).not.toHaveBeenCalled();
+    });
   });
 
   // ── finalizeThinking ────────────────────────────────────────
@@ -714,6 +751,142 @@ describe("sse-event-handler", () => {
       dispatchSSEEvent(makeEvent("thinking_delta", { content: "\n" }), ctx);
       expect(ctx.batcher.pushThinking).toHaveBeenCalledWith("\n");
       expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("reasoning_notice", () => {
+    it("does not append a duplicate when the same thinking block is present", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [{ type: "thinking" as const, content: "先核对金额", duration: 1 }],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("reasoning_notice", {
+        content: "先核对金额",
+        iteration: 1,
+      }), makeCtx());
+
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    });
+
+    it("keeps a notice when no normal thinking block was rendered", () => {
+      dispatchSSEEvent(makeEvent("reasoning_notice", {
+        content: "兼容客户端推理摘要",
+        iteration: 1,
+      }), makeCtx());
+
+      expect(chatActions.appendBlock).toHaveBeenCalledWith("a1", {
+        type: "reasoning_notice",
+        content: "兼容客户端推理摘要",
+        iteration: 1,
+      });
+    });
+
+    it("deduplicates a notice when a later status block separates thinking", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [
+          { type: "thinking" as const, content: "先核对金额", iteration: 2, duration: 1 },
+          { type: "status" as const, label: "工具完成", variant: "info" as const },
+        ],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("reasoning_notice", {
+        content: "先核对金额",
+        iteration: 2,
+      }), makeCtx());
+
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("reasoning replay dedupe", () => {
+    it("does not append a complete thinking event after streamed thinking", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [{ type: "thinking" as const, content: "先核对金额", iteration: 1, duration: 1 }],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("thinking", {
+        content: "先核对金额",
+        iteration: 1,
+      }), makeCtx());
+
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    });
+
+    it("collapses a complete event whose text extends a streamed prefix", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [{ type: "thinking" as const, content: "先核对", iteration: 1, duration: 1 }],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("thinking", {
+        content: "先核对金额",
+        iteration: 1,
+      }), makeCtx());
+
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    });
+
+    it("drops an already-applied replay packet by sequence", () => {
+      mockChatState.activeStreamId = "stream-1";
+      mockChatState.latestSeq = 8;
+      dispatchSSEEvent(makeEvent("thinking_delta", {
+        content: "重复片段",
+        stream_id: "stream-1",
+        seq: 8,
+        replayed: true,
+      }), makeCtx());
+
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+      expect(chatActions.setStreamState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("tool call replay dedupe", () => {
+    it("updates an existing running call instead of appending a second card", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [{
+          type: "tool_call" as const,
+          toolCallId: "call-1",
+          name: "run_code",
+          args: { code: "1+1" },
+          status: "running" as const,
+        }],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("tool_call_start", {
+        tool_call_id: "call-1",
+        tool_name: "run_code",
+        arguments: { code: "1+1" },
+      }), makeCtx());
+
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+      expect(chatActions.updateToolCallBlock).toHaveBeenCalledWith(
+        "a1", "call-1", expect.any(Function),
+      );
     });
   });
 
@@ -1269,6 +1442,145 @@ describe("sse-event-handler", () => {
         makeCtx(),
       );
       expect(uiMock.setChatMode).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("未执行调用的状态定案", () => {
+    /** 把 updateToolCallBlock 接到真实块上，便于断言字段变化。 */
+    function bindToolCallBlock(message: Extract<Message, { role: "assistant" }>) {
+      mockChatState.messages = [message];
+      mockChatState.messagesById = { a1: message };
+      chatActions.updateToolCallBlock.mockImplementation(
+        (_id, callId, update: (block: unknown) => unknown) => {
+          message.blocks = message.blocks.map((block) =>
+            block.type === "tool_call" && block.toolCallId === callId
+              ? (update(block) as typeof block)
+              : block,
+          );
+        },
+      );
+    }
+
+    it("流式写入被模型重试放弃时定案为失败，不再停在进行中", () => {
+      const message: Extract<Message, { role: "assistant" }> = {
+        id: "a1",
+        role: "assistant",
+        blocks: [{
+          type: "tool_call",
+          toolCallId: "w1",
+          name: "write_text_file",
+          args: { file_path: "regression_analysis.py" },
+          status: "streaming",
+        }],
+      };
+      bindToolCallBlock(message);
+
+      dispatchSSEEvent(makeEvent("tool_call_aborted", {
+        tool_call_id: "w1",
+        tool_name: "write_text_file",
+        execution_state: "failed",
+        reason: "llm_retry",
+        effect: "write",
+        error: "TOOL_CALL_NOT_EXECUTED",
+        message: "本次写入未执行，目标文件没有被这次调用修改（模型连接中断，已自动重试同一请求）。",
+      }), makeCtx());
+
+      expect(message.blocks[0]).toMatchObject({
+        type: "tool_call",
+        toolCallId: "w1",
+        status: "error",
+        executionState: "aborted",
+        abortReason: "llm_retry",
+        // 折叠行显示人话，而不是 TOOL_CALL_NOT_EXECUTED 这类机器码
+        error: expect.stringContaining("本次写入未执行"),
+        result: expect.stringContaining("本次写入未执行"),
+      });
+      expect(excelActions.clearStreamingArgs).toHaveBeenCalledWith("w1");
+      chatActions.updateToolCallBlock.mockReset();
+    });
+
+    it("已进入执行器的调用不被 abort 事件改写", () => {
+      const message: Extract<Message, { role: "assistant" }> = {
+        id: "a1",
+        role: "assistant",
+        blocks: [{
+          type: "tool_call",
+          toolCallId: "done",
+          executionId: "exec-1",
+          name: "run_code",
+          args: {},
+          status: "success",
+          result: "ok",
+        }],
+      };
+      bindToolCallBlock(message);
+
+      dispatchSSEEvent(makeEvent("tool_call_aborted", {
+        tool_call_id: "done",
+        tool_name: "run_code",
+        error: "TOOL_CALL_NOT_EXECUTED",
+        message: "本次命令未启动；更早发起、仍在后台运行的命令不受影响。",
+      }), makeCtx());
+
+      expect(message.blocks[0]).toMatchObject({ status: "success", result: "ok" });
+      chatActions.updateToolCallBlock.mockReset();
+    });
+
+    it("turn_failed 只定案未派发的调用，后台运行中的执行继续跑", () => {
+      const message: Extract<Message, { role: "assistant" }> = {
+        id: "a1",
+        role: "assistant",
+        blocks: [
+          { type: "tool_call", toolCallId: "ghost", name: "write_text_file", args: {}, status: "streaming" },
+          { type: "tool_call", toolCallId: "bg", executionId: "exec-bg", executionState: "running",
+            name: "run_shell", args: {}, status: "running" },
+        ],
+      };
+      bindToolCallBlock(message);
+
+      dispatchSSEEvent(makeEvent("turn_failed", {
+        turn_id: "t1",
+        stop_reason: "llm_unavailable",
+        error: "peer closed connection",
+      }), makeCtx());
+
+      expect(message.blocks[0]).toMatchObject({
+        status: "error",
+        executionState: "aborted",
+        result: expect.stringContaining("模型服务中断"),
+      });
+      expect(message.blocks[1]).toMatchObject({ status: "running", executionState: "running" });
+      chatActions.updateToolCallBlock.mockReset();
+    });
+
+    it("同一次调用被下一次尝试复用时，失败定案翻回流式", () => {
+      const message: Extract<Message, { role: "assistant" }> = {
+        id: "a1",
+        role: "assistant",
+        blocks: [{
+          type: "tool_call",
+          toolCallId: "w1",
+          name: "write_text_file",
+          args: {},
+          status: "error",
+          executionState: "aborted",
+          error: "TOOL_CALL_NOT_EXECUTED",
+          result: "本次写入未执行。",
+        }],
+      };
+      bindToolCallBlock(message);
+
+      dispatchSSEEvent(makeEvent("tool_call_args_delta", {
+        tool_call_id: "w1",
+        tool_name: "write_text_file",
+        args_delta: '{"file_path": "a.py"',
+      }), makeCtx());
+
+      expect(message.blocks[0]).toMatchObject({ status: "streaming" });
+      expect(message.blocks[0]).not.toMatchObject({ executionState: "aborted" });
+      expect(excelActions.clearStreamingArgs).toHaveBeenCalledWith("w1");
+      expect(excelActions.appendStreamingArgs).toHaveBeenCalledWith("w1", '{"file_path": "a.py"');
+      chatActions.updateToolCallBlock.mockReset();
     });
   });
 });

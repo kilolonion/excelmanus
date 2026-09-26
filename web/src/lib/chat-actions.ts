@@ -28,8 +28,9 @@ import { handleWorkbookMessageSent } from "./workbook-chat-navigation";
 import { acknowledgedSelectionVersion } from "./excel-cell-edit";
 import { normalizeRelativePath } from "./workspace-file-ref";
 import { prepareWorkbookMergeSources } from "./workbook-group-actions";
-import type { MessageDispatchMode } from "./types";
+import type { ExampleContext, MessageDispatchMode } from "./types";
 import { useDispatchStore } from "@/stores/dispatch-store";
+import { mergeTokenStats, tokenStatsFromUsage, type TokenStatsBlock } from "./token-stats";
 
 type ChatImagePayload = {
   media_type: string;
@@ -358,12 +359,7 @@ function shouldResyncAfterStream(ctx: SSEHandlerContext, assistantMsgId: string)
 
 // 因延迟处理交互（askuser / approval）而累积的 Token 统计。
 // sendContinuation 会将这些细节到最终统计中。
-let _deferredTokenStats: {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  iterations: number;
-} | null = null;
+let _deferredTokenStats: TokenStatsBlock | null = null;
 
 export function resumeAfterInteraction(sessionId: string, response: { resume_required?: boolean }) {
   if (!response.resume_required || getActiveSessionId() !== sessionId || useChatStore.getState().isStreaming) return;
@@ -478,7 +474,7 @@ function startMessageStream(...args: Parameters<typeof streamMessage>) {
 
 /** Resolves once accepted; callers keep their draft when preflight rejects. */
 export async function sendMessage(text: string, files?: AttachedFile[], sessionId?: string | null, displayText?: string,
-  prepared?: PreparedWorkbookRequest, dispatchMode?: MessageDispatchMode): Promise<boolean> {
+  prepared?: PreparedWorkbookRequest, dispatchMode?: MessageDispatchMode, exampleContext?: ExampleContext): Promise<boolean> {
   if (preparingSubmission || (!text.trim() && !files?.length)) return false;
   const sid = sessionId || getActiveSessionId();
   if (sid !== getActiveSessionId()) throw new Error("已切换对话，请确认后重新发送");
@@ -489,7 +485,7 @@ export async function sendMessage(text: string, files?: AttachedFile[], sessionI
     if (useChatStore.getState().isStreaming || useChatStore.getState().abortController) {
       throw new Error("当前任务执行中，请通过对应按钮操作控制命令");
     }
-    startMessageStream(text, files, sid, displayText, undefined, undefined, undefined, undefined, dispatchMode);
+    startMessageStream(text, files, sid, displayText, undefined, undefined, undefined, undefined, dispatchMode, exampleContext);
     return true;
   }
   preparingSubmission = true;
@@ -510,7 +506,7 @@ export async function sendMessage(text: string, files?: AttachedFile[], sessionI
       return await dispatchDuringStream(request, files, mode);
     }
     if (request.chatMode) useUIStore.getState().setChatMode(request.chatMode);
-    startMessageStream(request.text, files, sid, displayText, request.sheetContext, request.workbookAction, request.chatMode, request.sheetContexts, dispatchMode);
+    startMessageStream(request.text, files, sid, displayText, request.sheetContext, request.workbookAction, request.chatMode, request.sheetContexts, dispatchMode, exampleContext);
     return true;
   } finally {
     preparingSubmission = false;
@@ -527,6 +523,7 @@ async function streamMessage(
   requestedChatMode = useUIStore.getState().chatMode,
   sheetContexts?: WorkbookSheetContext[],
   dispatchMode?: MessageDispatchMode,
+  exampleContext?: ExampleContext,
 ) {
   const store = useChatStore.getState();
   const sessionStore = useSessionStore.getState();
@@ -716,6 +713,9 @@ async function streamMessage(
     batcher: batcher as unknown as DeltaBatcherInterface,
     effectiveSessionId: effectiveSessionId || "",
     isFirstSend: true,
+    // This stream starts a new task. The request still carries a dispatch
+    // id for idempotency, but it must not be shown as an in-flight steer.
+    showDispatch: false,
     userText: text,
     thinkingInProgress: false,
     hadStreamError: false,
@@ -769,6 +769,7 @@ async function streamMessage(
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
         client_message_id: userMsgId,
         dispatch_mode: dispatchMode ?? useUIStore.getState().messageDispatchDefault,
+        ...(exampleContext ? { example_context: exampleContext } : {}),
       },
       (event) => {
         if (abortController.signal.aborted || S().abortController !== abortController) return;
@@ -782,27 +783,16 @@ async function streamMessage(
         // 鈹€鈹€ sendMessage 鐙湁鐨勫悗鍒嗗彂閫昏緫 鈹€鈹€
         const data = event.data;
 
-        if (sseEvent.event === "reply") {
+        if (sseEvent.event === "reply" && (!data.turn_id || sseCtx.completedTurnId !== data.turn_id)) {
           // Token 缁熻锛歴endMessage 鏈夊欢杩熺疮鍔犻€昏緫
           const hasPendingInteraction =
             S().pendingApproval !== null || S().pendingQuestion !== null;
           const totalTokens = (data.total_tokens as number) || 0;
           if (totalTokens > 0) {
             if (hasPendingInteraction) {
-              _deferredTokenStats = {
-                promptTokens: (data.prompt_tokens as number) || 0,
-                completionTokens: (data.completion_tokens as number) || 0,
-                totalTokens,
-                iterations: (data.iterations as number) || 0,
-              };
+              _deferredTokenStats = tokenStatsFromUsage(data);
             } else {
-              S().upsertBlockByType(sseCtx.assistantMsgId, "token_stats", {
-                type: "token_stats",
-                promptTokens: (data.prompt_tokens as number) || 0,
-                completionTokens: (data.completion_tokens as number) || 0,
-                totalTokens,
-                iterations: (data.iterations as number) || 0,
-              });
+              S().upsertBlockByType(sseCtx.assistantMsgId, "token_stats", tokenStatsFromUsage(data));
             }
           }
         }
@@ -937,39 +927,27 @@ export async function sendContinuation(
         dispatchSSEEvent(sseEvent, sseCtx);
 
         // 鈹€鈹€ sendContinuation 鐙湁锛歳eply 鐨?token 绱姞閫昏緫 鈹€鈹€
-        if (sseEvent.event === "reply") {
+        if (sseEvent.event === "reply" && (!sseEvent.data.turn_id || sseCtx.completedTurnId !== sseEvent.data.turn_id)) {
           const data = event.data;
           const hasPendingInteraction =
             S().pendingApproval !== null || S().pendingQuestion !== null;
           const totalTokens = (data.total_tokens as number) || 0;
           if (totalTokens > 0) {
             if (hasPendingInteraction) {
-              _deferredTokenStats = {
-                promptTokens: (data.prompt_tokens as number) || 0,
-                completionTokens: (data.completion_tokens as number) || 0,
-                totalTokens,
-                iterations: (data.iterations as number) || 0,
-              };
+              const current = tokenStatsFromUsage(data);
+              _deferredTokenStats = _deferredTokenStats
+                ? mergeTokenStats(_deferredTokenStats, current) : current;
             } else {
-              let accPrompt = (data.prompt_tokens as number) || 0;
-              let accCompletion = (data.completion_tokens as number) || 0;
-              let accTotal = totalTokens;
-              let accIterations = (data.iterations as number) || 0;
+              let accumulated = tokenStatsFromUsage(data);
               if (_deferredTokenStats) {
-                accPrompt += _deferredTokenStats.promptTokens;
-                accCompletion += _deferredTokenStats.completionTokens;
-                accTotal += _deferredTokenStats.totalTokens;
-                accIterations += _deferredTokenStats.iterations;
+                accumulated = mergeTokenStats(accumulated, _deferredTokenStats);
                 _deferredTokenStats = null;
               }
               const curMsg = getLastAssistantMessage(S().messages, msgId);
               if (curMsg) {
                 for (const b of curMsg.blocks) {
                   if (b.type === "token_stats") {
-                    accPrompt += b.promptTokens;
-                    accCompletion += b.completionTokens;
-                    accTotal += b.totalTokens;
-                    accIterations += b.iterations;
+                    accumulated = mergeTokenStats(accumulated, b);
                   }
                 }
                 if (curMsg.blocks.some((b) => b.type === "token_stats")) {
@@ -979,13 +957,7 @@ export async function sendContinuation(
                   }));
                 }
               }
-              S().upsertBlockByType(msgId, "token_stats", {
-                type: "token_stats",
-                promptTokens: accPrompt,
-                completionTokens: accCompletion,
-                totalTokens: accTotal,
-                iterations: accIterations,
-              });
+              S().upsertBlockByType(msgId, "token_stats", accumulated);
             }
           }
         }
@@ -1405,19 +1377,13 @@ export async function subscribeToSession(sessionId: string) {
         dispatchSSEEvent(sseEvent, sseCtx);
 
         // 鈹€鈹€ subscribe 鐙湁锛歳eply 鐨勭畝鍗?token 缁熻 鈹€鈹€
-        if (sseEvent.event === "reply") {
+        if (sseEvent.event === "reply" && (!sseEvent.data.turn_id || sseCtx.completedTurnId !== sseEvent.data.turn_id)) {
           const data = event.data;
           const hasPendingInteraction =
             S().pendingApproval !== null || S().pendingQuestion !== null;
           const totalTokens = (data.total_tokens as number) || 0;
           if (totalTokens > 0 && !hasPendingInteraction) {
-            S().upsertBlockByType(sseCtx.assistantMsgId, "token_stats", {
-              type: "token_stats",
-              promptTokens: (data.prompt_tokens as number) || 0,
-              completionTokens: (data.completion_tokens as number) || 0,
-              totalTokens,
-              iterations: (data.iterations as number) || 0,
-            });
+            S().upsertBlockByType(sseCtx.assistantMsgId, "token_stats", tokenStatsFromUsage(data));
           }
         }
       },

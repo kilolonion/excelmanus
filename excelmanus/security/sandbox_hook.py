@@ -196,15 +196,103 @@ def _is_file_like(obj):
     return hasattr(obj, "write") and not isinstance(obj, (str, bytes, bytearray))
 
 _XLSX_BYPASS_MSG = (
-    "工作区表格禁止直接保存。请用 em.apply_spreadsheet_changes 或 em.split_spreadsheet [等级: %s]"
+    "工作区表格禁止直接保存：%s 生成或覆盖工作区内的 xlsx 被安全策略拒绝。"
 )
+_EM_WRITER_TOOL = "apply_spreadsheet_changes"
+_EM_BOOTSTRAP_TOOLS = ("convert_spreadsheet", "query_spreadsheet", "split_spreadsheet")
+
+def _em_api_has(name):
+    """本次 run_code 的 em API 是否真的提供该函数；无 SDK 时返回 None。"""
+    module = globals().get("_em_mod")
+    if module is None:
+        return None
+    return callable(getattr(module, name, None))
+
+def _scan_table_dir(path, depth, found, recursive):
+    """目录列举用补丁前保存的原始实现，避免与扫描期的元数据守卫互相干扰。"""
+    lister = globals().get("_orig_listdir") or os.listdir
+    try:
+        names = lister(path)
+    except OSError:
+        return
+    for name in names:
+        full = os.path.join(path, name)
+        try:
+            if os.path.isdir(full):
+                if recursive and depth < 6:
+                    _scan_table_dir(full, depth + 1, found, recursive)
+                continue
+            if not os.path.isfile(full):
+                continue
+        except OSError:
+            continue
+        suffix = os.path.splitext(name)[1].lower()
+        if suffix in _SPREADSHEET_EXTS:
+            found.add("xlsx")
+        elif suffix == ".csv":
+            found.add("csv")
+
+def _scan_workspace_table_kinds():
+    """工作区顶层 + uploads/** + outputs/** 的表格族（与宿主目录扫描同口径）。"""
+    found = set()
+    _scan_table_dir(_WORKSPACE_ROOT, 0, found, False)
+    _scan_table_dir(os.path.join(_WORKSPACE_ROOT, "uploads"), 0, found, True)
+    _scan_table_dir(os.path.join(_WORKSPACE_ROOT, "outputs"), 0, found, True)
+    return found
+
+def _workbook_bypass_message(label="save"):
+    """按真实可用 API 生成拒绝文案：只推荐本次 em 里确实存在的替代工具。"""
+    label = str(label or "save")
+    kinds = _scan_workspace_table_kinds()
+    csv_only = "csv" in kinds and "xlsx" not in kinds
+    has_sdk = globals().get("_em_mod") is not None
+    usable = [name for name in _EM_BOOTSTRAP_TOOLS if _em_api_has(name)]
+    parts = [_XLSX_BYPASS_MSG % label]
+    if _em_api_has(_EM_WRITER_TOOL):
+        parts.append("请用 em." + _EM_WRITER_TOOL + " 提交工作簿变更（新建用 workbook_spec）。")
+        if "split_spreadsheet" in usable:
+            parts.append("按列拆分可用 em.split_spreadsheet。")
+        return "".join(parts) + " [等级: " + _TIER + "]"
+
+    if not has_sdk:
+        parts.append("本次 run_code 未注入 em SDK，em." + _EM_WRITER_TOOL + " 也不可用。")
+    else:
+        parts.append("em." + _EM_WRITER_TOOL + " 不在本次 em API 中。")
+    if csv_only:
+        parts.append(
+            "工作区只有 CSV、尚无 xlsx：工作簿写工具被 csv-only profile 门控（不是被删除）。"
+        )
+    elif has_sdk:
+        parts.append("它被当前 mode/profile 或会话授权门控（不是被删除）。")
+
+    if csv_only:
+        parts.append(
+            "确定性解锁：先用仍可用的表格工具写出第一个 xlsx"
+            "（必须落在 outputs/ 或工作区顶层，才会被目录扫描到）"
+        )
+        if "convert_spreadsheet" in usable:
+            parts.append(
+                "，例如 em.convert_spreadsheet(file_path='uploads/<数据>.csv', "
+                "output_path='outputs/<结果>.xlsx', mode='preserve')"
+            )
+        if "query_spreadsheet" in usable:
+            parts.append(
+                " 或 em.query_spreadsheet(sources=[{'file_path': 'uploads/<数据>.csv'}], "
+                "sql='SELECT * FROM data1', output_path='outputs/<结果>.xlsx')"
+            )
+        parts.append("；出现 xlsx 后下一轮目录会重新推导并解锁工作簿写工具。")
+    elif usable:
+        parts.append("当前可用：" + "、".join("em." + name for name in usable) + "。")
+
+    parts.append("写工具是被门控还是不存在，可用 introspect_capability 确认。")
+    return "".join(parts) + " [等级: " + _TIER + "]"
 
 def _deny_workbook_bypass(path, label="save"):
     if path is None or _is_file_like(path):
         return
     resolved = _safe_realpath(str(path))
     if _is_workbook_file(resolved) and _path_is_inside(_WORKSPACE_ROOT, resolved):
-        raise PermissionError(_XLSX_BYPASS_MSG % _TIER)
+        raise PermissionError(_workbook_bypass_message(label))
 
 def _is_sandbox_ephemeral(resolved):
     tmp = _safe_realpath(os.path.join(_WORKSPACE_ROOT, ".tmp"))
@@ -1268,6 +1356,24 @@ try:
     _SUBPROCESS_BLOCKED_ATTRS = ('run', 'call', 'check_call', 'check_output')
     def _make_subprocess_blocker(_name):
         def _blocked_fn(*_args, **_kwargs):
+            # Matplotlib treats missing external font-discovery tools as an
+            # optional dependency and falls back to local/bundled fonts. Its
+            # cold-cache probes catch OSError, not our usual RuntimeError.
+            # Only change the error for these internal probes; never execute
+            # a command or relax the guard based on its name (e.g. fc-list).
+            if _name == 'check_output':
+                _caller = sys._getframe(1)
+                _font_probe = (
+                    _caller.f_globals.get('__name__') == 'matplotlib.font_manager'
+                    and _caller.f_code.co_name in (
+                        '_get_fontconfig_fonts', '_get_macos_fonts',
+                    )
+                )
+                del _caller
+                if _font_probe:
+                    raise FileNotFoundError(
+                        'Matplotlib external font discovery is disabled in the sandbox'
+                    )
             raise RuntimeError(
                 "subprocess." + _name + "() 被安全策略禁止 [等级: " + _TIER + "]。"
                 "允许 import subprocess（库内部依赖），但禁止直接调用进程创建函数。"

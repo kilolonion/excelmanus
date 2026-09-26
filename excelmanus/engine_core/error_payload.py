@@ -111,14 +111,21 @@ APPROVAL_DENIED = "APPROVAL_DENIED"
 APPROVAL_TIMEOUT = "APPROVAL_TIMEOUT"
 CODE_MODE_UNAVAILABLE = "CODE_MODE_UNAVAILABLE"
 SDK_CONTRACT_VIOLATION = "SDK_CONTRACT_VIOLATION"
+SDK_SUBCALL_FAILED = "SDK_SUBCALL_FAILED"
+SDK_RETRY_UNSAFE = "SDK_RETRY_UNSAFE"
 INVALID_DEPENDENCY = "INVALID_DEPENDENCY"
 DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
 DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
 OPERATION_ID_REUSED = "OPERATION_ID_REUSED"
 EXTERNAL_COMMIT_UNKNOWN = "EXTERNAL_COMMIT_UNKNOWN"
 TURN_TIMEOUT = "TURN_TIMEOUT"
+# 模型流中断/重试把调用整段丢弃：该调用从未进入执行器，终态是"未执行"。
+# 与 CANCELLED（用户/父级取消）不同源，重试成功后由新的调用重新发起。
+TOOL_CALL_NOT_EXECUTED = "TOOL_CALL_NOT_EXECUTED"
 # C2 Excel 语义码（本单元只登记词表，不改工具名/参数）
 FORMULA_ERROR = "FORMULA_ERROR"
+# 公式重算/验收发现一个或多个单元格错误；与单个公式改写错误保持同一用户输入分类。
+FORMULA_ERRORS = "FORMULA_ERRORS"
 WORKBOOK_PROTECTED = "WORKBOOK_PROTECTED"
 OUT_OF_RANGE = "OUT_OF_RANGE"
 NAMED_RANGE_NOT_FOUND = "NAMED_RANGE_NOT_FOUND"
@@ -175,13 +182,17 @@ ERROR_CODES: frozenset[str] = frozenset({
     APPROVAL_TIMEOUT,
     CODE_MODE_UNAVAILABLE,
     SDK_CONTRACT_VIOLATION,
+    SDK_SUBCALL_FAILED,
+    SDK_RETRY_UNSAFE,
     INVALID_DEPENDENCY,
     DEPENDENCY_CYCLE,
     DEPENDENCY_FAILED,
+    TOOL_CALL_NOT_EXECUTED,
     OPERATION_ID_REUSED,
     EXTERNAL_COMMIT_UNKNOWN,
     TURN_TIMEOUT,
     FORMULA_ERROR,
+    FORMULA_ERRORS,
     WORKBOOK_PROTECTED,
     OUT_OF_RANGE,
     NAMED_RANGE_NOT_FOUND,
@@ -203,6 +214,7 @@ ERROR_CODE_TO_FAILURE_CLASS: dict[str, str] = {
     SPEC_NOT_PATCH: FAILURE_INVALID_ARGS,
     COMPILE_FAILED: FAILURE_INVALID_ARGS,
     FORMULA_ERROR: FAILURE_INVALID_ARGS,
+    FORMULA_ERRORS: FAILURE_INVALID_ARGS,
     OUT_OF_RANGE: FAILURE_INVALID_ARGS,
     PERMISSION_DENIED: FAILURE_PERMISSION_DENIED,
     TOOL_NOT_ALLOWED: FAILURE_PERMISSION_DENIED,
@@ -212,12 +224,15 @@ ERROR_CODE_TO_FAILURE_CLASS: dict[str, str] = {
     APPROVAL_TIMEOUT: FAILURE_APPROVAL_TIMEOUT,
     CODE_MODE_UNAVAILABLE: FAILURE_BLOCKED,
     SDK_CONTRACT_VIOLATION: FAILURE_INTERNAL,
+    SDK_SUBCALL_FAILED: FAILURE_INTERNAL,
+    SDK_RETRY_UNSAFE: FAILURE_BLOCKED,
     INVALID_DEPENDENCY: FAILURE_INVALID_ARGS,
     DEPENDENCY_CYCLE: FAILURE_INVALID_ARGS,
     DEPENDENCY_FAILED: FAILURE_BLOCKED,
     OPERATION_ID_REUSED: FAILURE_CONFLICT,
     EXTERNAL_COMMIT_UNKNOWN: FAILURE_BLOCKED,
     TURN_TIMEOUT: FAILURE_BLOCKED,
+    TOOL_CALL_NOT_EXECUTED: FAILURE_BLOCKED,
     NOT_FOUND: FAILURE_NOT_FOUND,
     SHEET_NOT_FOUND: FAILURE_NOT_FOUND,
     UNKNOWN_TOOL: FAILURE_NOT_FOUND,
@@ -273,6 +288,13 @@ _REMEDIATION_BY_CODE: dict[str, str] = {
     SPEC_NOT_PATCH: "workbook_spec 只能用于创建新文件：换成尚不存在的输出路径，或对已有文件改用 operations 更新。",
     COMPILE_FAILED: "修正规格里的非法引用或操作后再编译，不要原样重试。",
     FORMULA_ERROR: "修正公式语法或引用（避免 #REF!）后重写该单元格，不要原样重试。",
+    FORMULA_ERRORS: (
+        "公式重算已完成，但单元格公式结果未通过验收；本次 committed=false，未发布重算产物，源文件保持 source_version。"
+        "按 formula_recalculation.errors 中的工作表、单元格与错误值定位，用 observe_spreadsheet 回读该公式及引用；"
+        "#VALUE! 应检查是否引用表头/文本或行号偏移，修正公式或输入数据。"
+        "以 source_version 作为 expected_version 读取并修复源文件；若版本已变则重新观察，修复提交后使用新 content_version 重算。"
+        "不要通过改输出路径或 allow_formula_errors=true 跳过本次验收。"
+    ),
     OUT_OF_RANGE: "把行列缩小到工作表实际范围后重试；先 observe_spreadsheet 看 max_row/max_col。",
     PERMISSION_DENIED: "不要重试这次写入；改用 observe_spreadsheet 等只读工具，或请用户切到编辑模式（也可切出只读/计划模式）。",
     TOOL_NOT_ALLOWED: "不要再调这个工具名；改用当前授权目录里已有的工具。",
@@ -288,6 +310,7 @@ _REMEDIATION_BY_CODE: dict[str, str] = {
     OPERATION_ID_REUSED: "该操作 ID 已用于不同意图；先核对原操作状态，不要用它提交另一项写入，也不要重放已提交的操作。",
     EXTERNAL_COMMIT_UNKNOWN: "外部写入是否提交尚不确定；先查询原操作或外部系统的实际状态，不要自动重放。",
     TURN_TIMEOUT: "本回合已超时；先核对已完成调用和写入状态，再继续尚未执行的步骤，不要重放已提交或结果不确定的写入。",
+    TOOL_CALL_NOT_EXECUTED: "这次调用没有进入执行器，没有产生任何副作用；重试成功后按需重新发起，不要沿用被丢弃的参数。",
     NOT_FOUND: "message 指出缺失的是列名/键名时，按返回的可用列列表修正后重试；是文件路径时按候选核对拼写，任务允许查找时再列目录，不要擅自换文件。",
     SHEET_NOT_FOUND: "若返回了 available_sheets，用其中准确表名重试；没有候选时先 overview 再按实际表名重试。不要编造默认表名。",
     UNKNOWN_TOOL: "先用 introspect_capability 查询当前可用能力及工具详情，再使用已确认的工具名。",
@@ -387,6 +410,12 @@ def remediation_for(
             if names:
                 return f"{text} 候选：{names}"
         errors = extra.get("errors")
+        errors_field = "errors"
+        if code == FORMULA_ERRORS:
+            calculation = extra.get("formula_recalculation")
+            if isinstance(calculation, Mapping):
+                errors = calculation.get("errors")
+                errors_field = "formula_recalculation.errors"
         if isinstance(errors, list) and errors:
             preview_errs = []
             for item in errors[:3]:
@@ -397,7 +426,8 @@ def remediation_for(
                 elif str(item).strip():
                     preview_errs.append(str(item))
             if preview_errs:
-                return f"{text} 详情：{'; '.join(preview_errs)}"
+                more = f"（共 {len(errors)} 项，完整列表见 {errors_field} 字段）" if len(errors) > 3 else ""
+                return f"{text} 详情：{'; '.join(preview_errs)}{more}"
         return text
     klass = failure_class if failure_class in FAILURE_CLASSES else failure_class_for_error_code(code)
     return _REMEDIATION_BY_CLASS.get(klass, _REMEDIATION_BY_CLASS[FAILURE_INTERNAL])

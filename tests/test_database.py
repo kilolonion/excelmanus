@@ -9,6 +9,36 @@ from excelmanus.database import Database
 
 
 class TestDatabase:
+    def test_migrates_legacy_vision_to_independent_modalities(self, tmp_path, monkeypatch):
+        import excelmanus.database as database_module
+        from excelmanus.stores.config_store import GlobalConfigStore
+
+        path = str(tmp_path / "model-metadata.db")
+        with monkeypatch.context() as legacy:
+            legacy.setattr(database_module, "_LATEST_VERSION", 12)
+            db = Database(path)
+            for mode in ("auto", "true", "false"):
+                db.conn.execute(
+                    "INSERT INTO model_profiles (name, model, vision_mode, created_at, updated_at) VALUES (?, ?, ?, '', '')",
+                    (mode, "custom-model", mode),
+                )
+            db.conn.commit()
+            db.close()
+        db = Database(path)
+        store = GlobalConfigStore(db)
+        assert store.get_profile("auto")["input_modalities"] is None
+        assert store.get_profile("true")["input_modalities"] == ["text", "image"]
+        assert store.get_profile("false")["input_modalities"] == ["text"]
+        assert store.get_profile("true")["max_output_tokens"] == 0
+        store.update_profile("true", input_modalities=["audio", "video"], max_output_tokens=8192)
+        db.close()
+        db = Database(path)
+        saved = GlobalConfigStore(db).get_profile("true")
+        assert saved["input_modalities"] == ["audio", "video"]
+        assert saved["max_output_tokens"] == 8192
+        assert saved["vision_mode"] == "false"
+        db.close()
+
     def test_creates_db_file_and_tables(self, tmp_path: Path) -> None:
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)

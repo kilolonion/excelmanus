@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useSyncExternalStore } from "react";
 import { Sidebar, SidebarToggle } from "@/components/sidebar/Sidebar";
 import { TopModelSelector } from "@/components/chat/TopModelSelector";
 import { ChatSessionHeader } from "@/components/chat/ChatSessionHeader";
@@ -31,6 +32,10 @@ const AdminPanel = dynamic(
   { ssr: false }
 );
 
+const subscribeToAndroidClient = () => () => {};
+const getAndroidClientSnapshot = () => typeof window !== "undefined" && window.excelManusAndroid?.version === 1;
+const getAndroidClientServerSnapshot = () => false;
+
 // Univer is warmed by workbook hover/focus and opening, not by loading chat.
 // requestIdleCallback cannot keep a large module's parse/evaluation work idle.
 
@@ -50,6 +55,11 @@ const CoachMarks = dynamic(
 );
 
 export function ClientLayout({ children }: { children: React.ReactNode }) {
+  const androidClient = useSyncExternalStore(
+    subscribeToAndroidClient,
+    getAndroidClientSnapshot,
+    getAndroidClientServerSnapshot,
+  );
   const wizardCompleted = useOnboardingStore((s) => s.wizardCompleted);
   const coachMarksCompleted = useOnboardingStore((s) => s.coachMarksCompleted);
   const advancedGuideCompleted = useOnboardingStore((s) => s.advancedGuideCompleted);
@@ -77,7 +87,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
         <Sidebar />
         <main className="em-main flex-1 flex flex-col overflow-hidden min-w-0">
           {/* 顶栏与对话区共用同一列，右侧面板打开时一起缩窄 */}
-          <div className="em-topbar flex flex-col shrink-0 topbar-glass">
+          <div className={`em-topbar flex flex-col shrink-0 topbar-glass${androidClient ? " em-topbar-android" : ""}`}>
             <div className="em-topbar-toolbar relative flex items-center overflow-hidden">
               <div className="em-topbar-leading flex min-w-0 flex-1 items-center">
                 <SidebarToggle />

@@ -8,21 +8,8 @@ from excelmanus.vision_capability import keyword_implies_vision
 
 
 @pytest.mark.parametrize("model", [
-    "amazon.nova-lite-v1:0",
-    "us.anthropic.claude-opus-5",
-    "qwen3-vl-plus",
-    "o1-pro",
-    "gemini-3.8-flash",
-    "llama-3.2-11b-vision-instruct",
-    "chatgpt-4o-latest",
-    "openrouter/anthropic/claude-sonnet-5",
-    "gpt-5.2-codex",
-    "kimi-k2.5",
-    "glm-5.3",
-    "MiniMax-M3",
-    "mimo-v2.5",
-    "mimo-v2.6-flash",
-    "mimo-v2-omni",
+    "gpt-4o", "gpt-6-astra", "o3", "gpt-5.2-codex", "gemini-2.5-flash",
+    "claude-sonnet-4-6", "glm-4.6v", "kimi-k2.6", "mimo-v2.6-flash", "grok-code-fast-1",
 ])
 def test_vision_models(model: str) -> None:
     assert keyword_implies_vision(model) is True
@@ -45,6 +32,9 @@ def test_vision_models(model: str) -> None:
     "mimo-v2.5-tts",
     "mimo-v2-flash",
     "some-unknown-text-model",
+    "gpt-5.3-codex-spark",
+    "qwen-future-vl",
+    "workbuddy-cn/auto",
 ])
 def test_non_vision_models(model: str) -> None:
     assert keyword_implies_vision(model) is False

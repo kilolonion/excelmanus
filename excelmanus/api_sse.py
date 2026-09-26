@@ -41,7 +41,13 @@ def sse_format_seq(event_type: str, data: dict, seq: int, stream_id: str) -> str
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
-def inject_seq_into_sse(sse_text: str, seq: int, stream_id: str) -> str:
+def inject_seq_into_sse(
+    sse_text: str,
+    seq: int,
+    stream_id: str,
+    *,
+    replayed: bool = False,
+) -> str:
     """向已序列化的 SSE 文本中注入 seq 和 stream_id 字段。
 
     在 ``data:`` 行的 JSON 对象中追加字段，避免重新完整序列化事件。
@@ -52,6 +58,11 @@ def inject_seq_into_sse(sse_text: str, seq: int, stream_id: str) -> str:
     if rpos < 0:
         return sse_text
     insert = f',"seq":{seq},"stream_id":"{stream_id}"'
+    if replayed:
+        # A reconnect can overlap the previous fetch.  The browser uses this
+        # marker together with seq to discard an event it has already applied;
+        # it is deliberately absent from live events for wire compatibility.
+        insert += ',"replayed":true'
     return sse_text[:rpos] + insert + sse_text[rpos:]
 
 
@@ -221,6 +232,7 @@ def sse_event_to_sse(
         EventType.TOOL_CALL_START: "tool_call_start",
         EventType.TOOL_CALL_END: "tool_call_end",
         EventType.TOOL_CALL_STATE: "tool_call_state",
+        EventType.TOOL_CALL_ABORTED: "tool_call_aborted",
         EventType.ITERATION_START: "iteration_start",
         EventType.SUBAGENT_START: "subagent_start",
         EventType.SUBAGENT_ITERATION: "subagent_iteration",
@@ -317,6 +329,25 @@ def sse_event_to_sse(
             data["ui"] = sanitize_external_data(event.ui, max_len=2000)
         if event.parent_call_id:
             data["parent_call_id"] = sanitize_external_text(event.parent_call_id, max_len=160)
+    elif event.event_type == EventType.TOOL_CALL_ABORTED:
+        # 未执行即放弃：前端据此把卡片定案，不留"进行中"。
+        data = {
+            "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
+            "tool_name": event.tool_name,
+            "execution_state": event.execution_state or "failed",
+            "reason": sanitize_external_text(event.abort_reason, max_len=60),
+            "effect": sanitize_external_text(event.abort_effect, max_len=20),
+            "error": (
+                sanitize_external_text(event.error, max_len=120)
+                if event.error
+                else None
+            ),
+            "message": sanitize_external_text(
+                event.result[:500] if event.result else "",
+                max_len=500,
+            ),
+            "iteration": event.iteration,
+        }
     elif event.event_type == EventType.ITERATION_START:
         data = {"iteration": event.iteration}
         if event.turn_id:
@@ -343,6 +374,7 @@ def sse_event_to_sse(
         data = {"turn_id": event.turn_id, "content": sanitize_streaming_text(event.result),
                 "dispatch": event.dispatch, "prompt_tokens": event.prompt_tokens,
                 "completion_tokens": event.completion_tokens, "total_tokens": event.total_tokens,
+                "cached_tokens": event.cached_tokens,
                 "iterations": event.total_iterations}
     elif event.event_type == EventType.TURN_END:
         data = {"turn_id": event.turn_id, "iteration": event.iteration}
@@ -499,6 +531,7 @@ def sse_event_to_sse(
     elif event.event_type in {EventType.TASK_LIST_CREATED, EventType.TASK_ITEM_UPDATED}:
         data = {
             "task_list": event.task_list_data,
+            "tool_call_id": event.tool_call_id,
             "task_index": event.task_index,
             "task_status": event.task_status,
         }
@@ -598,11 +631,16 @@ def sse_event_to_sse(
             version = str(
                 item.get("contentVersion") or item.get("content_version") or ""
             )
-            mutations.append({
+            payload = {
                 "identity": public_path_fn(identity),
                 "content_version": sanitize_external_text(version, max_len=100),
                 "source": sanitize_external_text(str(item.get("source") or ""), max_len=40),
-            })
+            }
+            # Deletions must stay distinguishable from writes so every client
+            # surface evicts the path instead of re-listing a dead file.
+            if bool(item.get("deleted")):
+                payload["deleted"] = True
+            mutations.append(payload)
         data = {
             "mutations": mutations,
             "files": [
@@ -708,6 +746,7 @@ def sse_event_to_sse(
             "prompt_tokens": event.prompt_tokens,
             "completion_tokens": event.completion_tokens,
             "total_tokens": event.total_tokens,
+            "cached_tokens": event.cached_tokens,
         }
     elif event.event_type == EventType.PLAN_CREATED:
         data = {

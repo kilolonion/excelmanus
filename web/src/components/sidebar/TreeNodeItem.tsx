@@ -31,6 +31,7 @@ import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import { isSpreadsheetFile, workspaceFileOpenHint } from "@/lib/file-kind";
 import { displayFilePath } from "@/lib/file-identity";
 import { useWorkspaceFileActive } from "@/lib/open-workspace-file";
+import { handleWorkspaceFilesDeleted } from "@/lib/file-deletion";
 import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 import { useExcelStore } from "@/stores/excel-store";
 import { formatFileMention } from "@/components/chat/chat-input-insert";
@@ -113,29 +114,21 @@ export function TreeNodeItem(props: TreeNodeProps) {
         workspaceFiles: removeWorkspaceEntries(prevWorkspaceFiles, [node.fullPath]),
         wsFilesLoaded: true,
       });
+      // 统一清理：文件夹及其后代在最近打开、已打开表格标签等所有入口一并剔除。
+      const cleanup = () => handleWorkspaceFilesDeleted(
+        [node.fullPath],
+        workspaceKeyForSessionId(sessionId),
+      );
       try {
         await workspaceDeleteItem(node.fullPath, sessionId);
-        // W8: 同步清理 recentFiles 中属于该文件夹的条目
-        const excelStore = useExcelStore.getState();
-        const prefix = node.fullPath + "/";
-        const toRemove = excelStore.recentFiles
-          .filter((f) => f.path.includes(prefix) || f.path.endsWith("/" + node.fullPath))
-          .map((f) => f.path);
-        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove, workspaceKeyForSessionId(sessionId));
-        excelStore.bumpWorkspaceFilesVersion();
+        cleanup();
         onRefresh();
       } catch (err) {
         if (!isNotFoundError(err)) {
           useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
           return;
         }
-        const excelStore = useExcelStore.getState();
-        const prefix = node.fullPath + "/";
-        const toRemove = excelStore.recentFiles
-          .filter((f) => f.path.includes(prefix) || f.path.endsWith("/" + node.fullPath))
-          .map((f) => f.path);
-        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove, workspaceKeyForSessionId(sessionId));
-        excelStore.bumpWorkspaceFilesVersion();
+        cleanup();
         onRefresh();
       }
     };
@@ -340,19 +333,21 @@ export function TreeNodeItem(props: TreeNodeProps) {
       workspaceFiles: removeWorkspaceEntries(prevWorkspaceFiles, [node.fullPath]),
       wsFilesLoaded: true,
     });
+    // 统一清理：最近打开、已打开表格标签、全屏视图等所有入口一并剔除。
+    const cleanup = () => handleWorkspaceFilesDeleted(
+      [node.fullPath],
+      workspaceKeyForSessionId(sessionId),
+    );
     try {
       await workspaceDeleteItem(node.fullPath, sessionId);
-      // W8: 同步从 recentFiles 移除
-      if (file) useExcelStore.getState().removeRecentFile(file.path, workspaceKeyForSessionId(sessionId));
-      useExcelStore.getState().bumpWorkspaceFilesVersion();
+      cleanup();
       onRefresh();
     } catch (err) {
       if (!isNotFoundError(err)) {
         useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
         return;
       }
-      if (file) useExcelStore.getState().removeRecentFile(file.path, workspaceKeyForSessionId(sessionId));
-      useExcelStore.getState().bumpWorkspaceFilesVersion();
+      cleanup();
       onRefresh();
     }
   };

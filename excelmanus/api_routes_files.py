@@ -84,6 +84,70 @@ async def get_workbook_observation(request: Request) -> JSONResponse:
         return _error_json_response(400, str(exc), code=getattr(exc, "code", "INVALID_ARGS"))
 
 
+@router.get("/api/v1/workbooks/object-image")
+@router.get("/api/v1/workbooks/image")
+async def get_workbook_object_image(request: Request) -> StreamingResponse:
+    """Serve one embedded workbook image from an immutable snapshot.
+
+    Workbook observations intentionally carry metadata rather than base64.  The
+    browser requests the binary only for objects in the current viewport, while
+    the version token prevents an old image being shown after a workbook edit.
+    """
+    from excelmanus.workbook.snapshot import SnapshotError
+
+    params = request.query_params
+    path, sheet = params.get("path", ""), params.get("sheet", "")
+    kind = params.get("kind", "image")
+    try:
+        index = int(params.get("index", "0"))
+    except ValueError:
+        return _error_json_response(400, "index 必须是非负整数", code="INVALID_ARGS")  # type: ignore[return-value]
+    if not path or not sheet or kind != "image" or index < 0:
+        return _error_json_response(400, "需要 path、sheet、kind=image、非负 index", code="INVALID_ARGS")  # type: ignore[return-value]
+    root, scope_error = _file_workspace_root(request, params.get("session_id"), params.get("workspace_id"))
+    if scope_error is not None:
+        return scope_error  # type: ignore[return-value]
+    resolved = _resolve_excel_path(path, params.get("session_id"), workspace_root=root)
+    if resolved is None:
+        return _error_json_response(404, "工作簿不存在")  # type: ignore[return-value]
+
+    def read_image():
+        snap = _open_route_snapshot(resolved, path, root, params.get("workspace_id"))
+        expected = params.get("expected_version")
+        if expected and expected != snap.content_version:
+            return _error_json_response(409, "对象图片版本已变化", code="STALE_VIEW")
+        wb = snap.open_workbook(data_only=False, read_only=False)
+        try:
+            if sheet not in wb.sheetnames:
+                return _error_json_response(404, "工作表不存在")
+            images = list(getattr(wb[sheet], "_images", []) or [])
+            if index >= len(images):
+                return _error_json_response(404, "图片对象不存在")
+            image = images[index]
+            payload = image._data() if callable(getattr(image, "_data", None)) else None
+            if not payload:
+                return _error_json_response(404, "图片数据不可用")
+            fmt = str(getattr(image, "format", "") or "").lower().lstrip(".")
+            media_type = {
+                "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                "gif": "image/gif", "bmp": "image/bmp", "webp": "image/webp",
+                "tif": "image/tiff", "tiff": "image/tiff",
+            }.get(fmt, "application/octet-stream")
+            headers = {
+                "Cache-Control": "private, max-age=300",
+                "ETag": f'"{snap.content_version}:{sheet}:{index}"',
+                "X-Workbook-Version": snap.content_version,
+            }
+            return StreamingResponse(iter((payload,)), media_type=media_type, headers=headers)
+        finally:
+            wb.close()
+
+    try:
+        return await run_in_threadpool(read_image)
+    except (SnapshotError, ValueError, KeyError, OSError) as exc:
+        return _error_json_response(400, str(exc), code=getattr(exc, "code", "INVALID_ARGS"))  # type: ignore[return-value]
+
+
 class WorkbookChangesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_id: str | None = None
@@ -665,51 +729,6 @@ async def list_file_groups(request: Request) -> JSONResponse:
         return JSONResponse(content={"groups": result})
     except Exception:
         return JSONResponse(content={"groups": []})
-
-@router.post("/api/v1/files/groups")
-async def create_file_group(request: Request) -> JSONResponse:
-    """创建文件组。
-
-    Body: {name: str, description?: str, file_ids?: [{id: str, role?: str}]}
-    """
-    assert get_config() is not None, "服务未初始化"
-    body = await request.json()
-    ws_root = _resolve_workspace_root(request, session_id=(body.get("session_id") or None))
-    registry = _get_file_registry(ws_root)
-    if registry is None:
-        return _error_json_response(500, "FileRegistry 不可用")
-
-    name = body.get("name", "").strip()
-    if not name:
-        return _error_json_response(400, "缺少文件组名称")
-
-    description = body.get("description", "")
-    file_ids_raw = body.get("file_ids", [])
-
-    # 提取纯 file_id 列表用于创建
-    plain_ids = []
-    role_map: dict[str, str] = {}
-    for item in file_ids_raw:
-        if isinstance(item, dict):
-            fid = item.get("id", "")
-            role = item.get("role", "member")
-        else:
-            fid = str(item)
-            role = "member"
-        if fid:
-            plain_ids.append(fid)
-            role_map[fid] = role
-
-    try:
-        group = registry.create_group(name, file_ids=plain_ids, description=description)
-        # 设置角色（create_group 默认 member，需更新非默认角色）
-        for fid, role in role_map.items():
-            if role != "member":
-                registry.add_to_group(group.id, fid, role)
-        members = registry.get_group_files(group.id)
-        return JSONResponse(status_code=201, content={**group.to_dict(), "members": members})
-    except Exception as exc:
-        return _error_json_response(500, f"创建文件组失败: {exc}")
 
 @router.put("/api/v1/files/groups/{group_id}")
 async def update_file_group(group_id: str, request: Request) -> JSONResponse:

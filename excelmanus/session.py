@@ -699,7 +699,10 @@ class SessionManager:
         """向所有使用指定模型的活跃会话广播能力更新（锁保护）。"""
         async with self._lock:
             for entry in self._sessions.values():
-                if entry.engine.current_model == model:
+                from excelmanus.auth.providers.registry import strip_managed_prefix
+                if (strip_managed_prefix(entry.engine.current_model) == strip_managed_prefix(model)
+                    and entry.engine.active_base_url.rstrip("/") == str(getattr(caps, "base_url", "")).rstrip("/")
+                    and entry.engine.capability_scope == getattr(caps, "cache_scope", None)):
                     entry.engine.set_model_capabilities(caps)
 
     async def broadcast_context_optimization(
@@ -803,14 +806,23 @@ class SessionManager:
         root = event["workspace_root"]
         path = event["path"]
         source = event.get("from_path")
+        exists_after = bool(event.get("exists_after"))
         if self._database is not None:
             from excelmanus.file_registry import get_shared_file_registry
             registry = get_shared_file_registry(self._database, root)
             if source and not (Path(root) / source).exists() and (Path(root) / path).exists():
                 registry.rename_entry(source, path)
-            if not event.get("exists_after") and not (Path(root) / path).exists():
+            if not exists_after and not (Path(root) / path).exists():
                 registry.mark_deleted(path)
         changed = [f"./{p}" for p in (source, path) if p]
+        # A rename leaves the source identity behind; an unlink removes the
+        # target. Both must reach clients as deletions so every file surface
+        # evicts the dead path instead of offering it again.
+        deleted: list[str] = []
+        if source and not (Path(root) / source).exists():
+            deleted.append(f"./{source}")
+        if not exists_after:
+            deleted.append(f"./{path}")
         for sid, entry in list(self._sessions.items()):
             engine = entry.engine
             if not paths_equal(engine._workspace.root_dir, root):
@@ -824,7 +836,8 @@ class SessionManager:
             stream = get_runtime().session_stream_states.setdefault(sid, SessionStreamState())
             stream.deliver(ToolCallEvent(event_type=EventType.MUTATION, changed_files=changed,
                 mutations=changed_mutations(changed, content_versions={f"./{path}": event.get("after_version")},
-                                            source=(event.get("context") or {}).get("source", "runtime")),
+                                            source=(event.get("context") or {}).get("source", "runtime"),
+                                            deleted=deleted),
                 tool_call_id=event["event_id"]))
 
     def _resolve_user_config_store(self, user_id: str | None = None) -> Any:
@@ -1160,7 +1173,7 @@ class SessionManager:
                     self._database,
                     engine.current_model,
                     engine.active_base_url,
-                    canonical_model=getattr(engine, "active_canonical_model", ""),
+                    scope=engine.capability_scope,
                 )
                 if caps is not None:
                     engine.set_model_capabilities(caps)
@@ -2174,6 +2187,8 @@ class SessionManager:
         user_id: str | None = None,
     ) -> list[dict]:
         """分页获取会话消息（优先内存，回退 SQLite）。"""
+        from excelmanus.history_projection import project_task_lists, task_calls
+
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is not None:
@@ -2190,12 +2205,17 @@ class SessionManager:
                     if not item.get("message_id"):
                         item["message_id"] = f"volatile:{session_id}:{start + idx}"
                     normalized.append(item)
-                return normalized
+                return project_task_lists(normalized, raw_messages)
 
         if self._chat_history is not None:
             if not self._chat_history.session_exists(session_id):
                 return []
             if tail:
-                return await asyncio.to_thread(self._chat_history.load_messages_tail, session_id, limit=limit)
-            return await asyncio.to_thread(self._chat_history.load_messages, session_id, limit=limit, offset=offset)
+                page = await asyncio.to_thread(self._chat_history.load_messages_tail, session_id, limit=limit)
+            else:
+                page = await asyncio.to_thread(self._chat_history.load_messages, session_id, limit=limit, offset=offset)
+            if any(task_calls(message) for message in page):
+                history = await asyncio.to_thread(self._chat_history.load_task_history, session_id)
+                return project_task_lists(page, history)
+            return page
         return []

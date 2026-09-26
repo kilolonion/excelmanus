@@ -91,6 +91,16 @@ class ImageAttachment(BaseModel):
         return self
 
 
+class ExampleContext(BaseModel):
+    """Optional hint from a welcome-page example; it never changes authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+    workflow: Annotated[str, StringConstraints(strip_whitespace=True, max_length=128)] = ""
+    sample: Annotated[str, StringConstraints(strip_whitespace=True, max_length=128)] = ""
+
+
 class SheetContext(BaseModel):
     """Current browser view, used only as a bounded suggestion, never authority."""
 
@@ -131,6 +141,7 @@ class ChatRequest(BaseModel):
     ] | None = None
     chat_mode: Literal["write", "read", "plan"] = "write"
     images: list[ImageAttachment] = Field(default_factory=list)
+    example_context: ExampleContext | None = None
     sheet_context: SheetContext | None = None
     # Visible workbook panes captured at send time. The singular field remains
     # the compatibility/default context for existing clients.
@@ -223,7 +234,8 @@ def _context_input(request: ChatRequest) -> dict[str, Any]:
 
     context = {"sheet_context": request.sheet_context.model_dump() if request.sheet_context else None,
                "sheet_contexts": [item.model_dump() for item in request.sheet_contexts],
-               "workbook_action": request.workbook_action.model_dump() if request.workbook_action else None}
+               "workbook_action": request.workbook_action.model_dump() if request.workbook_action else None,
+               "example_context": request.example_context.model_dump() if request.example_context else None}
     settings = live_jev_settings(get_config())
     if not jev_is_active(settings) or gate_for_pack("context.resolve", settings) == "off":
         return context
@@ -284,6 +296,7 @@ class ChatResponse(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int | None = None
     # 自动生成的会话标题（仅首轮返回）
     title: str | None = None
     # 会话实际绑定的工作区（JEV 路由后可能与请求时不同）
@@ -324,6 +337,7 @@ def _build_reply_sse(chat_result: Any, engine: Any) -> str:
         "prompt_tokens": chat_result.prompt_tokens,
         "completion_tokens": chat_result.completion_tokens,
         "total_tokens": chat_result.total_tokens,
+        "cached_tokens": chat_result.cached_tokens,
         "turn_id": getattr(driver, "turn_id", ""),
         "dispatch": getattr(driver, "last_reply", {}) or {},
     })
@@ -385,7 +399,8 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
                 truncated=bool(event.excel_truncated),
                 cell_styles=list(event.excel_cell_styles or [])[:51],
             )
-            ch.save_affected_file(session_id, pub_path)
+            # A read-only preview is not a mutation. Published artifacts are
+            # persisted immediately from the shared receipt/MUTATION path.
         elif event.event_type == EventType.MUTATION:
             seen: set[str] = set()
             for f in (event.changed_files or [])[:50]:
@@ -711,6 +726,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             prompt_kind=request.prompt_kind,
             dispatch_mode=request.dispatch_mode,
             client_message_id=request.client_message_id,
+            example_context=request.example_context.model_dump() if request.example_context else None,
         )
         chat_result = chat_turn.result
     except AttachmentError as _attachment_exc:
@@ -808,6 +824,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         prompt_tokens=chat_result.prompt_tokens,
         completion_tokens=chat_result.completion_tokens,
         total_tokens=chat_result.total_tokens,
+        cached_tokens=chat_result.cached_tokens,
         title=generated_title,
         **_session_workspace_fields(session_id, route_decision),
     )
@@ -1053,6 +1070,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         prompt_kind=request.prompt_kind,
                         dispatch_mode=request.dispatch_mode,
                         client_message_id=request.client_message_id,
+                        example_context=request.example_context.model_dump() if request.example_context else None,
                     )
                     await engine._driver.wait_until_idle()
                     return _with_turn_usage(outcome.result)
@@ -1551,8 +1569,10 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
         if first_buf is not None and first_buf > after_seq + 1:
             _has_gap = True
         elif first_buf is None:
-            # 缓冲区为空但有丢弃记录（零容量缓冲或全部溢出）
-            _has_gap = True
+            # 缓冲区为空但有丢弃记录（零容量缓冲或全部溢出）。如果
+            # 客户端的游标已经追上当前序号，说明它是在上一轮恢复后
+            # 再次订阅，不应因历史 dropped_count 永久触发失败。
+            _has_gap = after_seq < stream_state.current_seq
 
     # ── chat 任务已完成：重放缓冲后结束 ──
     if chat_task is None or chat_task.done():
@@ -1583,7 +1603,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                         continue
                     sse = _sse_event_to_sse(event, session_id)
                     if sse is not None:
-                        yield _inject_seq(sse, seq, _sid)
+                        yield _inject_seq(sse, seq, _sid, replayed=True)
                 if completed_result is not None:
                     try:
                         engine = get_session_manager().get_engine(session_id) if get_session_manager() else None
@@ -1642,11 +1662,23 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     continue
                 sse = _sse_event_to_sse(event, session_id)
                 if sse is not None:
-                    yield _inject_seq(sse, seq, _sid)
+                    yield _inject_seq(sse, seq, _sid, replayed=True)
 
             engine = get_session_manager().get_engine(session_id) if get_session_manager() else None
             if engine is not None:
-                yield _dispatch_snapshot_sse(engine)
+                # A malformed/legacy dispatch receipt must not terminate the
+                # reconnect stream before its queued tool events are drained.
+                # Keep the snapshot best-effort and let the normal event
+                # replay remain authoritative.
+                try:
+                    yield _dispatch_snapshot_sse(engine)
+                except Exception:
+                    logger.warning("重连发送 dispatch snapshot 失败，继续消费事件流", exc_info=True)
+                    yield _sse_format("dispatch_snapshot", {
+                        "dispatches": [],
+                        "turn_id": "",
+                        "active_dispatch": None,
+                    })
 
             while True:
                 assert queue_get_task is not None

@@ -17,6 +17,38 @@ def _isolate_attachment_store(tmp_path, monkeypatch):
 
 class TestReadImage:
 
+    def test_analyze_layout_returns_bounded_rule_candidates(self, tmp_path: Path) -> None:
+        """视觉复刻可一次取得布局提示，避免模型反复编写像素扫描。"""
+        from PIL import Image, ImageDraw
+        from excelmanus.tools.image_tools import read_image, init_guard
+
+        image = Image.new("RGB", (240, 160), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((20, 20, 220, 140), outline="black", width=2)
+        draw.line((20, 70, 220, 70), fill="black", width=2)
+        draw.line((120, 20, 120, 140), fill="black", width=2)
+        path = tmp_path / "receipt.png"
+        image.save(path)
+        init_guard(str(tmp_path))
+
+        out = read_image(file_path=str(path), analyze_layout=True)
+
+        assert out.success, out.model_text
+        layout = out.value["layout"]
+        assert layout["algorithm"] == "dark_pixel_projection_v1"
+        assert layout["source_size"] == {"width": 240, "height": 160}
+        assert layout["candidate_horizontal_rules"]
+        assert layout["candidate_vertical_rules"]
+        assert len(layout["candidate_horizontal_rules"]) <= 64
+        assert len(layout["candidate_vertical_rules"]) <= 64
+        candidate = layout["layout_reference_candidate"]
+        assert candidate["attachment_id"].startswith("sha256:")
+        assert candidate["column_edges"][0] == 0.0
+        assert candidate["column_edges"][-1] == 1.0
+        assert candidate["column_edges"][1] == pytest.approx(0.5, abs=0.01)
+        assert candidate["row_edges"][1] == pytest.approx(0.42, abs=0.01)
+        assert "layout_reference_candidate" in out.model_text
+
     def test_read_png_file(self, tmp_path: Path) -> None:
         """读取 PNG 文件返回正确元数据。"""
         from excelmanus.tools.image_tools import read_image, init_guard
@@ -34,6 +66,29 @@ class TestReadImage:
         assert out.value['attachment_id'] in out.model_text
         assert '尺寸=' in out.model_text
         assert out.ui_meta.image and out.ui_meta.image.get('attachment')
+
+    def test_crop_zoom_creates_one_explicit_high_detail_observation(self, tmp_path: Path) -> None:
+        from PIL import Image
+        from excelmanus.attachments.store import get_attachment_store
+        from excelmanus.tools.image_tools import read_image, init_guard
+
+        path = tmp_path / "source.png"
+        Image.new("RGB", (100, 100), "white").save(path)
+        init_guard(str(tmp_path))
+        out = read_image(
+            file_path=str(path),
+            crop={"x": 10, "y": 20, "width": 20, "height": 10, "zoom": 4},
+            detail="high",
+        )
+
+        assert out.success, out.model_text
+        assert "zoom': 4" in out.model_text
+        ref = get_attachment_store().get_ref(out.value["attachment_id"])
+        assert ref is not None
+        assert (ref.width, ref.height) == (80, 40)
+        assert ref.parent_attachment_id
+        assert ref.crop_in_parent == {"x": 10, "y": 20, "width": 20, "height": 10}
+        assert ref.crop_zoom == 4
 
     def test_read_nonexistent_file(self, tmp_path: Path) -> None:
         """读取不存在的文件返回错误。"""
@@ -84,6 +139,10 @@ class TestReadImage:
         tools = get_tools()
         names = [t.name for t in tools]
         assert 'read_image' in names
+        schema = next(t.input_schema for t in tools if t.name == 'read_image')
+        assert schema['properties']['analyze_layout']['type'] == 'boolean'
+        assert schema['properties']['crop']['properties']['zoom']['maximum'] == 8
+        assert next(t for t in tools if t.name == 'read_image').cache_ttl_seconds == 600
 
     def test_read_by_attachment_id_from_history(self, tmp_path: Path) -> None:
         from excelmanus.tools.context import ToolCallContext, bind_call, current_call, reset_call

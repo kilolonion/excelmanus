@@ -28,6 +28,7 @@ from excelmanus.system_one.types import ChoiceAnswer, Decision, Evaluation, Noul
 
 def _settings(**overrides: object) -> JevSettings:
     base = dict(
+        experimental_enabled=True,
         enabled="enforce",
         exposure="enforce",
         mode_hint=True,

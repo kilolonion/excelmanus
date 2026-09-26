@@ -310,52 +310,21 @@
 
 ---
 
-## 十、openpyxl 快速参考
+## 十、ExcelManus 排版提交模板
 
-### 10.1 专业表格一键样式（代码骨架）
-
-```python
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
-
-# ── 色板 A：商务蓝 ──
-TITLE_FILL = PatternFill("solid", fgColor="002060")
-TITLE_FONT = Font(name="Calibri", bold=True, size=14, color="FFFFFF")
-HEADER_FILL = PatternFill("solid", fgColor="4472C4")
-HEADER_FONT = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
-BODY_FONT = Font(name="Calibri", size=10, color="333333")
-ALT_ROW_FILL = PatternFill("solid", fgColor="D6E4F0")
-SUMMARY_FONT = Font(name="Calibri", bold=True, size=11, color="000000")
-HEADER_BORDER_BOTTOM = Border(bottom=Side(style="medium", color="002060"))
-SUMMARY_BORDER_TOP = Border(top=Side(style="double", color="000000"))
-ALIGN_CENTER = Alignment(horizontal="center", vertical="center")
-ALIGN_LEFT = Alignment(horizontal="left", vertical="center")
-ALIGN_RIGHT = Alignment(horizontal="right", vertical="center")
-```
-
-### 10.2 交替行色应用
+工作区不直接保存 openpyxl 对象。先观察目标区域，再把样式、尺寸和冻结窗格合并为一个 `apply_spreadsheet_changes` ChangeSet；字段不确定时查询 `apply_spreadsheet_changes.operations.<kind>`。
 
 ```python
-for row_idx in range(data_start_row, data_end_row + 1):
-    if row_idx % 2 == 0:
-        for col_idx in range(min_col, max_col + 1):
-            ws.cell(row=row_idx, column=col_idx).fill = ALT_ROW_FILL
+operations = [
+    {"kind": "format", "sheet": "汇总", "range": "A1:H1",
+     "font": {"bold": True, "color": "FFFFFF"},
+     "fill": {"color": "4472C4"},
+     "alignment": {"horizontal": "center", "vertical": "center"}},
+    {"kind": "size", "sheet": "汇总",
+     "column_widths": {"A": 18, "B": 14, "C": 14},
+     "row_heights": {"1": 24}},
+    {"kind": "freeze", "sheet": "汇总", "freeze_panes": "A2"},
+]
 ```
 
-### 10.3 按数据类型自动对齐
-
-```python
-from openpyxl.utils import get_column_letter
-import re
-
-for col_idx in range(min_col, max_col + 1):
-    # 采样前 10 行判断数据类型
-    sample = [ws.cell(row=r, column=col_idx).value
-              for r in range(data_start_row, min(data_start_row + 10, data_end_row + 1))
-              if ws.cell(row=r, column=col_idx).value is not None]
-    numeric_count = sum(1 for v in sample if isinstance(v, (int, float)))
-    is_numeric = numeric_count > len(sample) * 0.7
-
-    align = ALIGN_RIGHT if is_numeric else ALIGN_LEFT
-    for row_idx in range(data_start_row, data_end_row + 1):
-        ws.cell(row=row_idx, column=col_idx).alignment = align
-```
+按内容适配时显式指定 `auto_fit=true` 和 `axis`，不要覆盖用户给定的比例；提交后读取回执的 `content_version`，再通过 `preview_spreadsheet` 检查文字截断、`###`、对比度、冻结边界和打印布局。

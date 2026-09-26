@@ -8,8 +8,18 @@ from dataclasses import replace
 from itertools import count
 from typing import Any
 
+from excelmanus.engine_core.aborted_calls import (
+    ABORT_REASON_EXHAUSTED,
+    ABORT_REASON_FAILURE,
+    ABORT_REASON_FALLBACK,
+    ABORT_REASON_INCOMPLETE,
+    ABORT_REASON_RETRY,
+    aborted_call_payload,
+    classify_tool_effect,
+)
 from excelmanus.engine_core.idle_tracker import idle_segment, reset_idle_tracker
 from excelmanus.engine_core.llm_caller import (
+    LLMRetryExhaustedError,
     compute_retry_delay,
     is_content_filter_error,
     is_nonretryable_auth_error,
@@ -415,6 +425,7 @@ def _bind_prepared_outbound(engine: Any, prepared: Any) -> tuple[Any, dict[str, 
     import openai
     from excelmanus.attachments.files_api import lease_file_ids
     from excelmanus.engine_core.llm_caller import degraded_params
+    from excelmanus.providers.mimo import is_mimo_base_url
 
     route = prepared.route
     lease_file_ids(prepared.request_id, prepared.file_leases)
@@ -424,7 +435,11 @@ def _bind_prepared_outbound(engine: Any, prepared: Any) -> tuple[Any, dict[str, 
     stream_kwargs["stream"] = True
     skip = set(degraded_params(route.protocol_label(), route.model))
     skip |= set(degraded_params(route.protocol, route.model))
-    if isinstance(getattr(engine, "_client", None), openai.AsyncOpenAI) and "stream_options" not in skip:
+    if (
+        isinstance(getattr(engine, "_client", None), openai.AsyncOpenAI)
+        and "stream_options" not in skip
+        and not is_mimo_base_url(str(getattr(route, "endpoint", "")))
+    ):
         stream_kwargs["stream_options"] = {"include_usage": True}
     return route, kwargs, stream_kwargs
 
@@ -497,8 +512,7 @@ def _handle_text_reply(
 ) -> tuple[str, Any]:
     """处理 LLM 返回纯文本（无 tool_calls）的情况。
 
-    纯文本一律结束本轮。仅保留 HTML 整页响应检测：那是 LLM 客户端
-    配置错误（base_url 指到了网页），不是对回复内容的行为判断。
+    只根据实际回执检查缺失的交付证据，最多两次纠正；不评判回复措辞。
     """
     reply_text = _message_content_to_text(getattr(message, "content", None))
 
@@ -520,6 +534,20 @@ def _handle_text_reply(
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
+
+    from excelmanus.engine_core.delivery import DeliveryLedger
+    ledger = getattr(getattr(engine, "_state", None), "delivery", None)
+    if isinstance(ledger, DeliveryLedger):
+        limit = getattr(getattr(engine, "config", None), "max_iterations", 0)
+        dispatcher = getattr(engine, "_tool_dispatcher", None)
+        exhausted = isinstance(limit, int) and limit > 0 and iteration >= limit
+        if dispatcher is not None and dispatcher.has_call_budget_remaining() is False:
+            exhausted = True
+        feedback = None if exhausted else ledger.next_feedback()
+        if feedback:
+            engine._memory.add_assistant_tool_message(_assistant_message_to_dict(message))
+            engine._memory.add_user_message(feedback, prompt_kind="delivery_evidence", hidden=True)
+            return "continue", None
 
     payload = _assistant_message_to_dict(message)
     payload["content"] = reply_text
@@ -575,12 +603,18 @@ async def run_tool_loop(
                 engine._state.affected_files,
                 root,
             )
+            # 本轮被删除的身份随事件下发，前端各入口据此同步剔除已删文件。
+            deleted = collect_public_identities(
+                sorted(getattr(engine._state, "affected_file_deletions", ()) or ()),
+                root,
+            )
             engine.emit(
                 on_event,
                 ToolCallEvent(
                     event_type=EventType.MUTATION,
                     changed_files=changed,
-                    mutations=changed_mutations(changed, workspace_root=root),
+                    mutations=changed_mutations(changed, workspace_root=root,
+                                                deleted=deleted),
                 ),
             )
         from excelmanus.workspace.scratch import leftover_reminder
@@ -589,7 +623,21 @@ async def run_tool_loop(
         if reminder:
             reply = str(kwargs.get("reply") or "")
             kwargs["reply"] = f"{reply}\n\n{reminder}" if reply else reminder
-        return ChatResult(**kwargs)
+        from excelmanus.engine_core.delivery import DeliveryLedger
+        ledger = getattr(engine._state, "delivery", None)
+        missing = ledger.pending() if isinstance(ledger, DeliveryLedger) else []
+        if missing:
+            labels = {"calculation": "公式重算", "formula_errors": "公式错误检查",
+                      "visual_preview": "图表或版式预览", "validation_failed_or_partial": "业务校验未通过或不完整",
+                      "mutation_failed": "业务操作失败，尚未恢复"}
+            note = "尚未完成全部交付核验：" + "；".join(
+                f"{row['file_path']}（{'、'.join(labels.get(key, key) for key in row['missing'])}）" for row in missing[:5]
+            )
+            kwargs["reply"] = note + "。\n\n" + str(kwargs.get("reply") or "")
+        return ChatResult(
+            **kwargs,
+            cached_tokens=total_cached_tokens if cache_usage_complete else None,
+        )
 
     max_failures = engine._config.max_consecutive_failures
     max_iterations = engine._config.max_iterations
@@ -614,6 +662,8 @@ async def run_tool_loop(
     # token 使用累计
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_cached_tokens: int | None = None
+    cache_usage_complete = True
     # 诊断收集
     engine._turn_diagnostics = []
 
@@ -767,6 +817,10 @@ async def run_tool_loop(
             # Stream immediately; only provider retries retract this iteration.
             # The primary agent decides whether further task work is needed.
             streamed_text = False
+            # 本次尝试已把参数流给前端、但还没进入执行器的调用（id → 工具名）。
+            # 尝试被丢弃时它们必须当场定案为"未执行"：否则界面上会永久停在
+            # "进行中"，用户和模型都无法判断那次写入到底有没有发生。
+            streamed_calls: dict[str, str] = {}
 
             def _forward(event: Any) -> None:
                 # consume_stream 已经通过 engine._emit 盖章/trace/审计过一次，
@@ -778,10 +832,40 @@ async def run_tool_loop(
                 except Exception as exc:
                     logger.warning("事件回调异常: %s", exc)
 
+            def _notify_retry_recovered() -> None:
+                """重试的请求一旦开始产出内容，立即通知前端“已恢复”。
+
+                不等整段输出结束：首块内容（思考/正文/工具调用）到达即视为
+                模型服务恢复，让重试横幅第一时间翻转为“模型服务已恢复”。
+                同一次重试只通知一次；若其后再次失败进入下一次重试，
+                由“retrying”分支复位后按新的尝试次数重新通知。
+                """
+                nonlocal _retry_recovered_emitted
+                if _retry_recovered_emitted or _retry_attempt <= 1:
+                    return
+                _retry_recovered_emitted = True
+                engine._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.LLM_RETRY,
+                        retry_status="succeeded",
+                        retry_attempt=_retry_attempt,
+                        retry_max_attempts=_retry_max,
+                    ),
+                )
+
             def _stream_on_event(event: Any) -> None:
                 nonlocal streamed_text
-                if getattr(event, "event_type", None) == EventType.TEXT_DELTA:
+                event_type = getattr(event, "event_type", None)
+                if event_type == EventType.TEXT_DELTA:
                     streamed_text = True
+                elif event_type == EventType.TOOL_CALL_ARGS_DELTA:
+                    call_id = str(getattr(event, "tool_call_id", "") or "")
+                    if call_id:
+                        streamed_calls.setdefault(
+                            call_id, str(getattr(event, "tool_name", "") or "")
+                        )
+                _notify_retry_recovered()
                 _forward(event)
 
             def _retract_streamed_text() -> None:
@@ -791,6 +875,39 @@ async def run_tool_loop(
                         event_type=EventType.RETRACT_TEXT, iteration=iteration,
                     ))
                     streamed_text = False
+
+            def _abandon_streamed_calls(reason: str, only_ids: set[str] | None = None) -> None:
+                """把本轮尝试里"流出去了但没执行"的调用定案为未执行。
+
+                只处理从未进入执行器的调用：已经在跑的调用由 ToolRuntime 自己发
+                终态事件（后台命令/子代理继续执行，不会被这里误标成失败）。
+                """
+                pending = [
+                    (call_id, tool_name)
+                    for call_id, tool_name in streamed_calls.items()
+                    if only_ids is None or call_id in only_ids
+                ]
+                if not pending:
+                    return
+                for call_id, _ in pending:
+                    streamed_calls.pop(call_id, None)
+                for call_id, tool_name in pending:
+                    payload = aborted_call_payload(tool_name, reason)
+                    engine._emit(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.TOOL_CALL_ABORTED,
+                            tool_call_id=call_id,
+                            tool_name=tool_name,
+                            execution_state="failed",
+                            success=False,
+                            error=str(payload.get("error_code") or ""),
+                            result=str(payload.get("message") or ""),
+                            abort_reason=reason,
+                            abort_effect=classify_tool_effect(tool_name),
+                            iteration=iteration,
+                        ),
+                    )
 
             # ── LLM 调用 + 5xx/429 自动重试 ──
             _retry_max = engine._config.llm_retry_max_attempts
@@ -803,9 +920,13 @@ async def run_tool_loop(
             message: Any = None
             usage: Any = None
             _retry_attempt = 0
+            _retry_recovered_emitted = False
             while True:
                 _retry_attempt += 1
                 _retract_streamed_text()
+                # 上一次尝试若以 continue 收场（重试/换路），其流式调用到此定案。
+                # 首次进入时 streamed_calls 为空，是 no-op。
+                _abandon_streamed_calls(ABORT_REASON_RETRY)
                 try:
                     try:
                         stream_or_response = await _await_with_turn_budget(
@@ -839,6 +960,9 @@ async def run_tool_loop(
                         # 流式调用失败时回退到非流式
                         logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
                         _retract_streamed_text()
+                        # 流式产物整段丢弃：已流出的调用不会随非流式请求重放，
+                        # 当场按"未执行"定案，别让卡片停在"进行中"。
+                        _abandon_streamed_calls(ABORT_REASON_FALLBACK)
                         response = await _await_with_turn_budget(
                             engine,
                             engine._llm_caller.create_chat_completion_with_retry(kwargs),
@@ -846,7 +970,9 @@ async def run_tool_loop(
                         message, usage = _extract_completion_message(response)
 
                     # 成功 — 若经历过重试则通知前端
-                    if _retry_attempt > 1:
+                    # （流式路径已在首块内容到达时提前通知，这里只兜底
+                    #   非流式/无内容回调的路径，避免重复通知）
+                    if _retry_attempt > 1 and not _retry_recovered_emitted:
                         engine._emit(
                             on_event,
                             ToolCallEvent(
@@ -908,6 +1034,7 @@ async def run_tool_loop(
 
                     # ── 内容安全策略拦截：不可重试，立即通知前端 ──
                     if is_content_filter_error(_retry_exc):
+                        _abandon_streamed_calls(ABORT_REASON_FAILURE)
                         engine._emit(
                             on_event,
                             _failure_guidance_event(_classify_failure(
@@ -972,6 +1099,7 @@ async def run_tool_loop(
                             "401 后凭证刷新未产生新 token，无法恢复: %s",
                             str(_retry_exc)[:200],
                         )
+                        _abandon_streamed_calls(ABORT_REASON_FAILURE)
                         raise
 
                     if _retry_attempt < _retry_max and is_retryable_llm_error(_retry_exc):
@@ -983,6 +1111,9 @@ async def run_tool_loop(
                             "LLM 调用失败（可重试），%0.1f 秒后第 %d/%d 次重试: %s",
                             _delay, _retry_attempt, _retry_max - 1, _err_brief,
                         )
+                        # 本次尝试作废：先把它流出去的调用定案为"未执行"，
+                        # 再播"正在重试"，顺序与用户看到的因果一致。
+                        _abandon_streamed_calls(ABORT_REASON_RETRY)
                         # 通知前端：正在重试
                         engine._emit(
                             on_event,
@@ -995,6 +1126,9 @@ async def run_tool_loop(
                                 retry_error_message=_err_brief,
                             ),
                         )
+                        # 新一轮重试开始：复位“已恢复”提前通知标志，
+                        # 让下一次尝试恢复时按新尝试次数重新通知。
+                        _retry_recovered_emitted = False
                         engine._emit(
                             on_event,
                             ToolCallEvent(
@@ -1020,6 +1154,8 @@ async def run_tool_loop(
 
                     # 不可重试或重试次数耗尽
                     if _retry_attempt >= _retry_max and is_retryable_llm_error(_retry_exc):
+                        # 本轮到此为止：最后一次尝试流出去的调用同样定案为未执行。
+                        _abandon_streamed_calls(ABORT_REASON_EXHAUSTED)
                         engine._emit(
                             on_event,
                             ToolCallEvent(
@@ -1030,6 +1166,21 @@ async def run_tool_loop(
                                 retry_error_message=str(_retry_exc)[:200],
                             ),
                         )
+                        # 瞬时传输故障（如流中断连）重试耗尽：先发失败引导卡片，
+                        # 再抛出可识别的收尾异常，由 Driver 降级成本轮失败收尾，
+                        # 不让原始传输异常击穿回合与 SSE 流。
+                        engine._emit(
+                            on_event,
+                            _failure_guidance_event(_classify_failure(
+                                _retry_exc,
+                                stage="calling_llm",
+                                provider=engine._extract_provider_label(),
+                                model=engine._active_model or "",
+                            )),
+                        )
+                        raise LLMRetryExhaustedError(_retry_exc, _retry_attempt) from _retry_exc
+                    # 其他不可恢复失败：本轮中止，流出去的调用一律定案为未执行。
+                    _abandon_streamed_calls(ABORT_REASON_FAILURE)
                     raise
 
             from excelmanus.request.types import PreparedRequest
@@ -1092,6 +1243,16 @@ async def run_tool_loop(
         tool_calls, _stripped_text = recover_tool_calls_from_markup(
             message, tool_calls
         )
+        # 流式参数发出去过、但最终调用列表里没有的调用：它不会被执行，
+        # 当场定案为"未执行"，否则它会在界面上永久"进行中"。
+        _final_call_ids = {str(getattr(tc, "id", "") or "") for tc in tool_calls or []}
+        _abandon_streamed_calls(
+            ABORT_REASON_INCOMPLETE,
+            only_ids={cid for cid in streamed_calls if cid not in _final_call_ids},
+        )
+        # 真正要执行的调用：从"待定案"里移除，后续终态由执行器发。
+        for _call_id in _final_call_ids:
+            streamed_calls.pop(_call_id, None)
         if _stripped_text is not None and streamed_text:
             _retract_streamed_text()
             if _stripped_text.strip():
@@ -1123,6 +1284,12 @@ async def run_tool_loop(
         # 图片：历史保持 append-only ref，投影只发生在本次请求。
 
         # 累计 token 使用量
+        # 在预算检查前记录，确保触发预算上限的最后一次调用也计入统计。
+        cache_usage = extract_cache_usage(usage)
+        if cache_usage.hit is None:
+            cache_usage_complete = False
+        else:
+            total_cached_tokens = (total_cached_tokens or 0) + cache_usage.hit
         if usage is not None:
             total_prompt_tokens += _usage_token(usage, "prompt_tokens")
             total_completion_tokens += _usage_token(usage, "completion_tokens")
@@ -1185,7 +1352,6 @@ async def run_tool_loop(
                 engine._memory.note_provider_prompt_tokens(iter_prompt)
             except Exception:
                 logger.debug("usage 锚点记录失败", exc_info=True)
-        cache_usage = extract_cache_usage(usage)
         iter_cache_creation, iter_cache_read = _extract_anthropic_cache_tokens(usage)
         iter_ttft = _extract_ttft_ms(usage)
         diag = TurnDiagnostic(

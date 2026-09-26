@@ -696,37 +696,60 @@ class TestV2OperationSchema:
         })
         assert any("join.on" in message for message in bad)
 
-    def test_join_json_string_rejected(self) -> None:
+    def test_join_json_string_accepted(self) -> None:
+        # 统一合同：join 接受结构化对象或等价 JSON 字符串（运行时自动解析）
         bad = self._violations("analyze_spreadsheet", {
             "file_path": "a.xlsx", "mode": "aggregate", "aggregations": {"x": "sum"},
             "join": '{"sheet":"R","on":"键"}',
         })
-        assert bad
+        assert not bad, bad
 
     def test_analyze_aggregations_accept_structured_objects_and_arrays(self) -> None:
-        for aggs in ({"金额": "sum"}, [{"column": "金额", "func": "sum"}]):
+        # 结构化 {列名: 函数/函数数组}、[{column, func}] 与等价 JSON 字符串三者等价
+        for aggs in ({"金额": "sum"}, [{"column": "金额", "func": "sum"}],
+                     '{"金额":"sum"}', '[{"column":"金额","func":"sum"}]',
+                     '{"销售额(万元)": ["sum", "mean", "max", "min"]}'):
             bad = self._violations("analyze_spreadsheet", {
                 "file_path": "a.xlsx", "mode": "aggregate",
                 "group_by": ["区域"], "aggregations": aggs,
             })
             assert not bad, f"aggregations={aggs!r}: {bad}"
-        for aggs in ('{"金额":"sum"}', '[{"column":"金额","func":"sum"}]'):
-            bad = self._violations("analyze_spreadsheet", {
-                "file_path": "a.xlsx", "mode": "aggregate",
-                "group_by": ["区域"], "aggregations": aggs,
-            })
-            assert bad
 
-    def test_analyze_conditions_and_paths_json_string_rejected(self) -> None:
+    def test_analyze_conditions_and_paths_json_string_accepted(self) -> None:
         bad = self._violations("analyze_spreadsheet", {
             "file_path": "a.xlsx", "mode": "filter",
             "conditions": '[{"column":"c","operator":"eq","value":1}]',
         })
-        assert bad
+        assert not bad, bad
         bad = self._violations("analyze_spreadsheet", {
             "mode": "files", "file_paths": '["a.xlsx","b.xlsx"]',
         })
-        assert bad
+        assert not bad, bad
+
+    def test_analyze_group_by_index_columns_json_string_accepted(self) -> None:
+        bad = self._violations("analyze_spreadsheet", {
+            "file_path": "a.xlsx", "mode": "pivot",
+            "index": '["区域"]', "columns": '["年份"]', "values": '["销售额(万元)"]',
+        })
+        assert not bad, bad
+
+    def test_json_string_fields_type_matches_description(self) -> None:
+        """schema 合同自洽：描述说接受 JSON 字符串的字段 type 必须含 string，反之亦然。"""
+        from excelmanus.tools.workbook_query_schemas import QUERY_SCHEMAS
+
+        structured_fields = {"aggregations", "group_by", "index", "columns", "values",
+                             "conditions", "join", "file_paths", "include"}
+        props = QUERY_SCHEMAS["analyze_spreadsheet"]["properties"]
+        for name, node in props.items():
+            desc = str(node.get("description") or "")
+            types = node.get("type")
+            types = [types] if isinstance(types, str) else list(types or [])
+            mentions_json = "JSON 字符串" in desc
+            if name in structured_fields:
+                assert "string" in types, f"{name} 应允许 JSON 字符串（type={types}）"
+                assert mentions_json, f"{name}: type 允许 string 但描述未说明 JSON 字符串合同"
+            elif mentions_json:
+                assert "string" in types, f"{name}: 描述说接受 JSON 字符串但 type={types}"
 
     def test_inspect_include_legacy_field_rejected(self) -> None:
         bad = self._violations("observe_spreadsheet", {

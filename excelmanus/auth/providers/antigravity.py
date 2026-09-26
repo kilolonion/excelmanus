@@ -555,7 +555,7 @@ class AntigravityProvider(AuthProvider, LoopbackOAuthCapable):
             "model": self._DEFAULT_PROFILE_NAME,
             "api_key": "",
             "base_url": self.BASE_URL,
-            "description": "Claude Sonnet 4.6 - Antigravity 订阅（Google OAuth）",
+            "description": "Antigravity 订阅（Google OAuth）",
             "protocol": self.PROTOCOL,
             "thinking_mode": "gemini_level",
             "model_family": "claude",

@@ -89,7 +89,7 @@ async def test_openai_thinking_uses_total_budget_slice() -> None:
             base_url="https://api.openai.com/v1",
         )
 
-    assert ok is False
+    assert ok is None
     assert t == ""
     assert err
     assert len(calls) >= 2
@@ -214,7 +214,8 @@ async def test_probe_job_cancel_while_running() -> None:
 
 
 @pytest.mark.asyncio
-async def test_probe_job_deduplication() -> None:
+@pytest.mark.parametrize("second_key, expected_calls", [("k", 1), ("k2", 2)])
+async def test_probe_job_deduplication(second_key, expected_calls) -> None:
     """Same model+base_url targets share probe result, second is deduplicated."""
     from excelmanus.capability_probe_jobs import CapabilityProbeJobManager, ProbeTargetSpec
     from excelmanus.model_probe import ModelCapabilities
@@ -236,16 +237,16 @@ async def test_probe_job_deduplication() -> None:
         mgr = CapabilityProbeJobManager(job_concurrency=4, provider_concurrency=4)
         specs = [
             ProbeTargetSpec(name="t1", cache_model="m", api_model="m", base_url="http://x/v1", api_key="k", protocol="auto"),
-            ProbeTargetSpec(name="t2", cache_model="m", api_model="m", base_url="http://x/v1", api_key="k2", protocol="auto"),
+            ProbeTargetSpec(name="t2", cache_model="m", api_model="m", base_url="http://x/v1", api_key=second_key, protocol="auto"),
         ]
         result = await mgr.create_job(targets=specs)
         await asyncio.sleep(1.0)
         snap = await mgr.get_job_snapshot(result["job_id"])
         assert snap is not None
-        # Only 1 actual probe call despite 2 targets
-        assert call_count == 1
+        # Only the same credential/route may share an observation.
+        assert call_count == expected_calls
         dedup_count = sum(1 for t in snap["targets"] if t.get("deduplicated"))
-        assert dedup_count == 1
+        assert dedup_count == 2 - expected_calls
         await mgr.shutdown()
 
 
@@ -290,6 +291,8 @@ async def test_freshness_on_cache_hit() -> None:
 
     cached = ModelCapabilities(model="m", base_url="http://x/v1", healthy=True,
                                supports_tool_calling=True, supports_vision=True, supports_thinking=False)
+    from excelmanus.model_probe import _mark_freshness
+    _mark_freshness(cached, source="")
 
     with patch("excelmanus.model_probe.load_capabilities", return_value=cached):
         result = await run_full_probe(

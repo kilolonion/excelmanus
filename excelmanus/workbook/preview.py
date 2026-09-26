@@ -33,16 +33,16 @@ def preview_workbook(
     sheet: str,
     range: str,
     expected_version: str | None = None,
-    surface: str = "workbench",
+    surface: str = "auto",
     page: int = 1,
 ) -> ToolResult:
     if (
-        surface not in {"workbench", "print"}
+        surface not in {"auto", "workbench", "print"}
         or isinstance(page, bool)
         or not isinstance(page, int)
         or not 1 <= page <= 200
     ):
-        raise ValueError("surface must be workbench/print; page must be 1..200")
+        raise ValueError("surface must be auto/workbench/print; page must be 1..200")
     from excelmanus.workbook.refs import parse_rect
 
     rect = parse_rect(range)
@@ -61,6 +61,13 @@ def preview_workbook(
         mode="range",
         facets=["data", "presentation", "geometry", "objects"],
     )
+    requested_surface = surface
+    drawing_coverage = _drawing_coverage(snap, sheet, rect, observation)
+    fit_range = surface == "auto" and bool(drawing_coverage["intersecting_objects"])
+    if surface == "auto":
+        surface = "print" if fit_range else "workbench"
+    if fit_range and page != 1:
+        raise ValueError("auto 图表预览整段缩放为一页；实际打印分页请用 surface='print'")
     _cancelled()
     assets, asset_digest = renderer_assets() if surface == "workbench" else (None, None)
     font_fingerprint = environment_fingerprint()
@@ -69,8 +76,10 @@ def preview_workbook(
     cache_key = (
         str(get_attachment_store().root),
         snap.id.key(),
-        observation["observation_id"],
+        sheet,
+        range,
         surface,
+        fit_range,
         page,
         asset_digest,
         font_fingerprint,
@@ -89,6 +98,7 @@ def preview_workbook(
             assets,
             asset_digest,
             font_fingerprint,
+            fit_range=fit_range,
         )
 
     if surface == "workbench":
@@ -100,6 +110,13 @@ def preview_workbook(
     _cancelled()
     # The cache owns immutable values; callers cannot mutate subsequent results.
     value, attachment = deepcopy(value), deepcopy(attachment)
+    value["requested_surface"] = requested_surface
+    value["visual_coverage"] = {
+        **drawing_coverage,
+        "complete_objects": drawing_coverage["complete_objects"] if surface == "print" else [],
+        "whole_region": surface == "workbench" or value.get("measured", {}).get("page_count") == 1,
+        "fit_to_page": fit_range,
+    }
     return ToolResult.from_image_injection(
         model_text=json.dumps(value, ensure_ascii=False),
         injection=ImageInjection(
@@ -117,6 +134,33 @@ def _cache_product(result):
     return result, ref.bytes + len(json.dumps(value))
 
 
+def _drawing_coverage(snap, sheet, rect, observation):
+    from excelmanus.workbook.geometry import axis_offset, drawing_preview_range
+    workbook = snap.open_workbook(data_only=False, read_only=False)
+    try:
+        ws = workbook[sheet]
+        x0, y0 = axis_offset(ws, rect.min_col, axis="column"), axis_offset(ws, rect.min_row, axis="row")
+        x1, y1 = axis_offset(ws, rect.max_col + 1, axis="column"), axis_offset(ws, rect.max_row + 1, axis="row")
+        suggestions = {obj["id"]: drawing_preview_range(ws, obj) for obj in observation["regions"][0].get("objects", [])}
+    finally:
+        workbook.close()
+    intersecting, complete, cropped = [], [], []
+    for obj in observation["regions"][0].get("objects", []):
+        box = obj.get("bounds") or {}
+        if any(box.get(key) is None for key in ("x", "y", "width", "height")):
+            continue
+        left, top, right, bottom = box["x"], box["y"], box["x"] + box["width"], box["y"] + box["height"]
+        if left < x1 and right > x0 and top < y1 and bottom > y0:
+            intersecting.append(obj["id"])
+            (complete if left >= x0 and top >= y0 and right <= x1 and bottom <= y1 else cropped).append(obj["id"])
+    return {"intersecting_objects": intersecting, "complete_objects": complete,
+            "cropped_objects": cropped, "geometry_basis": "estimated_sheet_pixels",
+            "next_calls": [{"tool": "preview_spreadsheet", "arguments": {
+                "file_path": snap.file.relative, "expected_version": snap.content_version,
+                "sheet": sheet, "range": suggestions[key], "surface": "auto"}}
+                for key in cropped if suggestions.get(key)]}
+
+
 def _render(
     snap,
     observation,
@@ -128,6 +172,7 @@ def _render(
     assets,
     asset_digest,
     font_fingerprint,
+    *, fit_range=False,
 ):
     with tempfile.TemporaryDirectory(prefix="excelmanus-preview-") as temp:
         root = Path(temp)
@@ -156,39 +201,19 @@ def _render(
             measured = json.loads(meta.read_text(encoding="utf-8"))
             engine_digest = asset_digest
         else:
-            from io import BytesIO
-            from openpyxl import load_workbook
-            from excelmanus.workbook.adapter import ensure_editable
+            from excelmanus.workbook.ooxml import render_selection
 
-            ensure_editable(snap.read_bytes())
-            wb = load_workbook(
-                BytesIO(snap.read_bytes()), keep_vba=False, rich_text=True
-            )
-            try:
-                selected = wb[sheet]
-                for ws in wb:
-                    ws.sheet_state = "visible" if ws is selected else "hidden"
-                wb.active = wb.index(selected)
-                selected.print_area = range
-                src = root / "input.xlsx"
-                serialized = BytesIO()
-                wb.save(serialized)
-                from excelmanus.workbook.adapter import (
-                    preserve_workbook_extensions,
-                    preserve_empty_custom_properties,
-                )
-
-                preserved = preserve_workbook_extensions(
-                    snap.read_bytes(), serialized.getvalue()
-                )
-                src.write_bytes(
-                    preserve_empty_custom_properties(snap.read_bytes(), preserved)
-                )
-            finally:
-                wb.close()
+            src = root / "input.xlsx"
+            src.write_bytes(render_selection(snap.read_bytes(), sheet, range, fit_to_page=fit_range))
             out = root / "out"
             out.mkdir()
             pdf, engine = _office_convert(src, out, "pdf:calc_pdf_Export")
+            import re
+            counter = shutil.which("pdfinfo")
+            count = re.search(r"Pages:\s*(\d+)", _run([counter, str(pdf)], timeout=15)) if counter else None
+            page_count = int(count[1]) if count else None
+            if page_count is not None and page > page_count:
+                raise ValueError(f"预览只有 {page_count} 页，page={page} 超出范围")
             converter = shutil.which("pdftoppm")
             if not converter:
                 raise CommitError(
@@ -213,6 +238,7 @@ def _render(
             measured = {
                 "engine": "libreoffice-print",
                 "page": page,
+                "page_count": page_count,
                 "geometry_mapping": "unavailable",
                 "calculation": "renderer_may_recalculate",
                 "renderer_version": _run([engine, "--version"], timeout=10).strip(),
@@ -288,6 +314,10 @@ def _render(
         "limitations": [
             "Font substitution can change glyph metrics",
             "Workbench core does not render drawing objects or evaluate conditional formatting",
+            "Merged ranges may show a renderer outline that is not a cell border in the file; "
+            "verify borders via observe_spreadsheet(facets=['presentation'])",
+            "Displayed text is not returned as data here (renderer_required); "
+            "treat the image as the display evidence and cell values as the fact",
         ]
         if surface == "workbench"
         else ["Print layout; not the workbench viewport"],

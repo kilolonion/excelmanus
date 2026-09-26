@@ -513,6 +513,10 @@ async def async_main(argv: Sequence[str] | None = None, *, root: Path | None = N
     assert_unsigned_unchanged()
     _bind_product_settings()
     settings = settings_from(None)
+    if not settings.experimental_enabled:
+        print("实验性 Jev 未开启，跳过在线标定；请先在设置中开启实验性 Jev。")
+        print(next_step_banner())
+        return NO_KEY_EXIT
     api_key, key_env, transport = resolve_api_key()
     if not api_key:
         print(

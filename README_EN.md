@@ -223,6 +223,7 @@ A directory with a `SKILL.md` containing `name` and `description` defines a skil
 
 | Skill | Purpose |
 | --- | --- |
+| `spreadsheet_workflow` | ExcelManus V2 workflow for observing, analyzing, editing, recalculating, validating, previewing, and delivering spreadsheets |
 | `data_basic` | Data reading, analysis, filtering, and transformation |
 | `chart_basic` | Workbook charts and image export |
 | `format_basic` | Styles, conditional formatting, and layout |

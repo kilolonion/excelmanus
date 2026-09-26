@@ -808,7 +808,6 @@ class CodePolicyHandler(BaseToolHandler):
         消除原先 GREEN/YELLOW 路径与 RED→降级路径的 ~100 行重复代码。
         """
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-        from excelmanus.security.code_policy import extract_excel_targets
 
         e = self._engine
         dispatcher = self._dispatcher
@@ -851,16 +850,15 @@ class CodePolicyHandler(BaseToolHandler):
                     and item.get("path")
                 )
         _has_published = bool(_published_paths)
-        _has_ast_write = any(t.operation == "write" for t in extract_excel_targets(code))
-        if (audit_record is not None and audit_record.changes) or _has_published or _has_ast_write:
+        if (audit_record is not None and audit_record.changes) or _has_published:
             e.record_write_action()
             _state = getattr(e, "_state", None)
             if _state is not None:
-                _ast_paths = ", ".join(
-                    t.file_path for t in extract_excel_targets(code)
-                    if t.operation == "write" and t.file_path != "<variable>"
-                ) if _has_ast_write else ""
-                _file_path = _published_paths or _ast_paths
+                _observed_paths = ", ".join(
+                    str(change.get("file") or "") for change in (getattr(audit_record, "changes", None) or [])
+                    if isinstance(change, dict) and change.get("file")
+                )
+                _file_path = _published_paths or _observed_paths
                 _state.record_write_operation(
                     tool_name="run_code",
                     file_path=_file_path,

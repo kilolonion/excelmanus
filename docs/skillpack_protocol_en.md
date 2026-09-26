@@ -63,11 +63,13 @@ Default scan order is listed below. Settings can disable general discovery, exte
 - `read` and `plan` exclude pure-write tools. Tools with read-only actions may remain discoverable, but write actions are restricted at execution.
 - In `write`, direct tools and `run_code` coexist. Common tools load upfront; other capabilities are disclosed on demand after `introspect_capability`. The `em.*` SDK binds the complete authorized catalog.
 - Invoking a skill does not switch execution modes or bypass path checks, content versions, approvals, or write restrictions.
+- Activation returns instructions and a resource index. Read supporting content on demand with `introspect_capability(query_type="knowledge_read", query="resource:skill-name/path")`; references are no longer all inlined at activation. Use `knowledge_workflow` for schema-checked task recipes and version dependencies.
 
 ## 5. Built-in system Skillpacks
 
 | Skill | Main purpose |
 | --- | --- |
+| `spreadsheet_workflow` | ExcelManus V2 workflow for observing, analyzing, editing, recalculating, validating, previewing, and delivering spreadsheets |
 | `data_basic` | Reading, analysis, filtering, and transformation |
 | `chart_basic` | Workbook charts and image export |
 | `format_basic` | Styles, conditional formatting, and layout |

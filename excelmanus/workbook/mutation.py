@@ -187,6 +187,124 @@ def execute_operation(
         return {"kind": kind, "applied": applied, "warnings": warnings}
 
 
+# Serialization is verified by re-reading the published package. openpyxl
+# reports a freshly created cell with bare style defaults, while the same cell
+# after a reload carries whatever the workbook's default style spells out:
+# Excel and LibreOffice write ``horizontal="general" vertical="bottom"``
+# explicitly, and openpyxl resolves a new cell through the file's first xf.
+# Styles therefore need a semantic identity instead of ``==`` on the proxies.
+# Only these equivalences are folded, all of them OOXML no-ops:
+#   * an attribute equal to its class default (Calibri 11, no fill, ...),
+#   * an alignment attribute equal to the documented OOXML default
+#     (general / bottom / no rotation / no wrap / zero indent),
+#   * a border side that is present but empty (``<left/>``), which means the
+#     same as an absent side and is how Excel spells every edge.
+# Every other attribute of the resolved style node is compared by value, and
+# style-table indexes are never compared. Another font, a real alignment, a
+# number format, a fill, a border side or a font colour still compare
+# different.
+_ALIGNMENT_IMPLICIT_DEFAULTS = {
+    "horizontal": ("general",),
+    "vertical": ("bottom",),
+    "textRotation": (0,),
+    "wrapText": (False,),
+    "shrinkToFit": (False,),
+    "indent": (0, 0.0),
+    "relativeIndent": (0, 0.0),
+    "justifyLastLine": (False,),
+    "readingOrder": (0,),
+}
+_NUMBER_FORMAT_IMPLICIT_DEFAULTS = ("General", "general")
+_EMPTY_NODE_EQUIVALENTS = {"Side"}
+
+
+def _canonical_style_node(value: Any, implicit_defaults: dict | None = None) -> Any:
+    """Comparable form of an openpyxl style node with defaults folded away."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(
+            sorted((_canonical_style_node(item) for item in value), key=repr)
+        )
+    # openpyxl style nodes keep their real values in __dict__; __attrs__ only
+    # lists the XML attributes (empty for Font, partial for Border), so using it
+    # would silently skip facets such as border sides.
+    attributes = getattr(value, "__dict__", None)
+    if not isinstance(attributes, dict) or not attributes:
+        return repr(value)
+    defaults = type(value)()
+    folded = []
+    for name in sorted(attributes):
+        item = attributes[name]
+        if item == getattr(defaults, name, None):
+            continue
+        if implicit_defaults and item in implicit_defaults.get(name, ()):
+            continue
+        canonical = _canonical_style_node(item)
+        if (
+            type(item).__name__ in _EMPTY_NODE_EQUIVALENTS
+            and isinstance(canonical, tuple)
+            and canonical[1] == ()
+        ):
+            continue
+        folded.append((name, canonical))
+    return (type(value).__name__, tuple(folded))
+
+
+def _style_signature(cell: Any) -> dict:
+    """Semantic style identity of a cell, independent of style-table indexes."""
+    number_format = cell.number_format
+    return {
+        "font": _canonical_style_node(copy(cell.font)),
+        "fill": _canonical_style_node(copy(cell.fill)),
+        "border": _canonical_style_node(copy(cell.border)),
+        "alignment": _canonical_style_node(
+            copy(cell.alignment), _ALIGNMENT_IMPLICIT_DEFAULTS
+        ),
+        "number_format": None
+        if number_format in _NUMBER_FORMAT_IMPLICIT_DEFAULTS
+        else number_format,
+    }
+
+
+def _restore_formula_caches(
+    before: bytes | None, data: bytes, wb: Any
+) -> tuple[str, str, bytes]:
+    """计算输入未变时把旧公式缓存抄回新包，避免每次序列化都强制重算。
+
+    返回 ``(formula_cache, calculation_inputs, data)``：openpyxl 序列化总会丢
+    公式缓存，但纯格式/尺寸/合并类改动不改变任何计算输入；此时旧缓存仍然有效，
+    抄回后回执声明 ``preserved_unchanged_calculation_inputs``，交付证据可延续。
+    抄不回（源文件本来就没有缓存等）时如实退回失效声明，绝不伪造缓存。
+    """
+    invalidated = "invalidated_by_serialization; calculate explicitly when needed"
+    if before is None:
+        return invalidated, "initial", data
+    from excelmanus.workbook.formula_values import calculation_fingerprint
+
+    try:
+        unchanged = calculation_fingerprint(wb) == getattr(
+            wb, "_em_calculation_fingerprint", None
+        )
+    except Exception:
+        unchanged = False
+    if not unchanged:
+        return invalidated, "changed", data
+    has_formula = any(
+        cell.data_type == "f" for sheet in wb for cell in sheet._cells.values()
+    )
+    if has_formula:
+        try:
+            from excelmanus.workbook.ooxml import merge_formula_caches
+
+            restored, count = merge_formula_caches(data, before)
+            if count:
+                return "preserved_unchanged_calculation_inputs", "unchanged", restored
+        except Exception:
+            pass  # 缓存抄不回就保持失效声明，不阻塞提交
+    return invalidated, "unchanged", data
+
+
 def _preservation_check(
     before: bytes | None, after: bytes, operations: list[dict]
 ) -> None:
@@ -686,16 +804,7 @@ def apply_changes(
                             col,
                             cell.value,
                             cell.data_type,
-                            {
-                                key: copy(getattr(cell, key))
-                                for key in (
-                                    "font",
-                                    "fill",
-                                    "border",
-                                    "alignment",
-                                    "number_format",
-                                )
-                            },
+                            _style_signature(cell),
                         )
                     )
                 for entry in evidence:
@@ -715,6 +824,9 @@ def apply_changes(
                 data = preserve_workbook_extensions(before, out.getvalue())
                 data = preserve_empty_custom_properties(before, data)
                 _preservation_check(before, data, _ops)
+                formula_cache, calculation_inputs, data = _restore_formula_caches(
+                    before, data, wb
+                )
                 # Verify serialization using a new reader, not the mutable workbook.
                 reopened = load_workbook(
                     BytesIO(data), read_only=False, data_only=False, rich_text=True
@@ -725,18 +837,29 @@ def apply_changes(
 
                     for sheet_name, row, col, expected, data_type, style in samples:
                         cell = reopened[sheet_name].cell(row, col)
+                        actual_style = _style_signature(cell)
+                        value_ok = _values_equal(expected, cell.value)
                         ok = (
-                            _values_equal(expected, cell.value)
+                            value_ok
                             and data_type == cell.data_type
-                            and all(
-                                value == copy(getattr(cell, key))
-                                for key, value in style.items()
-                            )
+                            and style == actual_style
                         )
                         if not ok:
+                            drift = []
+                            if not value_ok:
+                                drift.append("value")
+                            if data_type != cell.data_type:
+                                drift.append("data_type")
+                            drift.extend(
+                                f"style.{key}"
+                                for key in style
+                                if style[key] != actual_style[key]
+                            )
                             raise CommitError(
                                 "SERIALIZATION_MISMATCH",
-                                f"Serialized cell differs: {sheet_name}!{cell.coordinate}",
+                                f"Serialized cell differs: {sheet_name}!{cell.coordinate}"
+                                f" ({', '.join(drift) or 'unknown'})",
+                                fields={"committed": False},
                             )
                         from excelmanus.workbook.observation import _scalar
 
@@ -826,7 +949,19 @@ def apply_changes(
                     )
                 finally:
                     reopened.close()
+                from excelmanus.workbook.geometry import drawing_preview_range
                 observations[_rel] = {
+                    "verification_requirements": {
+                        "formula_count": sum(cell.data_type == "f" for sheet in wb for cell in sheet._cells.values()),
+                        "drawings": [{"id": obj["id"], "sheet": ws.title,
+                                      "target_cell": obj.get("target_cell"), "bounds": obj.get("bounds"),
+                                      "preview_range": drawing_preview_range(ws, obj)}
+                                     for ws in reopened for obj in _objects(reopened, ws)
+                                     if obj["kind"] in {"chart", "image"}],
+                        "visual_sheets": sorted({op.get("sheet") for op in _ops
+                            if op.get("sheet") and op["kind"] in {"format", "size", "geometry.scale", "geometry.resize", "print_layout", "merge"}})
+                            if _rel not in document_metadata or document_metadata[_rel].get("purpose") == "visual_replica" else [],
+                    },
                     "geometry_changes": evidence,
                     "visual_observed": False,
                     "operations": effects,
@@ -841,7 +976,8 @@ def apply_changes(
                         "max_cells": 64,
                         "scope": "changed values/formulas/styles; geometry separately checked",
                     },
-                    "formula_cache": "invalidated_by_serialization; calculate explicitly when needed",
+                    "formula_cache": formula_cache,
+                    "calculation_inputs": calculation_inputs,
                 }
                 if _rel in document_metadata:
                     observations[_rel]["document"] = document_metadata[_rel]

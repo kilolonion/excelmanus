@@ -150,7 +150,8 @@ async def test_output_violation_preserves_commit_and_failure_event(tmp_path):
     assert len(ends) == 1 and not ends[0].success and ends[0].error == result.error
     assert ends[0].ui["content_version"] == "sha256:observed"
     sdk = await execute(engine, "run_code", {"code": "import em, json\ntry:\n    em.bad_receipt()\nexcept em.HostToolError as e:\n    print(json.dumps([e.code, e.details['execution_completed'], e.details['operation_id']]))"})
-    assert sdk.success, sdk.result
+    assert not sdk.success, sdk.result
+    assert sdk.structured.error.code == "SDK_SUBCALL_FAILED"
     assert json.loads(sdk.structured.value["stdout_tail"]) == ["SDK_CONTRACT_VIOLATION", True, "op-1"]
     assert count == 2  # One Native call and one explicit SDK call, no automatic retry.
 

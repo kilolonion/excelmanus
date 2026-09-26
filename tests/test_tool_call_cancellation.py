@@ -235,7 +235,11 @@ async def test_sdk_child_cancellation_keeps_parent_script_and_later_child_runnin
     assert child["parent_execution_id"] == row_for(e, "code")["execution_id"]
     e._tool_runtime.cancel_call(child["execution_id"])
     result = await asyncio.wait_for(job, 5)
-    assert result.tool_calls[0].success, result.tool_calls[0].result
+    # Catching the cancelled child lets the script continue, but cannot report
+    # all SDK work successful. Process success and business outcome are separate.
+    assert not result.tool_calls[0].success
+    assert result.tool_calls[0].structured.error.code == "SDK_SUBCALL_FAILED"
+    assert result.tool_calls[0].structured.value["return_code"] == 0
     assert "CANCELLED\ncontinued" in result.tool_calls[0].structured.value["stdout_tail"]
     assert not e._tool_dispatcher.is_cancelled()
     assert_paired(events, child["tool_call_id"])

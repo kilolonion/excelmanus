@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, lazy, Suspense } from "react";
+import { useCallback, useEffect, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Settings, Server, Package, SlidersHorizontal, X, ArrowUpCircle, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -31,14 +31,15 @@ import { useShallow } from "zustand/react/shallow";
 import { useUIStore } from "@/stores/ui-store";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { checkModelPlaceholder } from "@/lib/api";
-import { SettingsPageHeader } from "./SettingsPageLayout";
+import { SettingsSearch } from "./SettingsSearch";
+import { useSettingsDraftStore } from "@/stores/settings-draft-store";
 
 const TAB_META = [
-  { value: "model", label: "模型", coachId: "coach-settings-tab-model", icon: <Server className="size-4" /> },
-  { value: "plugins", label: "扩展", coachId: "coach-settings-tab-plugins", icon: <Package className="size-4" /> },
-  { value: "runtime", label: "系统", coachId: "coach-settings-tab-runtime", icon: <SlidersHorizontal className="size-4" /> },
-  { value: "access", label: "安全", coachId: "coach-settings-tab-access", icon: <ShieldCheck className="size-4" /> },
-  { value: "version", label: "版本", coachId: "coach-settings-tab-version", icon: <ArrowUpCircle className="size-4" /> },
+  { value: "model", label: "模型与连接", coachId: "coach-settings-tab-model", icon: <Server className="size-4" /> },
+  { value: "plugins", label: "扩展与记忆", coachId: "coach-settings-tab-plugins", icon: <Package className="size-4" /> },
+  { value: "runtime", label: "偏好与运行", coachId: "coach-settings-tab-runtime", icon: <SlidersHorizontal className="size-4" /> },
+  { value: "access", label: "访问与安全", coachId: "coach-settings-tab-access", icon: <ShieldCheck className="size-4" /> },
+  { value: "version", label: "关于与更新", coachId: "coach-settings-tab-version", icon: <ArrowUpCircle className="size-4" /> },
 ];
 
 const PLUGIN_TAB_VALUES = ["rules", "skills", "mcp", "memory"] as const;
@@ -57,6 +58,14 @@ export function SettingsDialog() {
       closeSettings: s.closeSettings,
     }))
   );
+
+  const draftCount = useSettingsDraftStore((state) => Object.keys(state.drafts).length);
+  useEffect(() => {
+    if (!draftCount) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [draftCount]);
 
   const isGuideLocked = useOnboardingStore((s) => s.isGuideLocked);
   const primaryTab = isPluginTab(settingsTab) || settingsTab === "plugins" ? "plugins" : settingsTab;
@@ -91,6 +100,7 @@ export function SettingsDialog() {
   return (
     <Dialog open={settingsOpen} onOpenChange={handleOpenChange} modal={!isGuideLocked}>
       <DialogContent
+        aria-describedby={undefined}
         showCloseButton={false}
         onInteractOutside={(event) => { if (isGuideLocked) event.preventDefault(); }}
         onOpenAutoFocus={(event) => { if (isGuideLocked) event.preventDefault(); }}
@@ -100,7 +110,7 @@ export function SettingsDialog() {
         <DialogClose asChild>
           <Button variant="ghost" size="icon" className="em-settings-close h-8 w-8 rounded-full opacity-70 hover:opacity-100">
             <X className="h-4 w-4" />
-            <span className="sr-only">Close</span>
+            <span className="sr-only">关闭设置</span>
           </Button>
         </DialogClose>
         <Tabs
@@ -115,7 +125,7 @@ export function SettingsDialog() {
                   <span className="em-settings-title-icon"><Settings className="h-4 w-4" /></span>
                   <span className="min-w-0">
                     <span className="block text-sm font-semibold tracking-tight">设置</span>
-                    <span className="mt-0.5 block text-[10px] font-normal leading-snug text-muted-foreground">模型、扩展与系统偏好</span>
+                    <span className="mt-0.5 block text-[10px] font-normal leading-snug text-muted-foreground">连接模型，调整工作方式</span>
                   </span>
                 </h2>
               </DialogHeader>
@@ -140,7 +150,7 @@ export function SettingsDialog() {
               })}
               <div className="em-settings-sidebar-foot">
                 <span className="em-settings-sidebar-foot-dot" />
-                <span>本地配置已自动保存</span>
+                <span>{draftCount ? `${draftCount} 项运行设置未保存，草稿已保留` : "各项设置的保存方式见页面说明"}</span>
               </div>
             </aside>
             <div className="em-settings-mobile-head sm:hidden">
@@ -150,6 +160,7 @@ export function SettingsDialog() {
                   return <button key={tab.value} type="button" role="tab" aria-selected={isActive} data-coach-id={tab.coachId} onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)} className={`em-settings-mobile-tab ${isActive ? "is-active" : ""}`}>{tab.icon}{tab.label}</button>;
                 })}
               </nav>
+              {draftCount > 0 && <p className="px-3 pb-2 text-xs text-amber-700 dark:text-amber-400">{draftCount} 项运行设置未保存，切换页面会保留草稿</p>}
             </div>
             <AnimatePresence mode="wait">
               <motion.div
@@ -160,6 +171,7 @@ export function SettingsDialog() {
                 transition={{ duration: 0.15 }}
                 className="em-settings-scroll overflow-y-auto min-h-0 h-full px-4 sm:px-7 flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-7"
               >
+                <SettingsSearch />
                 <Suspense fallback={<TabSpinner />}>
                   <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined} data-coach-id="coach-settings-content-model">
                     {settingsTab === "model" && <ModelTab />}
@@ -173,13 +185,13 @@ export function SettingsDialog() {
                     )}
                   </TabsContent>
                   <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
-                    {settingsTab === "runtime" && <><SettingsPageHeader icon={<SlidersHorizontal className="h-5 w-5" />} eyebrow="系统设置" title="工作区与运行时" description="调整表格、对话、上下文和 Agent 运行行为。" /><RuntimeTab /></>}
+                    {settingsTab === "runtime" && <RuntimeTab />}
                   </TabsContent>
                   <TabsContent value="access" className="mt-0 grow shrink-0 flex flex-col">
-                    {settingsTab === "access" && <><SettingsPageHeader icon={<ShieldCheck className="h-5 w-5" />} eyebrow="安全设置" title="访问与安全" description="管理登录保护、管理员凭据和工具执行校验。" /><AccessTab /></>}
+                    {settingsTab === "access" && <AccessTab />}
                   </TabsContent>
                   <TabsContent value="version" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "version" ? true : undefined} data-coach-id="coach-settings-content-version">
-                    {settingsTab === "version" && <><SettingsPageHeader icon={<ArrowUpCircle className="h-5 w-5" />} eyebrow="应用信息" title="版本与更新" description="检查版本、管理更新备份，并查看项目资源。" /><VersionTab /></>}
+                    {settingsTab === "version" && <VersionTab />}
                   </TabsContent>
                 </Suspense>
               </motion.div>

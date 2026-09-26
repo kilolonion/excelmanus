@@ -70,7 +70,11 @@ from excelmanus.workbook.refs import (
 from excelmanus.workbook.snapshot import parse_bound_selection
 
 
-from excelmanus.workbook.cells import assign_cell_value, _resolve_merged_cell
+from excelmanus.workbook.cells import (
+    assign_cell_value,
+    coerce_cell_value,
+    _resolve_merged_cell,
+)
 
 
 from excelmanus.workbook.styles import (
@@ -781,7 +785,7 @@ def _write_matrix(
     widths = [len(row) if isinstance(row, list) else 1 for row in values]
     if not widths or not widths[0] or len(set(widths)) != 1:
         raise MutationAborted(_invalid(
-            "values 必须是非空矩形；不同宽度请拆成多次 write。null 表示清空该格。"
+            "values 必须是非空矩形；不同宽度请拆成多次 write。null 或空串表示清空该格。"
         ))
     width = widths[0]
     _write_selection_cells(ws, rows=list(range(row0, row0 + len(values))),
@@ -797,6 +801,13 @@ def _write_selection_cells(
     values: list[Any],
 ) -> None:
     """Apply a selection write through the same merged-cell contract as write."""
+    # 空串 = 清空单元格：先归一，后面的合并格冲突判定与重定向才能把它当“空”。
+    values = [
+        [coerce_cell_value(item) for item in row]
+        if isinstance(row, list)
+        else coerce_cell_value(row)
+        for row in values
+    ]
     placements: list[tuple[int, int, int, int, Any, bool]] = []
     for r_idx, excel_row in enumerate(rows):
         cells = values[r_idx] if isinstance(values[r_idx], list) else [values[r_idx]]
@@ -1126,14 +1137,14 @@ def _apply_pivot(
             raise MutationAborted(merge_err)
         assert merged is not None
         df = merged
-    keys, derived_specs, keys_err = _normalize_group_keys(_op_get(op, "group_by"), df.columns)
+    keys, derived_specs, keys_err = _normalize_group_keys(_op_get(op, "group_by"), df.columns, "group_by")
     if keys_err is not None:
         raise MutationAborted(keys_err)
-    idx_keys, idx_derived, idx_err = _normalize_group_keys(_op_get(op, "index"), df.columns)
+    idx_keys, idx_derived, idx_err = _normalize_group_keys(_op_get(op, "index"), df.columns, "index")
     if idx_err is not None:
         raise MutationAborted(idx_err)
     col_keys, col_derived, col_err = _normalize_group_keys(
-        _op_get(op, "columns"), df.columns
+        _op_get(op, "columns"), df.columns, "columns"
     )
     if col_err is not None:
         raise MutationAborted(col_err)

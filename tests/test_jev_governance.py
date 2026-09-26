@@ -33,6 +33,7 @@ def test_signed_provenance_mismatch_blocks_enforce(monkeypatch: pytest.MonkeyPat
     from excelmanus.system_one import calibration
 
     settings = JevSettings(
+        experimental_enabled=True,
         enabled="enforce", exposure="enforce", mode_hint=False,
         observation="off", ui_hint=False,
         model="m", api_key="k", timeout_seconds=1.0, calibrated=True,

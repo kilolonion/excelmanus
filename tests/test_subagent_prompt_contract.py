@@ -123,8 +123,12 @@ async def test_runtime_conditions_update_without_recreating_child(parent):
     assert "FULL_ACCESS_ONLY" not in text
     assert "WRITE_TOOL_ONLY" not in text
     child._full_access_enabled = True
-    # Catalog inspects names/extensions only; this fixture never opens a workbook.
-    (Path(child.config.workspace_root) / "existing.xlsx").write_bytes(b"catalog fixture")
+    # A real workbook, not a renamed text file, changes the catalog evidence.
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.save(Path(child.config.workspace_root) / "existing.xlsx")
+    workbook.close()
     updated = build_stable_system_prompt(child)
     assert "NEW_WORKBOOK_ONLY" not in updated
     assert "FULL_ACCESS_ONLY" in updated

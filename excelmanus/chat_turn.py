@@ -99,6 +99,7 @@ async def run_engine_followup(
     prompt_kind: str | None = None,
     dispatch_mode: str | None = None,
     client_message_id: str | None = None,
+    example_context: dict[str, Any] | None = None,
 ) -> ChatTurnOutcome:
     """按网页直聊参数调用 ``engine.followup``。
 
@@ -115,6 +116,8 @@ async def run_engine_followup(
         context_kwargs["dispatch_mode"] = dispatch_mode
     if client_message_id:
         context_kwargs["client_message_id"] = client_message_id
+    if example_context:
+        context_kwargs["example_context"] = example_context
     result = await engine.followup(
         display_text,
         on_event=on_event,

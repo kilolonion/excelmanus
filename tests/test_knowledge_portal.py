@@ -153,6 +153,36 @@ def test_full_schema_pages_reconstruct_exact_contract(make_engine):
     assert json.loads("".join(pieces)) == augment_reference_schema(engine.registry.get_tool(name).input_schema)
 
 
+@pytest.mark.parametrize("query", ["workbook_spec", "apply_spreadsheet_changes.workbook_spec"])
+def test_workbook_spec_shorthand_routes_to_current_tool(make_engine, query):
+    engine = make_engine()
+    result = invoke(engine, next_call("knowledge_spec", query, language="json"))
+    assert result["status"] == "ok", result
+    assert result["title"] == "apply_spreadsheet_changes.workbook_spec 工具规范"
+    engine._current_chat_mode = "read"
+    unavailable = invoke(engine, next_call("knowledge_spec", query))
+    assert unavailable["status"] == "unavailable"
+
+
+def test_selected_schema_closes_refs_and_workflow_exposes_authorized_tools(make_engine):
+    from excelmanus.tools.workbook_examples import report_creation_example
+    engine = make_engine()
+    call = next_call("knowledge_spec", "apply_spreadsheet_changes.workbook_spec")
+    parts = []
+    while call:
+        result = invoke(engine, call)
+        assert result["status"] == "ok", result
+        parts.append(result["content"])
+        call = result.get("next_call")
+    spec = json.loads("".join(parts))
+    assert spec["field"] == "workbook_spec"
+    assert "operations" not in spec["input_schema"]["properties"]
+    validate(report_creation_example(), spec["input_schema"])
+    result = invoke(engine, next_call("knowledge_workflow", "spreadsheet-report"))
+    assert result["status"] == "ok", result
+    assert {"calculate_spreadsheet", "validate_spreadsheet", "preview_spreadsheet"} <= engine._loaded_tool_names
+
+
 @pytest.mark.parametrize("query,expected", [
     ("系统架构", "doc:architecture"), ("读取 Excel 数据", "tool:observe_spreadsheet"),
     ("配置", "settings"), ("审批", "doc:execution"),

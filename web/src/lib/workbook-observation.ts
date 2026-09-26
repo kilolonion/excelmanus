@@ -31,6 +31,8 @@ export interface WorkbookRegion {
   coverage?: Record<string, { status: string }>;
   merge_anchors?: Record<string, { value: unknown; formula?: string | null; s?: Record<string, unknown> }>;
   merges?: { min_row: number; min_col: number; max_row: number; max_col: number }[];
+  objects?: WorkbookDrawingObject[];
+  cell_images?: WorkbookDrawingObject[];
   geometry?: {
     columns: AxisSize[];
     rows: AxisSize[];
@@ -38,6 +40,22 @@ export interface WorkbookRegion {
     height_px: number;
     defaults?: { font?: { name?: string; size_pt?: number } };
   };
+}
+
+export interface WorkbookDrawingObject {
+  id?: string;
+  kind: "image" | "chart" | string;
+  index?: number;
+  target_cell?: string | null;
+  bounds?: { x?: number; y?: number; width?: number; height?: number; unit?: string };
+  source_size_px?: { width?: number; height?: number };
+  format?: string;
+  chart_type?: string;
+  chart_data?: {
+    title?: string | null;
+    series?: Array<{ index?: number; name?: string; categories?: unknown[]; values?: unknown[] }>;
+  };
+  asset?: { kind?: string; media_type?: string; index?: number; url?: string };
 }
 
 export interface WorkbookObservation {
@@ -263,8 +281,8 @@ export function hasPresentation(view: WorkbookObservation): boolean {
 
 export function presentationNotice(view: WorkbookObservation | null): string | null {
   if (!view) return null;
-  if (view.sheets.some((s) => (s.available?.charts || 0) + (s.available?.images || 0) + (s.available?.conditional_rules || 0) > 0)) {
-    return "此视图暂未显示图表、图片或条件格式效果；请查看原文件或打印预览。";
+  if (view.sheets.some((s) => (s.available?.conditional_rules || 0) > 0)) {
+    return "条件格式规则已保留；动态颜色与图标将在打印预览中计算。";
   }
   return null;
 }

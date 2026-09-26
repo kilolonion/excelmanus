@@ -55,10 +55,29 @@ class AttachmentStore:
         if not digest or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise AttachmentError("Original image source is unavailable", "ATTACHMENT_MISSING")
         path = self.sources / digest[:2] / digest
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise AttachmentError("Original image source is unavailable", "ATTACHMENT_MISSING") from exc
         if hashlib.sha256(data).hexdigest() != digest:
             raise AttachmentError("Original image digest mismatch", "ATTACHMENT_CORRUPT")
         return data
+
+    def read_source(self, ref: ImageAttachmentRef) -> tuple[bytes, str]:
+        """Read verified source bytes; distinguish an old normalized fallback.
+
+        A corrupt original is an error, never an implicit switch to a different
+        image. New source attachments need only their durable object.
+        """
+        if ref.source_digest == ref.attachment_id.removeprefix("sha256:"):
+            return self.get_bytes(ref), "original"
+        if ref.source_digest:
+            try:
+                return self.get_source(ref), "original"
+            except AttachmentError as exc:
+                if exc.code != "ATTACHMENT_MISSING":
+                    raise
+        return self.get_bytes(ref), "legacy_normalized"
 
     def object_path(self, digest: str) -> Path:
         return self.objects / digest[:2] / digest

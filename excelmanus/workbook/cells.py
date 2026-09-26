@@ -14,8 +14,23 @@ def init_guard(workspace_root: str) -> None:
     bind_workspace(workspace_root)
 
 
+def coerce_cell_value(raw: Any) -> Any:
+    """写入单元格前的值归一：空串等同于 Excel 的“清空单元格”，归一为 None。
+
+    openpyxl 无法落盘再回读字面空串：内存里 ``cell.value = ""`` 是 ``t="s"``，
+    写出的 XML 是空文本节点（``<c r="B2" t="inlineStr"></c>``），重新读取只能得到
+    ``None``/``inlineStr``。内存里留着 "" 会让提交前的序列化校验读到并不存在的
+    差异（SERIALIZATION_MISMATCH，failure_class=internal），所以在写入前就归一。
+    纯空白串（如 " "）是 Excel 里的真实值，能正常往返，原样保留。
+    """
+    if isinstance(raw, str) and raw == "":
+        return None
+    return raw
+
+
 def _coerce_value(raw: Any) -> Any:
     """尊重 JSON/Python 类型；字符串不解析成数字。以 '=' 开头的保留为公式。"""
+    raw = coerce_cell_value(raw)
     if raw is None or not isinstance(raw, str):
         return raw
     stripped = raw.strip()

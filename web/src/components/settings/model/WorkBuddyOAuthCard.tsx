@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Loader2, ExternalLink, ChevronRight, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import {
   subscriptionBrowserLoginStart,
   subscriptionBrowserLoginPoll,
@@ -201,10 +202,10 @@ export function WorkBuddyOAuthCard({
                 <div className="text-[11px] text-muted-foreground space-y-0.5">
                   <p>粘贴 CPA <code className="px-0.5 rounded bg-background font-mono">workbuddy-*.json</code> 或包含 accessToken 的 JSON</p>
                 </div>
-                <textarea aria-label="已有账号凭证 JSON" autoComplete="off" spellCheck={false} disabled={busy}
+                <Textarea aria-label="已有账号凭证 JSON" autoComplete="off" spellCheck={false} disabled={busy}
                   value={tokenInput}
                   onChange={(e) => setTokenInput(e.target.value)}
-                  className="w-full h-14 rounded-md border border-input bg-background px-2 py-1 text-[11px] font-mono resize-none"
+                  className="h-14 min-h-[3.5rem] resize-none rounded-lg px-2 py-1 text-[11px] font-mono"
                   placeholder='{"auth":{"accessToken":"...","refreshToken":"..."}}'
                 />
                 <Button size="sm" variant="outline" className="h-8 text-[11px]" onClick={handleManualConnect} disabled={busy || !tokenInput.trim()}>

@@ -117,7 +117,10 @@ def normalize_chart_args(
     except InvalidRefError as exc:
         return error_result(str(exc), code="RANGE_INVALID")
     except ValueError as exc:
-        return error_result(str(exc), code="INVALID_ARGS")
+        return error_result(
+            str(exc) + " 图表的 sheet 是数据源表；跨表放置用 target_sheet。",
+            code="INVALID_ARGS",
+        )
     except Exception as exc:
         return error_result(
             f"data_range/categories_range 不是合法坐标：{exc}。"
@@ -194,25 +197,103 @@ def add_chart_to_workbook(wb: Any, spec: ChartSpec) -> dict[str, Any]:
             chart.y_axis.title = spec.y_title
 
     min_col, min_row, max_col, max_row = _bounds(spec.data_range)
-    data_ref = Reference(ws, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
     cats_ref = None
     if spec.categories_range:
         c_min_col, c_min_row, c_max_col, c_max_row = _bounds(spec.categories_range)
         cats_ref = Reference(
             ws, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row
         )
+        # A table-shaped range may include the explicitly designated category
+        # axis. Exclude that edge vector instead of plotting labels as a series.
+        # 散点图的行方向在下方单独处理，不在这里改写 min_row/max_row。
+        if not spec.from_rows and c_min_col == c_max_col and (c_min_row, c_max_row) == (min_row + 1, max_row):
+            if c_min_col == min_col:
+                min_col += 1
+            elif c_min_col == max_col:
+                max_col -= 1
+        elif spec.from_rows and spec.chart_type != "scatter" and c_min_row == c_max_row and (c_min_col, c_max_col) == (min_col + 1, max_col):
+            if c_min_row == min_row:
+                min_row += 1
+            elif c_min_row == max_row:
+                max_row -= 1
+    if min_col > max_col or min_row > max_row:
+        raise ValueError("data_range 除类别范围外必须至少包含一个数据系列")
+    data_ref = Reference(ws, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
 
     if spec.chart_type == "scatter":
         from openpyxl.chart import Series as ChartSeries
+        from openpyxl.chart.data_source import StrRef
+        from openpyxl.chart.marker import Marker
+        from openpyxl.chart.series import SeriesLabel
+        from openpyxl.chart.shapes import GraphicalProperties
+        from openpyxl.drawing.line import LineProperties
+        from openpyxl.utils import get_column_letter, quote_sheetname
 
-        if cats_ref is not None:
-            x_values = cats_ref
+        def _point_style(series: Any) -> None:
+            """散点图显式默认：只有数据点、不连线。
+
+            Excel 与 LibreOffice 对“未声明 marker/line”的散点序列各有默认解释，
+            同一文件会出现“点”或“点+线”两种观感；这里把观察到的正确形态写进
+            对象，避免交付物依赖渲染器默认值。
+            """
+            series.marker = Marker(symbol="circle", size=7)
+            series.graphicalProperties = GraphicalProperties(ln=LineProperties(noFill=True))
+
+        def _series_title(row: int, col: int) -> SeriesLabel:
+            """系列名取表头单元格的动态引用，而不是让渲染器回退成 Column B/Column C。"""
+            ref = f"{quote_sheetname(ws.title)}!${get_column_letter(col)}${row}"
+            return SeriesLabel(strRef=StrRef(f=ref))
+
+        if spec.from_rows:
+            # 行方向：每一行是一个序列，行首标签列是系列名，其余单元格是数据点；
+            # 类别轴取 categories_range，缺省用数据区首行（表头行）。
+            label_col = min_col
+            data_min_col = min_col + 1
+            if data_min_col > max_col:
+                raise ValueError("行方向散点图除系列名外必须至少包含一列数值")
+            if cats_ref is not None:
+                c_min_col, c_min_row, c_max_col, c_max_row = _bounds(spec.categories_range)
+                if c_min_row != c_max_row:
+                    raise ValueError(
+                        "行方向散点图的 categories_range 必须是单行（类别是每个数据点的 x 值）；"
+                        "行列方向相反时请改用 from_rows=false 或转置数据。"
+                    )
+                if (c_max_col - c_min_col + 1) != (max_col - data_min_col + 1):
+                    raise ValueError(
+                        f"categories_range 有 {c_max_col - c_min_col + 1} 个类别，"
+                        f"而每行有 {max_col - data_min_col + 1} 个数据点，数量必须一致。"
+                    )
+                x_values = cats_ref
+            else:
+                x_values = Reference(ws, min_col=data_min_col, max_col=max_col, min_row=min_row, max_row=min_row)
+            for row_idx in range(min_row + 1, max_row + 1):
+                y_values = Reference(ws, min_col=data_min_col, max_col=max_col, min_row=row_idx, max_row=row_idx)
+                series = ChartSeries(y_values, xvalues=x_values, title_from_data=False)
+                series.tx = _series_title(row_idx, label_col)
+                _point_style(series)
+                chart.series.append(series)
         else:
-            x_values = Reference(ws, min_col=min_col, min_row=min_row + 1, max_row=max_row)
-        for col_idx in range(min_col if cats_ref else min_col + 1, max_col + 1):
-            y_values = Reference(ws, min_col=col_idx, min_row=min_row + 1, max_row=max_row)
-            series = ChartSeries(y_values, xvalues=x_values, title_from_data=False)
-            chart.series.append(series)
+            if cats_ref is not None:
+                c_min_col, c_min_row, c_max_col, c_max_row = _bounds(spec.categories_range)
+                if c_min_col != c_max_col:
+                    raise ValueError(
+                        "列方向散点图的 categories_range 必须是单列（类别是每个数据点的 x 值）；"
+                        "行列方向相反时请改用 from_rows=true 或转置数据。"
+                    )
+                if (c_max_row - c_min_row + 1) != (max_row - min_row):
+                    raise ValueError(
+                        f"categories_range 有 {c_max_row - c_min_row + 1} 个类别，"
+                        f"而每个序列有 {max_row - min_row} 个数据点（不含表头），数量必须一致。"
+                    )
+                x_values = cats_ref
+            else:
+                x_values = Reference(ws, min_col=min_col, min_row=min_row + 1, max_row=max_row)
+            for col_idx in range(min_col if cats_ref else min_col + 1, max_col + 1):
+                y_values = Reference(ws, min_col=col_idx, min_row=min_row + 1, max_row=max_row)
+                series = ChartSeries(y_values, xvalues=x_values, title_from_data=False)
+                series.tx = _series_title(min_row, col_idx)
+                _point_style(series)
+                chart.series.append(series)
     else:
         chart.add_data(data_ref, titles_from_data=True, from_rows=spec.from_rows)
         if cats_ref is not None:
@@ -293,7 +374,16 @@ def update_chart_in_workbook(wb: Any, op: dict[str, Any]) -> dict[str, Any]:
         for pos, series in enumerate(new_chart.series):
             if pos < len(old_series):
                 from copy import deepcopy
-                for attr in ("graphicalProperties", "marker", "dLbls", "trendline", "errBars"):
+                # 旧版本散点序列没有显式 marker（symbol=none）也从未声明“点+线”意图，
+                # 那是实现默认值而不是用户选择；把它复制回来会把刚修好的默认样式
+                # 重新污染成“无点带线”。只有显式点样式才视为用户意图并保留。
+                legacy_scatter_style = (
+                    new_type == "scatter"
+                    and str(getattr(getattr(old_series[pos], "marker", None), "symbol", "") or "") in ("", "none")
+                )
+                attrs = ("dLbls", "trendline", "errBars") if legacy_scatter_style else (
+                    "graphicalProperties", "marker", "dLbls", "trendline", "errBars")
+                for attr in attrs:
                     if hasattr(series, attr) and hasattr(old_series[pos], attr):
                         setattr(series, attr, deepcopy(getattr(old_series[pos], attr)))
         chart.series = new_chart.series

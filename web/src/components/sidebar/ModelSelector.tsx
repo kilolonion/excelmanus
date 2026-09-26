@@ -11,7 +11,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
-import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
+import { cleanModelDescription, displayModelLabel, formatModelIdForDisplay, isSameModelReference } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
 import { useModelSelection } from "@/hooks/use-model-selection";
 
@@ -20,6 +20,7 @@ export function ModelSelector() {
 
   const activeModel = models.find((m) => m.name === currentModel);
   const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
+  const description = (m: ModelInfo) => cleanModelDescription(m.description, [displayModelLabel(m), m.name, resolvedModel(m)]);
   const displayName = activeModel
     ? displayModelLabel(activeModel)
     : currentModel || "模型未加载";
@@ -51,7 +52,7 @@ export function ModelSelector() {
                   {displayName}
                 </motion.span>
               </AnimatePresence>
-              {activeModel?.model && activeModel.name !== resolvedModel(activeModel) && (
+              {activeModel?.model && !isSameModelReference(activeModel.name, resolvedModel(activeModel)) && (
                 <span className="truncate text-muted-foreground text-[10px]">
                   {resolvedModel(activeModel)}
                 </span>
@@ -102,8 +103,8 @@ export function ModelSelector() {
                 )}
               </div>
               <span className="text-[10px] text-muted-foreground truncate w-full">
-                {resolvedModel(m)}
-                {m.description ? ` · ${m.description}` : ""}
+                {!isSameModelReference(displayModelLabel(m), resolvedModel(m)) && resolvedModel(m)}
+                {description(m) ? `${!isSameModelReference(displayModelLabel(m), resolvedModel(m)) ? " · " : ""}${description(m)}` : ""}
               </span>
             </DropdownMenuItem>
           );
